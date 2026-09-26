@@ -500,9 +500,13 @@ async fn tiny_or_disabled_contexts_keep_the_digest_without_a_request() {
         let client = ModelClient::new(config.model.clone(), &paths).unwrap();
         let mut messages = vec![json!({"role":"system","content":"system"})];
         for i in 0..80 {
-            messages.push(json!({"role":"user","content":format!("request {i}")}));
-            messages.push(json!({"role":"assistant","content":format!("answer {i}")}));
+            messages.push(
+                json!({"role":"user","content":format!("request {i}: {}", "context ".repeat(100))}),
+            );
+            messages.push(json!({"role":"assistant","content":format!("answer {i}: {}", "detail ".repeat(100))}));
         }
+        // Exercise real token pressure, not an arbitrary message-count trigger.
+        assert!(shadowcode_core::context::estimate_tokens(&json!(messages)) > limit);
         let outcome = shadowcode_core::compaction::compact(
             &client,
             &mut messages,

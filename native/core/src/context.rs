@@ -198,13 +198,9 @@ pub fn compact_detailed(
         "Model context is too small for the tools; select a larger context budget"
     );
     let hard_limit = context_limit.saturating_sub(reserved);
-    let target = if messages.len() >= 70 {
-        0
-    } else {
-        ((hard_limit as f64 * ratio) as usize).max(256)
-    };
+    let target = ((hard_limit as f64 * ratio) as usize).max(256);
     let before = estimate_tokens(&json!(messages));
-    if before <= hard_limit && messages.len() < 70 {
+    if before <= hard_limit {
         return Ok(None);
     }
     // Compact is eager (it reserves a quarter-window for output). The keep-list
@@ -266,8 +262,7 @@ pub fn compact_detailed(
         }
     }
     let keep_json = serde_json::to_string(&preserved).unwrap_or_default();
-    let keep_text =
-        crate::tools::truncate(&keep_json, if messages.len() >= 70 { 20 } else { 1200 });
+    let keep_text = crate::tools::truncate(&keep_json, 1200);
     if removed > 0 {
         let note = compaction_note(
             removed,
@@ -276,7 +271,22 @@ pub fn compact_detailed(
             None,
             previous_summary.as_deref(),
         );
-        kept.insert(1.min(kept.len()), note);
+        let note_index = 1.min(kept.len());
+        kept.insert(note_index, note);
+        // Excerpts duplicate material in the structured keep-list. Drop these
+        // optional excerpts first when the summary itself would exceed the
+        // request budget; never silently shorten the keep-list based on the
+        // number of messages in the conversation.
+        while response_budget(&kept, schemas, context_limit).is_err() && !notes.is_empty() {
+            notes.pop();
+            kept[note_index] = compaction_note(
+                removed,
+                keep_text,
+                &notes,
+                None,
+                previous_summary.as_deref(),
+            );
+        }
     } else if let Some(note) = previous_note {
         // Nothing new was removed: the earlier summary still stands.
         kept.insert(1.min(kept.len()), note);
@@ -284,7 +294,7 @@ pub fn compact_detailed(
     let after = estimate_tokens(&json!(kept));
     let response_tokens = match response_budget(&kept, schemas, context_limit) {
         Ok(tokens) => tokens,
-        Err(_) if original_fits && messages.len() < 70 => {
+        Err(_) if original_fits => {
             *messages = original;
             return Ok(None);
         }

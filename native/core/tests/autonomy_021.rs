@@ -37,6 +37,27 @@ fn layered_budget_accounts_before_compaction() {
 }
 
 #[test]
+fn fitting_history_is_not_compacted_at_message_count_boundaries() {
+    for count in [20, 69, 70, 71, 200] {
+        let mut messages = vec![json!({"role":"system","content":"Preserve user constraints."})];
+        for index in 1..count {
+            messages.push(json!({
+                "role": if index % 2 == 1 { "user" } else { "assistant" },
+                "content": format!("Unique fact {index}: preserve the existing public API.")
+            }));
+        }
+        let original = messages.clone();
+        assert!(context::compact(&mut messages, &[], 128_000, 0.7)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            messages, original,
+            "Fitting {count}-message history must remain intact"
+        );
+    }
+}
+
+#[test]
 fn compaction_keeps_original_intent_and_structured_keep_list() {
     let mut messages = conversation(80);
     messages.push(json!({"role":"user","content":"Current request must remain intact"}));
@@ -431,7 +452,7 @@ fn keep_list_retains_objective_constraints_decisions_failures_and_plan() {
         );
         messages.insert(
             messages.len() - 1,
-            json!({"role":"tool","tool_call_id":format!("n{i}"),"name":"read_file","content":"fn unused(){}"}),
+            json!({"role":"tool","tool_call_id":format!("n{i}"),"name":"read_file","content":"fn unused(){}".repeat(100)}),
         );
     }
     let kept = autonomy::preserve(&messages);
