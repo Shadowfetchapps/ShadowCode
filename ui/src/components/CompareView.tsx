@@ -305,7 +305,10 @@ export function CompareView({
                   Applied {record.applied_files.length}{" "}
                   {record.applied_files.length === 1 ? "file" : "files"}
                   {winner ? ` from ${winner.name}` : ""} — review them in
-                  Changes. The copies were removed.
+                  Changes.{" "}
+                  {record.cleanup_pending
+                    ? "Some copies are retained until cleanup completes."
+                    : "The copies were removed."}
                 </span>
                 <button
                   type="button"
@@ -320,6 +323,21 @@ export function CompareView({
               <p className="notice" role="status">
                 This comparison was discarded. Your project was not changed.
               </p>
+            )}
+            {record.cleanup_pending && (
+              <div className="notice" role="status">
+                <span>Cleanup pending. Your recorded result is preserved.</span>
+                <button
+                  type="button"
+                  className="mini"
+                  disabled={Boolean(acting)}
+                  onClick={() =>
+                    void act("cleanup", () => api.discardCompare(record.id))
+                  }
+                >
+                  Retry cleanup
+                </button>
+              </div>
             )}
             {conflict && (
               <div className="notice bad compare-conflict" role="alert">

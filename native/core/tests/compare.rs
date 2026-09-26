@@ -851,3 +851,64 @@ async fn keep_revalidates_checks_and_requires_explicit_review_of_stale_evidence(
         f.service.engine.shutdown().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn applied_outcome_survives_pending_cleanup_and_restart_without_rescoring() {
+    let f = fixture().await;
+    let started = start(&f).await;
+    let id = started["id"].as_str().unwrap();
+    let ready = finished(&f, id).await;
+    let beta = PathBuf::from(lane(&ready, "lane-beta")["worktree"].as_str().unwrap());
+    // A manual owner is as authoritative as a running job at disposal time.
+    let owner = f.service.engine.reserve_workspace(&beta).unwrap();
+    let kept = call(
+        &f.service,
+        "POST",
+        &format!("/api/compare/{id}/keep"),
+        json!({"model":"lane-alpha"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(kept["state"], "applied");
+    assert_eq!(kept["cleanup_pending"], true);
+    assert_eq!(lane(&kept, "lane-beta")["removed"], false);
+    assert!(beta.is_dir());
+    assert_eq!(
+        fs::read_to_string(f.project.join("answer.txt")).unwrap(),
+        "alpha\n"
+    );
+    drop(owner);
+    f.service.engine.shutdown().await.unwrap();
+    drop(f.service);
+    let reopened = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let restored = call(&reopened, "GET", &format!("/api/compare/{id}"), Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(restored["winner"], "lane-alpha");
+    assert_eq!(restored["cleanup_pending"], true);
+    // User edits after application must survive a cleanup retry.
+    fs::write(f.project.join("answer.txt"), "user edited after keep\n").unwrap();
+    for _ in 0..2 {
+        let cleaned = call(
+            &reopened,
+            "POST",
+            &format!("/api/compare/{id}/discard"),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cleaned["state"], "applied");
+        assert_eq!(cleaned["cleanup_pending"], false);
+        assert_eq!(cleaned["winner"], "lane-alpha");
+    }
+    assert!(!beta.exists());
+    assert_eq!(
+        fs::read_to_string(f.project.join("answer.txt")).unwrap(),
+        "user edited after keep\n"
+    );
+    let board = call(&reopened, "GET", "/api/compare/scoreboard", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(board["rows"][0]["wins"], 1);
+    reopened.engine.shutdown().await.unwrap();
+}

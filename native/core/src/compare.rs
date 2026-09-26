@@ -128,6 +128,8 @@ pub struct Record {
     pub lanes: Vec<Lane>,
     pub winner: Option<String>,
     pub applied_files: Vec<String>,
+    /// Logical outcome is durable, but one or more lane checkouts remain.
+    pub cleanup_pending: bool,
     /// Cleanup problems and lanes that went missing outside ShadowCode.
     pub notes: Vec<String>,
     /// Runs were added to the scoreboard, or will not be (internal; not in
@@ -772,6 +774,28 @@ async fn remove_lanes(engine: &Engine, record: &mut Record) -> Vec<String> {
         if lane.removed || lane.worktree_id.is_empty() {
             continue;
         }
+        // Recheck ownership at every destructive boundary, including cleanup
+        // retries. A recorded cancellation request is not process completion.
+        let reservation = (|| -> Result<_> {
+            if let Some(job) = engine.job(&lane.job_id)? {
+                ensure!(!active(&job.status), "Lane task is still stopping");
+            }
+            if lane.worktree.exists() {
+                Ok(Some(engine.reserve_workspace(&lane.worktree)?))
+            } else {
+                Ok(None)
+            }
+        })();
+        let _reservation = match reservation {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                notes.push(format!(
+                    "{}: cleanup pending; worktree was kept: {error:#}",
+                    lane.name
+                ));
+                continue;
+            }
+        };
         match worktrees::dispose(
             engine.paths(),
             &record.workspace,
@@ -792,6 +816,7 @@ async fn remove_lanes(engine: &Engine, record: &mut Record) -> Vec<String> {
             )),
         }
     }
+    record.cleanup_pending = record.lanes.iter().any(|lane| !lane.removed);
     if let Err(error) = set_trust(engine, &removed, false) {
         notes.push(format!("Could not update trusted projects: {error:#}"));
     }
@@ -1250,19 +1275,21 @@ pub async fn keep_reviewed(
     record.applied_files = files;
     record.state = "applied".into();
     record.finished_at.get_or_insert_with(crate::now);
-    // Other lanes are thrown away; a still-running lane is stopped first.
-    if let Err(error) = stop_lanes(engine, &record, Some(model)).await {
-        record.notes.push(format!("{error:#}"));
-    }
-    refresh(engine, &mut record, &cancel).await?;
-    let notes = remove_lanes(engine, &mut record).await;
-    record.notes.extend(notes);
-    // Preserve the assessment made at acceptance, rather than promoting the
-    // original task's historical pass after its worktree has been removed.
     if let Some(selected) = record.lanes.iter_mut().find(|item| item.model == model) {
         selected.checks = acceptance_checks;
     }
-    // The first save with a winner scores the win.
+    record.cleanup_pending = record.lanes.iter().any(|lane| !lane.removed);
+    // Durably record the outcome and score before deleting recoverable lanes.
+    // A failed save leaves all lane material intact. The earlier apply/save
+    // crash window still requires the operation journal.
+    record = persist(&store, record).await?;
+    drop(_lane_reservation);
+    if let Err(error) = stop_lanes(engine, &record, Some(model)).await {
+        record.notes.push(format!("Cleanup pending: {error:#}"));
+        return persist(&store, record).await;
+    }
+    let notes = remove_lanes(engine, &mut record).await;
+    record.notes.extend(notes);
     persist(&store, record).await
 }
 
@@ -1289,6 +1316,8 @@ pub async fn discard(engine: &Engine, id: &str) -> Result<Record> {
     refresh(engine, &mut record, &cancel).await?;
     record.state = "discarded".into();
     record.finished_at.get_or_insert_with(crate::now);
+    record.cleanup_pending = record.lanes.iter().any(|lane| !lane.removed);
+    record = persist(&store, record).await?;
     let notes = remove_lanes(engine, &mut record).await;
     record.notes.extend(notes);
     persist(&store, record).await

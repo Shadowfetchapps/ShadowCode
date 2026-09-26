@@ -127,6 +127,34 @@ const article = (name: string) =>
   screen.getByRole("article", { name: new RegExp(`^${name}$`) });
 
 describe("CompareView", () => {
+  it("reports retained copies and retries cleanup without keeping again", async () => {
+    const pending = record({
+      state: "applied",
+      winner: finishedCloud.model,
+      lanes: [finishedCloud],
+      cleanup_pending: true,
+    });
+    mocks.compare.mockResolvedValue(pending);
+    mocks.discardCompare.mockResolvedValue({
+      ...pending,
+      cleanup_pending: false,
+      lanes: [{ ...finishedCloud, removed: true }],
+    });
+    view({ pollMs: 60000 });
+    const retry = await screen.findByRole("button", { name: "Retry cleanup" });
+    expect(screen.getByText(/Some copies are retained/)).toBeTruthy();
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(mocks.discardCompare).toHaveBeenCalledWith("c1"),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Retry cleanup" }),
+      ).toBeNull(),
+    );
+    expect(mocks.keepCompare).not.toHaveBeenCalled();
+  });
+
   it("polls running lanes until they finish and shows their results", async () => {
     let finished = false;
     mocks.compare.mockImplementation(async () =>

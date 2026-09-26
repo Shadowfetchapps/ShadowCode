@@ -813,6 +813,7 @@ export type CompareRecord = {
   lanes: CompareLane[];
   winner: string | null;
   applied_files: string[];
+  cleanup_pending?: boolean;
   notes: string[];
 };
 export type CompareScore = {

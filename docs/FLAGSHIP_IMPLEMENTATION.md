@@ -20,6 +20,12 @@ Historical verification is reassessed without mutating original receipts. Visibl
 
 Recorded validation: six Compare and fourteen service tests pass; 312 UI tests and production build pass. These exercise fixture/native service behavior, not live provider authentication or packaged Wayland acceptance. Recovery journaling, cross-process exclusion, unsaved buffers, continuous freshness and efficient shared indexing remain unfinished.
 
+## Compare outcome and cleanup boundary
+
+Keep now persists the applied result and scoreboard before removing lanes. Discard persists its logical outcome before disposal. An additive `cleanup_pending` field distinguishes a durable result from remaining cleanup. A stop failure retains all remaining lanes; each disposal also checks task state and reserves an existing lane against application-owned work. The UI reports retained copies and supports cleanup retry.
+
+A native regression holds a lane reservation during Keep, restarts the service with cleanup pending, edits the applied file, then retries cleanup twice. The result survives, later edits remain, and the win is counted once. This covers the post-receipt recovery path, not a crash immediately after patch application. The full intent/preimage/postimage journal, per-lane durable checkpoints, process-tree exit proof, cross-process mutation coordination and lock-scope redesign remain required.
+
 ## Next implementation work
 
 1. Complete Compare journal/recovery and immutable preview binding; add project-scoped check configuration UI. The original arbitrary-command false verification is fixed in source with a native regression.
