@@ -91,6 +91,13 @@ End-to-end managed-runtime fixtures run two GGUF lanes in offline mode, verify s
 
 No paid/live provider turns, billing changes, release publication, or destructive Git repairs are authorized by the reference document itself. No new required hosted backend or account. Tests use isolated scratch profiles and projects.
 
+
+## Real single-model offline acceptance
+
+The opt-in `live_local_acceptance_from_explicit_models` harness accepts one to three explicit installed GGUF paths, creates an isolated profile/project and downloads nothing. On 2026-09-26 the one-model case completed on the installed Qwen2.5 0.5B Q4_K_M (491,400,032 bytes) and llama.cpp 0.4.1-dev / 18f9f7bef. A Linux user/network namespace exposed only loopback; a `strace -f -e trace=connect` trace observed ten connections to 127.0.0.1 and no nonloopback connects. The runtime reported Vulkan / RTX 5060 Ti and no CPU fallback.
+
+The supplied addition-function explanation completed in about 1.99 seconds, including 1.63 seconds of runtime preparation. This is one inference observation, not TTFT, a coding benchmark, independent GPU-offload measurement or multi-model acceptance. Verification correctly remained `not_run`. The real test and all-target Clippy with warnings denied pass. LOC-01 remains open: only one installed GGUF was found; the two-model scheduler is currently covered by fixtures. No installed app, model or account profile was modified.
+
 ## Full acceptance register
 
 Initial state below is **mapping pending**, not an assertion that existing functionality is missing. Each ID needs an exact test reference and qualified result before completion. Existing successful broad suites do not automatically prove each invariant.
@@ -112,7 +119,7 @@ Initial state below is **mapping pending**, not an assertion that existing funct
 - **CMP-09 — Binary, rename, delete, executable bit**: Result faithful; review and recovery remain usable. Status: mapping pending.
 - **CMP-10 — Separate app processes target one project**: Ownership/revision conflicts stop competing writes. Status: mapping pending.
 - **CMP-11 — Project A shutdown stalls**: Project B status/cancellation remain responsive. Status: mapping pending.
-- **LOC-01 — Two installed GGUF models offline**: Sequential runs complete without network access. Status: mapping pending.
+- **LOC-01 — Two installed GGUF models offline**: sequential two-model fixture passes. Real single-model inference passes in a loopback-only network namespace; a second installed GGUF is still needed for real two-model acceptance.
 - **LOC-02 — Three-model queue cancelled mid-run**: Pending models do not start. Status: mapping pending.
 - **LOC-03 — Local model exceeds safe allocation**: Clear error; UI survives; project unchanged. Status: mapping pending.
 - **LOC-04 — Runtime crashes or port is occupied**: Honest state and recoverable restart path. Status: mapping pending.

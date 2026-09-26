@@ -1722,3 +1722,148 @@ async fn compare_runs_two_installed_gguf_models_sequentially_in_offline_mode() {
     .unwrap();
     service.engine.shutdown().await.unwrap();
 }
+
+/// Opt-in real inference acceptance. Set explicit model paths; never downloads
+/// weights or imports the user's account/profile. Run in a network namespace
+/// with loopback enabled for an enforced offline qualification.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicit installed GGUF paths and a real llama-server"]
+async fn live_local_acceptance_from_explicit_models() {
+    let files: Vec<String> = serde_json::from_str(
+        &std::env::var("SHADOWCODE_LIVE_GGUF_FILES")
+            .expect("SHADOWCODE_LIVE_GGUF_FILES JSON array"),
+    )
+    .unwrap();
+    assert!((1..=3).contains(&files.len()));
+    let server = std::env::var("SHADOWCODE_LLAMA_SERVER").expect("SHADOWCODE_LLAMA_SERVER");
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(
+        project.join("calc.py"),
+        "def add(a, b):\n    return a + b\n",
+    )
+    .unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Offline Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "acceptance fixture",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+    Config::patch(&paths,json!({
+        "model":{"provider":"local","endpoint":"http://127.0.0.1:9/v1","name":"unused","context_limit":4096},
+        "local_engine":{"llama_binary":server,"files":files,"context_size":4096},
+        "network":{"mode":"offline"},"cli_agents":{"enabled":false},
+        "trusted_workspaces":[project],"agent":{"max_steps":4}
+    })).unwrap();
+    let service = Service::open(paths.clone(), Some(project.clone())).unwrap();
+    let catalog = call(&service, "GET", "/api/local-models", Value::Null)
+        .await
+        .unwrap();
+    let models = catalog["models"].as_array().unwrap();
+    assert_eq!(models.len(), files.len(), "{catalog}");
+    let ids: Vec<_> = files
+        .iter()
+        .map(|file| {
+            models.iter().find(|model| model["path"] == *file).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let task = "In one short sentence, explain this Python function: def add(a, b): return a + b. Do not call tools.";
+    let (job_ids, comparison) = if ids.len() > 1 {
+        let record = call(
+            &service,
+            "POST",
+            "/api/compare",
+            json!({"workspace":project,"task":task,"models":ids,"mode":"ask","web":false}),
+        )
+        .await
+        .unwrap();
+        (
+            record["lanes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|lane| lane["job_id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            Some(record["id"].as_str().unwrap().to_owned()),
+        )
+    } else {
+        let job = call(
+            &service,
+            "POST",
+            "/api/jobs",
+            json!({"workspace":project,"task":task,"model":ids[0],"mode":"ask","web":false}),
+        )
+        .await
+        .unwrap();
+        (vec![job["id"].as_str().unwrap().to_owned()], None)
+    };
+    let mut jobs = Vec::new();
+    for id in &job_ids {
+        match tokio::time::timeout(Duration::from_secs(180), service.engine.wait(id)).await {
+            Ok(job) => jobs.push(job.unwrap()),
+            Err(_) => {
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(10), service.engine.cancel(id)).await;
+                service.engine.shutdown().await.unwrap();
+                panic!("live local job timed out");
+            }
+        }
+    }
+    let mut runtimes = Vec::new();
+    for job in &jobs {
+        runtimes.push(
+            service
+                .engine
+                .store()
+                .last_task_event(&job.task_id, "local.runtime_ready")
+                .unwrap(),
+        );
+    }
+    let report = json!({"scope":if comparison.is_some(){"real multi-model Compare inference"}else{"real single-model inference only"},"runtime":catalog["runtime"],"hardware":catalog["hardware"],"models":models,"jobs":jobs,"runtime_events":runtimes});
+    if let Ok(output) = std::env::var("SHADOWCODE_LIVE_REPORT") {
+        fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    println!(
+        "LIVE_ACCEPTANCE {}",
+        serde_json::to_string(&report).unwrap()
+    );
+    if let Some(id) = comparison {
+        call(
+            &service,
+            "POST",
+            &format!("/api/compare/{id}/discard"),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    }
+    service.engine.shutdown().await.unwrap();
+    for job in &jobs {
+        assert_eq!(job.status, "completed", "{}", job.summary);
+        assert!(!job.summary.trim().is_empty());
+    }
+    for pair in jobs.windows(2) {
+        assert!(pair[1].started_at >= pair[0].finished_at.unwrap());
+    }
+}
