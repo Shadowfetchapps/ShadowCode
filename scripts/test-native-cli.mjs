@@ -201,12 +201,23 @@ try {
   const peer = (await cli(["mcp","add",mcpDefinition])).servers[0];
   await cli(["mcp","enable",peer.id,"--hash",peer.hash]);
   assert.equal((await cli(["run","MCP unattended"],2)).status,"needs_approval");
-  assert.equal(await readFile(peerPids).then(()=>true,()=>false),false,"Unapproved MCP call must not launch the server");
+  // Enabling the reviewed server authorizes catalog discovery, not tools/call.
+  const peerMessages = async () => (await readFile(peerRequests, "utf8")).trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+  const unattendedMessages = await peerMessages();
+  assert.ok(unattendedMessages.some(message => message.method === "initialize"), "Enabled MCP catalog must initialize");
+  assert.ok(unattendedMessages.some(message => message.method === "tools/list"), "Enabled MCP catalog must discover tools");
+  assert.equal(unattendedMessages.some(message => message.method === "tools/call"), false, "Unapproved MCP request must not invoke a tool");
+  for (const pid of JSON.parse(await readFile(peerPids,"utf8"))) await until("Unattended CLI MCP cleanup",()=>dead(pid));
   const peerTask = launch(["run","MCP interactively","--interactive"],{tty:true});
   await until("MCP exact argument prompt",()=>peerTask.output.stdout.includes("[y/N]"));
   assert.match(peerTask.output.stdout,/MCP config:cli-peer \/ echo[\s\S]*"message": "native-cli-mcp-ok"/);
+  assert.equal((await peerMessages()).some(message => message.method === "tools/call"), false, "Pending interactive approval must not invoke a tool");
   peerTask.child.stdin.write("y\n");
   await finish(peerTask);
+  const approvedCalls = (await peerMessages()).filter(message => message.method === "tools/call");
+  assert.equal(approvedCalls.length, 1, "Only the approved tool call may execute");
+  assert.equal(approvedCalls[0].params.name, "echo");
+  assert.deepEqual(approvedCalls[0].params.arguments, { message: "native-cli-mcp-ok" });
   for (const pid of JSON.parse(await readFile(peerPids,"utf8"))) await until("CLI MCP cleanup",()=>dead(pid));
   await cli(["mcp","remove",peer.id,"--hash",peer.hash]);
   checks.push("MCP refusal without a terminal, exact argument display, real PTY approval, subprocess result and cleanup");
