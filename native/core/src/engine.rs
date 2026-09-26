@@ -1785,9 +1785,38 @@ impl Engine {
             }
         }
         // Held until this task returns: the local model lease lives in it.
-        let mut prepared = self
-            .prepare_model_client(&running.config, &running.config.model, &running.cancel)
-            .await?;
+        let prepare_started = Instant::now();
+        let managed = crate::local_engine::is_managed(&running.config.model);
+        let comparison = self
+            .0
+            .store
+            .session_meta(&job.session_id, keys::COMPARE_ID)?
+            .is_some();
+        let mut prepared = if managed && comparison {
+            crate::local_engine::prepare_with_policy(
+                &running.config.local_engine,
+                &running.config.model,
+                &self.0.local_llama,
+                &running.cancel,
+                false,
+            )
+            .await?
+        } else {
+            self.prepare_model_client(&running.config, &running.config.model, &running.cancel)
+                .await?
+        };
+        if managed {
+            events.emit(
+                "local.runtime_ready",
+                json!({
+                    "model_id": running.config.model.default,
+                    "runtime": self.0.local_llama.loaded_json(),
+                    "preparation_seconds": prepare_started.elapsed().as_secs_f64(),
+                    "comparison": comparison,
+                    "automatic_cpu_fallback_allowed": !comparison
+                }),
+            )?;
+        }
         prepared.extra_body = crate::effort::native_body(
             crate::openrouter::is_openrouter(&running.config.model),
             prepared.extra_body.take(),

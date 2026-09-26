@@ -219,6 +219,15 @@ impl LocalRuntime {
         spec: LaunchSpec,
         cancel: &CancellationToken,
     ) -> Result<(Loaded, Lease)> {
+        self.acquire_with_policy(spec, cancel, true).await
+    }
+
+    pub async fn acquire_with_policy(
+        &self,
+        spec: LaunchSpec,
+        cancel: &CancellationToken,
+        allow_cpu_fallback: bool,
+    ) -> Result<(Loaded, Lease)> {
         ensure!(!cancel.is_cancelled(), "Model load cancelled");
         let abort = self.abort_token();
         loop {
@@ -239,6 +248,7 @@ impl LocalRuntime {
             if let Some(current) = slot.as_mut() {
                 let alive = current.alive();
                 if current.spec.same_model(&spec) && alive {
+                    ensure!(allow_cpu_fallback || !current.info.cpu_fallback, "Comparison cannot reuse an automatic CPU fallback. Unload it and explicitly choose CPU settings or retry the GPU configuration.");
                     current.leases.fetch_add(1, Ordering::AcqRel);
                     return Ok((
                         current.info.clone(),
@@ -275,7 +285,9 @@ impl LocalRuntime {
                 self.clear_snapshot();
                 previous.stop().await;
             }
-            let result = self.launch_with_fallback(&spec, cancel, &abort).await;
+            let result = self
+                .launch_with_fallback(&spec, cancel, &abort, allow_cpu_fallback)
+                .await;
             return match result {
                 Ok(server) => {
                     if let Ok(mut errors) = self.errors.lock() {
@@ -305,10 +317,11 @@ impl LocalRuntime {
         spec: &LaunchSpec,
         cancel: &CancellationToken,
         abort: &CancellationToken,
+        allow_cpu_fallback: bool,
     ) -> Result<Server> {
         match launch(spec, spec.gpu, cancel, abort).await {
             Ok(server) => Ok(server),
-            Err(LoadFailure::Exited(first)) if spec.gpu != GpuMode::Off => {
+            Err(LoadFailure::Exited(first)) if spec.gpu != GpuMode::Off && allow_cpu_fallback => {
                 let mut server = match launch(spec, GpuMode::Off, cancel, abort).await {
                     Ok(server) => server,
                     Err(LoadFailure::Exited(second)) => {

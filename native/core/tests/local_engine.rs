@@ -674,6 +674,21 @@ async fn cancel_during_load_early_exit_tail_and_cpu_fallback() {
         .unwrap()
         .contains("fake crash loading model"));
 
+    let before_strict = lines(&f.bin.join("launches.jsonl")).len();
+    assert!(local_engine::prepare_with_policy(
+        &cfg.local_engine,
+        &model_for(&id("gpufail")),
+        engine.local_runtime(),
+        &CancellationToken::new(),
+        false
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        lines(&f.bin.join("launches.jsonl")).len(),
+        before_strict + 1,
+        "strict comparison policy must not launch a CPU retry"
+    );
     let prepared = engine
         .prepare_model_client(&cfg, &model_for(&id("gpufail")), &CancellationToken::new())
         .await
@@ -1567,4 +1582,143 @@ async fn managed_jobs_run_in_submission_order_across_projects_and_skip_cancelled
     assert_eq!(engine.job(&middle.id).unwrap().unwrap().status, "cancelled");
     assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 3);
     engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn compare_runs_two_installed_gguf_models_sequentially_in_offline_mode() {
+    let f = fixture(GPU);
+    let a = f.models.join("a.gguf");
+    let b = f.models.join("b.gguf");
+    let c = f.models.join("c.gguf");
+    qwen_like(&c, "qwen3", TOOLS_TEMPLATE);
+    qwen_like(&a, "qwen3", TOOLS_TEMPLATE);
+    qwen_like(&b, "qwen3", TOOLS_TEMPLATE);
+    fs::write(f.project.join("hello.txt"), "hello\n").unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "base",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&f.project)
+            .status()
+            .unwrap()
+            .success());
+    }
+    Config::patch(&f.paths,json!({"local_engine":{"files":[a,b,c]},"network":{"mode":"offline"},"cli_agents":{"enabled":false}})).unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let entries = local_engine::scan(&cfg.local_engine);
+    let ids: Vec<_> = ["a", "b"]
+        .iter()
+        .map(|name| entries.iter().find(|e| e.name == *name).unwrap().id.clone())
+        .collect();
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let record = call(
+        &service,
+        "POST",
+        "/api/compare",
+        json!({"workspace":f.project,"task":"Read hello.txt","models":ids,"web":false}),
+    )
+    .await
+    .unwrap();
+    let record_id = record["id"].as_str().unwrap();
+    let lanes = record["lanes"].as_array().unwrap();
+    let mut jobs = Vec::new();
+    for lane in lanes {
+        jobs.push(
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                service.engine.wait(lane["job_id"].as_str().unwrap()),
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        );
+    }
+    assert!(jobs.iter().all(|job| job.status == "completed"), "{jobs:?}");
+    assert!(jobs[1].started_at >= jobs[0].finished_at.unwrap());
+    let result = call(
+        &service,
+        "GET",
+        &format!("/api/compare/{record_id}"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["state"], "done");
+    for (index, lane) in result["lanes"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(lane["local_runtime"]["model_id"], ids[index]);
+        assert_eq!(
+            lane["local_runtime"]["automatic_cpu_fallback_allowed"],
+            false
+        );
+        assert_eq!(lane["local_runtime"]["runtime"]["cpu_fallback"], false);
+        assert_eq!(lane["base_commit"], result["base"]["commit"]);
+    }
+    assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 2);
+    call(
+        &service,
+        "POST",
+        &format!("/api/compare/{record_id}/discard"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    let c_id = entries
+        .iter()
+        .find(|entry| entry.name == "c")
+        .unwrap()
+        .id
+        .clone();
+    let held = service
+        .engine
+        .prepare_model_client(&cfg, &model_for(&c_id), &CancellationToken::new())
+        .await
+        .unwrap();
+    let cancelled = call(&service,"POST","/api/compare",json!({"workspace":f.project,"task":"Read hello.txt","models":[ids[0],ids[1],c_id],"web":false})).await.unwrap();
+    let cancelled_id = cancelled["id"].as_str().unwrap();
+    call(
+        &service,
+        "POST",
+        &format!("/api/compare/{cancelled_id}/cancel"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    for lane in cancelled["lanes"].as_array().unwrap() {
+        let job = tokio::time::timeout(
+            Duration::from_secs(5),
+            service.engine.wait(lane["job_id"].as_str().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(job.status, "cancelled");
+    }
+    drop(held);
+    assert_eq!(
+        lines(&f.bin.join("launches.jsonl")).len(),
+        3,
+        "cancelled queued models must not load"
+    );
+    call(
+        &service,
+        "POST",
+        &format!("/api/compare/{cancelled_id}/discard"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    service.engine.shutdown().await.unwrap();
 }

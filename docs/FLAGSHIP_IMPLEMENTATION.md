@@ -74,6 +74,12 @@ Top-level managed-model jobs register in submission order across project workspa
 
 A cross-project native fixture holds a runtime lease, submits three tasks, cancels the middle one, and verifies queued states, model launch counts, terminal states and start-after-predecessor-finish ordering. This is job scheduling, not yet the complete multi-GGUF Compare feature: setup-only runtime callers still use lease admission, ordered Compare launch metadata/timing and fallback policy remain, and real offline model acceptance has not run.
 
+## Sequential multi-GGUF Compare integration
+
+The native and picker one-GGUF restriction is removed. Two or three installed compatible local models now use the ordered managed-job scheduler from one comparison snapshot. Offline mode remains authoritative. Compare preparation disables automatic CPU fallback and rejects reuse of an automatically-fallen-back runtime; normal non-Compare fallback behavior remains unchanged. Each local lane records runtime ID, reported backend, effective context size, preparation duration and fallback policy; the lane card displays the useful runtime details. Preparation includes readiness/wait work and is not a measured time-to-first-token.
+
+End-to-end managed-runtime fixtures run two GGUF lanes in offline mode, verify sequential completion and shared snapshot, and cancel a three-model lineup while another lease occupies the runtime, proving no queued model is loaded. A failed-GPU fixture proves comparison policy does not launch a CPU retry. The full UI suite passes 314 tests and the production build. These simulated model/runtime files do not prove real inference or absence of external packets; actual two-model offline acceptance, complete model file/quantization/template identity, separated timing metrics and native UI acceptance remain required. Earlier entries describing the one-GGUF restriction are superseded by this increment.
+
 ## Next implementation work
 
 1. Complete Compare journal/recovery and immutable preview binding; add project-scoped check configuration UI. The original arbitrary-command false verification is fixed in source with a native regression.

@@ -190,7 +190,8 @@ export function CompareDialog({
             </button>
           )}
           <p className="hint">
-            At most one local model: only one fits in GPU memory at a time.
+            Local models run one at a time in selection order. Automatic CPU
+            fallback is disabled for comparisons.
           </p>
         </fieldset>
         <section className="compare-cost" aria-label="Cost">

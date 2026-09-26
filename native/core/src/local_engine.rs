@@ -1497,6 +1497,16 @@ pub async fn prepare(
     local: &crate::local_runtime::LocalRuntime,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<PreparedModel> {
+    prepare_with_policy(config, model, local, cancel, true).await
+}
+
+pub async fn prepare_with_policy(
+    config: &LocalEngineConfig,
+    model: &crate::config::ModelConfig,
+    local: &crate::local_runtime::LocalRuntime,
+    cancel: &tokio_util::sync::CancellationToken,
+    allow_cpu_fallback: bool,
+) -> Result<PreparedModel> {
     let id = model.default.trim().to_owned();
     let config_owned = config.clone();
     let (runtime, entry) = tokio::task::spawn_blocking(move || {
@@ -1550,7 +1560,9 @@ pub async fn prepare(
         gpu,
         backend: runtime.backend(),
     };
-    let (loaded, lease) = local.acquire(spec, cancel).await?;
+    let (loaded, lease) = local
+        .acquire_with_policy(spec, cancel, allow_cpu_fallback)
+        .await?;
     let mut next = model.clone();
     next.endpoint = loaded.endpoint.clone();
     next.name = entry.name.clone();

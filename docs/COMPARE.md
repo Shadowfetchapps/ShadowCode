@@ -1,6 +1,6 @@
 # Compare
 
-Compare sends one task to 2 or 3 models at once. Each model works in its own
+Compare sends one task to 2 or 3 models. Each model works in its own
 lane, which is a managed Git worktree on a `shadowcode/<ID>` branch. When the
 lanes finish, you keep one result. Its changes are applied to your project's
 working tree, and every lane worktree and its branch is removed.
@@ -29,12 +29,11 @@ lanes.
 Each lane is a normal ShadowCode job with its own conversation. The job uses
 the chosen model, the same permission mode and permission level as the
 project, and the chosen mode: `code`, `plan` (read-only) or `ask` (read-only
-review). Lanes run at the same time. While lanes exist, their worktrees are
+review). Cloud lanes can run concurrently; managed local lanes run sequentially. While lanes exist, their worktrees are
 trusted for you. Keep and discard remove that trust again.
 
-- **One local model at most.** Only one local model fits in GPU memory at a
-  time, so a comparison can include at most one `local:gguf:*` model. Pair it
-  with cloud or subscription models.
+- **Local models run sequentially.** Choose two or three installed compatible GGUF models. Managed jobs share one runtime and run in submission order; queued lanes remain cancellable. Comparison runs refuse automatic GPU-to-CPU fallback, including reuse of a runtime that automatically fell back. Choose CPU settings deliberately or retry the GPU configuration. Runtime preparation time includes readiness/wait work and is not token-generation latency.
+
 - **Offline mode** accepts only models that run on this computer.
 - **Cost.** Every lane is a full task. Subscription lanes use your plan's
   allowance, OpenRouter and other API-key lanes are billed per token, and a

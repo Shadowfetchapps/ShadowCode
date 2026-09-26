@@ -144,39 +144,17 @@ describe("CompareDialog", () => {
     );
   });
 
-  it("allows one local model and explains rows that cannot be chosen", async () => {
+  it("allows two local models and explains sequential execution", async () => {
     render(<Harness />);
     await choose(1, /qwen3:14b · This computer/);
-    fireEvent.click(
-      within(dialog()).getByRole("button", { name: /^Model 2:/ }),
-    );
-    const other = await screen.findByRole("option", { name: /gemma-4:12b/ });
-    expect(other.textContent).toContain("One local model per comparison");
-    fireEvent.click(other);
-    // Not chosen: the row shows why instead.
-    expect(screen.getByRole("listbox")).toBeTruthy();
-    expect(
-      dialog().querySelector(".unified-picker-details")?.textContent,
-    ).toContain("Only one local model fits in GPU memory");
-    const taken = screen.getByRole("option", { name: /qwen3:14b/ });
-    expect(taken.textContent).toContain("Already chosen");
-    const signIn = screen.getByRole("option", { name: /Claude Code/ });
-    expect(signIn.textContent).toContain("Sign in");
-    expect(
-      within(dialog())
-        .getByRole("button", { name: /^Model 2:/ })
-        .getAttribute("aria-label"),
-    ).toBe("Model 2: none chosen");
+    await choose(2, /gemma-4:12b/);
+    expect(startButton().getAttribute("aria-disabled")).not.toBe("true");
+    expect(dialog().textContent).toContain("Local models run one at a time");
   });
 
-  it("checks a lineup that arrives with two local models or a stale row", () => {
+  it("accepts an existing local lineup while rejecting stale rows", () => {
     render(<Harness initial={["local:gguf:qwen", "local:gguf:gemma"]} />);
-    expect(startButton().getAttribute("title")).toMatch(
-      /Only one local model fits in GPU memory/,
-    );
-    expect(dialog().querySelector(".compare-slot-error")?.textContent).toMatch(
-      /one local model/i,
-    );
+    expect(startButton().getAttribute("aria-disabled")).not.toBe("true");
     cleanup();
     render(<Harness initial={["cli:codex:astra", "cli:claude"]} />);
     expect(startButton().getAttribute("title")).toBe(

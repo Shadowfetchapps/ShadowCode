@@ -642,8 +642,7 @@ async fn invalid_lineups_create_nothing() {
         .await
         .contains("different models"));
     let local = attempt(json!(["local:gguf:one", "local:gguf:two"])).await;
-    assert!(local.contains("one local model"), "{local}");
-    assert!(local.contains("GPU memory"), "{local}");
+    assert!(!local.contains("one local model"), "{local}");
     assert!(attempt(json!(["lane-alpha", "lane-unknown"]))
         .await
         .contains("lane-unknown"));

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { CompareLane, CompareRecord } from "../api";
 import type { PickerTarget } from "./picker";
 import {
-  LOCAL_LIMIT_REASON,
   badgeFor,
   checkLineup,
   compareBlocked,
@@ -72,10 +71,10 @@ describe("checkLineup", () => {
       null,
     );
   });
-  it("allows one local model at most", () => {
+  it("allows distinct local models to run sequentially", () => {
     const check = checkLineup([qwen.id, gemma.id], targets);
-    expect(check.slots).toEqual([null, LOCAL_LIMIT_REASON]);
-    expect(check.error).toBe(LOCAL_LIMIT_REASON);
+    expect(check.slots).toEqual([null, null]);
+    expect(check.error).toBeNull();
   });
   it("flags a model that left the picker", () => {
     expect(checkLineup([codex.id, "cli:gone"], targets).slots[1]).toMatch(
@@ -88,9 +87,7 @@ describe("slotTargets", () => {
   it("keeps rows visible but explains why they cannot join", () => {
     const rows = slotTargets(targets, [qwen.id, ""], 1);
     const local = rows.find((t) => t.id === gemma.id)!;
-    expect(local.availability).toBe("unavailable");
-    expect(local.availability_label).toBe("One local model per comparison");
-    expect(local.reason).toBe(LOCAL_LIMIT_REASON);
+    expect(local).toBe(gemma);
     const taken = rows.find((t) => t.id === qwen.id)!;
     expect(taken.availability_label).toBe("Already chosen");
     expect(rows.find((t) => t.id === codex.id)).toBe(codex);

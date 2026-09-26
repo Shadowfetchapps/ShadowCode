@@ -1,4 +1,4 @@
-//! Compare: one task sent to 2–3 models at once. Each model ("lane") works
+//! Compare: one task sent to 2–3 models (managed local jobs are sequential). Each model ("lane") works
 //! in its own managed Git worktree created from the same starting state (HEAD
 //! plus the user's uncommitted, non-ignored work) and runs as a normal job.
 //! Keeping a lane applies its changes to the source working tree with
@@ -153,6 +153,7 @@ pub struct Lane {
     pub checks: Checks,
     pub duration_s: f64,
     pub usage: Value,
+    pub local_runtime: Value,
     pub error: Option<String>,
     /// The lane worktree and its managed branch were removed.
     pub removed: bool,
@@ -676,6 +677,9 @@ async fn refresh(engine: &Engine, record: &mut Record, cancel: &CancellationToke
         lane.job_id = job.id.clone();
         lane.status = job.status.clone();
         lane.summary = job.summary.clone();
+        if let Some(event) = store.last_task_event(&job.task_id, "local.runtime_ready")? {
+            lane.local_runtime = event["payload"].clone();
+        }
         lane.usage = json!({
             "prompt_tokens": job.usage.prompt_tokens,
             "completion_tokens": job.usage.completion_tokens,
@@ -755,10 +759,6 @@ fn resolve_models(
             "Choose different models; {id} is listed twice"
         );
     }
-    ensure!(
-        ids.iter().filter(|id| id.starts_with("local:gguf:")).count() <= 1,
-        "Compare can include at most one local model: only one local model fits in GPU memory at a time. Pair it with cloud or subscription models."
-    );
     let store = engine.store();
     let mut resolved: Vec<(String, config::ModelConfig)> = Vec::new();
     for id in ids {

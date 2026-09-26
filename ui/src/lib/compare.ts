@@ -13,8 +13,6 @@ import {
 export const MIN_LANES = 2;
 export const MAX_LANES = 3;
 
-export const LOCAL_LIMIT_REASON =
-  "Only one local model fits in GPU memory, so a comparison can include one. Pair it with cloud or subscription models.";
 export const DUPLICATE_REASON = "Already chosen for another model slot.";
 
 const LOCAL_ID = /^local:gguf:/;
@@ -52,17 +50,13 @@ export function compareBlocked(options: {
 }
 
 /** Rows for one slot's picker: rows that cannot join this lineup stay
- * visible with the reason (a second local model, a row already chosen). */
+ * visible with the reason (for example, a row already chosen). */
 export function slotTargets(
   targets: PickerTarget[],
   chosen: string[],
   slot: number,
 ): PickerTarget[] {
   const others = chosen.filter((id, index) => index !== slot && id);
-  const otherLocal = others.some((id) => {
-    const target = targets.find((t) => t.id === id);
-    return target ? isLocal(target) : isLocalId(id);
-  });
   return targets.map((target) => {
     if (others.includes(target.id))
       return {
@@ -70,13 +64,6 @@ export function slotTargets(
         availability: "unavailable",
         availability_label: "Already chosen",
         reason: DUPLICATE_REASON,
-      };
-    if (otherLocal && isLocal(target) && isReady(target))
-      return {
-        ...target,
-        availability: "unavailable",
-        availability_label: "One local model per comparison",
-        reason: LOCAL_LIMIT_REASON,
       };
     return target;
   });
@@ -89,14 +76,12 @@ export type LineupCheck = {
   slots: (string | null)[];
 };
 
-/** The lineup rules the engine enforces (2–3 distinct ready models, at most
- * one local). */
+/** The lineup rules the engine enforces (2–3 distinct ready models; local models run sequentially). */
 export function checkLineup(
   models: string[],
   targets: PickerTarget[],
 ): LineupCheck {
   const slots: (string | null)[] = models.map(() => null);
-  let locals = 0;
   models.forEach((id, index) => {
     if (!id) {
       slots[index] = "Choose a model.";
@@ -116,7 +101,6 @@ export function checkLineup(
         `${target.name}: ${availabilityLabel(target)}${target.reason ? ` · ${target.reason}` : ""}`;
       return;
     }
-    if (isLocal(target) && ++locals > 1) slots[index] = LOCAL_LIMIT_REASON;
   });
   const chosen = models.filter(Boolean).length;
   let error: string | null = slots.find(Boolean) || null;

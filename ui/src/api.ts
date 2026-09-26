@@ -790,6 +790,12 @@ export type CompareLane = {
     }[];
   };
   duration_s: number;
+  local_runtime?: {
+    model_id: string;
+    preparation_seconds: number;
+    automatic_cpu_fallback_allowed: boolean;
+    runtime?: { backend: string; context_tokens: number };
+  } | null;
   usage: {
     prompt_tokens?: number;
     completion_tokens?: number;

@@ -567,6 +567,16 @@ export function LaneCard({
           <span className="dim"> · {formatSeconds(lane.duration_s)}</span>
         )}
       </p>
+      {lane.local_runtime?.runtime && (
+        <p className="dim">
+          Runtime: {lane.local_runtime.runtime.backend} ·{" "}
+          {lane.local_runtime.runtime.context_tokens.toLocaleString()} context
+          tokens · preparation{" "}
+          {formatSeconds(lane.local_runtime.preparation_seconds)}
+          {!lane.local_runtime.automatic_cpu_fallback_allowed &&
+            " · automatic CPU fallback off"}
+        </p>
+      )}
       {active && lane.summary && (
         <p className="compare-lane-activity">{lane.summary}</p>
       )}
