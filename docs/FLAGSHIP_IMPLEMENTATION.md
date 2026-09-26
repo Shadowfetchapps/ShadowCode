@@ -68,6 +68,12 @@ Different-model requests now wait cancellably for active model leases instead of
 
 The local-engine fixture suite checks no second launch while a lease is active, cancelled waiting requests, release-triggered switching, same-model sharing and shutdown with a queued request. This is not yet a FIFO multi-GGUF Compare scheduler: lineup restrictions remain until ordered scheduling, queue UI, timing/configuration evidence and actual offline acceptance are implemented. Long-lived same-model sharing can delay a different model. Existing CPU fallback behavior still needs an explicit Compare policy before benchmark use.
 
+## Ordered managed job scheduling
+
+Top-level managed-model jobs register in submission order across project workspaces and remain in persisted `queued` status until admitted. Admission precedes the general worker semaphore, avoiding worker exhaustion by local waiters. Completion/cancellation wakes the next eligible entry; weak references prevent completed task retention. A cancelled middle entry cannot start or let a later job overtake the active predecessor. Nested tasks continue to share the parent's model; a nested model/context switch while the runtime is leased is refused to avoid a parent-child wait cycle.
+
+A cross-project native fixture holds a runtime lease, submits three tasks, cancels the middle one, and verifies queued states, model launch counts, terminal states and start-after-predecessor-finish ordering. This is job scheduling, not yet the complete multi-GGUF Compare feature: setup-only runtime callers still use lease admission, ordered Compare launch metadata/timing and fallback policy remain, and real offline model acceptance has not run.
+
 ## Next implementation work
 
 1. Complete Compare journal/recovery and immutable preview binding; add project-scoped check configuration UI. The original arbitrary-command false verification is fixed in source with a native regression.

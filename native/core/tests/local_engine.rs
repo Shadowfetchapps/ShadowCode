@@ -1484,3 +1484,87 @@ async fn a_plan_limit_continues_the_conversation_on_a_local_model() {
     assert_eq!(later, 0, "no follow-up job in ask mode");
     assert!(Config::patch(&f.paths, json!({"limits":{"on_limit":"sometimes"}})).is_err());
 }
+
+#[tokio::test]
+async fn managed_jobs_run_in_submission_order_across_projects_and_skip_cancelled_entries() {
+    use shadowcode_core::engine::StartRequest;
+    let f = fixture(GPU);
+    let a = f.models.join("a.gguf");
+    let b = f.models.join("b.gguf");
+    qwen_like(&a, "qwen3", TOOLS_TEMPLATE);
+    qwen_like(&b, "qwen3", TOOLS_TEMPLATE);
+    let projects: Vec<_> = (0..3)
+        .map(|n| f._root.path().join(format!("queue-{n}")))
+        .collect();
+    for project in &projects {
+        fs::create_dir(project).unwrap();
+        fs::write(project.join("hello.txt"), "hello\n").unwrap();
+    }
+    Config::patch(
+        &f.paths,
+        json!({"local_engine":{"files":[a,b]},"trusted_workspaces":projects}),
+    )
+    .unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let entries = local_engine::scan(&cfg.local_engine);
+    let id = |name| {
+        entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap()
+            .id
+            .clone()
+    };
+    let engine = Engine::open(f.paths.clone()).unwrap();
+    // Hold A to stop the first submitted B task at the runtime boundary.
+    let held = engine
+        .prepare_model_client(&cfg, &model_for(&id("a")), &CancellationToken::new())
+        .await
+        .unwrap();
+    let request = |project: PathBuf, model: ModelConfig| StartRequest {
+        workspace: project,
+        task: "Read hello.txt".into(),
+        session_id: None,
+        model: Some(model),
+        mode: "code".into(),
+        queue: false,
+        images: vec![],
+        web: false,
+    };
+    let first = engine
+        .start(request(projects[0].clone(), model_for(&id("b"))))
+        .await
+        .unwrap();
+    let middle = engine
+        .start(request(projects[1].clone(), model_for(&id("a"))))
+        .await
+        .unwrap();
+    let last = engine
+        .start(request(projects[2].clone(), model_for(&id("a"))))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(engine.job(&middle.id).unwrap().unwrap().status, "queued");
+    assert_eq!(engine.job(&last.id).unwrap().unwrap().status, "queued");
+    assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 1);
+    let cancelled = tokio::time::timeout(Duration::from_secs(2), engine.cancel_queued(&middle.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.status, "cancelled");
+    drop(held);
+    let first = tokio::time::timeout(Duration::from_secs(15), engine.wait(&first.id))
+        .await
+        .unwrap()
+        .unwrap();
+    let last = tokio::time::timeout(Duration::from_secs(15), engine.wait(&last.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.status, "completed", "{}", first.summary);
+    assert_eq!(last.status, "completed", "{}", last.summary);
+    assert!(last.started_at >= first.finished_at.unwrap());
+    assert_eq!(engine.job(&middle.id).unwrap().unwrap().status, "cancelled");
+    assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 3);
+    engine.shutdown().await.unwrap();
+}

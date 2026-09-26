@@ -25,7 +25,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
     time::{Duration, Instant},
 };
@@ -176,6 +176,8 @@ struct Inner {
     closing: AtomicBool,
     background: Arc<BackgroundManager>,
     local_llama: crate::local_runtime::LocalRuntime,
+    local_jobs: Mutex<VecDeque<Weak<Running>>>,
+    local_job_changed: Notify,
     vendors: Arc<crate::cli_agent::catalog::VendorCatalog>,
     _profile_lock: Arc<crate::paths::ProfileLock>,
 }
@@ -220,6 +222,8 @@ impl Engine {
             closing: AtomicBool::new(false),
             background,
             local_llama: crate::local_runtime::LocalRuntime::new(),
+            local_jobs: Mutex::new(VecDeque::new()),
+            local_job_changed: Notify::new(),
             vendors,
             _profile_lock: profile_lock,
         })))
@@ -678,6 +682,13 @@ impl Engine {
             turn: context.turn,
             child: None,
         });
+        if running.command.is_none() && crate::local_engine::is_managed(&running.config.model) {
+            self.0
+                .local_jobs
+                .lock()
+                .map_err(|_| anyhow!("Local task queue poisoned"))?
+                .push_back(Arc::downgrade(&running));
+        }
         queues.jobs.insert(job.id.clone(), running.clone());
         queues
             .lanes
@@ -1033,6 +1044,46 @@ impl Engine {
             .context("Tasks are still shutting down; keep the app open until cleanup finishes")??;
         Ok(())
     }
+    /// Top-level managed tasks enter in submission order across workspaces.
+    /// Waiting precedes the general worker permit so queued local jobs cannot
+    /// occupy every worker while their predecessor waits to start.
+    async fn await_local_job(&self, running: &Running) -> Result<()> {
+        if running.command.is_some() || !crate::local_engine::is_managed(&running.config.model) {
+            return Ok(());
+        }
+        loop {
+            let changed = self.0.local_job_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            ensure!(
+                !running.cancel.is_cancelled(),
+                "Local task cancelled while queued"
+            );
+            let ready = {
+                let mut queue = self
+                    .0
+                    .local_jobs
+                    .lock()
+                    .map_err(|_| anyhow!("Local task queue poisoned"))?;
+                queue.retain(|item| {
+                    item.upgrade()
+                        .is_some_and(|job| !job.finished.load(Ordering::Acquire))
+                });
+                queue
+                    .front()
+                    .and_then(Weak::upgrade)
+                    .is_some_and(|job| std::ptr::eq(job.as_ref(), running))
+            };
+            if ready {
+                return Ok(());
+            }
+            tokio::select! {
+                biased;
+                _ = running.cancel.cancelled() => bail!("Local task cancelled while queued"),
+                _ = &mut changed => {}
+            }
+        }
+    }
     async fn drain(&self, workspace: PathBuf) {
         loop {
             let job = {
@@ -1054,6 +1105,7 @@ impl Engine {
             };
             if !job.finished.load(Ordering::Acquire) {
                 let outcome=std::panic::AssertUnwindSafe(async {
+                    self.await_local_job(&job).await?;
                     let _slot=tokio::select! {_=job.cancel.cancelled()=>bail!("Task cancelled while queued"),slot=self.0.slots.acquire()=>slot.context("Task scheduler stopped")?};
                     self.run(&job).await
                 }).catch_unwind().await.unwrap_or_else(|_|Err(anyhow!("The task worker panicked. Its checkpoints and history were retained.")));
@@ -1072,6 +1124,7 @@ impl Engine {
                     }
                     job.finished.store(true, Ordering::Release);
                     job.done.notify_waiters();
+                    self.0.local_job_changed.notify_waiters();
                 }
                 // A subscription ran out: keep going on a local model when
                 // the user chose that (limits.on_limit = "local").
@@ -1312,6 +1365,7 @@ impl Engine {
         let _ = self.0.sender.send(event);
         running.finished.store(true, Ordering::Release);
         running.done.notify_waiters();
+        self.0.local_job_changed.notify_waiters();
         Ok(())
     }
     async fn run(&self, running: &Running) -> Result<(String, Value)> {
@@ -1718,6 +1772,18 @@ impl Engine {
         events: TaskEvents,
         tools: &ToolExecutor,
     ) -> Result<(String, Value)> {
+        // A parent may be awaiting this child while holding the local lease.
+        // Waiting for a different model here would deadlock that task tree.
+        if running.child.is_some()
+            && crate::local_engine::is_managed(&running.config.model)
+            && self.0.local_llama.in_use() > 0
+        {
+            if let Some(loaded) = self.0.local_llama.loaded() {
+                ensure!(loaded.id == running.config.model.default
+                    && (running.config.model.context_limit == 0 || loaded.ctx == running.config.model.context_limit as u64),
+                    "A nested local task cannot switch the model or context while another task holds the runtime. Use the parent's local model and context or run this task separately.");
+            }
+        }
         // Held until this task returns: the local model lease lives in it.
         let mut prepared = self
             .prepare_model_client(&running.config, &running.config.model, &running.cancel)
