@@ -32,6 +32,12 @@ Before source mutation, Keep captures the working-tree preimage using a temporar
 
 Native coverage includes preimage pin/content checks and restart from seeded interrupted records with unchanged and edited files. Seeded interruption is not an OS-crash injection demonstration. Full reconciliation, expected postimages, index identity, guided recovery resolution, cross-process project ownership, per-path bounds/redaction and bounded recovery retention are still required. Pins are intentionally retained in this increment to avoid destroying recovery evidence; they may retain nonignored source content just as the existing Compare snapshot does. Do not label this foundation complete crash recovery.
 
+## Compare exact-state reconciliation
+
+New operations record the expected postimage tree (computed by applying the binary patch to an isolated index), source branch/ref and staged-content tree. The recovery action checks branch, HEAD and staged content, then compares current source content to the preimage and expected postimage. An exact postimage persists the applied outcome and win once; an exact preimage returns the comparison to a retryable state. Ambiguous content and incomplete legacy evidence stay blocked. No recovery action applies/reverts files or deletes lanes. The UI exposes Recheck recovery alongside Changes.
+
+Validation: nine native Compare tests cover before/after/ambiguous/staged-change restart states and repeated assessment; ten Compare UI tests cover the action; strict Clippy and production UI build pass. Restart cases seed journal states rather than killing a live application. Full crash injection, simultaneous external edits, guided ambiguous-state resolution, bounded recovery retention and cross-process ownership remain open. Whole-tree comparison is conservative: unrelated edits also require review. Index comparison uses staged-content identity, not all index flags or unsaved editor buffers.
+
 ## Next implementation work
 
 1. Complete Compare journal/recovery and immutable preview binding; add project-scoped check configuration UI. The original arbitrary-command false verification is fixed in source with a native regression.

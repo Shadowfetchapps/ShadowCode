@@ -334,6 +334,16 @@ export function CompareView({
                 <button
                   type="button"
                   className="mini"
+                  disabled={Boolean(acting)}
+                  onClick={() =>
+                    void act("recover", () => api.recoverCompare(record.id))
+                  }
+                >
+                  Recheck recovery
+                </button>
+                <button
+                  type="button"
+                  className="mini"
                   onClick={() => onOpenChanges()}
                 >
                   Open Changes

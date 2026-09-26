@@ -974,3 +974,79 @@ async fn uncertain_keep_survives_restart_and_blocks_mutation_and_cleanup() {
         reopened.engine.shutdown().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn recovery_reconciles_exact_images_and_preserves_ambiguous_edits() {
+    for outcome in ["before", "after", "ambiguous", "index"] {
+        let f = fixture().await;
+        let started = start(&f).await;
+        let id = started["id"].as_str().unwrap();
+        let ready = finished(&f, id).await;
+        let alpha = PathBuf::from(lane(&ready, "lane-alpha")["worktree"].as_str().unwrap());
+        git(&alpha, &["add", "--all"]);
+        git(&alpha, &["commit", "-qm", "Result"]);
+        let result = git(&alpha, &["rev-parse", "HEAD"]);
+        let before = git(&f.project, &["rev-parse", "HEAD"]);
+        let store = f.service.engine.store();
+        let key = shadowcode_core::store::keys::compare_record(id);
+        store
+            .meta_transaction(|meta| {
+                let mut record: Value = meta.json(&key)?.unwrap();
+                record["state"] = json!("needs_review");
+                record["recovery"] = json!({
+                    "phase":"applying", "model":"lane-alpha", "result_commit": result,
+                    "before_commit":before, "expected_head":before,
+                    "expected_ref":git(&f.project, &["rev-parse","--symbolic-full-name","HEAD"]),
+                    "index_tree":git(&f.project, &["write-tree"]),
+                    "after_tree":git(&alpha, &["rev-parse","HEAD^{tree}"]),
+                    "paths":["answer.txt","lib.txt"]
+                });
+                meta.set_json(&key, &record)
+            })
+            .unwrap();
+        if outcome == "after" {
+            fs::copy(alpha.join("lib.txt"), f.project.join("lib.txt")).unwrap();
+            fs::copy(alpha.join("answer.txt"), f.project.join("answer.txt")).unwrap();
+        } else if matches!(outcome, "ambiguous" | "index") {
+            fs::write(f.project.join("lib.txt"), "user edit\n").unwrap();
+            if outcome == "index" {
+                git(&f.project, &["add", "lib.txt"]);
+            }
+        }
+        let content = fs::read(f.project.join("lib.txt")).unwrap();
+        f.service.engine.shutdown().await.unwrap();
+        drop(store);
+        drop(f.service);
+        let reopened = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+        let assessed = call(
+            &reopened,
+            "POST",
+            &format!("/api/compare/{id}/recover"),
+            Value::Null,
+        )
+        .await;
+        match outcome {
+            "before" => assert_eq!(assessed.unwrap()["state"], "done"),
+            "after" => {
+                assert_eq!(assessed.unwrap()["state"], "applied");
+                // Repeated assessment does not score again or apply a patch.
+                call(
+                    &reopened,
+                    "POST",
+                    &format!("/api/compare/{id}/recover"),
+                    Value::Null,
+                )
+                .await
+                .unwrap();
+                let board = call(&reopened, "GET", "/api/compare/scoreboard", Value::Null)
+                    .await
+                    .unwrap();
+                assert_eq!(board["rows"][0]["wins"], 1);
+            }
+            _ => assert!(assessed.is_err()),
+        }
+        assert_eq!(fs::read(f.project.join("lib.txt")).unwrap(), content);
+        assert!(alpha.is_dir());
+        reopened.engine.shutdown().await.unwrap();
+    }
+}

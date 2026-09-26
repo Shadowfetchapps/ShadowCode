@@ -65,6 +65,9 @@ impl Service {
                 .await?
                 .to_json())
             }
+            ("POST", ["compare", id, "recover"]) => {
+                Ok(compare::recover(engine, id).await?.to_json())
+            }
             ("POST", ["compare", id, "discard"]) => {
                 Ok(compare::discard(engine, id).await?.to_json())
             }

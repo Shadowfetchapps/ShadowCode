@@ -123,6 +123,9 @@ pub struct Recovery {
     pub result_commit: String,
     pub before_commit: String,
     pub expected_head: String,
+    pub expected_ref: String,
+    pub index_tree: String,
+    pub after_tree: String,
     pub paths: Vec<String>,
 }
 
@@ -1194,6 +1197,152 @@ pub(crate) async fn apply_checkout(
     Ok(None)
 }
 
+/// Compute expected postimages in an isolated index; no source files or real
+/// index are changed. A preflight conflict has no expected postimage.
+async fn projected_tree(
+    scratch: &Path,
+    lane: &Lane,
+    head: &str,
+    before: &str,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    let temp = tempfile::tempdir_in(scratch)?;
+    let patch = temp.path().join("projection.patch");
+    let output = format!("--output={}", patch.display());
+    git(
+        &lane.worktree,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            &output,
+            &lane.base_commit,
+            head,
+            "--",
+        ],
+        cancel,
+    )
+    .await?;
+    let index = temp.path().join("index");
+    let env = [(
+        "GIT_INDEX_FILE",
+        index.to_str().context("Index path must be UTF-8")?,
+    )];
+    git_env(&lane.worktree, &["read-tree", before], &env, cancel).await?;
+    let applied = git_with(
+        &lane.worktree,
+        &[
+            "apply",
+            "--cached",
+            "--binary",
+            "--whitespace=nowarn",
+            "--",
+            patch.to_str().context("Patch path must be UTF-8")?,
+        ],
+        &env,
+        cancel,
+    )
+    .await?;
+    if !applied.ok {
+        return Ok(String::new());
+    }
+    git_env(&lane.worktree, &["write-tree"], &env, cancel).await
+}
+
+async fn index_tree(
+    scratch: &Path,
+    workspace: &Path,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    let original = git(
+        workspace,
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        cancel,
+    )
+    .await?;
+    let temp = tempfile::tempdir_in(scratch)?;
+    let copy = temp.path().join("index");
+    fs::copy(original, &copy).context("Could not preserve index identity for recovery")?;
+    git_env(
+        workspace,
+        &["write-tree"],
+        &[(
+            "GIT_INDEX_FILE",
+            copy.to_str().context("Index path must be UTF-8")?,
+        )],
+        cancel,
+    )
+    .await
+}
+
+/// Reconcile only exact recorded states. Never apply, revert, or remove files.
+pub async fn recover(engine: &Engine, id: &str) -> Result<Record> {
+    let _guard = LOCK.lock().await;
+    let store = engine.store();
+    let mut record = load(&store, id)?;
+    if record.state != "needs_review" {
+        return Ok(record);
+    }
+    let recovery = record
+        .recovery
+        .clone()
+        .context("Recovery evidence is unavailable")?;
+    ensure!(
+        !recovery.after_tree.is_empty()
+            && !recovery.index_tree.is_empty()
+            && !recovery.expected_ref.is_empty(),
+        "This operation lacks complete recovery evidence; copies are preserved for manual review"
+    );
+    let _reservation = engine.reserve_workspace(&record.workspace)?;
+    let cancel = CancellationToken::new();
+    let head = git(&record.workspace, &["rev-parse", "HEAD"], &cancel).await?;
+    let reference = git(
+        &record.workspace,
+        &["rev-parse", "--symbolic-full-name", "HEAD"],
+        &cancel,
+    )
+    .await?;
+    ensure!(head == recovery.expected_head && reference == recovery.expected_ref && index_tree(&engine.paths().data, &record.workspace, &cancel).await? == recovery.index_tree,
+        "Project branch, HEAD or staged content changed; recovery requires review and no files were changed");
+    let current = snapshot_for(
+        &engine.paths().data,
+        &record.workspace,
+        "assessing recovery",
+        "ShadowCode recovery assessment",
+        &cancel,
+    )
+    .await?;
+    let current_tree = git(
+        &record.workspace,
+        &["rev-parse", &format!("{}^{{tree}}", current.commit)],
+        &cancel,
+    )
+    .await?;
+    let before_tree = git(
+        &record.workspace,
+        &["rev-parse", &format!("{}^{{tree}}", recovery.before_commit)],
+        &cancel,
+    )
+    .await?;
+    if current_tree == recovery.after_tree {
+        record.state = "applied".into();
+        record.winner = Some(recovery.model);
+        record.applied_files = recovery.paths;
+        record.cleanup_pending = record.lanes.iter().any(|lane| !lane.removed);
+        record.finished_at.get_or_insert_with(crate::now);
+        record.recovery.as_mut().unwrap().phase = "applied".into();
+    } else if current_tree == before_tree {
+        record.state = "done".into();
+        record.recovery.as_mut().unwrap().phase = "not_applied".into();
+    } else {
+        bail!("Current files match neither the recorded preimage nor the expected result. Recovery requires review; no files or copies were changed");
+    }
+    persist(&store, record).await
+}
+
 pub async fn keep(engine: &Engine, id: &str, model: &str) -> Result<Record> {
     keep_reviewed(engine, id, model, false).await
 }
@@ -1285,6 +1434,15 @@ pub async fn keep_reviewed(
             &cancel,
         )
         .await?;
+        let after_tree =
+            projected_tree(&engine.paths().data, &lane, &head, &before.commit, &cancel).await?;
+        let index_tree = index_tree(&engine.paths().data, &record.workspace, &cancel).await?;
+        let expected_ref = git(
+            &record.workspace,
+            &["rev-parse", "--symbolic-full-name", "HEAD"],
+            &cancel,
+        )
+        .await?;
         record.recovery = Some(Recovery {
             operation_id: uuid::Uuid::new_v4().simple().to_string(),
             phase: "applying".into(),
@@ -1292,6 +1450,9 @@ pub async fn keep_reviewed(
             result_commit: head.clone(),
             before_commit: before.commit,
             expected_head: before.head,
+            expected_ref,
+            index_tree,
+            after_tree,
             paths: files.clone(),
         });
         record.state = "needs_review".into();

@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   approvals: vi.fn(),
   keepCompare: vi.fn(),
   discardCompare: vi.fn(),
+  recoverCompare: vi.fn(),
   cancelCompare: vi.fn(),
 }));
 vi.mock("../api", () => ({ api: mocks }));
@@ -138,6 +139,18 @@ describe("CompareView", () => {
     expect(screen.queryByRole("button", { name: "Discard all" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open Changes" }));
     expect(props.onOpenChanges).toHaveBeenCalled();
+    mocks.recoverCompare.mockResolvedValue(
+      record({ state: "done", lanes: [finishedCloud] }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Recheck recovery" }));
+    await waitFor(() =>
+      expect(mocks.recoverCompare).toHaveBeenCalledWith("c1"),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Recheck recovery" }),
+      ).toBeNull(),
+    );
   });
 
   it("reports retained copies and retries cleanup without keeping again", async () => {

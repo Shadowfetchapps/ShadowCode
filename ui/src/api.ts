@@ -958,6 +958,12 @@ export const api = {
       model,
       accept_unverified: acceptUnverified,
     }),
+  recoverCompare: (id: string) =>
+    send<CompareRecord>(
+      `/api/compare/${encodeURIComponent(id)}/recover`,
+      "POST",
+      {},
+    ),
   discardCompare: (id: string) =>
     send<CompareRecord>(
       `/api/compare/${encodeURIComponent(id)}/discard`,
