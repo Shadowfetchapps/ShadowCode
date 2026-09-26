@@ -341,6 +341,67 @@ async fn terminals_are_blocked_until_allowed() {
 }
 
 #[tokio::test]
+async fn background_commands_require_remote_terminal_permission() {
+    let f = fixture().await;
+    // Trust the project so only the remote permission can prevent execution.
+    shadowcode_core::config::Config::patch(
+        f.service.engine.paths(),
+        json!({"trusted_workspaces": [f.workspace]}),
+    )
+    .unwrap();
+    let token = f.pair().await;
+    let command =
+        json!({"name":"remote policy probe", "command":"printf allowed > remote-marker.txt"});
+    let (status, body) = f
+        .api(&token, "POST", "/api/background", Some(command.clone()))
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(!f.workspace.join("remote-marker.txt").exists());
+    let tasks = f
+        .service
+        .dispatch(Request {
+            method: "GET".into(),
+            path: "/api/background".into(),
+            body: Value::Null,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        tasks["tasks"].as_array().unwrap().len(),
+        0,
+        "Denied requests must not register a process"
+    );
+
+    f.service
+        .dispatch(Request {
+            method: "PUT".into(),
+            path: "/api/remote".into(),
+            body: json!({"allow_terminals": true}),
+        })
+        .await
+        .unwrap();
+    let (status, body) = f
+        .api(&token, "POST", "/api/background", Some(command))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if std::fs::read_to_string(f.workspace.join("remote-marker.txt"))
+                .ok()
+                .as_deref()
+                == Some("allowed")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Allowed remote command did not run");
+    f.manager.stop();
+}
+
+#[tokio::test]
 async fn secrets_are_not_shown_remotely() {
     let f = fixture().await;
     let token = f.pair().await;

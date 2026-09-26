@@ -8,7 +8,8 @@
 //! - The app preview (`/api/preview…`) is refused: its proxies listen on this
 //!   computer's loopback only, and server detection lists local processes.
 //! - Interactive terminals (`/api/terminals…`) and the direct command runner
-//!   (`/api/workspace/exec`) are refused unless the user turned on "Allow
+//!   (`/api/workspace/exec`), including background processes (`/api/background…`),
+//!   are refused unless the user turned on "Allow
 //!   terminals over remote access". Agent shell commands still go through
 //!   the usual approvals.
 //! - The computer's microphone (`/api/voice/start`, `recording`, `stop`,
@@ -125,7 +126,9 @@ pub fn check(path: &str, body: &Value, access: &Access, paths: &AppPaths) -> Res
     let family = parts.first().copied().unwrap_or("");
     match family {
         "remote" | "views" | "runtime" | "owned-jobs" => return Err(Refusal(MANAGED_LOCALLY)),
-        "terminals" if !access.allow_terminals => return Err(Refusal(TERMINALS_OFF)),
+        "terminals" | "background" if !access.allow_terminals => {
+            return Err(Refusal(TERMINALS_OFF))
+        }
         "preview" => return Err(Refusal(PREVIEW_LOCAL)),
         _ => {}
     }
@@ -250,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn terminals_and_exec_need_the_explicit_switch() {
+    fn direct_process_routes_need_the_explicit_switch() {
         let (_dir, paths) = paths();
         let off = Access {
             allow_terminals: false,
@@ -263,6 +266,9 @@ mod tests {
             "/api/terminals/abc/input",
             "/api/terminals/abc/output?cursor=0",
             "/api/workspace/exec",
+            "/api/background",
+            "/api/background/task-id",
+            "/api/background/task-id/stop",
         ] {
             assert_eq!(
                 check(path, &Value::Null, &off, &paths),
