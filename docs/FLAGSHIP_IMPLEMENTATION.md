@@ -38,6 +38,12 @@ New operations record the expected postimage tree (computed by applying the bina
 
 Validation: nine native Compare tests cover before/after/ambiguous/staged-change restart states and repeated assessment; ten Compare UI tests cover the action; strict Clippy and production UI build pass. Restart cases seed journal states rather than killing a live application. Full crash injection, simultaneous external edits, guided ambiguous-state resolution, bounded recovery retention and cross-process ownership remain open. Whole-tree comparison is conservative: unrelated edits also require review. Index comparison uses staged-content identity, not all index flags or unsaved editor buffers.
 
+## Actual Compare process-crash coverage
+
+Linux integration tests now spawn an isolated service test process and intercept only the source Git apply/removal commands through a test-local PATH wrapper. The parent sends SIGKILL before patch application, after patch application, and after outcome persistence before the first worktree removal. Restart uses the actual journal written by Keep, not a seeded replacement. The test checks before/applied reconciliation without reapplication, preserved lane copies, binary bytes, rename/delete results and executable mode. Crash controls exist only in the test executable; production has no environment-triggered fault injection.
+
+The Linux suite reports eleven passing tests, including the no-op child entry used by the parent harness. This covers three real process-crash boundaries, not every journal write, disk-full failure, power-loss/fsync behavior or concurrent external edit. Those acceptance cases, ambiguous recovery UX and cross-project synchronization remain open.
+
 ## Next implementation work
 
 1. Complete Compare journal/recovery and immutable preview binding; add project-scoped check configuration UI. The original arbitrary-command false verification is fixed in source with a native regression.

@@ -129,7 +129,10 @@ async fn fixture_with_checks(delay: Duration, checks: bool) -> Fixture {
         (response, delay)
     })
     .await;
-    let root = tempfile::tempdir().unwrap();
+    let root = match std::env::var_os("SHADOWCODE_COMPARE_CRASH_ROOT") {
+        Some(parent) => tempfile::tempdir_in(parent).unwrap(),
+        None => tempfile::tempdir().unwrap(),
+    };
     let project = root.path().join("project");
     fs::create_dir(&project).unwrap();
     git(&project, &["init", "-q"]);
@@ -1048,5 +1051,179 @@ async fn recovery_reconciles_exact_images_and_preserves_ambiguous_edits() {
         assert_eq!(fs::read(f.project.join("lib.txt")).unwrap(), content);
         assert!(alpha.is_dir());
         reopened.engine.shutdown().await.unwrap();
+    }
+}
+
+// These hooks live only in the integration-test executable. Production code
+// has no environment-controlled crash points.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn compare_crash_child() {
+    let Some(parent) = std::env::var_os("SHADOWCODE_COMPARE_CRASH_ROOT") else {
+        return;
+    };
+    let f = fixture().await;
+    let record = start(&f).await;
+    let id = record["id"].as_str().unwrap();
+    let ready = finished(&f, id).await;
+    let alpha = PathBuf::from(lane(&ready, "lane-alpha")["worktree"].as_str().unwrap());
+    fs::write(alpha.join("binary.dat"), [0, 1, 255, 0, 42]).unwrap();
+    fs::rename(alpha.join("tracked.txt"), alpha.join("renamed.txt")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(alpha.join("answer.txt"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        Path::new(&parent).join("fixture.json"),
+        json!({"root":f._root.path(),"id":id}).to_string(),
+    )
+    .unwrap();
+    call(
+        &f.service,
+        "POST",
+        &format!("/api/compare/{id}/keep"),
+        json!({"model":"lane-alpha"}),
+    )
+    .await
+    .unwrap();
+    panic!("Crash interception did not stop Keep");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn real_process_crash_before_and_after_apply_recovers_without_reapplication() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    fn quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+    for phase in ["before", "after", "cleanup"] {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let marker = root.path().join("paused");
+        let real_git = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap();
+        assert!(real_git.status.success());
+        let real_git = String::from_utf8(real_git.stdout).unwrap();
+        // Match only source working-tree application, never --check or
+        // --cached projection. Pause with a bounded timeout as a backstop.
+        let script = format!(
+            r#"#!/bin/sh
+apply=no
+skip=no
+worktree=no
+remove=no
+for arg do
+  case "$arg" in apply) apply=yes;; --check|--cached) skip=yes;; worktree) worktree=yes;; remove) remove=yes;; esac
+done
+if {{ [ {phase} != cleanup ] && [ "$apply" = yes ] && [ "$skip" = no ]; }} || {{ [ {phase} = cleanup ] && [ "$worktree" = yes ] && [ "$remove" = yes ]; }}; then
+  if [ {phase} = after ]; then {git} "$@" || exit $?; fi
+  echo $$ > {marker}
+  sleep 30
+  exit 97
+fi
+exec {git} "$@"
+"#,
+            phase = quote(phase),
+            git = quote(real_git.trim()),
+            marker = quote(marker.to_str().unwrap())
+        );
+        fs::write(bin.join("git"), script).unwrap();
+        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        let log = fs::File::create(root.path().join("child.log")).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "compare_crash_child", "--nocapture"])
+            .env("SHADOWCODE_COMPARE_CRASH_ROOT", root.path())
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .stdout(Stdio::from(log.try_clone().unwrap()))
+            .stderr(Stdio::from(log))
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !marker.exists() && Instant::now() < deadline && child.try_wait().unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // The recorded PID belongs to our wrapper, which process::run starts
+        // in its own process group. Kill that owned group and our test child.
+        // Stop the test process first: it must not unwind and delete its
+        // temporary profile when the intercepted Git child is terminated.
+        let _ = child.kill();
+        child.wait().unwrap();
+        if let Ok(pid) = fs::read_to_string(&marker) {
+            let pid: i32 = pid.trim().parse().unwrap();
+            assert!(pid > 1);
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+        assert!(
+            marker.exists(),
+            "child did not reach {phase}: {}",
+            fs::read_to_string(root.path().join("child.log")).unwrap()
+        );
+        let fixture: Value =
+            serde_json::from_slice(&fs::read(root.path().join("fixture.json")).unwrap()).unwrap();
+        let location = PathBuf::from(fixture["root"].as_str().unwrap());
+        let project = location.join("project");
+        let id = fixture["id"].as_str().unwrap();
+        let service = Service::open(
+            AppPaths::isolated(&location.join("profile")).unwrap(),
+            Some(project.clone()),
+        )
+        .unwrap();
+        let interrupted = call(&service, "GET", &format!("/api/compare/{id}"), Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(
+            interrupted["state"],
+            if phase == "cleanup" {
+                "applied"
+            } else {
+                "needs_review"
+            }
+        );
+        let source = fs::read(project.join("lib.txt")).unwrap();
+        let recovered = call(
+            &service,
+            "POST",
+            &format!("/api/compare/{id}/recover"),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            recovered["state"],
+            if phase == "before" { "done" } else { "applied" }
+        );
+        assert_eq!(fs::read(project.join("lib.txt")).unwrap(), source);
+        assert_eq!(project.join("answer.txt").exists(), phase != "before");
+        assert_eq!(project.join("tracked.txt").exists(), phase == "before");
+        if phase != "before" {
+            assert_eq!(
+                fs::read(project.join("binary.dat")).unwrap(),
+                [0, 1, 255, 0, 42]
+            );
+            assert_eq!(
+                fs::read_to_string(project.join("renamed.txt")).unwrap(),
+                "committed\n"
+            );
+            assert_ne!(
+                fs::metadata(project.join("answer.txt"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                0
+            );
+        }
+
+        for lane in recovered["lanes"].as_array().unwrap() {
+            assert!(Path::new(lane["worktree"].as_str().unwrap()).exists());
+        }
+        service.engine.shutdown().await.unwrap();
     }
 }
