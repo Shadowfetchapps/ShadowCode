@@ -2,6 +2,9 @@ name: Native Linux release
 on:
   push:
     tags: ['v*']
+concurrency:
+  group: native-release-${{ github.ref }}
+  cancel-in-progress: false
 permissions:
   contents: write
 jobs:
@@ -18,6 +21,8 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: ui/package-lock.json
+      - name: Test release staging and immutable retry behavior
+        run: node --test scripts/test-native-release.mjs
       - name: Validate native release tag
         run: |
           VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
@@ -79,6 +84,4 @@ jobs:
       - name: Publish checked native artifacts
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "ShadowCode $GITHUB_REF_NAME" --notes-file docs/RELEASE_NOTES.md
-          gh release upload "$GITHUB_REF_NAME" target/release/bundle/appimage/*.AppImage target/release/bundle/appimage/*runtime-sources.tar.gz target/release/bundle/deb/*.deb target/release/bundle/SHA256SUMS --clobber
+        run: node scripts/publish-native-release.mjs

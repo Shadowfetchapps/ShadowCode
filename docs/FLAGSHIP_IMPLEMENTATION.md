@@ -50,6 +50,12 @@ Compare metadata synchronization is now scoped to canonical project paths. A sho
 
 The Compare suite covers ownership refusal before source changes and successful retry after release. The real-crash parent is a second process and verifies that it cannot acquire the child's repository ownership at all three mutation boundaries. A unit test holds project A's metadata lock while acquiring project B's. This establishes scoped-lock behavior, not a measured end-to-end UI latency target. Git/worktree subsystem locks, independent external editors, advisory-lock cooperation by older app versions and network-filesystem lock semantics remain limitations.
 
+## Release draft staging and immutable retry
+
+The release workflow preserves all existing gates and delegates publication to `scripts/publish-native-release.mjs`. It stages a draft, uploads only missing assets without clobber, downloads all expected assets to verify SHA-256 bytes and completeness, then publishes. Published retries are read-only; changed bytes, unexpected assets, incomplete published releases and authorization failures are refused. A deterministic manifest binds tag/source commit, architecture, Cargo/UI lockfiles, runtime pin and package hashes. Per-tag workflow concurrency serializes cooperating release runs. Native PR CI and release CI run the publisher fixture suite.
+
+Eight local Node tests exercise failure/retry and corruption paths; both workflow YAML files parse. No GitHub draft or public release was created to test this change. Remote tag protection, platform signing/authenticated updates and full workflow execution remain unverified. Manual concurrent repository edits are outside workflow concurrency. Draft discovery follows GitHub's authenticated [List releases API](https://docs.github.com/en/rest/releases/releases#list-releases); publication commands were checked against installed `gh` help.
+
 ## Next implementation work
 
 1. Complete Compare journal/recovery and immutable preview binding; add project-scoped check configuration UI. The original arbitrary-command false verification is fixed in source with a native regression.
