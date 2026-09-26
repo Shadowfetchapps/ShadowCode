@@ -242,7 +242,11 @@ async fn main() -> anyhow::Result<()> {
         let done = loop {
             tokio::select! {
                 done = &mut waiting => break done?,
-                _ = &mut deadline => anyhow::bail!("turn did not finish in 240 s"),
+                _ = &mut deadline => {
+                    let _ = tokio::time::timeout(Duration::from_secs(10), service.engine.cancel(&id)).await;
+                    service.engine.shutdown().await?;
+                    anyhow::bail!("turn did not finish in 240 s");
+                },
                 _ = tokio::time::sleep(Duration::from_millis(300)), if command => {
                     let pending = call(&service, "GET", "/api/approvals", json!({})).await?;
                     for approval in pending["approvals"].as_array().into_iter().flatten() {
@@ -280,6 +284,23 @@ async fn main() -> anyhow::Result<()> {
                     println!("  {} {}", e["type"], e["payload"]);
                 }
             }
+        }
+        // A completed job is not enough: the minimal text/resume smoke must
+        // preserve the exact answer. In particular, duplicate stream/result
+        // text must make this executable fail rather than merely print it.
+        let expected_word = !web && !image && !command;
+        let answer = done["result"]["summary"]
+            .as_str()
+            .or(done["result"]["text"].as_str())
+            .unwrap_or("")
+            .trim();
+        if done["status"] != "completed" || (expected_word && answer != "ALPHA") {
+            service.engine.shutdown().await?;
+            anyhow::bail!(
+                "live smoke failed: status={}, exact-answer check={}",
+                done["status"],
+                !expected_word || answer == "ALPHA"
+            );
         }
     }
     // --switch <picker id>: continue the same conversation on another

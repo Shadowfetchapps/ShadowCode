@@ -41,6 +41,7 @@ pub struct ClaudeAdapter {
     started: bool,
     initialized: bool,
     streamed_text: bool,
+    turn_text_emitted: bool,
     pending_prompt: Option<(String, Vec<PromptImage>)>,
     pending_permissions: HashSet<String>,
     tool_names: HashMap<String, String>,
@@ -80,6 +81,7 @@ impl ClaudeAdapter {
                 // complete message is the only copy.
                 "text" if !self.streamed_text => {
                     if let Some(text) = block["text"].as_str().filter(|t| !t.is_empty()) {
+                        self.turn_text_emitted = true;
                         step.updates.push(Update::Text(redact(text)));
                     }
                 }
@@ -259,6 +261,8 @@ impl CliAdapter for ClaudeAdapter {
         self.started
     }
     fn prompt(&mut self, text: &str, images: &[PromptImage]) -> Result<Vec<String>> {
+        self.streamed_text = false;
+        self.turn_text_emitted = false;
         if self.started {
             self.turn_active = true;
             Ok(vec![Self::user_message(text, images)])
@@ -306,6 +310,7 @@ impl CliAdapter for ClaudeAdapter {
                     match event["delta"]["text"].as_str() {
                         Some(text) if !text.is_empty() => {
                             self.streamed_text = true;
+                            self.turn_text_emitted = true;
                             Step::update(Update::Text(redact(text)))
                         }
                         _ => Step::default(),
@@ -373,12 +378,12 @@ impl CliAdapter for ClaudeAdapter {
                     )));
                 } else {
                     // `result` repeats the final assistant text; it is only
-                    // emitted when nothing was streamed for this turn.
+                    // emitted when neither deltas nor complete assistant
+                    // messages emitted text during this turn. The per-message
+                    // streamed_text marker resets at each assistant frame.
                     let text = message["result"]
                         .as_str()
-                        .filter(|t| {
-                            !t.is_empty() && !self.streamed_text && self.tool_names.is_empty()
-                        })
+                        .filter(|t| !t.is_empty() && !self.turn_text_emitted)
                         .map(redact);
                     step.updates.push(Update::TurnCompleted {
                         text,

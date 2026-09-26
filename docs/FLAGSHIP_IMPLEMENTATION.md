@@ -91,12 +91,19 @@ End-to-end managed-runtime fixtures run two GGUF lanes in offline mode, verify s
 
 No paid/live provider turns, billing changes, release publication, or destructive Git repairs are authorized by the reference document itself. No new required hosted backend or account. Tests use isolated scratch profiles and projects.
 
-
 ## Real single-model offline acceptance
 
 The opt-in `live_local_acceptance_from_explicit_models` harness accepts one to three explicit installed GGUF paths, creates an isolated profile/project and downloads nothing. On 2026-09-26 the one-model case completed on the installed Qwen2.5 0.5B Q4_K_M (491,400,032 bytes) and llama.cpp 0.4.1-dev / 18f9f7bef. A Linux user/network namespace exposed only loopback; a `strace -f -e trace=connect` trace observed ten connections to 127.0.0.1 and no nonloopback connects. The runtime reported Vulkan / RTX 5060 Ti and no CPU fallback.
 
 The supplied addition-function explanation completed in about 1.99 seconds, including 1.63 seconds of runtime preparation. This is one inference observation, not TTFT, a coding benchmark, independent GPU-offload measurement or multi-model acceptance. Verification correctly remained `not_run`. The real test and all-target Clippy with warnings denied pass. LOC-01 remains open: only one installed GGUF was found; the two-model scheduler is currently covered by fixtures. No installed app, model or account profile was modified.
+
+## Live subscription text/resume and Claude duplication fix
+
+After the user offered existing subscriptions for testing, source-built `live_vendor_turn` runs used isolated profiles/projects and installed official CLI logins. Codex 0.158.0-alpha.2.1 (ChatGPT Pro, GPT-6-Luna), Claude Code 2.1.278 (Claude.ai Max, Default), Cursor 2026.09.15-d2fe57e (Auto), Antigravity ACP 1.2.1 (Gemini 3.8 Flash High) and Grok 1.0.41 (Grok 4.7) each completed an initial one-word answer and native-session resume. Cursor's CLI reported Free; paid entitlement remains unconfirmed. Unknown plan allowance remains unknown.
+
+The real Claude run initially returned `ALPHAALPHA` twice. Its per-message streaming marker reset before `result`, allowing repeated final text. A separate per-turn emitted-text marker now suppresses that duplicate and resets on follow-up. Regression fixtures cover streamed and complete-message paths, later result-only turns, genuine repeated chunks, multiple messages and tool-then-result fallback. The real Claude recheck returned exactly `ALPHA` on both turns. The live example now fails on a wrong/duplicate answer and cancels timed-out jobs before shutdown.
+
+All 19 adapter tests and core all-target Clippy with warnings denied pass. These live tests establish basic text and resume behavior, not full provider conformance or coding-quality acceptance. No tool action, image, quota exhaustion or auth-expiry case was exercised live in this increment. The installed app and billing settings were not changed. Codex subscription authentication was cross-checked with [official OpenAI documentation](https://learn.chatgpt.com/docs/auth).
 
 ## Full acceptance register
 

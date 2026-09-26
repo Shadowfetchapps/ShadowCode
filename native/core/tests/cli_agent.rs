@@ -404,6 +404,81 @@ fn claude_stream_json_approval_and_interrupt() {
 }
 
 #[test]
+fn claude_result_does_not_repeat_streamed_or_complete_messages() {
+    let root = tempfile::tempdir().unwrap();
+    let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ALPHA"}}}"#;
+    let assistant =
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ALPHA"}]}}"#;
+    let result = r#"{"type":"result","subtype":"success","result":"ALPHA"}"#;
+    for frames in [vec![delta, assistant, result], vec![assistant, result]] {
+        let mut adapter = adapter_for(Vendor::Claude, false);
+        adapter.prompt("one word", &[]).unwrap();
+        adapter.on_start(&launch(root.path()));
+        let (_, updates) = feed(&mut *adapter, &frames);
+        let text: String = updates
+            .iter()
+            .filter_map(|u| match u {
+                Update::Text(t) | Update::TurnCompleted { text: Some(t), .. } => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "ALPHA");
+        assert!(updates
+            .iter()
+            .any(|u| matches!(u, Update::TurnCompleted { text: None, .. })));
+
+        // A subsequent turn with only a final result must still be visible.
+        adapter.prompt("one more", &[]).unwrap();
+        let done = adapter.on_line(result).unwrap();
+        assert!(done.updates.iter().any(|u| matches!(
+            u,
+            Update::TurnCompleted { text: Some(t), .. } if t == "ALPHA"
+        )));
+    }
+}
+
+#[test]
+fn claude_preserves_repeated_text_across_messages_and_result_only_after_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let mut adapter = adapter_for(Vendor::Claude, false);
+    adapter.prompt("repeat", &[]).unwrap();
+    adapter.on_start(&launch(root.path()));
+    let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ha"}}}"#;
+    let assistant = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"haha"}]}}"#;
+    let (_, updates) = feed(
+        &mut *adapter,
+        &[
+            delta,
+            delta,
+            assistant,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"again"}]}}"#,
+            r#"{"type":"result","subtype":"success","result":"again"}"#,
+        ],
+    );
+    let text: String = updates
+        .iter()
+        .filter_map(|u| match u {
+            Update::Text(t) | Update::TurnCompleted { text: Some(t), .. } => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "hahaagain");
+
+    adapter.prompt("tool then result", &[]).unwrap();
+    let (_, updates) = feed(
+        &mut *adapter,
+        &[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"a.txt"}}]}}"#,
+            r#"{"type":"result","subtype":"success","result":"Found it"}"#,
+        ],
+    );
+    assert!(updates.iter().any(|u| matches!(
+        u,
+        Update::TurnCompleted { text: Some(t), .. } if t == "Found it"
+    )));
+}
+
+#[test]
 fn malformed_lines_are_warnings_not_fatals() {
     for vendor in Vendor::ALL {
         for fallback in [false, vendor == Vendor::Codex] {
