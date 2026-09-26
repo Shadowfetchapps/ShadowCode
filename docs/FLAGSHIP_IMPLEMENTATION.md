@@ -56,6 +56,12 @@ The release workflow preserves all existing gates and delegates publication to `
 
 Eight local Node tests exercise failure/retry and corruption paths; both workflow YAML files parse. No GitHub draft or public release was created to test this change. Remote tag protection, platform signing/authenticated updates and full workflow execution remain unverified. Manual concurrent repository edits are outside workflow concurrency. Draft discovery follows GitHub's authenticated [List releases API](https://docs.github.com/en/rest/releases/releases#list-releases); publication commands were checked against installed `gh` help.
 
+## Provider runtime capability enforcement
+
+The ACP execution adapter now checks the live initialize response before starting a session: only supported protocol version 1 is accepted, and queued image prompts require explicitly advertised image support. Follow-up images are checked at send time too. Missing, false or malformed image declarations cannot silently send attachments or trigger a provider/billing fallback. The image capability resets at process startup; cached catalog/vendor-name assumptions cannot authorize actual image transmission.
+
+Parameterized fixtures cover Cursor, Antigravity and Grok with queued/follow-up images and true/false/missing/malformed declarations, plus unsupported/missing protocol versions. Existing Antigravity Google authentication and session/model-switch fixtures remain exercised. This is protocol conformance evidence, not a live login test or a change to the supported vendor login routes. The existing Grok early vision restriction and broader capability/UI synchronization remain separate work. Reference: [ACP v1 initialization](https://agentclientprotocol.com/protocol/v1/initialization).
+
 ## Next implementation work
 
 1. Complete Compare journal/recovery and immutable preview binding; add project-scoped check configuration UI. The original arbitrary-command false verification is fixed in source with a native regression.

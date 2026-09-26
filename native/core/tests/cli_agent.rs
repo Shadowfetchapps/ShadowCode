@@ -910,7 +910,10 @@ fn vendor_image_bytes_use_official_fields() {
     let (send, _) = feed(
         &mut *cursor,
         &[
-            &rpc_result(1, json!({"protocolVersion":1})),
+            &rpc_result(
+                1,
+                json!({"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":true}}}),
+            ),
             &rpc_result(2, json!({"sessionId":"s1"})),
         ],
     );
@@ -962,4 +965,69 @@ fn acp_resume_ignores_replayed_history() {
     assert!(answer
         .iter()
         .any(|u| matches!(u, Update::Text(t) if t == "BETA")));
+}
+
+#[test]
+fn acp_negotiated_image_capabilities_guard_queued_and_followup_prompts() {
+    let root = tempfile::tempdir().unwrap();
+    for vendor in [Vendor::Cursor, Vendor::Antigravity, Vendor::Grok] {
+        for declared in [Value::Null, json!(false), json!("true"), json!(true)] {
+            for queued in [false, true] {
+                let mut adapter = adapter_for(vendor, false);
+                adapter.on_start(&launch(root.path()));
+                if queued {
+                    assert!(adapter
+                        .prompt("inspect", &[sample_image()])
+                        .unwrap()
+                        .is_empty());
+                }
+                let initialized = adapter.on_line(&rpc_result(1, json!({
+                    "protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":declared}}
+                })));
+                if queued && declared != true {
+                    let error = initialized
+                        .expect_err("unsupported queued image must fail before session creation");
+                    assert!(error.to_string().contains("No image prompt was sent"));
+                    continue;
+                }
+                let step = initialized.unwrap();
+                assert!(step.send.iter().any(|line| line.contains("session/new")));
+                let session = adapter
+                    .on_line(&rpc_result(2, json!({"sessionId":"capability-test"})))
+                    .unwrap();
+                if queued {
+                    assert!(session
+                        .send
+                        .iter()
+                        .any(|line| line.contains("session/prompt") && line.contains("aW1n")));
+                } else if declared == true {
+                    assert!(
+                        adapter.prompt("inspect", &[sample_image()]).unwrap()[0].contains("aW1n")
+                    );
+                } else {
+                    assert!(adapter.prompt("inspect", &[sample_image()]).is_err());
+                    // Rejection does not silently send text, switch providers,
+                    // or prevent a subsequent deliberate text-only request.
+                    assert!(adapter.prompt("text only", &[]).unwrap()[0].contains("session/prompt"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn acp_rejects_incompatible_or_malformed_protocol_negotiation() {
+    let root = tempfile::tempdir().unwrap();
+    for vendor in [Vendor::Cursor, Vendor::Antigravity, Vendor::Grok] {
+        for version in [Value::Null, json!(0), json!(2), json!("1"), json!(-1)] {
+            let mut adapter = adapter_for(vendor, false);
+            adapter.on_start(&launch(root.path()));
+            adapter.prompt("queued work", &[]).unwrap();
+            let error = adapter
+                .on_line(&rpc_result(1, json!({"protocolVersion":version})))
+                .expect_err("must reject unsupported negotiation");
+            assert!(error.to_string().contains("No session was started"));
+            assert!(!adapter.ready());
+        }
+    }
 }

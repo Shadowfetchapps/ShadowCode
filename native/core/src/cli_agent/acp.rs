@@ -71,6 +71,8 @@ pub struct AcpAdapter {
     switching: bool,
     /// The agent accepts HTTP MCP servers (`mcpCapabilities.http`).
     mcp_http: bool,
+    /// Negotiated per process, never inferred from a vendor name or cache.
+    images_supported: bool,
 }
 impl AcpAdapter {
     pub fn new(vendor: Vendor) -> Self {
@@ -92,7 +94,14 @@ impl AcpAdapter {
             prompt_active: false,
             switching: false,
             mcp_http: false,
+            images_supported: false,
         }
+    }
+    fn check_images(&self, images: &[PromptImage]) -> Result<()> {
+        if !images.is_empty() && !self.images_supported {
+            bail!("{} runtime did not advertise image support. Remove the attachment or explicitly choose an image-capable model. No image prompt was sent.", self.vendor.product_label());
+        }
+        Ok(())
     }
     /// The project's enabled MCP servers in ACP form.
     fn mcp_servers(&self) -> Value {
@@ -111,6 +120,7 @@ impl AcpAdapter {
         self.next_id
     }
     fn start_prompt(&mut self, text: &str, images: &[PromptImage]) -> Result<Vec<String>> {
+        self.check_images(images)?;
         let Some(session) = self.session_id.clone() else {
             bail!("ACP session is not ready")
         };
@@ -289,6 +299,13 @@ impl AcpAdapter {
         }
         let res = &message["result"];
         if Some(id) == self.init_id {
+            if res["protocolVersion"].as_u64() != Some(1) {
+                bail!("{} runtime returned an unsupported or missing ACP protocol version; ShadowCode supports version 1. No session was started.", self.vendor.product_label());
+            }
+            self.images_supported = res["agentCapabilities"]["promptCapabilities"]["image"] == true;
+            if let Some((_, images)) = &self.pending_prompt {
+                self.check_images(images)?;
+            }
             self.phase = Phase::Initialized;
             self.mcp_http = res["agentCapabilities"]["mcpCapabilities"]["http"] == true;
             // Documented Cursor flow: `authenticate {methodId:"cursor_login"}`
@@ -585,6 +602,7 @@ impl CliAdapter for AcpAdapter {
     }
     fn on_start(&mut self, options: &LaunchOptions) -> Vec<String> {
         self.options = Some(options.clone());
+        self.images_supported = false;
         let id = self.id();
         self.init_id = Some(id);
         vec![request(
