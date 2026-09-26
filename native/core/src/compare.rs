@@ -112,6 +112,20 @@ pub struct Lane {
     stats_for: String,
 }
 
+/// Durable intent. Unknown application outcomes retain lane material and
+/// refuse further mutation until reconciliation can establish what happened.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Recovery {
+    pub operation_id: String,
+    pub phase: String,
+    pub model: String,
+    pub result_commit: String,
+    pub before_commit: String,
+    pub expected_head: String,
+    pub paths: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Record {
@@ -122,7 +136,7 @@ pub struct Record {
     pub web: bool,
     pub created_at: f64,
     pub finished_at: Option<f64>,
-    /// running | done | applied | discarded
+    /// running | done | needs_review | applied | discarded
     pub state: String,
     pub base: Base,
     pub lanes: Vec<Lane>,
@@ -130,6 +144,7 @@ pub struct Record {
     pub applied_files: Vec<String>,
     /// Logical outcome is durable, but one or more lane checkouts remain.
     pub cleanup_pending: bool,
+    pub recovery: Option<Recovery>,
     /// Cleanup problems and lanes that went missing outside ShadowCode.
     pub notes: Vec<String>,
     /// Runs were added to the scoreboard, or will not be (internal; not in
@@ -1253,6 +1268,34 @@ pub async fn keep_reviewed(
         lane.status
     );
     if !files.is_empty() {
+        let before = snapshot_for(
+            &engine.paths().data,
+            &record.workspace,
+            "keeping a result",
+            "ShadowCode Compare recovery preimage",
+            &cancel,
+        )
+        .await?;
+        // Pin preimages against Git garbage collection. Never move HEAD or
+        // the user's branch/index. Retention is deliberately conservative.
+        let reference = format!("refs/shadowcode/recovery/{}", record.id);
+        git(
+            &record.workspace,
+            &["update-ref", &reference, &before.commit],
+            &cancel,
+        )
+        .await?;
+        record.recovery = Some(Recovery {
+            operation_id: uuid::Uuid::new_v4().simple().to_string(),
+            phase: "applying".into(),
+            model: lane.model.clone(),
+            result_commit: head.clone(),
+            before_commit: before.commit,
+            expected_head: before.head,
+            paths: files.clone(),
+        });
+        record.state = "needs_review".into();
+        record = persist(&store, record).await?;
         // Working tree only: no --index, no commit.
         let refused = apply_checkout(
             &engine.paths().data,
@@ -1264,12 +1307,22 @@ pub async fn keep_reviewed(
         )
         .await?;
         if let Some(refused) = refused {
+            // Preflight refusal is an observed no-write outcome, unlike an
+            // interrupted or failed apply whose result must be reconciled.
+            record.state = "done".into();
+            if let Some(recovery) = &mut record.recovery {
+                recovery.phase = "not_applied".into();
+            }
+            persist(&store, record).await?;
             bail!(
                 "{}'s changes no longer apply: the project changed since the comparison started{}. Nothing was changed and every lane is kept; update or revert those files, then keep again.",
                 lane.name,
                 refused.described()
             );
         }
+    }
+    if let Some(recovery) = &mut record.recovery {
+        recovery.phase = "applied".into();
     }
     record.winner = Some(lane.model.clone());
     record.applied_files = files;
@@ -1298,6 +1351,7 @@ pub async fn discard(engine: &Engine, id: &str) -> Result<Record> {
     let _guard = LOCK.lock().await;
     let store = engine.store();
     let mut record = load(&store, id)?;
+    ensure!(record.state != "needs_review", "An interrupted Keep requires recovery review. Project files and lane copies have been preserved; cleanup is blocked.");
     if matches!(record.state.as_str(), "applied" | "discarded") {
         // Retry cleanup of anything a previous attempt left behind.
         if record.lanes.iter().any(|lane| !lane.removed) {

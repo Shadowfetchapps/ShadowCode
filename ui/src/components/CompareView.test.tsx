@@ -127,6 +127,19 @@ const article = (name: string) =>
   screen.getByRole("article", { name: new RegExp(`^${name}$`) });
 
 describe("CompareView", () => {
+  it("shows interrupted Keep without offering another mutation", async () => {
+    mocks.compare.mockResolvedValue(
+      record({ state: "needs_review", lanes: [finishedCloud] }),
+    );
+    const props = view();
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Recovery material and lane copies are retained",
+    );
+    expect(screen.queryByRole("button", { name: "Discard all" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open Changes" }));
+    expect(props.onOpenChanges).toHaveBeenCalled();
+  });
+
   it("reports retained copies and retries cleanup without keeping again", async () => {
     const pending = record({
       state: "applied",

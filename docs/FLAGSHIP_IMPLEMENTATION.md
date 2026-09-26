@@ -26,6 +26,12 @@ Keep now persists the applied result and scoreboard before removing lanes. Disca
 
 A native regression holds a lane reservation during Keep, restarts the service with cleanup pending, edits the applied file, then retries cleanup twice. The result survives, later edits remain, and the win is counted once. This covers the post-receipt recovery path, not a crash immediately after patch application. The full intent/preimage/postimage journal, per-lane durable checkpoints, process-tree exit proof, cross-process mutation coordination and lock-scope redesign remain required.
 
+## Compare durable intent foundation
+
+Before source mutation, Keep captures the working-tree preimage using a temporary index, pins it under `refs/shadowcode/recovery/<compare-id>`, and persists an operation identity, selected model, result commit, source HEAD, changed paths and `applying` phase in the existing revision-checked record. The public state is `needs_review` until application succeeds and the applied outcome is persisted. A confirmed Git preflight refusal returns to `done` with `not_applied`; an uncertain failure retains recovery material and blocks Keep/Discard. The UI exposes the interrupted state and project Changes.
+
+Native coverage includes preimage pin/content checks and restart from seeded interrupted records with unchanged and edited files. Seeded interruption is not an OS-crash injection demonstration. Full reconciliation, expected postimages, index identity, guided recovery resolution, cross-process project ownership, per-path bounds/redaction and bounded recovery retention are still required. Pins are intentionally retained in this increment to avoid destroying recovery evidence; they may retain nonignored source content just as the existing Compare snapshot does. Do not label this foundation complete crash recovery.
+
 ## Next implementation work
 
 1. Complete Compare journal/recovery and immutable preview binding; add project-scoped check configuration UI. The original arbitrary-command false verification is fixed in source with a native regression.

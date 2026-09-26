@@ -37,6 +37,7 @@ const STATE_LABELS: Record<string, string> = {
   done: "Finished · choose a result to keep",
   applied: "Result kept",
   discarded: "Discarded",
+  needs_review: "Interrupted Keep · recovery review required",
 };
 
 /** The Compare view: every lane of one comparison side by side, with Keep,
@@ -323,6 +324,21 @@ export function CompareView({
               <p className="notice" role="status">
                 This comparison was discarded. Your project was not changed.
               </p>
+            )}
+            {record.state === "needs_review" && (
+              <div className="notice bad" role="alert">
+                Keep was interrupted or could not confirm its outcome. Review
+                project changes before further action. Recovery material and
+                lane copies are retained; automatic Keep and cleanup are
+                blocked.
+                <button
+                  type="button"
+                  className="mini"
+                  onClick={() => onOpenChanges()}
+                >
+                  Open Changes
+                </button>
+              </div>
             )}
             {record.cleanup_pending && (
               <div className="notice" role="status">

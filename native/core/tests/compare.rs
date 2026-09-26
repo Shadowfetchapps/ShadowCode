@@ -405,6 +405,17 @@ async fn lanes_start_from_uncommitted_work_and_keep_applies_one_result() {
     assert_eq!(kept["state"], "applied", "{kept:#}");
     assert_eq!(kept["winner"], "lane-alpha");
     assert_eq!(kept["applied_files"], json!(["answer.txt", "lib.txt"]));
+    assert_eq!(kept["recovery"]["phase"], "applied");
+    let recovery_ref = format!("refs/shadowcode/recovery/{id}");
+    assert_eq!(
+        git(project, &["rev-parse", &recovery_ref]),
+        kept["recovery"]["before_commit"].as_str().unwrap()
+    );
+    assert_eq!(
+        git(project, &["show", &format!("{recovery_ref}:tracked.txt")]),
+        "uncommitted change"
+    );
+
     assert!(kept["notes"].as_array().unwrap().is_empty(), "{kept:#}");
     // alpha's result is in the working tree, not staged and not committed.
     assert_eq!(
@@ -911,4 +922,55 @@ async fn applied_outcome_survives_pending_cleanup_and_restart_without_rescoring(
         .unwrap();
     assert_eq!(board["rows"][0]["wins"], 1);
     reopened.engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn uncertain_keep_survives_restart_and_blocks_mutation_and_cleanup() {
+    for partially_changed in [false, true] {
+        let f = fixture().await;
+        let started = start(&f).await;
+        let id = started["id"].as_str().unwrap();
+        let ready = finished(&f, id).await;
+        // Seed the durable state left by interruption after intent persistence.
+        // This tests restart handling, not an actual OS crash injection.
+        let store = f.service.engine.store();
+        let key = shadowcode_core::store::keys::compare_record(id);
+        store.meta_transaction(|meta| {
+            let mut record: Value = meta.json(&key)?.unwrap();
+            record["state"] = json!("needs_review");
+            record["recovery"] = json!({"phase":"applying","model":"lane-alpha","paths":["lib.txt","answer.txt"]});
+            meta.set_json(&key, &record)
+        }).unwrap();
+        if partially_changed {
+            fs::write(
+                f.project.join("lib.txt"),
+                "uncertain or user-edited content\n",
+            )
+            .unwrap();
+        }
+        let before = fs::read(f.project.join("lib.txt")).unwrap();
+        f.service.engine.shutdown().await.unwrap();
+        drop(store);
+        drop(f.service);
+        let reopened = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+        let restored = call(&reopened, "GET", &format!("/api/compare/{id}"), Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(restored["state"], "needs_review");
+        for action in ["keep", "discard"] {
+            assert!(call(
+                &reopened,
+                "POST",
+                &format!("/api/compare/{id}/{action}"),
+                json!({"model":"lane-alpha"})
+            )
+            .await
+            .is_err());
+        }
+        assert_eq!(fs::read(f.project.join("lib.txt")).unwrap(), before);
+        for lane in ready["lanes"].as_array().unwrap() {
+            assert!(Path::new(lane["worktree"].as_str().unwrap()).is_dir());
+        }
+        reopened.engine.shutdown().await.unwrap();
+    }
 }
