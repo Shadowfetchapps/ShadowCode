@@ -1,0 +1,79 @@
+# Flagship implementation ledger
+
+Goal: a dependable, easy-to-use native workspace combining supported vendor login/session routes and compatible local models, with trustworthy execution, review, recovery, and releases. Popularity is an aspiration, not an engineering acceptance result.
+
+Baseline: `e371baaa4c690527173a322f7e0e1cfae4db329a`. Implementation branch: `flagship/reliability-foundation`. Preserve the existing architecture and provider integrations. The complete [acceptance specification](FLAGSHIP_ACCEPTANCE_SPEC.md) remains in scope; this ledger is not a narrowed definition of completion.
+
+## Implemented increments
+
+- REMOTE-01 — remote background commands respect the terminal switch. Commit `d488fd2`. Real HTTP regression trusts the project, proves denied requests register no process and write no marker, then proves enabling the switch permits execution. All nine remote integration tests and seven remote policy unit tests pass. Installed release is unchanged; the new test exercises source-built core services.
+- CLI-MCP-01 — distinguish enabled discovery from approved invocation. Commit `0286d36`. Smoke verifies initialize/list, no tools/call unattended or while approval is pending, exactly one approved call with exact arguments, and process cleanup. All 21 CLI scenario groups pass against the baseline debug executable (32 scripted model requests). This is test correction, not a claim of live provider authentication.
+- CONTEXT-01 — remove count-triggered compaction and the 20-byte keep-list truncation. Boundary checks cover 20, 69, 70, 71, and 200 messages. All 16 autonomy integration tests and ten model-quality tests pass, including real token-pressure fixtures, retained constraints, and summary fallback. Optional request excerpts are reduced when the summary itself exceeds the context budget. This is source-level verification, not an installed AppImage update.
+
+## Next implementation work
+
+1. Structured verification receipts and freshness, shared by engine, goals, Compare, and UI. The reproduced false verification remains open.
+2. Immutable draft release staging and required gates, preserving all current checks; dependency advisory remedy.
+3. Compare fault injection, durable journal, process-exit cleanup checks, cross-project synchronization.
+4. Provider capability/conformance and real coding evaluations, extending existing login integrations using supported vendor mechanisms.
+5. Shared local-resource scheduling and actual offline multiple-GGUF acceptance.
+6. UX, diagnostic export, measured performance, Wayland and package/recovery qualification.
+
+No paid/live provider turns, billing changes, release publication, or destructive Git repairs are authorized by the reference document itself. No new required hosted backend or account. Tests use isolated scratch profiles and projects.
+
+## Full acceptance register
+
+Initial state below is **mapping pending**, not an assertion that existing functionality is missing. Each ID needs an exact test reference and qualified result before completion. Existing successful broad suites do not automatically prove each invariant.
+
+- **RUN-01 — Very fast hermetic task**: Terminal state observed; CLI exits successfully. Status: mapping pending.
+- **RUN-02 — Engine throws before streaming**: Failure propagated; no permanent spinner. Status: mapping pending.
+- **RUN-03 — Cancel before startup**: Task never executes; cancelled state persists. Status: mapping pending.
+- **RUN-04 — Cancel during output**: No late event changes state to success. Status: mapping pending.
+- **RUN-05 — Two sessions and duplicate events**: No cross-session completion; duplicates deduplicated. Status: mapping pending.
+- **RUN-06 — Owned child ignores graceful stop**: Bounded escalation; unrelated processes untouched. Status: mapping pending.
+- **CMP-01 — Crash before project mutation**: Project unchanged; operation recoverable. Status: mapping pending.
+- **CMP-02 — Crash after apply before applied receipt**: Recovery reconciles actual content; no blind reapply. Status: mapping pending.
+- **CMP-03 — Crash after receipt before cleanup**: Applied result preserved; cleanup retries safely. Status: mapping pending.
+- **CMP-04 — Failure deleting one lane**: Remaining lane retained and reported pending. Status: mapping pending.
+- **CMP-05 — Other lane refuses to stop**: Its worktree is not destructively removed. Status: mapping pending.
+- **CMP-06 — Duplicate Keep or Keep/Discard race**: One logical result; no double score or mutation. Status: mapping pending.
+- **CMP-07 — Project edited after preview**: Revalidate/review conflict; no stale silent overwrite. Status: mapping pending.
+- **CMP-08 — Staged/unstaged changes and unsaved buffer**: Index and unrelated work preserved. Status: mapping pending.
+- **CMP-09 — Binary, rename, delete, executable bit**: Result faithful; review and recovery remain usable. Status: mapping pending.
+- **CMP-10 — Separate app processes target one project**: Ownership/revision conflicts stop competing writes. Status: mapping pending.
+- **CMP-11 — Project A shutdown stalls**: Project B status/cancellation remain responsive. Status: mapping pending.
+- **LOC-01 — Two installed GGUF models offline**: Sequential runs complete without network access. Status: mapping pending.
+- **LOC-02 — Three-model queue cancelled mid-run**: Pending models do not start. Status: mapping pending.
+- **LOC-03 — Local model exceeds safe allocation**: Clear error; UI survives; project unchanged. Status: mapping pending.
+- **LOC-04 — Runtime crashes or port is occupied**: Honest state and recoverable restart path. Status: mapping pending.
+- **LOC-05 — One model fails in Compare**: Other lane results and verification stay intact. Status: mapping pending.
+- **PRF-01 — Model claims tests passed without execution**: UI does not mark verified. Status: mapping pending.
+- **PRF-02 — Configured checks pass, then source changes**: Receipt becomes stale. Status: mapping pending.
+- **PRF-03 — No checks configured**: Completed but verification not run. Status: mapping pending.
+- **PRF-04 — Required check cancelled/skipped**: Overall verification not passed. Status: mapping pending.
+- **PRF-05 — Provider self-reports an external result**: Provenance differs from locally observed evidence. Status: mapping pending.
+- **PRV-01 — Expired auth or unavailable quota**: Clear status; no fabricated usage or fallback billing. Status: mapping pending.
+- **PRV-02 — Malformed/out-of-order protocol data**: Bounded failure/recovery; no mixed sessions. Status: mapping pending.
+- **PRV-03 — Unsupported image/tool capability**: Explicit rejection or supported alternative with consent. Status: mapping pending.
+- **PRV-04 — Vendor runtime updates capabilities**: Capability record refreshes; stale affordance removed. Status: mapping pending.
+- **SEC-01 — Strict sandbox unavailable**: Operation refused, not silently downgraded. Status: mapping pending.
+- **SEC-02 — Approval parameters change**: Old approval cannot authorize changed operation. Status: mapping pending.
+- **SEC-03 — Secret-containing logs/diagnostics**: Redaction verified; preview before export. Status: mapping pending.
+- **SEC-04 — Repository text requests broader permissions**: Text cannot grant permissions. Status: mapping pending.
+- **SEC-05 — Symlink/path/remote destination changes**: Actual boundary policy rechecked. Status: mapping pending.
+- **UI-01 — Long transcript plus active stream**: Input latency measured and bounded. Status: mapping pending.
+- **UI-02 — Event gap, duplicate event, reconnect**: Resynchronize without duplicate output/tool effects. Status: mapping pending.
+- **UI-03 — 100 sequential fixture tasks**: No unexplained resource-growth trend. Status: mapping pending.
+- **UI-04 — Keyboard and Wayland native session**: Focus, copy/paste, resize, cancellation usable. Status: mapping pending.
+- **REL-01 — Asset upload fails**: No newly advertised incomplete public release. Status: mapping pending.
+- **REL-02 — Retry same version with different binary**: Refused; published version remains immutable. Status: mapping pending.
+- **REL-03 — Checksum/signature mismatch**: Install/update rejected. Status: mapping pending.
+- **REL-04 — Interrupted replacement or failed first launch**: Last valid app/config recoverable. Status: mapping pending.
+- **REL-05 — Fresh packaged install without dev tools**: Intended standalone functions actually work. Status: mapping pending.
+- **REL-06 — Required integration test is skipped**: Release cannot be labelled fully verified. Status: mapping pending.
+
+## Evidence boundaries
+
+Prior baseline audit: 737 Rust tests passed across completed binaries after one isolated timing rerun; eight ignored. UI: 308 unit and 44 browser E2E tests passed. Sustained native stress: 200 completions, five cancellations, ten output floods. These are baseline measurements, not verification of subsequent edits. Full live-provider, Wayland, offline multi-model, and release-package qualification remain open.
+
+At every checkpoint record changed commit, exact commands and results, fixture/native/live scope, unresolved risks, and the next dependency. Never mark a phase complete from a passing subset alone.
