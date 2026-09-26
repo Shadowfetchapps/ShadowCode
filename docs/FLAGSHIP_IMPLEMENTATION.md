@@ -62,6 +62,12 @@ The ACP execution adapter now checks the live initialize response before startin
 
 Parameterized fixtures cover Cursor, Antigravity and Grok with queued/follow-up images and true/false/missing/malformed declarations, plus unsupported/missing protocol versions. Existing Antigravity Google authentication and session/model-switch fixtures remain exercised. This is protocol conformance evidence, not a live login test or a change to the supported vendor login routes. The existing Grok early vision restriction and broader capability/UI synchronization remain separate work. Reference: [ACP v1 initialization](https://agentclientprotocol.com/protocol/v1/initialization).
 
+## Managed local runtime admission foundation
+
+Different-model requests now wait cancellably for active model leases instead of failing immediately. The last lease wakes waiting requests, and notification registration precedes the lease check to avoid lost wakeups. Existing same-model sharing remains. Cancellation and runtime shutdown prevent a waiting request from starting another model. All existing callers of managed runtime acquisition share this boundary.
+
+The local-engine fixture suite checks no second launch while a lease is active, cancelled waiting requests, release-triggered switching, same-model sharing and shutdown with a queued request. This is not yet a FIFO multi-GGUF Compare scheduler: lineup restrictions remain until ordered scheduling, queue UI, timing/configuration evidence and actual offline acceptance are implemented. Long-lived same-model sharing can delay a different model. Existing CPU fallback behavior still needs an explicit Compare policy before benchmark use.
+
 ## Next implementation work
 
 1. Complete Compare journal/recovery and immutable preview binding; add project-scoped check configuration UI. The original arbitrary-command false verification is fixed in source with a native regression.

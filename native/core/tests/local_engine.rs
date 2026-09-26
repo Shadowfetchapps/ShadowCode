@@ -502,16 +502,28 @@ async fn load_switch_lease_unload_and_shutdown_stop_the_server() {
     assert_eq!(launches[0]["proxy_env"], false);
     let pid_a = launches[0]["pid"].as_u64().unwrap();
 
-    // A task holds A: switching to B is refused, not swapped mid-turn.
-    let error = engine
-        .prepare_model_client(&cfg, &model_for(&id_b), &cancel)
+    // A task holds A: B waits without loading and cancellation removes it.
+    let queued_cancel = CancellationToken::new();
+    let queued_engine = engine.clone();
+    let queued_cfg = cfg.clone();
+    let queued_model = model_for(&id_b);
+    let token = queued_cancel.clone();
+    let queued = tokio::spawn(async move {
+        queued_engine
+            .prepare_model_client(&queued_cfg, &queued_model, &token)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!queued.is_finished());
+    assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 1);
+    queued_cancel.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(2), queued)
         .await
+        .unwrap()
+        .unwrap()
         .err()
         .unwrap();
-    assert!(
-        error.to_string().contains("Another task is using a"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("cancelled"), "{error}");
     assert!(engine.local_runtime().unload().await.is_err());
     // Same model is shared.
     let again = engine
@@ -520,13 +532,24 @@ async fn load_switch_lease_unload_and_shutdown_stop_the_server() {
         .unwrap();
     assert_eq!(engine.local_runtime().in_use(), 2);
     drop(again);
+    let waiting_engine = engine.clone();
+    let waiting_cfg = cfg.clone();
+    let waiting_model = model_for(&id_b);
+    let waiting = tokio::spawn(async move {
+        waiting_engine
+            .prepare_model_client(&waiting_cfg, &waiting_model, &CancellationToken::new())
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!waiting.is_finished());
     drop(first);
     assert_eq!(engine.local_runtime().in_use(), 0);
 
     // Now the switch works and loads the projector.
-    let second = engine
-        .prepare_model_client(&cfg, &model_for(&id_b), &cancel)
+    let second = tokio::time::timeout(Duration::from_secs(5), waiting)
         .await
+        .unwrap()
+        .unwrap()
         .unwrap();
     assert_eq!(second.vision, Some(true));
     let launches = lines(&f.bin.join("launches.jsonl"));
@@ -559,12 +582,34 @@ async fn load_switch_lease_unload_and_shutdown_stop_the_server() {
         .prepare_model_client(&cfg, &model_for(&id_a), &cancel)
         .await
         .unwrap();
-    drop(third);
+    let queued_engine = engine.clone();
+    let queued_cfg = cfg.clone();
+    let queued_model = model_for(&id_b);
+    let shutdown_waiter = tokio::spawn(async move {
+        queued_engine
+            .prepare_model_client(&queued_cfg, &queued_model, &CancellationToken::new())
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!shutdown_waiter.is_finished());
     let pid_c = lines(&f.bin.join("launches.jsonl"))[2]["pid"]
         .as_u64()
         .unwrap();
     engine.shutdown().await.unwrap();
     assert!(!pid_alive(pid_c), "no orphan llama-server after shutdown");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), shutdown_waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    drop(third);
+    assert_eq!(
+        lines(&f.bin.join("launches.jsonl")).len(),
+        3,
+        "shutdown must not start a waiting model"
+    );
 }
 
 #[tokio::test]

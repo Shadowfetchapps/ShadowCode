@@ -79,10 +79,12 @@ pub struct Loaded {
 }
 
 /// Keeps the loaded model in place while a task uses it.
-pub struct Lease(Arc<AtomicUsize>);
+pub struct Lease(Arc<AtomicUsize>, Arc<tokio::sync::Notify>);
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        if self.0.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.1.notify_waiters();
+        }
     }
 }
 
@@ -148,6 +150,7 @@ pub struct LocalRuntime {
     abort: Mutex<CancellationToken>,
     snapshot: Mutex<Option<(Loaded, Arc<AtomicUsize>)>>,
     errors: Mutex<HashMap<String, String>>,
+    released: Arc<tokio::sync::Notify>,
 }
 
 enum LoadFailure {
@@ -208,8 +211,9 @@ impl LocalRuntime {
         }))
     }
 
-    /// Start (or reuse) the server for `spec` and lease it. Refuses to swap a
-    /// model another task is using. Cancellable via `cancel` or [`unload`].
+    /// Start (or reuse) the server for `spec` and lease it. A different model
+    /// waits until every current lease is released; same-model callers share.
+    /// Cancellable while waiting or loading via `cancel` or [`unload`].
     pub async fn acquire(
         &self,
         spec: LaunchSpec,
@@ -217,63 +221,82 @@ impl LocalRuntime {
     ) -> Result<(Loaded, Lease)> {
         ensure!(!cancel.is_cancelled(), "Model load cancelled");
         let abort = self.abort_token();
-        let mut slot = tokio::select! {
-            _ = cancel.cancelled() => bail!("Model load cancelled"),
-            _ = abort.cancelled() => bail!("Model load cancelled because the model was unloaded"),
-            slot = self.slot.lock() => slot,
-        };
-        if let Some(current) = slot.as_mut() {
-            let alive = current.alive();
-            if current.spec.same_model(&spec) && alive {
-                current.leases.fetch_add(1, Ordering::AcqRel);
-                return Ok((current.info.clone(), Lease(current.leases.clone())));
-            }
-            if !alive {
-                // Keep the crash visible on the row instead of silently restarting.
-                let tail = current
-                    .stderr
-                    .lock()
-                    .map(|r| r.tail(ERROR_TAIL_BYTES))
-                    .unwrap_or_default();
-                if let Ok(mut errors) = self.errors.lock() {
-                    errors.insert(
-                        current.info.id.clone(),
-                        format!("llama-server stopped unexpectedly. Last output:\n{tail}"),
-                    );
-                }
-            }
-            let busy = current.leases.load(Ordering::Acquire);
+        loop {
+            let released = self.released.notified();
+            tokio::pin!(released);
+            // Register before inspecting leases to avoid a last-drop wakeup race.
+            released.as_mut().enable();
+            let mut slot = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => bail!("Model load cancelled"),
+                _ = abort.cancelled() => bail!("Model load cancelled because the model was unloaded"),
+                slot = self.slot.lock() => slot,
+            };
             ensure!(
-                busy == 0 || !alive,
-                "Another task is using {}. Wait for it to finish or stop it, then try again.",
-                current.info.name
+                !cancel.is_cancelled() && !abort.is_cancelled(),
+                "Model load cancelled"
             );
-        }
-        if let Some(previous) = slot.take() {
-            self.clear_snapshot();
-            previous.stop().await;
-        }
-        let result = self.launch_with_fallback(&spec, cancel, &abort).await;
-        match result {
-            Ok(server) => {
-                if let Ok(mut errors) = self.errors.lock() {
-                    errors.remove(&spec.id);
+            if let Some(current) = slot.as_mut() {
+                let alive = current.alive();
+                if current.spec.same_model(&spec) && alive {
+                    current.leases.fetch_add(1, Ordering::AcqRel);
+                    return Ok((
+                        current.info.clone(),
+                        Lease(current.leases.clone(), self.released.clone()),
+                    ));
                 }
-                server.leases.fetch_add(1, Ordering::AcqRel);
-                let lease = Lease(server.leases.clone());
-                let info = server.info.clone();
-                if let Ok(mut snapshot) = self.snapshot.lock() {
-                    *snapshot = Some((info.clone(), server.leases.clone()));
+                if !alive {
+                    // Keep the crash visible on the row instead of silently restarting.
+                    let tail = current
+                        .stderr
+                        .lock()
+                        .map(|r| r.tail(ERROR_TAIL_BYTES))
+                        .unwrap_or_default();
+                    if let Ok(mut errors) = self.errors.lock() {
+                        errors.insert(
+                            current.info.id.clone(),
+                            format!("llama-server stopped unexpectedly. Last output:\n{tail}"),
+                        );
+                    }
                 }
-                *slot = Some(server);
-                Ok((info, lease))
+                let busy = current.leases.load(Ordering::Acquire);
+                if busy > 0 && alive {
+                    drop(slot);
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => bail!("Model load cancelled while waiting for the local runtime"),
+                        _ = abort.cancelled() => bail!("Model load cancelled because the model was unloaded"),
+                        _ = &mut released => {}
+                    }
+                    continue;
+                }
             }
-            Err(error) => {
-                if let Ok(mut errors) = self.errors.lock() {
-                    errors.insert(spec.id.clone(), format!("{error:#}"));
-                }
-                Err(error)
+            if let Some(previous) = slot.take() {
+                self.clear_snapshot();
+                previous.stop().await;
             }
+            let result = self.launch_with_fallback(&spec, cancel, &abort).await;
+            return match result {
+                Ok(server) => {
+                    if let Ok(mut errors) = self.errors.lock() {
+                        errors.remove(&spec.id);
+                    }
+                    server.leases.fetch_add(1, Ordering::AcqRel);
+                    let lease = Lease(server.leases.clone(), self.released.clone());
+                    let info = server.info.clone();
+                    if let Ok(mut snapshot) = self.snapshot.lock() {
+                        *snapshot = Some((info.clone(), server.leases.clone()));
+                    }
+                    *slot = Some(server);
+                    Ok((info, lease))
+                }
+                Err(error) => {
+                    if let Ok(mut errors) = self.errors.lock() {
+                        errors.insert(spec.id.clone(), format!("{error:#}"));
+                    }
+                    Err(error)
+                }
+            };
         }
     }
 
