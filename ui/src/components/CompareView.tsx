@@ -196,7 +196,11 @@ export function CompareView({
     const id = record.id;
     void act(current.kind, () =>
       current.kind === "keep"
-        ? api.keepCompare(id, current.lane.model)
+        ? api.keepCompare(
+            id,
+            current.lane.model,
+            Boolean(current.lane.checks.incomplete),
+          )
         : api.discardCompare(id),
     ).finally(() => setConfirm(null));
   }
@@ -402,6 +406,12 @@ export function CompareView({
             {confirm.kind === "keep" ? (
               <>
                 <h2>Keep {confirm.lane.name}’s result?</h2>
+                {Boolean(confirm.lane.checks.incomplete) && (
+                  <p className="warn-text">
+                    Checks are stale or incomplete. Keeping this result accepts
+                    it without current verification.
+                  </p>
+                )}
                 <p>
                   Apply {confirm.lane.name}’s changes to your project as
                   uncommitted changes and remove the other copies?
@@ -442,7 +452,9 @@ export function CompareView({
                   <LoaderCircle size={14} className="spin" aria-hidden="true" />
                 )}
                 {confirm.kind === "keep"
-                  ? `Keep ${confirm.lane.name}`
+                  ? confirm.lane.checks.incomplete
+                    ? "Keep without current checks"
+                    : `Keep ${confirm.lane.name}`
                   : "Discard all"}
               </button>
             </div>
@@ -581,7 +593,7 @@ export function LaneCard({
         )}
       </div>
       <div className="compare-lane-section">
-        <h4>Checks</h4>
+        <h4>{won ? "Checks at acceptance" : "Checks"}</h4>
         {checks.commands.length ? (
           <details className="compare-checks">
             <summary>

@@ -111,7 +111,24 @@ async fn fixture() -> Fixture {
 }
 /// `delay` holds every model reply, so lanes stay running.
 async fn fixture_with(delay: Duration) -> Fixture {
-    let server = support::server(move |_, body| (reply(body), delay)).await;
+    fixture_with_checks(delay, false).await
+}
+async fn fixture_with_checks(delay: Duration, checks: bool) -> Fixture {
+    let server = support::server(move |_, body| {
+        let messages = body["messages"].as_array().cloned().unwrap_or_default();
+        let after_edits = messages.iter().any(|m| m["role"] == "tool");
+        let checked = messages.iter().any(|m| m["name"] == "exec");
+        let response = if checks && after_edits && !checked {
+            response(
+                "Checking",
+                json!([tool("check", "exec", json!({"command":"printf check"}))]),
+            )
+        } else {
+            reply(body)
+        };
+        (response, delay)
+    })
+    .await;
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     fs::create_dir(&project).unwrap();
@@ -130,6 +147,7 @@ async fn fixture_with(delay: Duration) -> Fixture {
             "permissions": {"mode": "allow_edits", "approve_shell": false},
             "model": {"provider":"local","endpoint":server.endpoint,"name":"alpha","context_limit":16384},
             "agent": {"max_steps": 8},
+            "verification": {"commands":["printf check"]},
             // Never probe the vendor CLIs installed on the test machine.
             "cli_agents": {"enabled": false}
         }),
@@ -755,4 +773,81 @@ async fn cancel_keeps_lanes_and_discard_stops_running_lanes() {
     assert_eq!(listed["compares"][0]["id"], second.as_str());
     assert_eq!(listed["compares"][1]["id"], id.as_str());
     f.service.engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn keep_revalidates_checks_and_requires_explicit_review_of_stale_evidence() {
+    for edited in [false, true] {
+        let f = fixture_with_checks(Duration::ZERO, true).await;
+        let started = start(&f).await;
+        let id = started["id"].as_str().unwrap();
+        let done = finished(&f, id).await;
+        let selected = lane(&done, "lane-alpha");
+        assert_eq!(selected["checks"]["passed"], 1, "{selected}");
+        let worktree = PathBuf::from(selected["worktree"].as_str().unwrap());
+        let busy = f.service.engine.reserve_workspace(&worktree).unwrap();
+        let refused = call(
+            &f.service,
+            "POST",
+            &format!("/api/compare/{id}/keep"),
+            json!({"model":"lane-alpha"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.to_string().contains("already using"));
+        assert!(!f.project.join("answer.txt").exists());
+        drop(busy);
+        if edited {
+            fs::write(worktree.join("answer.txt"), "edited after verification\n").unwrap();
+            let observed = call(
+                &f.service,
+                "GET",
+                &format!("/api/compare/{id}"),
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            assert_eq!(lane(&observed, "lane-alpha")["checks"]["passed"], 0);
+            assert_eq!(lane(&observed, "lane-alpha")["checks"]["incomplete"], 1);
+            let error = call(
+                &f.service,
+                "POST",
+                &format!("/api/compare/{id}/keep"),
+                json!({"model":"lane-alpha"}),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("current verification"),
+                "{error}"
+            );
+            assert!(!f.project.join("answer.txt").exists());
+            assert!(worktree.is_dir());
+        }
+        let applied = call(
+            &f.service,
+            "POST",
+            &format!("/api/compare/{id}/keep"),
+            json!({"model":"lane-alpha","accept_unverified":edited}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied["state"], "applied");
+        assert_eq!(
+            lane(&applied, "lane-alpha")["checks"]["passed"],
+            if edited { 0 } else { 1 }
+        );
+        if edited {
+            assert!(applied["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n.as_str().unwrap().contains("explicit review")));
+            assert_eq!(
+                fs::read_to_string(f.project.join("answer.txt")).unwrap(),
+                "edited after verification\n"
+            );
+        }
+        f.service.engine.shutdown().await.unwrap();
+    }
 }

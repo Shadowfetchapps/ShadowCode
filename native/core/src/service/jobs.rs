@@ -72,6 +72,14 @@ impl Service {
             ("POST", "/api/jobs" | "/api/run") => return self.start_job(call).await,
             _ => {}
         }
+        if call.method == "GET"
+            && call.family() == "jobs"
+            && parts.len() == 4
+            && parts[3] == "verification"
+        {
+            let job = self.engine.job(parts[2])?.context("Job not found")?;
+            return crate::verification::current(&self.engine, &job).await;
+        }
         if call.family() == "jobs"
             && parts.len() >= 3
             && call.method == "POST"
@@ -207,7 +215,8 @@ impl Service {
     /// one) as a command task.
     async fn start_test_job(&self, call: &Call) -> Result<Value> {
         let body: TestBody = call.body()?;
-        let workspace = self.workspace()?;
+        let selection = self.snapshot_selection()?;
+        let workspace = selection.workspace.clone();
         if let Some(path) = body.workspace.0.as_deref() {
             ensure!(
                 Workspace::open(Path::new(path))?.path == workspace,
@@ -241,6 +250,11 @@ impl Service {
                 self.job_owner.as_ref(),
             )
             .await?;
+        self.select_if(
+            &job.workspace,
+            Some(job.session_id.clone()),
+            Some(selection.generation),
+        )?;
         Ok(json!(job))
     }
     /// POST /api/jobs and /api/run: start an agent turn. A provider change

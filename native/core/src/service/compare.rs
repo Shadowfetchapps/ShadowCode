@@ -56,7 +56,14 @@ impl Service {
                     .as_str()
                     .filter(|m| !m.is_empty())
                     .context("Choose the model whose result to keep")?;
-                Ok(compare::keep(engine, id, model).await?.to_json())
+                Ok(compare::keep_reviewed(
+                    engine,
+                    id,
+                    model,
+                    body["accept_unverified"].as_bool().unwrap_or(false),
+                )
+                .await?
+                .to_json())
             }
             ("POST", ["compare", id, "discard"]) => {
                 Ok(compare::discard(engine, id).await?.to_json())

@@ -1,3 +1,4 @@
+import { api } from "../../api";
 import {
   memo,
   useLayoutEffect,
@@ -179,6 +180,7 @@ const TranscriptRow = memo(function TranscriptRow({
         {!timelineAbove && <ActivityTimeline activity={activity} withSummary />}
         <TaskSummary
           activity={activity}
+          readVerification={api.jobVerification}
           diffStats={actions.diffStats}
           onReview={(path) => actions.onReview(path, item.taskId)}
           onRewind={

@@ -263,6 +263,57 @@ pub async fn refresh(commands: &mut [Value], workspace: Arc<Workspace>) {
     }
 }
 
+/// Revalidate a historical result without rewriting its original receipts.
+/// Reopening an application/profile does not make an old pass current.
+pub async fn current(engine: &crate::engine::Engine, job: &crate::engine::Job) -> Result<Value> {
+    let mut summary = job
+        .result
+        .as_ref()
+        .map(|result| result["verification"].clone())
+        .filter(|value| value.is_object())
+        .or(engine
+            .store()
+            .last_task_event(&job.task_id, "verification.summary")?
+            .map(|event| event["payload"].clone()))
+        .unwrap_or_else(|| json!({"status":"not_run","commands":[]}));
+    if summary["status"] == "vendor_owned" {
+        return Ok(summary);
+    }
+    let mut commands = summary["commands"].as_array().cloned().unwrap_or_default();
+    match Workspace::open(&job.workspace) {
+        Ok(workspace) => refresh(&mut commands, Arc::new(workspace)).await,
+        Err(_) => {
+            for command in &mut commands {
+                if command["kind"] == "configured_check" && command["state"] == "passed" {
+                    command["state"] = json!("stale");
+                    command["success"] = json!(false);
+                }
+            }
+        }
+    }
+    let text = if summary["model_claimed_success"] == true {
+        "All tests passed"
+    } else {
+        ""
+    };
+    let assessed = classify(text, &commands, summary["inspected_workspace"] == true);
+    if let (Some(target), Some(fields)) = (summary.as_object_mut(), assessed.as_object()) {
+        target.extend(fields.clone());
+    }
+    if job.status != "completed" {
+        summary["verified"] = json!(false);
+        summary["status"] = json!(match job.status.as_str() {
+            "cancelled" => "cancelled",
+            "failed" => "failed",
+            _ => "incomplete",
+        });
+    }
+    summary["assessed_at"] = json!(crate::now());
+    summary["freshness_scope"] =
+        json!("Point-in-time assessment of current files; original task history is unchanged.");
+    Ok(summary)
+}
+
 /// The latest receipt for each exact check, for Compare and other consumers.
 pub fn latest_checks(commands: &[Value]) -> Vec<Value> {
     let mut latest = BTreeMap::new();

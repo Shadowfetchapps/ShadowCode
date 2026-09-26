@@ -1066,3 +1066,81 @@ async fn desktop_history_pages_are_bounded_complete_and_preserve_original_export
     .is_err());
     service.engine.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn historical_verification_rechecks_external_edits_and_restart_without_rewriting_receipts() {
+    let (root, service) = setup(true);
+    let project = root.path().join("project");
+    fs::write(project.join("source.txt"), "original").unwrap();
+    Config::patch(
+        service.engine.paths(),
+        json!({"permissions":{"approve_shell":false}}),
+    )
+    .unwrap();
+    let started = call(
+        &service,
+        "POST",
+        "/api/jobs/test",
+        json!({"command":"test -f source.txt"}),
+    )
+    .await
+    .unwrap();
+    let id = started["id"].as_str().unwrap();
+    let approval = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let pending = call(&service, "GET", "/api/approvals", Value::Null)
+                .await
+                .unwrap();
+            if let Some(approval) = pending["approvals"].as_array().unwrap().first() {
+                break approval.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    call(
+        &service,
+        "POST",
+        &format!("/api/approvals/{}", approval["id"].as_str().unwrap()),
+        json!({"decision":"approve"}),
+    )
+    .await
+    .unwrap();
+    let job = tokio::time::timeout(Duration::from_secs(8), service.engine.wait(id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.status, "completed", "{}", job.summary);
+    assert_eq!(
+        job.result.as_ref().unwrap()["verification"]["verified"],
+        true
+    );
+    let route = format!("/api/jobs/{id}/verification");
+    let fresh = call(&service, "GET", &route, Value::Null).await.unwrap();
+    assert_eq!(fresh["status"], "passed");
+    assert!(fresh["assessed_at"].is_number());
+    fs::write(project.join("source.txt"), "externally edited").unwrap();
+    let stale = call(&service, "GET", &route, Value::Null).await.unwrap();
+    assert_eq!(stale["status"], "stale");
+    assert_eq!(stale["verified"], false);
+    assert_eq!(
+        service.engine.job(id).unwrap().unwrap().result.unwrap()["verification"]["verified"],
+        true,
+        "Historical receipt must not be rewritten"
+    );
+    let paths = service.engine.paths().clone();
+    service.engine.shutdown().await.unwrap();
+    drop(service);
+    let reopened = Service::open(paths, Some(project.clone())).unwrap();
+    assert_eq!(
+        call(&reopened, "GET", &route, Value::Null).await.unwrap()["status"],
+        "stale"
+    );
+    fs::remove_file(project.join("source.txt")).unwrap();
+    assert_eq!(
+        call(&reopened, "GET", &route, Value::Null).await.unwrap()["verified"],
+        false
+    );
+    reopened.engine.shutdown().await.unwrap();
+}

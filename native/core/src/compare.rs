@@ -553,6 +553,10 @@ fn checks_of(engine: &Engine, job: &Job) -> Checks {
                 .map(|event| event["payload"].clone())
         })
         .unwrap_or(Value::Null);
+    checks_from(&verification)
+}
+
+fn checks_from(verification: &Value) -> Checks {
     let latest = crate::verification::latest_checks(
         verification["commands"]
             .as_array()
@@ -953,7 +957,18 @@ pub async fn get(engine: &Engine, id: &str) -> Result<Record> {
     let store = engine.store();
     let mut record = load(&store, id)?;
     refresh(engine, &mut record, &CancellationToken::new()).await?;
-    persist_refreshed(&store, record).await
+    let mut record = persist_refreshed(&store, record).await?;
+    // Content reads do not hold the global metadata lock. The response is a
+    // point-in-time view; Keep repeats validation at its mutation boundary.
+    drop(_guard);
+    for lane in &mut record.lanes {
+        if !lane.removed && !active(&lane.status) {
+            if let Some(job) = engine.job(&lane.job_id)? {
+                lane.checks = checks_from(&crate::verification::current(engine, &job).await?);
+            }
+        }
+    }
+    Ok(record)
 }
 
 pub async fn list(engine: &Engine, workspace: &Path) -> Result<Vec<Record>> {
@@ -1140,6 +1155,15 @@ pub(crate) async fn apply_checkout(
 }
 
 pub async fn keep(engine: &Engine, id: &str, model: &str) -> Result<Record> {
+    keep_reviewed(engine, id, model, false).await
+}
+
+pub async fn keep_reviewed(
+    engine: &Engine,
+    id: &str,
+    model: &str,
+    accept_unverified: bool,
+) -> Result<Record> {
     let cancel = CancellationToken::new();
     let _guard = LOCK.lock().await;
     let store = engine.store();
@@ -1166,6 +1190,27 @@ pub async fn keep(engine: &Engine, id: &str, model: &str) -> Result<Record> {
         "{}'s worktree was deleted outside ShadowCode; its result cannot be kept",
         lane.name
     );
+    // Keep the selected lane stable against new application-owned tasks
+    // while validating its evidence and capturing the immutable result.
+    let _lane_reservation = engine.reserve_workspace(&lane.worktree)?;
+    let mut acceptance_checks = lane.checks.clone();
+    if let Some(job) = engine.job(&lane.job_id)? {
+        let current = checks_from(&crate::verification::current(engine, &job).await?);
+        acceptance_checks = current.clone();
+        if let Some(selected) = record.lanes.iter_mut().find(|item| item.model == model) {
+            selected.checks = current.clone();
+        }
+        if current.incomplete > 0 && !accept_unverified {
+            persist_refreshed(&store, record).await?;
+            bail!("This result no longer has current verification. Review the lane and rerun its checks, or explicitly choose Keep without current checks. No project changes were applied.");
+        }
+        if current.incomplete > 0 {
+            record.notes.push(format!(
+                "{} kept after explicit review without current verification.",
+                lane.name
+            ));
+        }
+    }
     // No agent task may run in the source while its working tree changes.
     let _reservation = engine.reserve_workspace(&record.workspace)?;
     // Commit the lane's result on its managed branch (never the user's).
@@ -1212,6 +1257,11 @@ pub async fn keep(engine: &Engine, id: &str, model: &str) -> Result<Record> {
     refresh(engine, &mut record, &cancel).await?;
     let notes = remove_lanes(engine, &mut record).await;
     record.notes.extend(notes);
+    // Preserve the assessment made at acceptance, rather than promoting the
+    // original task's historical pass after its worktree has been removed.
+    if let Some(selected) = record.lanes.iter_mut().find(|item| item.model == model) {
+        selected.checks = acceptance_checks;
+    }
     // The first save with a winner scores the win.
     persist(&store, record).await
 }

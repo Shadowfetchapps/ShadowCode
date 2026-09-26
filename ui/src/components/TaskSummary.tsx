@@ -1,8 +1,10 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { FileDiff, FlaskConical, Timer } from "lucide-react";
 import {
   formatDuration,
   verificationLine,
+  parseVerification,
+  type Verification,
   type TaskActivity,
 } from "../lib/activity";
 import type { LineCounts } from "../lib/diffStats";
@@ -19,8 +21,10 @@ export const TaskSummary = memo(function TaskSummary({
   onRewind,
   diffStat,
   diffStats,
+  readVerification,
 }: {
   activity: TaskActivity;
+  readVerification?: (attemptId: string) => Promise<unknown>;
   onReview: (path?: string) => void;
   onRewind?: () => void;
   diffStat?: (path: string) => Promise<DiffStat>;
@@ -51,7 +55,85 @@ export const TaskSummary = memo(function TaskSummary({
       live = false;
     };
   }, [diffStat, diffStats, changedKey]);
-  const verification = activity.verification;
+  const summaryRef = useRef<HTMLElement>(null);
+  const [fresh, setFresh] = useState<{
+    attemptId: string;
+    source: Verification | undefined;
+    value: Verification;
+  }>();
+  const [assessment, setAssessment] = useState("checking");
+  const [refreshKey, setRefreshKey] = useState(0);
+  const attemptId = activity.verification?.commands.find(
+    (c) => c.kind === "configured_check",
+  )?.attemptId;
+  const canAssess = Boolean(readVerification && attemptId);
+  useEffect(() => {
+    if (!readVerification || !attemptId) return;
+    let live = true,
+      visible = false,
+      running = false;
+    setFresh(undefined);
+    setAssessment("checking");
+    const assess = async () => {
+      if (!visible || running || !live) return;
+      running = true;
+      setAssessment("checking");
+      try {
+        const result = parseVerification(await readVerification(attemptId));
+        if (live) {
+          setFresh(
+            result
+              ? { attemptId, source: activity.verification, value: result }
+              : undefined,
+          );
+          setAssessment(result ? "current" : "unavailable");
+        }
+      } catch {
+        if (live) setAssessment("unavailable");
+      } finally {
+        running = false;
+      }
+    };
+    const observer =
+      typeof IntersectionObserver === "undefined"
+        ? null
+        : new IntersectionObserver((entries) => {
+            visible = entries.some((entry) => entry.isIntersecting);
+            if (visible) void assess();
+          });
+    if (observer && summaryRef.current) observer.observe(summaryRef.current);
+    else {
+      visible = true;
+      void assess();
+    }
+    const focus = () => {
+      if (document.visibilityState !== "hidden") void assess();
+    };
+    window.addEventListener("focus", focus);
+    document.addEventListener("visibilitychange", focus);
+    return () => {
+      live = false;
+      observer?.disconnect();
+      window.removeEventListener("focus", focus);
+      document.removeEventListener("visibilitychange", focus);
+    };
+  }, [attemptId, readVerification, activity.verification, refreshKey]);
+  const verification = canAssess
+    ? assessment === "current" &&
+      fresh &&
+      fresh.attemptId === attemptId &&
+      fresh.source === activity.verification
+      ? fresh.value
+      : {
+          ...activity.verification!,
+          status: assessment === "current" ? "checking" : assessment,
+          commands: activity.verification!.commands.map((c) =>
+            c.kind === "configured_check"
+              ? { ...c, state: "not_run", success: false }
+              : c,
+          ),
+        }
+    : activity.verification;
   const duration =
     activity.startedAt && activity.finishedAt
       ? formatDuration(activity.finishedAt - activity.startedAt)
@@ -78,6 +160,7 @@ export const TaskSummary = memo(function TaskSummary({
   if (quiet) {
     return (
       <section
+        ref={summaryRef}
         className={`task-summary is-quiet${limited ? " is-warn" : ""}`}
         aria-label="Task summary"
       >
@@ -102,6 +185,7 @@ export const TaskSummary = memo(function TaskSummary({
   }
   return (
     <section
+      ref={summaryRef}
       className={`task-summary ${activity.finished?.success || stopped ? "" : limited ? "is-warn" : "is-bad"}`}
       aria-label="Task summary"
     >
@@ -148,6 +232,23 @@ export const TaskSummary = memo(function TaskSummary({
         <h4>
           <FlaskConical size={13} aria-hidden="true" /> Commands and checks
         </h4>
+        {canAssess && (
+          <>
+            <button
+              type="button"
+              className="mini"
+              onClick={() => {
+                setAssessment("checking");
+                setRefreshKey((key) => key + 1);
+              }}
+            >
+              Refresh check evidence
+            </button>
+            <p className="dim">
+              Point-in-time assessment; original receipts remain in history.
+            </p>
+          </>
+        )}
         {verification?.status === "vendor_owned" ? (
           <p className="dim">
             {verification.note ||

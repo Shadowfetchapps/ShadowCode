@@ -356,6 +356,9 @@ export function verificationLine(
   verification: Verification | undefined,
 ): string | undefined {
   if (!verification) return undefined;
+  if (verification.status === "checking") return "Assessing current files…";
+  if (verification.status === "unavailable")
+    return "Current verification unavailable";
   if (verification.status === "vendor_owned")
     return "Checks are run and judged by the vendor agent";
   const checks = verification.commands.filter(

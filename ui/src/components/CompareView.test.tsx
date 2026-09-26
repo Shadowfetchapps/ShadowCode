@@ -240,7 +240,11 @@ describe("CompareView", () => {
       within(confirm).getByRole("button", { name: "Keep Codex · GPT-6-Astra" }),
     );
     await waitFor(() =>
-      expect(mocks.keepCompare).toHaveBeenCalledWith("c1", "cli:codex:astra"),
+      expect(mocks.keepCompare).toHaveBeenCalledWith(
+        "c1",
+        "cli:codex:astra",
+        false,
+      ),
     );
     const applied = await screen.findByText(/Applied 2 files from/);
     expect(applied.textContent).toContain("review them in");
@@ -395,4 +399,46 @@ describe("Scoreboard", () => {
     render(<Scoreboard rows={[]} />);
     expect(screen.getByText("No finished comparisons yet.")).toBeTruthy();
   });
+});
+
+it("requires an explicit keep action labeled without current checks for stale evidence", async () => {
+  const stale = {
+    ...finishedCloud,
+    checks: {
+      passed: 0,
+      failed: 0,
+      incomplete: 1,
+      commands: [
+        { command: "npm test", exit_code: 0, success: false, state: "stale" },
+      ],
+    },
+  };
+  const done = record({
+    state: "done",
+    lanes: [stale, localLane({ status: "completed" })],
+  });
+  mocks.compare.mockResolvedValue(done);
+  mocks.keepCompare.mockResolvedValue({
+    ...done,
+    state: "applied",
+    winner: stale.model,
+  });
+  view();
+  await waitFor(() =>
+    expect(article(stale.name).textContent).toContain("stale"),
+  );
+  fireEvent.click(
+    within(article(stale.name)).getByRole("button", { name: "Keep this one" }),
+  );
+  const dialog = screen.getByRole("dialog", {
+    name: `Keep ${stale.name}'s result`,
+  });
+  expect(dialog.textContent).toContain("without current verification");
+  expect(mocks.keepCompare).not.toHaveBeenCalled();
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Keep without current checks" }),
+  );
+  await waitFor(() =>
+    expect(mocks.keepCompare).toHaveBeenCalledWith("c1", stale.model, true),
+  );
 });

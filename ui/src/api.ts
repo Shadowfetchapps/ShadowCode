@@ -952,9 +952,10 @@ export const api = {
     get<{ compares: CompareRecord[] }>(
       `/api/compares${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
     ),
-  keepCompare: (id: string, model: string) =>
+  keepCompare: (id: string, model: string, acceptUnverified = false) =>
     send<CompareRecord>(`/api/compare/${encodeURIComponent(id)}/keep`, "POST", {
       model,
+      accept_unverified: acceptUnverified,
     }),
   discardCompare: (id: string) =>
     send<CompareRecord>(
@@ -1487,6 +1488,10 @@ export const api = {
     }
   },
   job: (id: string) => get<Job>(`/api/jobs/${id}`),
+  jobVerification: (id: string) =>
+    get<Record<string, unknown>>(
+      `/api/jobs/${encodeURIComponent(id)}/verification`,
+    ),
   cancelJob: (id: string, only_if_queued = false) =>
     send<Job>(`/api/jobs/${id}/cancel`, "POST", { only_if_queued }),
   pauseJob: (id: string) => send<Job>(`/api/jobs/${id}/pause`, "POST", {}),

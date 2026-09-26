@@ -32,7 +32,11 @@ Fingerprints include non-ignored file names, content, and executable modes, incl
 
 The engine captures before/after check state and rechecks passing receipts before publishing its final summary, after completion hooks. Changed content makes evidence stale. Hashing occurs around checks and final validation, not every streamed token. A receipt is evidence of that observed snapshot; it is not continuous filesystem monitoring.
 
-Remaining integration work: invalidate displayed historical results after external edits/restart/branch changes, efficiently share change-index fingerprints, refresh before Compare acceptance, add project-scoped check configuration UI, and broaden packaged/live-provider qualification. These limitations must not be presented as completed freshness coverage. Existing explicit test tasks already rerun a command without making a paid model request.
+Historical results are reassessed through `GET /api/jobs/{id}/verification` without rewriting recorded receipts. Visible task summaries request an assessment on mount, focus, and explicit refresh. Pending or unavailable assessments cannot reuse the old green status. External edits and service restart are covered by a native service regression. This is point-in-time validation, not continuous watching.
+
+Compare reassesses completed lanes and repeats validation before Keep. A stale or incomplete configured check requires explicit Keep-without-current-checks review. Keep reserves the selected lane against new application-owned jobs during validation/capture; checks recorded at acceptance remain distinguishable after cleanup. This reservation does not prove cross-process or external-editor exclusion.
+
+Remaining integration work: efficiently share change-index fingerprints, continuous invalidation, project-scoped check configuration UI, immutable preview binding and unsaved-buffer protection, transactional Compare recovery, and broader packaged/live-provider qualification. Existing explicit test tasks already rerun a command without making a paid model request.
 
 ## Compatibility and evidence
 

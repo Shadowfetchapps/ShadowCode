@@ -176,3 +176,107 @@ it("welcome state offers at most three suggestions", () => {
   fireEvent.click(chips[0]);
   expect(onSelect).toHaveBeenCalled();
 });
+
+it("reassesses visible receipts on focus and never falls back to a green result on error", async () => {
+  vi.stubGlobal("IntersectionObserver", undefined);
+  const receipt = {
+    command: "npm test",
+    exit_code: 0,
+    success: true,
+    kind: "configured_check",
+    state: "passed",
+    attemptId: "job-1",
+  };
+  const wire = { ...receipt, attempt_id: "job-1" };
+  const read = vi
+    .fn()
+    .mockResolvedValueOnce({ status: "passed", commands: [wire] })
+    .mockResolvedValueOnce({
+      status: "stale",
+      commands: [{ ...wire, state: "stale", success: false }],
+    })
+    .mockRejectedValueOnce(new Error("Cannot assess"));
+  render(
+    <TaskSummary
+      activity={{
+        ...base,
+        verification: { status: "passed", commands: [receipt] },
+      }}
+      onReview={vi.fn()}
+      readVerification={read}
+    />,
+  );
+  await waitFor(() =>
+    expect(screen.getByText("Configured checks passed")).toBeTruthy(),
+  );
+  fireEvent(window, new Event("focus"));
+  await waitFor(() =>
+    expect(screen.getByText("Checks are stale — files changed")).toBeTruthy(),
+  );
+  expect(read).toHaveBeenCalledWith("job-1");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Refresh check evidence" }),
+  );
+  await waitFor(() =>
+    expect(screen.getByText("Current verification unavailable")).toBeTruthy(),
+  );
+  expect(screen.queryByText("Configured checks passed")).toBeNull();
+  vi.unstubAllGlobals();
+});
+
+it("does not reuse a freshness result when the displayed attempt changes", async () => {
+  vi.stubGlobal("IntersectionObserver", undefined);
+  const command = {
+    command: "npm test",
+    exit_code: 0,
+    success: true,
+    kind: "configured_check",
+    state: "passed",
+    attemptId: "first",
+  };
+  const read = vi
+    .fn()
+    .mockResolvedValueOnce({
+      status: "passed",
+      commands: [{ ...command, attempt_id: "first" }],
+    })
+    .mockResolvedValueOnce({
+      status: "stale",
+      commands: [
+        { ...command, attempt_id: "second", state: "stale", success: false },
+      ],
+    });
+  const shown = render(
+    <TaskSummary
+      activity={{
+        ...base,
+        verification: { status: "passed", commands: [command] },
+      }}
+      onReview={vi.fn()}
+      readVerification={read}
+    />,
+  );
+  await waitFor(() =>
+    expect(screen.getByText("Configured checks passed")).toBeTruthy(),
+  );
+  shown.rerender(
+    <TaskSummary
+      activity={{
+        ...base,
+        taskId: "second-task",
+        verification: {
+          status: "passed",
+          commands: [{ ...command, attemptId: "second" }],
+        },
+      }}
+      onReview={vi.fn()}
+      readVerification={read}
+    />,
+  );
+  await waitFor(() =>
+    expect(screen.getByText("Checks are stale — files changed")).toBeTruthy(),
+  );
+  expect(read).toHaveBeenLastCalledWith("second");
+  expect(screen.queryByText("Configured checks passed")).toBeNull();
+  vi.unstubAllGlobals();
+});
