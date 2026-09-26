@@ -53,7 +53,7 @@ impl Engine {
             name: "exec".into(),
             arguments: arguments.clone(),
         };
-        let mut result = tools.execute(call).await?;
+        let mut result = crate::verification::execute(tools, call, &job.id, true).await?;
         if result.success {
             let outcomes = tools
                 .fire_hooks(hooks::context(
@@ -77,7 +77,16 @@ impl Engine {
         let mut completed = json!({"command":command.command,"success":result.success,"stdout":result.output["stdout"],"stderr":result.output["stderr"],"exit_code":result.output["exit_code"],"timed_out":result.output["timed_out"],"truncated":result.output["truncated"],"error":result.error});
         crate::redaction::redact_value(&mut completed);
         events.emit("command.completed", completed)?;
-        events.emit("verification.summary",json!({"status":if result.success{"verified"}else{"failed"},"commands":[{"command":command.command,"exit_code":result.output["exit_code"],"success":result.success}],"source":"native command; no model was called"}))?;
+        let mut receipts = vec![result.output["verification_receipt"].clone()];
+        if !result.success && receipts[0]["state"] == "passed" {
+            receipts[0]["state"] = json!("failed");
+            receipts[0]["success"] = json!(false);
+        }
+        crate::verification::refresh(&mut receipts, running.workspace.clone()).await;
+        events.emit(
+            "verification.summary",
+            crate::verification::classify("", &receipts, false),
+        )?;
         running
             .record
             .lock()

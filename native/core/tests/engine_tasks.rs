@@ -216,8 +216,9 @@ async fn model_loop_edits_verifies_persists_and_continues_a_real_workspace() {
             .count(),
         2
     );
-    assert!(events.iter().any(|e| e["type"] == "verification.summary"
-        && e["payload"]["status"] == "last_command_succeeded"));
+    assert!(events
+        .iter()
+        .any(|e| e["type"] == "verification.summary" && e["payload"]["status"] == "not_run"));
     engine.shutdown().await.unwrap();
     checkpoint::restore(
         &engine.store(),
@@ -1044,4 +1045,72 @@ async fn event_fork_keeps_completed_context_without_future_turns() {
             .contains("amber")
     );
     engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn command_names_do_not_verify_and_configured_receipts_go_stale_after_edits() {
+    for (configured, edit_after, expected) in [
+        (false, false, "not_run"),
+        (true, false, "passed"),
+        (true, true, "stale"),
+    ] {
+        let server = support::server(move |index, _| {
+            let answer = if index == 0 {
+                response(
+                    "Running command",
+                    json!([tool("check", "exec", json!({"command":"printf test"}))]),
+                )
+            } else if index == 1 && edit_after {
+                response(
+                    "Editing",
+                    json!([tool(
+                        "edit",
+                        "write_file",
+                        json!({"path":"source.txt","content":"changed","expected_hash":"missing"})
+                    )]),
+                )
+            } else {
+                response("All tests passed.", json!([]))
+            };
+            (answer, Duration::ZERO)
+        })
+        .await;
+        let (root, engine) = setup(&server.endpoint);
+        if configured {
+            Config::patch(
+                engine.paths(),
+                json!({"verification":{"commands":["printf test"]}}),
+            )
+            .unwrap();
+        }
+        let job = engine
+            .start(request(root.path(), "Run the configured operation", None))
+            .await
+            .unwrap();
+        let result = wait(&engine, &job.id).await;
+        assert_eq!(result.status, "completed", "{}", result.summary);
+        let evidence = &result.result.as_ref().unwrap()["verification"];
+        assert_eq!(evidence["status"], expected, "{evidence}");
+        assert_eq!(evidence["verified"], configured && !edit_after);
+        let receipt = &evidence["commands"][0];
+        assert_eq!(receipt["task_id"], job.task_id);
+        assert_eq!(receipt["attempt_id"], job.id);
+        assert_eq!(receipt["tool_call_id"], "check");
+        assert_eq!(receipt["exit_code"], 0);
+        assert_eq!(receipt["provenance"], "locally_observed");
+        assert!(receipt["output_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("event:"));
+        if configured {
+            assert!(receipt["workspace_fingerprint"].is_string());
+        }
+        // Even a configured custom check makes no assertion that a test suite ran.
+        assert!(receipt["scope"].as_str().unwrap().contains(if configured {
+            "No assertion about test counts"
+        } else {
+            "not verification"
+        }));
+        engine.shutdown().await.unwrap();
+    }
 }

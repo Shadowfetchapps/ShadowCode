@@ -253,9 +253,14 @@ impl Engine {
                 .and_then(|r| r.pointer("/verification/status"))
                 .and_then(Value::as_str)
                 .unwrap_or("not_run");
+            let execution_failed = outcome
+                .result
+                .as_ref()
+                .is_some_and(|r| r.pointer("/verification/execution_failed") == Some(&json!(true)));
             let passed = outcome.status == "completed"
-                && verification != "last_command_failed"
-                && (!verify || verification == "last_command_succeeded");
+                && !execution_failed
+                && !matches!(verification, "failed" | "cancelled" | "stale")
+                && (!verify || verification == "passed");
             let detail = if outcome.status == "completed" && !passed {
                 format!(
                     "Milestone requires attention: verification is {verification}.\n{}",

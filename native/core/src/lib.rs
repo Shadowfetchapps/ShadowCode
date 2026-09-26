@@ -93,3 +93,5 @@ pub fn now() -> f64 {
 pub fn id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
+
+pub mod verification;

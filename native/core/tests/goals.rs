@@ -76,6 +76,11 @@ async fn milestones_execute_tools_verify_persist_and_never_rerun_completed_work(
     })
     .await;
     let (root, service) = setup(&server.endpoint);
+    Config::patch(
+        service.engine.paths(),
+        json!({"verification":{"commands":["test \"$(cat proof.txt)\" = verified"]}}),
+    )
+    .unwrap();
     let goal=call(&service,"POST","/api/goals",json!({"instruction":"Write proof.txt and check its contents.","milestones":plan(&["Build file","Run check"],true),"run":true})).await.unwrap();
     let id = goal["id"].as_str().unwrap();
     let result = done(&service.engine, id).await;
@@ -234,7 +239,13 @@ async fn the_default_inspection_milestone_requires_a_current_workspace_read() {
 
 #[tokio::test]
 async fn verification_requires_a_real_successful_command_and_a_failed_check_stops_progress() {
-    for command in [None, Some("exit 7")] {
+    for (command, verify) in [
+        (None, true),
+        (Some("exit 7"), true),
+        (Some("exit 7"), false),
+        (Some("printf test"), true),
+        (Some("pwd"), true),
+    ] {
         let server = support::server(move |index, _| {
             let value = if let (0, Some(command)) = (index, command) {
                 response(
@@ -248,7 +259,7 @@ async fn verification_requires_a_real_successful_command_and_a_failed_check_stop
         })
         .await;
         let (_root, service) = setup(&server.endpoint);
-        let goal=call(&service,"POST","/api/goals",json!({"instruction":"Complete a verification milestone","milestones":plan(&["Acceptance"],true),"run":true})).await.unwrap();
+        let goal=call(&service,"POST","/api/goals",json!({"instruction":"Complete a verification milestone","milestones":plan(&["Acceptance"],verify),"run":true})).await.unwrap();
         let result = done(&service.engine, goal["id"].as_str().unwrap()).await;
         assert_eq!(result["status"], "blocked", "{result}");
         assert_eq!(result["progress_pct"], 0);

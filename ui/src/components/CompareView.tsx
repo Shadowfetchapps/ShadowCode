@@ -592,15 +592,22 @@ export function LaneCard({
               {checks.failed > 0 && (
                 <span className="bad">{checks.failed} failed</span>
               )}
+              {Boolean(checks.incomplete) && (
+                <span className="dim">
+                  {" "}
+                  · {checks.incomplete} incomplete or stale
+                </span>
+              )}
             </summary>
             <ul>
               {checks.commands.map((command, index) => (
                 <li key={index}>
                   <code>{command.command}</code>{" "}
                   <span className={command.success ? "ok" : "bad"}>
-                    {command.success
-                      ? "passed"
-                      : `failed${command.exit_code != null ? ` (exit ${command.exit_code})` : ""}`}
+                    {command.state ||
+                      (command.success
+                        ? "passed"
+                        : `failed${command.exit_code != null ? ` (exit ${command.exit_code})` : ""}`)}
                   </span>
                 </li>
               ))}

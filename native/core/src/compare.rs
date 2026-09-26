@@ -73,6 +73,7 @@ pub struct FileStat {
 #[serde(default)]
 pub struct CheckCommand {
     pub command: String,
+    pub state: String,
     pub exit_code: Option<i64>,
     pub success: bool,
 }
@@ -82,6 +83,7 @@ pub struct CheckCommand {
 pub struct Checks {
     pub passed: usize,
     pub failed: usize,
+    pub incomplete: usize,
     pub commands: Vec<CheckCommand>,
 }
 
@@ -551,22 +553,31 @@ fn checks_of(engine: &Engine, job: &Job) -> Checks {
                 .map(|event| event["payload"].clone())
         })
         .unwrap_or(Value::Null);
-    let commands: Vec<CheckCommand> = verification["commands"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let latest = crate::verification::latest_checks(
+        verification["commands"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+    );
+    let commands: Vec<CheckCommand> = latest
+        .iter()
         .map(|command| CheckCommand {
+            state: command["state"].as_str().unwrap_or("not_run").into(),
             command: command["command"]
                 .as_str()
                 .map(str::to_owned)
                 .unwrap_or_else(|| command["command"].to_string()),
             exit_code: command["exit_code"].as_i64(),
-            success: command["success"] == true,
+            success: command["state"] == "passed" && command["success"] == true,
         })
         .collect();
     Checks {
         passed: commands.iter().filter(|c| c.success).count(),
-        failed: commands.iter().filter(|c| !c.success).count(),
+        failed: commands.iter().filter(|c| c.state == "failed").count(),
+        incomplete: commands
+            .iter()
+            .filter(|c| !matches!(c.state.as_str(), "passed" | "failed"))
+            .count(),
         commands,
     }
 }

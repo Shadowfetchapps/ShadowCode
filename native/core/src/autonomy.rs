@@ -614,56 +614,8 @@ fn collect_paths(value: &Value, files: &mut BTreeSet<String>) {
     }
 }
 
-fn command_failed(command: &Value) -> bool {
-    command["success"] == false || command["timed_out"] == true
-}
-
 pub fn classify_verification(model_text: &str, commands: &[Value], inspected: bool) -> Value {
-    let claims = looks_like_success_claim(model_text);
-    let any_cmd = !commands.is_empty();
-    // The last verification-like command decides. A failing test that is
-    // deliberately observed first (bug-fix policy) must not block a later
-    // passing run from counting as verified; a failure after the last passing
-    // check, or a passing check that is not the final word, still blocks it.
-    let last_verification = commands.iter().rposition(looks_like_verification_command);
-    let evidence = last_verification.is_some();
-    let red_green = last_verification.is_some_and(|last| {
-        commands[..last]
-            .iter()
-            .any(|c| looks_like_verification_command(c) && command_failed(c))
-    });
-    let final_check_passed = last_verification.is_some_and(|last| {
-        commands[last]["success"] == true
-            && !command_failed(&commands[last])
-            && !commands[last + 1..].iter().any(command_failed)
-    });
-    let level = if final_check_passed {
-        ClaimLevel::Verified
-    } else if inspected || any_cmd {
-        ClaimLevel::Observed
-    } else {
-        ClaimLevel::ModelClaim
-    };
-    // Model prose never upgrades Observed → Verified.
-    let level = if claims && level != ClaimLevel::Verified && !evidence {
-        ClaimLevel::ModelClaim
-    } else {
-        level
-    };
-    json!({
-        "claim": level,
-        "verified": level == ClaimLevel::Verified,
-        "model_claimed_success": claims,
-        "inspected_workspace": inspected,
-        "red_green": red_green && level == ClaimLevel::Verified,
-        "commands": commands,
-        "unverified_claim": claims && level != ClaimLevel::Verified,
-        "note": if claims && level != ClaimLevel::Verified {
-            "Model text is not verification. Tests, compiler, lint, diff, or a recorded command result are required."
-        } else {
-            "Claim level is derived from recorded tool evidence, not prose."
-        }
-    })
+    crate::verification::classify(model_text, commands, inspected)
 }
 
 /// When the user goal is a bug/fix, ask for a failing test first. Not applied
@@ -712,32 +664,13 @@ pub fn bugfix_policy(task: &str) -> Option<&'static str> {
     }
 }
 
-fn looks_like_success_claim(text: &str) -> bool {
+pub(crate) fn looks_like_success_claim(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("tests passed")
         || lower.contains("all tests pass")
         || lower.contains("verified")
         || lower.contains("build succeeded")
         || lower.contains("correctly implemented")
-}
-
-fn looks_like_verification_command(command: &Value) -> bool {
-    let text = command["command"]
-        .as_str()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    [
-        "test",
-        "pytest",
-        "cargo test",
-        "npm test",
-        "lint",
-        "clippy",
-        "tsc",
-        "cargo check",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
 }
 
 pub fn parse_git_status(branch_line: &str, entries: &str) -> GitSafety {
@@ -1038,6 +971,14 @@ mod tests {
         assert_eq!(unlimited.max_steps, 64);
     }
 
+    fn check_receipt(command: &str, success: bool) -> Value {
+        json!({"schema_version":1,"task_id":"task","attempt_id":"attempt","tool_call_id":"call","check_id":crate::workspace::hash(command.as_bytes()),
+            "workspace":"/project","cwd":"/project","command":command,"kind":"configured_check",
+            "state":if success {"passed"}else{"failed"},"provenance":"locally_observed","scope":"configured check",
+            "started_at":1.0,"finished_at":2.0,"exit_code":if success{0}else{1},"termination_reason":"exited",
+            "workspace_fingerprint":"content-hash","output_ref":"tool.completed:call","success":success,"timed_out":false})
+    }
+
     #[test]
     fn model_prose_is_not_verification() {
         let report = classify_verification("All tests passed.", &[], false);
@@ -1050,11 +991,8 @@ mod tests {
             true,
         );
         assert_eq!(observed["claim"], "observed");
-        let verified = classify_verification(
-            "Done",
-            &[json!({"command":"cargo test --offline","success":true})],
-            true,
-        );
+        let verified =
+            classify_verification("Done", &[check_receipt("cargo test --offline", true)], true);
         assert_eq!(verified["claim"], "verified");
         assert_eq!(verified["verified"], true);
     }
@@ -1066,8 +1004,8 @@ mod tests {
         let red_green = classify_verification(
             "Fixed",
             &[
-                json!({"command":"cargo test -p demo","success":false}),
-                json!({"command":"cargo test -p demo","success":true}),
+                check_receipt("cargo test -p demo", false),
+                check_receipt("cargo test -p demo", true),
             ],
             true,
         );
@@ -1077,8 +1015,8 @@ mod tests {
         let regressed = classify_verification(
             "All tests passed",
             &[
-                json!({"command":"cargo test","success":true}),
-                json!({"command":"cargo test","success":false}),
+                check_receipt("cargo test", true),
+                check_receipt("cargo test", false),
             ],
             true,
         );
@@ -1088,7 +1026,7 @@ mod tests {
         let later_failure = classify_verification(
             "Done",
             &[
-                json!({"command":"npm test","success":true}),
+                check_receipt("npm test", true),
                 json!({"command":"node scripts/broken.js","success":false}),
             ],
             true,
@@ -1097,7 +1035,11 @@ mod tests {
         // A timed-out final check is not a passing check.
         let timed_out = classify_verification(
             "Done",
-            &[json!({"command":"pytest","success":true,"timed_out":true})],
+            &[{
+                let mut receipt = check_receipt("pytest", true);
+                receipt["timed_out"] = json!(true);
+                receipt
+            }],
             true,
         );
         assert_eq!(timed_out["verified"], false);

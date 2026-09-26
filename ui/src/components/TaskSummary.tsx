@@ -1,6 +1,10 @@
 import { memo, useEffect, useState } from "react";
 import { FileDiff, FlaskConical, Timer } from "lucide-react";
-import { formatDuration, type TaskActivity } from "../lib/activity";
+import {
+  formatDuration,
+  verificationLine,
+  type TaskActivity,
+} from "../lib/activity";
 import type { LineCounts } from "../lib/diffStats";
 
 export type DiffStat = LineCounts;
@@ -85,6 +89,13 @@ export const TaskSummary = memo(function TaskSummary({
             </span>
           )}
           <span className="dim">No files were changed.</span>
+          {!stopped && !limited && (
+            <span className="dim">
+              {verification?.status === "vendor_owned"
+                ? "Verification is provider-reported."
+                : "Verification not run."}
+            </span>
+          )}
         </header>
       </section>
     );
@@ -135,7 +146,7 @@ export const TaskSummary = memo(function TaskSummary({
       </div>
       <div className="task-summary-block">
         <h4>
-          <FlaskConical size={13} aria-hidden="true" /> Checks
+          <FlaskConical size={13} aria-hidden="true" /> Commands and checks
         </h4>
         {verification?.status === "vendor_owned" ? (
           <p className="dim">
@@ -143,24 +154,54 @@ export const TaskSummary = memo(function TaskSummary({
               "The vendor agent ran and judged its own checks; ShadowCode did not verify them."}
           </p>
         ) : verification?.commands.length ? (
-          <ul>
-            {verification.commands.map((c, i) => (
-              <li key={`${c.command}-${i}`} className={c.success ? "" : "bad"}>
-                <code>{c.command}</code>{" "}
-                <span className={c.success ? "ok" : "bad"}>
-                  {c.timed_out
-                    ? "timed out"
-                    : c.exit_code == null
-                      ? c.success
-                        ? "passed"
-                        : "failed"
-                      : `exit ${c.exit_code}`}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <>
+            <p className="dim">{verificationLine(verification)}</p>
+            <ul>
+              {verification.commands.map((c, i) => (
+                <li
+                  key={`${c.command}-${i}`}
+                  className={c.success ? "" : "bad"}
+                >
+                  <code>{c.command}</code>{" "}
+                  <span className={c.success ? "ok" : "bad"}>
+                    {c.state && c.kind === "configured_check"
+                      ? c.state
+                      : c.timed_out
+                        ? "timed out"
+                        : c.exit_code == null
+                          ? c.success
+                            ? "completed"
+                            : "failed"
+                          : `exit ${c.exit_code}`}
+                  </span>
+                  {c.callId && (
+                    <details>
+                      <summary>Execution receipt</summary>
+                      <p>{c.scope}</p>
+                      <p>
+                        Source: {c.provenance} · Attempt: {c.attemptId}
+                      </p>
+                      <p>
+                        Directory: <code>{c.cwd}</code>
+                      </p>
+                      {c.fingerprint && (
+                        <p>
+                          Content fingerprint: <code>{c.fingerprint}</code>
+                        </p>
+                      )}
+                      <pre>
+                        {activity.calls.find((call) => call.callId === c.callId)
+                          ?.output ||
+                          "Recorded output is available in this task’s command activity."}
+                      </pre>
+                    </details>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </>
         ) : (
-          <p className="dim">No test or build command was run.</p>
+          <p className="dim">Verification not run.</p>
         )}
         {verification?.presentedAs === "unverified" && (
           <p className="warn-text">

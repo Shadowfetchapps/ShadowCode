@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { EventRow } from "../api";
 import { replay } from "./transcript";
-import { classifyTool, deriveSteps, isVerificationCommand } from "./activity";
+import {
+  classifyTool,
+  deriveSteps,
+  isVerificationCommand,
+  parseVerification,
+  verificationLine,
+} from "./activity";
 
 let seq = 0;
 const ev = (
@@ -247,7 +253,7 @@ describe("activity timeline from real events", () => {
     ).toBeUndefined();
   });
 
-  it("lists a command the harness counted as a check once, under checks", () => {
+  it("does not upgrade legacy command success to a configured check", () => {
     const events = [
       ev("agent.started", { task: "x" }),
       ev("tool.started", {
@@ -263,7 +269,10 @@ describe("activity timeline from real events", () => {
       ev("agent.completed", { summary: "Done", success: true }),
     ];
     const derived = deriveSteps(replay(events).activity.t1);
-    expect(derived.map((s) => s.label)).toEqual(["Running checks", "Finished"]);
+    expect(derived.map((s) => s.label)).toEqual([
+      "Running commands",
+      "Finished",
+    ]);
     expect(derived[0].calls.map((c) => c.command)).toEqual(["cat hello.txt"]);
   });
 
@@ -291,4 +300,38 @@ describe("activity timeline from real events", () => {
     expect(classifyTool("search_code")).toBe("reading");
     expect(classifyTool("exec", { command: "echo hi" })).toBe("commands");
   });
+});
+
+it("labels typed verification states without promoting ordinary commands", () => {
+  const ordinary = parseVerification({
+    status: "not_run",
+    commands: [
+      { command: "printf test", success: true, exit_code: 0, kind: "command" },
+    ],
+  });
+  expect(verificationLine(ordinary)).toBe("Verification not run");
+  for (const [status, label] of [
+    ["passed", "Configured checks passed"],
+    ["stale", "Checks are stale — files changed"],
+    ["cancelled", "Verification cancelled"],
+    ["skipped", "Verification incomplete"],
+  ]) {
+    expect(
+      verificationLine(
+        parseVerification({
+          status,
+          commands: [
+            {
+              command: "npm test",
+              kind: "configured_check",
+              state: status,
+              tool_call_id: "c",
+              attempt_id: "a",
+              cwd: "/p",
+            },
+          ],
+        }),
+      ),
+    ).toBe(label);
+  }
 });

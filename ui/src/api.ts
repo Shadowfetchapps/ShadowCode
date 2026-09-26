@@ -781,7 +781,13 @@ export type CompareLane = {
   checks: {
     passed: number;
     failed: number;
-    commands: { command: string; exit_code: number | null; success: boolean }[];
+    incomplete?: number;
+    commands: {
+      command: string;
+      exit_code: number | null;
+      success: boolean;
+      state?: string;
+    }[];
   };
   duration_s: number;
   usage: {

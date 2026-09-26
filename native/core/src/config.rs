@@ -288,6 +288,7 @@ pub struct Config {
     pub routing: Value,
     pub mcp: Value,
     pub hooks: crate::hooks::HookConfig,
+    pub verification: crate::verification::CheckConfig,
     pub git: Value,
     pub logging: Value,
     pub trusted_workspaces: Vec<String>,
@@ -324,6 +325,7 @@ impl Default for Config {
             routing: json!({"enabled":false,"planner":"","coder":"","reviewer":"","tester":""}),
             mcp: json!({"servers":[]}),
             hooks: crate::hooks::HookConfig::default(),
+            verification: crate::verification::CheckConfig::default(),
             git: json!({"auto_commit":false,"allow_destructive":false}),
             logging: json!({"level":"info"}),
             trusted_workspaces: Vec::new(),
@@ -511,6 +513,7 @@ impl Config {
         self.sandbox.validate()?;
         self.checkpoints.validate()?;
         self.hooks.validate()?;
+        self.verification.validate()?;
         ensure!(
             serde_yaml_ng::to_string(self)?.len() <= MAX_CONFIG_BYTES,
             "Configuration exceeds 1 MB"

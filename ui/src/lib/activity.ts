@@ -34,6 +34,14 @@ export type VerificationCommand = {
   exit_code: number | null;
   success: boolean;
   timed_out?: boolean;
+  kind?: string;
+  state?: string;
+  callId?: string;
+  attemptId?: string;
+  cwd?: string;
+  fingerprint?: string;
+  provenance?: string;
+  scope?: string;
 };
 
 export type Verification = {
@@ -300,7 +308,9 @@ export function deriveSteps(
     // A command the harness recorded as a check is listed once, under
     // checks, not again under commands.
     const checks = new Set(
-      (activity.verification?.commands || []).map((c) => c.command.trim()),
+      (activity.verification?.commands || [])
+        .filter((c) => c.kind === "configured_check")
+        .map((c) => c.command.trim()),
     );
     const isCheck = (call: ActivityCall) =>
       call.step === "commands" &&
@@ -315,7 +325,12 @@ export function deriveSteps(
     // without a matching tool call in this list.
     const evidence =
       calls.length > 0 ||
-      (id === "testing" && Boolean(activity.verification?.commands.length)) ||
+      (id === "testing" &&
+        Boolean(
+          activity.verification?.commands.some(
+            (c) => c.kind === "configured_check",
+          ),
+        )) ||
       (id === "web" && activity.sources.length > 0);
     if (!evidence) continue;
     const live = calls.some((call) => call.live) && !activity.finished;
@@ -343,11 +358,16 @@ export function verificationLine(
   if (!verification) return undefined;
   if (verification.status === "vendor_owned")
     return "Checks are run and judged by the vendor agent";
-  if (!verification.commands.length) return undefined;
-  const failed = verification.commands.filter((c) => !c.success).length;
-  return failed
-    ? `${failed} of ${verification.commands.length} check${verification.commands.length === 1 ? "" : "s"} failed`
-    : `${verification.commands.length} check${verification.commands.length === 1 ? "" : "s"} passed`;
+  const checks = verification.commands.filter(
+    (c) => c.kind === "configured_check",
+  );
+  if (!checks.length) return "Verification not run";
+  if (verification.status === "stale")
+    return "Checks are stale — files changed";
+  if (verification.status === "cancelled") return "Verification cancelled";
+  if (verification.status === "skipped") return "Verification incomplete";
+  if (verification.status === "passed") return "Configured checks passed";
+  return "Configured checks did not pass";
 }
 
 export function parseVerification(value: unknown): Verification | undefined {
@@ -369,6 +389,20 @@ export function parseVerification(value: unknown): Verification | undefined {
           exit_code: Number.isFinite(exit as number) ? (exit as number) : null,
           success: c.success === true || (c.success == null && exit === 0),
           timed_out: c.timed_out === true,
+          kind: typeof c.kind === "string" ? c.kind : "command",
+          state: typeof c.state === "string" ? c.state : undefined,
+          callId:
+            typeof c.tool_call_id === "string" ? c.tool_call_id : undefined,
+          attemptId:
+            typeof c.attempt_id === "string" ? c.attempt_id : undefined,
+          cwd: typeof c.cwd === "string" ? c.cwd : undefined,
+          fingerprint:
+            typeof c.workspace_fingerprint === "string"
+              ? c.workspace_fingerprint
+              : undefined,
+          provenance:
+            typeof c.provenance === "string" ? c.provenance : undefined,
+          scope: typeof c.scope === "string" ? c.scope : undefined,
         };
       })
     : [];

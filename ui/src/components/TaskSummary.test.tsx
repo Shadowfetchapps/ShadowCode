@@ -110,7 +110,7 @@ it("states vendor-owned checks and unverified claims honestly", () => {
       onReview={vi.fn()}
     />,
   );
-  expect(screen.getByText("No test or build command was run.")).toBeTruthy();
+  expect(screen.getByText("Verification not run.")).toBeTruthy();
   expect(
     screen.getByText(/claims results that no recorded check confirms/),
   ).toBeTruthy();

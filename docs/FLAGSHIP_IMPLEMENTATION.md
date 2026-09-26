@@ -10,9 +10,13 @@ Baseline: `e371baaa4c690527173a322f7e0e1cfae4db329a`. Implementation branch: `fl
 - CLI-MCP-01 — distinguish enabled discovery from approved invocation. Commit `0286d36`. Smoke verifies initialize/list, no tools/call unattended or while approval is pending, exactly one approved call with exact arguments, and process cleanup. All 21 CLI scenario groups pass against the baseline debug executable (32 scripted model requests). This is test correction, not a claim of live provider authentication.
 - CONTEXT-01 — remove count-triggered compaction and the 20-byte keep-list truncation. Boundary checks cover 20, 69, 70, 71, and 200 messages. All 16 autonomy integration tests and ten model-quality tests pass, including real token-pressure fixtures, retained constraints, and summary fallback. Optional request excerpts are reduced when the summary itself exceeds the context budget. This is source-level verification, not an installed AppImage update.
 
+- PRF foundation — versioned native receipts now distinguish commands from configured checks and bind passing evidence to content fingerprints. Engine completion, explicit check tasks, required goal milestones, Compare counts, and UI use the distinction. Source tests cover the original false-positive, stale post-check edits, same-check recovery, and unrelated failure retention. [Semantics and remaining integration](VERIFICATION_RECEIPTS.md). Full historical/external-edit freshness is still open.
+
+Verification checkpoint validation: broad source run passed 325 native tests (two pre-existing ignored), including engine, goals, Compare, service commands, and core unit tests. The final execution-failure addition passed all four receipt tests and eight goal tests. UI: 309 tests and production build passed. Core all-target Clippy with warnings denied and native desktop build passed on the final source. Native CLI passed all 21 scenario groups. The final rebuilt executable reproduced `printf test` with `verified=false`, `status=not_run`, and `unverified_claim=true`. All provider responses were local fixtures; no paid/live authentication or release package was exercised.
+
 ## Next implementation work
 
-1. Structured verification receipts and freshness, shared by engine, goals, Compare, and UI. The reproduced false verification remains open.
+1. Complete receipt freshness after external edits/restart and before Compare acceptance; add project-scoped check configuration UI. The original arbitrary-command false verification is fixed in source with a native regression.
 2. Immutable draft release staging and required gates, preserving all current checks; dependency advisory remedy.
 3. Compare fault injection, durable journal, process-exit cleanup checks, cross-project synchronization.
 4. Provider capability/conformance and real coding evaluations, extending existing login integrations using supported vendor mechanisms.
@@ -47,10 +51,10 @@ Initial state below is **mapping pending**, not an assertion that existing funct
 - **LOC-03 — Local model exceeds safe allocation**: Clear error; UI survives; project unchanged. Status: mapping pending.
 - **LOC-04 — Runtime crashes or port is occupied**: Honest state and recoverable restart path. Status: mapping pending.
 - **LOC-05 — One model fails in Compare**: Other lane results and verification stay intact. Status: mapping pending.
-- **PRF-01 — Model claims tests passed without execution**: UI does not mark verified. Status: mapping pending.
-- **PRF-02 — Configured checks pass, then source changes**: Receipt becomes stale. Status: mapping pending.
-- **PRF-03 — No checks configured**: Completed but verification not run. Status: mapping pending.
-- **PRF-04 — Required check cancelled/skipped**: Overall verification not passed. Status: mapping pending.
+- **PRF-01 — Model claims tests passed without execution**: engine/receipt/UI regressions pass; final native executable reproduction passes. No paid provider used.
+- **PRF-02 — Configured checks pass, then source changes**: post-check edits before task completion and uncommitted-content/rename unit tests pass. External edits after completion, restart, and Compare acceptance refresh remain open.
+- **PRF-03 — No checks configured**: native arbitrary-command reproduction returns not_run; UI displays verification not run and preserves command exit evidence.
+- **PRF-04 — Required check cancelled/skipped**: typed-state unit tests prevent passing; failed/cancelled task aggregation and goal gating are implemented. Complete cancellation-boundary native matrix remains open.
 - **PRF-05 — Provider self-reports an external result**: Provenance differs from locally observed evidence. Status: mapping pending.
 - **PRV-01 — Expired auth or unavailable quota**: Clear status; no fabricated usage or fallback billing. Status: mapping pending.
 - **PRV-02 — Malformed/out-of-order protocol data**: Bounded failure/recovery; no mixed sessions. Status: mapping pending.
