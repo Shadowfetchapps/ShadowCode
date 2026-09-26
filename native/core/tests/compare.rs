@@ -1149,6 +1149,25 @@ exec {git} "$@"
         }
         // The recorded PID belongs to our wrapper, which process::run starts
         // in its own process group. Kill that owned group and our test child.
+        if marker.exists() {
+            // The parent is a distinct process/profile. It cannot acquire the
+            // repository lock while the child is inside a mutation boundary.
+            use fs2::FileExt;
+            let fixture: Value =
+                serde_json::from_slice(&fs::read(root.path().join("fixture.json")).unwrap())
+                    .unwrap();
+            let lock_path = Path::new(fixture["root"].as_str().unwrap())
+                .join("project/.git/shadowcode-compare.lock");
+            let other = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .unwrap();
+            assert!(
+                other.try_lock_exclusive().is_err(),
+                "competing process acquired mutation ownership"
+            );
+        }
         // Stop the test process first: it must not unwind and delete its
         // temporary profile when the intercepted Git child is terminated.
         let _ = child.kill();
@@ -1226,4 +1245,47 @@ exec {git} "$@"
         }
         service.engine.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn repository_ownership_refuses_keep_before_source_changes() {
+    use fs2::FileExt;
+    let f = fixture().await;
+    let record = start(&f).await;
+    let id = record["id"].as_str().unwrap();
+    finished(&f, id).await;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.project.join(".git/shadowcode-compare.lock"))
+        .unwrap();
+    file.try_lock_exclusive().unwrap();
+    let error = call(
+        &f.service,
+        "POST",
+        &format!("/api/compare/{id}/keep"),
+        json!({"model":"lane-alpha"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("owns this repository"),
+        "{error:#}"
+    );
+    assert_eq!(
+        fs::read_to_string(f.project.join("lib.txt")).unwrap(),
+        "value = 1\n"
+    );
+    assert!(!f.project.join("answer.txt").exists());
+    drop(file);
+    let kept = call(
+        &f.service,
+        "POST",
+        &format!("/api/compare/{id}/keep"),
+        json!({"model":"lane-alpha"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(kept["state"], "applied");
+    f.service.engine.shutdown().await.unwrap();
 }

@@ -44,6 +44,12 @@ Linux integration tests now spawn an isolated service test process and intercept
 
 The Linux suite reports eleven passing tests, including the no-op child entry used by the parent harness. This covers three real process-crash boundaries, not every journal write, disk-full failure, power-loss/fsync behavior or concurrent external edit. Those acceptance cases, ambiguous recovery UX and cross-project synchronization remain open.
 
+## Compare project coordination
+
+Compare metadata synchronization is now scoped to canonical project paths. A short registry mutex only manages weak lock references and is never held across async work. Start/Keep/Discard/recovery also acquire a nonblocking OS file lock in Git's common directory, shared across app profiles/processes and related worktrees. Existing revision-checked persistence and engine reservations remain. Lock order is documented; the repository lock file is never unlinked. Unix opens reject symlinks, nonregular files, other owners and extra hard links.
+
+The Compare suite covers ownership refusal before source changes and successful retry after release. The real-crash parent is a second process and verifies that it cannot acquire the child's repository ownership at all three mutation boundaries. A unit test holds project A's metadata lock while acquiring project B's. This establishes scoped-lock behavior, not a measured end-to-end UI latency target. Git/worktree subsystem locks, independent external editors, advisory-lock cooperation by older app versions and network-filesystem lock semantics remain limitations.
+
 ## Next implementation work
 
 1. Complete Compare journal/recovery and immutable preview binding; add project-scoped check configuration UI. The original arbitrary-command false verification is fixed in source with a native regression.

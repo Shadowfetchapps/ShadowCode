@@ -24,17 +24,65 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock, Weak},
     time::Duration,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-/// Serialises compare operations in this process, so one operation's
-/// load → refresh → save never races another's. Records, the project index
-/// and the scoreboard are still written transactionally (`save`), which is
-/// what keeps a second ShadowCode process from losing an update.
-static LOCK: Mutex<()> = Mutex::const_new(());
+/// Lock order: project metadata -> repository advisory lock -> engine
+/// reservations -> worktree disposal. The registry lock is never held over
+/// an await. Weak entries keep closed projects from accumulating locks.
+static PROJECT_LOCKS: LazyLock<std::sync::Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
+
+fn project_lock(workspace: &Path) -> Result<Arc<Mutex<()>>> {
+    let mut locks = PROJECT_LOCKS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Compare lock registry poisoned"))?;
+    locks.retain(|_, value| value.strong_count() > 0);
+    let lock = locks
+        .get(workspace)
+        .and_then(Weak::upgrade)
+        .unwrap_or_else(|| Arc::new(Mutex::new(())));
+    locks.insert(workspace.to_owned(), Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+/// Cross-profile/process mutation ownership. Never unlink this lock file:
+/// removing a locked inode would allow another writer through a new inode.
+async fn mutation_lock(workspace: &Path, cancel: &CancellationToken) -> Result<fs::File> {
+    use fs2::FileExt;
+    let directory = git(
+        workspace,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cancel,
+    )
+    .await?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(Path::new(&directory).join("shadowcode-compare.lock"))?;
+    let metadata = file.metadata()?;
+    ensure!(metadata.is_file(), "Compare lock must be a regular file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        ensure!(
+            metadata.uid() == unsafe { libc::geteuid() } && metadata.nlink() == 1,
+            "Compare lock must be owned by your account without extra hard links"
+        );
+    }
+    file.try_lock_exclusive()
+        .context("Another ShadowCode operation owns this repository; retry after it finishes")?;
+    Ok(file)
+}
 const LISTED: usize = 20;
 const INDEXED: usize = 100;
 const MAX_FILES: usize = 1000;
@@ -885,8 +933,10 @@ pub(crate) async fn start(engine: &Engine, options: StartOptions<'_>) -> Result<
     let (mode, purpose) = parse_mode(&options.mode)?;
     let models = resolve_models(engine, &cfg, &options.models)?;
     repository_root(&workspace, &cancel).await?;
+    let lock = project_lock(&workspace)?;
+    let _guard = lock.lock().await;
+    let _ownership = mutation_lock(&workspace, &cancel).await?;
     let base = snapshot(&engine.paths().data, &workspace, &cancel).await?;
-    let _guard = LOCK.lock().await;
     let mut record = Record {
         id: crate::id(),
         workspace: workspace.clone(),
@@ -996,12 +1046,14 @@ pub(crate) async fn start(engine: &Engine, options: StartOptions<'_>) -> Result<
 }
 
 pub async fn get(engine: &Engine, id: &str) -> Result<Record> {
-    let _guard = LOCK.lock().await;
     let store = engine.store();
+    let workspace = load(&store, id)?.workspace;
+    let lock = project_lock(&workspace)?;
+    let _guard = lock.lock().await;
     let mut record = load(&store, id)?;
     refresh(engine, &mut record, &CancellationToken::new()).await?;
     let mut record = persist_refreshed(&store, record).await?;
-    // Content reads do not hold the global metadata lock. The response is a
+    // Content reads do not hold the project metadata lock. The response is a
     // point-in-time view; Keep repeats validation at its mutation boundary.
     drop(_guard);
     for lane in &mut record.lanes {
@@ -1016,7 +1068,8 @@ pub async fn get(engine: &Engine, id: &str) -> Result<Record> {
 
 pub async fn list(engine: &Engine, workspace: &Path) -> Result<Vec<Record>> {
     let workspace = Workspace::open(workspace)?.path;
-    let _guard = LOCK.lock().await;
+    let lock = project_lock(&workspace)?;
+    let _guard = lock.lock().await;
     let store = engine.store();
     let mut records = Vec::new();
     for id in index(&store, &workspace)?.iter().take(LISTED) {
@@ -1280,9 +1333,12 @@ async fn index_tree(
 
 /// Reconcile only exact recorded states. Never apply, revert, or remove files.
 pub async fn recover(engine: &Engine, id: &str) -> Result<Record> {
-    let _guard = LOCK.lock().await;
     let store = engine.store();
+    let workspace = load(&store, id)?.workspace;
+    let lock = project_lock(&workspace)?;
+    let _guard = lock.lock().await;
     let mut record = load(&store, id)?;
+    let _ownership = mutation_lock(&record.workspace, &CancellationToken::new()).await?;
     if record.state != "needs_review" {
         return Ok(record);
     }
@@ -1354,9 +1410,12 @@ pub async fn keep_reviewed(
     accept_unverified: bool,
 ) -> Result<Record> {
     let cancel = CancellationToken::new();
-    let _guard = LOCK.lock().await;
     let store = engine.store();
+    let workspace = load(&store, id)?.workspace;
+    let lock = project_lock(&workspace)?;
+    let _guard = lock.lock().await;
     let mut record = load(&store, id)?;
+    let _ownership = mutation_lock(&record.workspace, &CancellationToken::new()).await?;
     ensure!(
         matches!(record.state.as_str(), "running" | "done"),
         "This comparison was already {}",
@@ -1509,9 +1568,12 @@ pub async fn keep_reviewed(
 
 pub async fn discard(engine: &Engine, id: &str) -> Result<Record> {
     let cancel = CancellationToken::new();
-    let _guard = LOCK.lock().await;
     let store = engine.store();
+    let workspace = load(&store, id)?.workspace;
+    let lock = project_lock(&workspace)?;
+    let _guard = lock.lock().await;
     let mut record = load(&store, id)?;
+    let _ownership = mutation_lock(&record.workspace, &CancellationToken::new()).await?;
     ensure!(record.state != "needs_review", "An interrupted Keep requires recovery review. Project files and lane copies have been preserved; cleanup is blocked.");
     if matches!(record.state.as_str(), "applied" | "discarded") {
         // Retry cleanup of anything a previous attempt left behind.
@@ -1539,8 +1601,10 @@ pub async fn discard(engine: &Engine, id: &str) -> Result<Record> {
 }
 
 pub async fn cancel(engine: &Engine, id: &str) -> Result<Record> {
-    let _guard = LOCK.lock().await;
     let store = engine.store();
+    let workspace = load(&store, id)?.workspace;
+    let lock = project_lock(&workspace)?;
+    let _guard = lock.lock().await;
     let mut record = load(&store, id)?;
     for lane in &record.lanes {
         if !lane.removed && !lane.job_id.is_empty() && active(&lane.status) {
@@ -1562,6 +1626,20 @@ pub fn session_tags(store: &Store, session_id: &str) -> Result<(Option<String>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unrelated_project_metadata_remains_available() {
+        let a = project_lock(Path::new("/fixture/project-a")).unwrap();
+        let same = project_lock(Path::new("/fixture/project-a")).unwrap();
+        assert!(Arc::ptr_eq(&a, &same));
+        let held = a.lock().await;
+        let b = project_lock(Path::new("/fixture/project-b")).unwrap();
+        let independent = tokio::time::timeout(Duration::from_millis(100), b.lock()).await;
+        assert!(independent.is_ok());
+        assert!(same.try_lock().is_err());
+        drop(held);
+        assert!(same.try_lock().is_ok());
+    }
 
     #[test]
     fn apply_errors_name_conflicting_files() {
