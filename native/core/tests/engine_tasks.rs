@@ -3365,3 +3365,210 @@ async fn inspection_workspace_evidence_survives_model_error_without_leaking_to_n
         );
     }
 }
+
+#[tokio::test]
+async fn repeated_result_paths_advise_once_without_suppressing_reread_edit_or_check() {
+    let server = support::server(|index, body| {
+        context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+        let calls = match index {
+            0 => json!([
+                tool("read-impl", "read_file", json!({"path":"sum.sh"})),
+                tool("read-notes", "read_file", json!({"path":"notes.md"})),
+            ]),
+            1 => json!([tool(
+                "search-clamp",
+                "search_code",
+                json!({"query":"clamp"})
+            )]),
+            2 => json!([tool(
+                "search-unique",
+                "search_code",
+                json!({"query":"unique"})
+            )]),
+            3 => json!([tool(
+                "search-chunks",
+                "search_code",
+                json!({"query":"chunks"})
+            )]),
+            4 => json!([tool("reread", "read_file", json!({"path":"sum.sh"}))]),
+            5 => json!([tool(
+                "edit",
+                "edit_file",
+                json!({
+                    "path":"sum.sh", "old_string":"a - b", "new_string":"a + b"
+                })
+            )]),
+            6 => json!([tool("check", "exec", json!({"command":"sh check.sh"}))]),
+            _ => json!([]),
+        };
+        let text = if index < 7 {
+            "Inspecting and repairing the helper"
+        } else {
+            "Fixed addition. The configured shell assertion passed."
+        };
+        (response(text, calls), Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    let project = root.path().join("project");
+    fs::create_dir(project.join("target")).unwrap();
+    let original = "# clamp unique chunks\na=$1; b=$2; echo $((a - b))\n";
+    let notes =
+        "# Helper notes\nclamp unique chunks are labels; the helper must add its two arguments.\n";
+    fs::write(project.join("sum.sh"), original).unwrap();
+    fs::write(project.join("notes.md"), notes).unwrap();
+    fs::write(
+        project.join("check.sh"),
+        "printf 'run\\n' >> target/check-runs\ntest \"$(sh sum.sh 2 3)\" = 5\n",
+    )
+    .unwrap();
+    Config::patch(
+        engine.paths(),
+        json!({
+            "model":{"context_limit":65536},
+            "agent":{"summary_compaction":false,"compact_ratio":0.95},
+            "verification":{"commands":["sh check.sh"]}
+        }),
+    )
+    .unwrap();
+    let job = engine.start(request(root.path(),
+        "Fix the helper's arithmetic bug after inspecting project evidence, then run the configured check.", None))
+        .await.unwrap();
+    let result = wait(&engine, &job.id).await;
+    let requests = server.requests.lock().unwrap().clone();
+    let (saved, events) = reopen_terminal_job(engine, result).await;
+
+    assert_eq!(saved.status, "completed", "{}", saved.summary);
+    assert_eq!(
+        requests.len(),
+        8,
+        "the advisory must not manufacture an extra model turn"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("sum.sh")).unwrap(),
+        original.replace("a - b", "a + b")
+    );
+    assert_eq!(fs::read_to_string(project.join("notes.md")).unwrap(), notes);
+    assert_eq!(
+        fs::read_to_string(project.join("target/check-runs")).unwrap(),
+        "run\n",
+        "execute only the model's single check call"
+    );
+    assert!(
+        !events.iter().any(|e| e["type"] == "context.compacted"),
+        "compaction is a separate fixture"
+    );
+
+    let final_messages = requests[7]["messages"].as_array().unwrap();
+    let tool_messages: Vec<_> = final_messages
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .collect();
+    let ids: Vec<_> = tool_messages
+        .iter()
+        .map(|m| m["tool_call_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "read-impl",
+            "read-notes",
+            "search-clamp",
+            "search-unique",
+            "search-chunks",
+            "reread",
+            "edit",
+            "check"
+        ]
+    );
+    let payloads: Vec<Value> = tool_messages
+        .iter()
+        .map(|m| serde_json::from_str(m["content"].as_str().unwrap()).unwrap())
+        .collect();
+    assert!(
+        payloads.iter().all(|p| p["success"] == true),
+        "every actual tool result remains visible"
+    );
+    assert_eq!(
+        payloads[5]["output"]["content"], original,
+        "reread remains permitted and precedes edit"
+    );
+    for payload in &payloads[2..5] {
+        let hits = payload["output"]["hits"].as_array().unwrap();
+        assert!(!hits.is_empty(), "real search must return evidence");
+        assert!(
+            hits.iter()
+                .all(|hit| matches!(hit["path"].as_str(), Some("sum.sh" | "notes.md"))),
+            "all returned paths were read"
+        );
+    }
+    // Every subsequent request retains the same tool response, including after
+    // the advisory. No result is replaced by fabricated success or a process note.
+    for (index, message) in tool_messages.iter().enumerate() {
+        let first_request = match index {
+            0 | 1 => 1,
+            _ => index,
+        };
+        for request in &requests[first_request..] {
+            let found = request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| {
+                    item["role"] == "tool" && item["tool_call_id"] == message["tool_call_id"]
+                })
+                .expect("completed tool response retained in later requests");
+            assert_eq!(found, *message);
+        }
+    }
+    let check_events: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "tool.completed" && e["payload"]["tool"] == "exec")
+        .collect();
+    assert_eq!(check_events.len(), 1);
+    let verification = &saved.result.as_ref().unwrap()["verification"];
+    assert_eq!(verification["status"], "passed", "{verification}");
+    assert_eq!(verification["verified"], true, "{verification}");
+    let commands = verification["commands"].as_array().unwrap();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0]["state"], "passed");
+    assert_owned_command_receipt(&commands[0], &events, &saved.task_id, "check");
+
+    let warnings: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e["type"] == "runaway.warning" && e["payload"]["kind"] == "redundant_observation"
+        })
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "three covered pathless searches must produce exactly one advisory"
+    );
+    assert_eq!(warnings[0]["task_id"], saved.task_id);
+    assert_eq!(warnings[0]["payload"]["action"], "replan");
+    for (index, request) in requests.iter().enumerate() {
+        let notes: Vec<_> = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                m["role"] == "system"
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|s| s.starts_with("Progress check:"))
+            })
+            .collect();
+        assert_eq!(
+            notes.len(),
+            usize::from(index >= 4),
+            "advisory first reaches the next request after search three"
+        );
+        if let Some(note) = notes.first() {
+            let content = note["content"].as_str().unwrap();
+            assert!(content.contains("inspected earlier in this task"));
+            assert!(content.contains("compacted, truncated, or changed"));
+            assert!(content.contains("read them again whenever needed"));
+        }
+    }
+}

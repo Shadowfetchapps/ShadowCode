@@ -16,31 +16,72 @@ pub struct ObservationLoop {
 }
 
 impl ObservationLoop {
+    /// Use the exact bounded/redacted tool message sent to the model. Backend
+    /// output alone does not establish that the model received a full read.
+    pub fn record_message(&mut self, name: &str, arguments: &Value, message: &Value) -> bool {
+        let payload = message["content"]
+            .as_str()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .unwrap_or(Value::Null);
+        let visible = message["redacted"] != true
+            && payload["redacted"] != true
+            && payload["truncated"] != true;
+        self.record(
+            name,
+            arguments,
+            if visible {
+                &payload["output"]
+            } else {
+                &Value::Null
+            },
+            visible && payload["success"] == true,
+        )
+    }
+
     pub fn record(&mut self, name: &str, arguments: &Value, output: &Value, success: bool) -> bool {
-        if !success {
-            self.redundant = 0;
-            return false;
-        }
+        // Even an unsuccessful mutation or command may have changed files.
         if tool_class(name) != ToolClass::ReadOnly {
             self.complete_reads.clear();
             self.redundant = 0;
             return false;
         }
         let path = arguments["path"].as_str();
+        let full_read = success
+            && output["offset"] == 1
+            && output["truncated"] == false
+            && output["next_offset"].is_null()
+            && output["redacted"] == false
+            && output["hash"].is_string();
+        if name == "read_file" && !full_read {
+            if let Some(path) = path {
+                self.complete_reads.remove(path);
+            }
+            self.redundant = 0;
+            return false;
+        }
+        if !success {
+            self.redundant = 0;
+            return false;
+        }
         let repeated = match (name, path) {
-            ("read_file", Some(path))
-                if output["truncated"] == false && output["next_offset"].is_null() =>
-            {
-                if let Some(hash) = output["hash"].as_str() {
-                    let previous = self.complete_reads.insert(path.to_owned(), hash.to_owned());
-                    previous.as_deref() == Some(hash)
-                } else {
-                    false
-                }
+            ("read_file", Some(path)) => {
+                let hash = output["hash"].as_str().expect("full read checked");
+                let previous = self.complete_reads.insert(path.to_owned(), hash.to_owned());
+                previous.as_deref() == Some(hash)
             }
-            ("search_code" | "search_text" | "search_symbol", Some(path)) => {
-                self.complete_reads.contains_key(path)
+            ("search_code", _) => {
+                output.get("truncated").is_none_or(|value| value == false)
+                    && output.get("ok").is_none_or(|value| value == true)
+                    && output["hits"].as_array().is_some_and(|hits| {
+                        !hits.is_empty()
+                            && hits.iter().all(|hit| {
+                                hit["path"]
+                                    .as_str()
+                                    .is_some_and(|path| self.complete_reads.contains_key(path))
+                            })
+                    })
             }
+            ("search_text" | "search_symbol", Some(path)) => self.complete_reads.contains_key(path),
             _ => false,
         };
         if repeated {
@@ -1353,13 +1394,13 @@ mod tests {
     fn repeated_inspection_prompts_once_and_resets_after_a_write() {
         let mut observations = ObservationLoop::default();
         let read = json!({"path":"helpers.py"});
-        let full = json!({"hash":"first","truncated":false,"next_offset":null});
+        let full = json!({"hash":"first","offset":1,"truncated":false,"next_offset":null,"redacted":false});
         assert!(!observations.record("read_file", &read, &full, true));
         for query in ["clamp", "unique"] {
             assert!(!observations.record(
                 "search_code",
                 &json!({"path":"helpers.py","query":query}),
-                &json!({"hits":[]}),
+                &json!({"hits":[{"path":"helpers.py"}]}),
                 true
             ));
         }
@@ -1372,6 +1413,155 @@ mod tests {
             &json!({"hash":"second","truncated":false,"next_offset":null}),
             true
         ));
+    }
+
+    #[test]
+    fn prior_file_coverage_detects_recorded_qwen_searches_without_a_path() {
+        let mut observations = ObservationLoop::default();
+        for path in ["helpers.py", "test_helpers.py"] {
+            assert!(!observations.record("read_file", &json!({"path":path}),
+                &json!({"hash":path,"offset":1,"truncated":false,"next_offset":null,"redacted":false}), true));
+        }
+        let searches = [
+            json!({"path":"helpers.py","query":"clamp"}),
+            json!({"query":"unique"}),
+            json!({"query":"chunks"}),
+            json!({"query":"clamp"}),
+            json!({"query":"unique"}),
+            json!({"query":"chunks"}),
+        ];
+        let output =
+            json!({"ok":true,"count":2,"hits":[{"path":"helpers.py"},{"path":"test_helpers.py"}]});
+        let original = output.clone();
+        let warnings: Vec<_> = searches
+            .iter()
+            .enumerate()
+            .filter_map(|(index, args)| {
+                observations
+                    .record("search_code", args, &output, true)
+                    .then_some(index)
+            })
+            .collect();
+        assert_eq!(
+            warnings,
+            vec![2],
+            "advice appears once after three covered searches"
+        );
+        assert_eq!(
+            output, original,
+            "the advisory never hides or rewrites evidence"
+        );
+    }
+
+    #[test]
+    fn new_empty_or_unknown_search_results_do_not_imply_redundant_inspection() {
+        for output in [
+            json!({"hits":[]}),
+            json!({}),
+            json!({"hits":[{}]}),
+            json!({"hits":[{"path":"helpers.py"},{"path":"new.py"}]}),
+            json!({"hits":[{"path":"new.py"}]}),
+        ] {
+            let mut observations = ObservationLoop::default();
+            observations.record("read_file", &json!({"path":"helpers.py"}),
+                &json!({"hash":"h","offset":1,"truncated":false,"next_offset":null,"redacted":false}), true);
+            for _ in 0..6 {
+                assert!(
+                    !observations.record("search_code", &json!({"query":"name"}), &output, true),
+                    "{output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_or_redacted_read_is_not_full_file_coverage() {
+        for output in [
+            json!({"hash":"h","offset":8,"truncated":false,"next_offset":null,"redacted":false}),
+            json!({"hash":"h","truncated":false,"next_offset":null,"redacted":false}),
+            json!({"hash":"h","offset":1,"truncated":true,"next_offset":null,"redacted":false}),
+            json!({"hash":"h","offset":1,"truncated":false,"next_offset":8,"redacted":false}),
+            json!({"hash":"h","offset":1,"truncated":false,"next_offset":null,"redacted":true}),
+        ] {
+            let mut observations = ObservationLoop::default();
+            observations.record("read_file", &json!({"path":"helpers.py"}), &output, true);
+            for _ in 0..6 {
+                assert!(
+                    !observations.record(
+                        "search_code",
+                        &json!({"path":"helpers.py","query":"name"}),
+                        &json!({"hits":[{"path":"helpers.py"}]}),
+                        true
+                    ),
+                    "{output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn visible_tool_message_and_failed_mutations_bound_historical_coverage() {
+        use crate::tools::ToolResult;
+        let args = json!({"path":"helpers.py"});
+        let full = ToolResult {
+            id: "read".into(),
+            execution: None,
+            success: true,
+            output: json!({"hash":"h","offset":1,"truncated":false,"next_offset":null,"redacted":false,"content":"x".repeat(1000)}),
+            error: String::new(),
+        };
+        for limit in [80, 8000] {
+            let mut observations = ObservationLoop::default();
+            let message = full.message("read_file", limit);
+            observations.record_message("read_file", &args, &message);
+            let mut warnings = 0;
+            for _ in 0..3 {
+                warnings += usize::from(observations.record(
+                    "search_code",
+                    &json!({"query":"x"}),
+                    &json!({"hits":[{"path":"helpers.py"}]}),
+                    true,
+                ));
+            }
+            assert_eq!(warnings, usize::from(limit == 8000));
+        }
+        for operation in ["write_file", "edit_file", "exec"] {
+            let mut observations = ObservationLoop::default();
+            observations.record_message("read_file", &args, &full.message("read_file", 8000));
+            observations.record(operation, &args, &json!({}), false);
+            for _ in 0..6 {
+                assert!(!observations.record(
+                    "search_code",
+                    &args,
+                    &json!({"hits":[{"path":"helpers.py"}]}),
+                    true
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_path_cannot_override_unknown_or_truncated_search_hits() {
+        for output in [
+            json!({"hits":[]}),
+            json!({"hits":[{}]}),
+            json!({"hits":[{"path":"new.py"}]}),
+            json!({"truncated":true,"hits":[{"path":"helpers.py"}]}),
+            json!({"ok":false,"hits":[{"path":"helpers.py"}]}),
+            json!({"ok":"true","hits":[{"path":"helpers.py"}]}),
+            json!({"truncated":"false","hits":[{"path":"helpers.py"}]}),
+        ] {
+            let mut observations = ObservationLoop::default();
+            let args = json!({"path":"helpers.py"});
+            observations.record("read_file", &args,
+                &json!({"hash":"h","offset":1,"truncated":false,"next_offset":null,"redacted":false}), true);
+            for _ in 0..6 {
+                assert!(
+                    !observations.record("search_code", &args, &output, true),
+                    "{output}"
+                );
+            }
+        }
     }
 
     #[test]

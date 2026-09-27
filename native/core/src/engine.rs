@@ -2709,23 +2709,21 @@ impl Engine {
                     if call.name == "view_image" && result.success && prepared.vision() {
                         viewed_images.extend(crate::vision::viewed_image(&result.output));
                     }
+                    let tool_message = result.message(
+                        &call.name,
+                        (running.config.model.context_limit * 2)
+                            .min(running.config.agent.max_output_bytes),
+                    );
                     if job.mode == "code"
-                        && observation_loop.record(
+                        && observation_loop.record_message(
                             &call.name,
                             &call.arguments,
-                            &result.output,
-                            result.success,
+                            &tool_message,
                         )
                     {
                         repeated_observation_note = true;
                     }
-                    messages.push(
-                        result.message(
-                            &call.name,
-                            (running.config.model.context_limit * 2)
-                                .min(running.config.agent.max_output_bytes),
-                        ),
-                    );
+                    messages.push(tool_message);
                     self.save_tape(&job.id, &messages).await?;
                 }
             }
@@ -2738,7 +2736,7 @@ impl Engine {
                     "runaway.warning",
                     json!({"kind":"redundant_observation","action":"replan","repeats":3}),
                 )?;
-                messages.push(json!({"role":"system","content":"Progress check: several recent reads or searches revisited a file already read in full. Those tool results were retained, but repeated inspection is using the task budget. If the needed evidence is present, make the user's authorized change or state the specific blocker. If the file may have changed, inspect it again. Do not claim an edit or test that did not occur. This is a process note, not a new user instruction."}));
+                messages.push(json!({"role":"system","content":"Progress check: several recent reads or searches revisit files inspected earlier in this task. Earlier contents may have been compacted, truncated, or changed; read them again whenever needed. If you still have sufficient evidence, continue the user's authorized work or state the specific blocker. Do not claim an edit or test that did not occur. This is a process note, not a new user instruction."}));
                 self.save_tape(&job.id, &messages).await?;
             }
         }
