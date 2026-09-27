@@ -68,49 +68,7 @@ impl Engine {
             "Subagents run on ShadowCode's own loop"
         );
         spec.config.validate()?;
-        let store = &self.0.store;
-        let session =
-            store.create_session(&workspace.path, &spec.config.model.default, &spec.title)?;
-        let sid = session["id"]
-            .as_str()
-            .context("Session missing ID")?
-            .to_owned();
-        use crate::store::keys;
-        store.set_session_meta(&sid, keys::SUBAGENT_PARENT, &spec.link.parent_session)?;
-        store.set_session_meta(&sid, keys::SUBAGENT_RUN, &spec.link.run_id)?;
-        store.set_session_meta(&sid, keys::SUBAGENT_AGENT, &spec.link.name)?;
-        let job = Job {
-            id: crate::id(),
-            workspace: workspace.path.clone(),
-            session_id: sid.clone(),
-            task_id: crate::id(),
-            task: spec.prompt,
-            web: spec.web,
-            // Never queued: it starts inside the parent's tool call.
-            status: "running".into(),
-            mode: spec.mode,
-            model: spec.config.model.name.clone(),
-            started_at: crate::now(),
-            event_cursor: store.event_cursor(&sid)?,
-            ..Default::default()
-        };
-        store.create_job(&json!(job))?;
-        let running = Arc::new(Running {
-            clock: crate::timing::Clock::default(),
-            record: Mutex::new(job.clone()),
-            config: spec.config,
-            system_context: Some(spec.system_context),
-            command: None,
-            workspace,
-            cancel: spec.cancel,
-            finished: AtomicBool::new(false),
-            done: Notify::new(),
-            steer: steering::SteerControl::default(),
-            turn_plan: Default::default(),
-            turn: Default::default(),
-            child: Some(spec.link),
-        });
-        {
+        let (job, running) = {
             let mut queues = self
                 .0
                 .queues
@@ -120,8 +78,52 @@ impl Engine {
                 !self.0.closing.load(Ordering::Acquire),
                 "Application is shutting down"
             );
+            ensure!(!queues.manual.contains_key(&workspace.path), "Wait for the manual operation in this workspace to finish before starting a subagent");
+            let store = &self.0.store;
+            let session =
+                store.create_session(&workspace.path, &spec.config.model.default, &spec.title)?;
+            let sid = session["id"]
+                .as_str()
+                .context("Session missing ID")?
+                .to_owned();
+            use crate::store::keys;
+            store.set_session_meta(&sid, keys::SUBAGENT_PARENT, &spec.link.parent_session)?;
+            store.set_session_meta(&sid, keys::SUBAGENT_RUN, &spec.link.run_id)?;
+            store.set_session_meta(&sid, keys::SUBAGENT_AGENT, &spec.link.name)?;
+            let job = Job {
+                id: crate::id(),
+                workspace: workspace.path.clone(),
+                session_id: sid.clone(),
+                task_id: crate::id(),
+                task: spec.prompt,
+                web: spec.web,
+                // Never queued: it starts inside the parent's tool call.
+                status: "running".into(),
+                mode: spec.mode,
+                model: spec.config.model.name.clone(),
+                started_at: crate::now(),
+                event_cursor: store.event_cursor(&sid)?,
+                ..Default::default()
+            };
+            store.create_job(&json!(job))?;
+            let running = Arc::new(Running {
+                clock: crate::timing::Clock::default(),
+                record: Mutex::new(job.clone()),
+                config: spec.config,
+                system_context: Some(spec.system_context),
+                command: None,
+                workspace,
+                cancel: spec.cancel,
+                finished: AtomicBool::new(false),
+                done: Notify::new(),
+                steer: steering::SteerControl::default(),
+                turn_plan: Default::default(),
+                turn: Default::default(),
+                child: Some(spec.link),
+            });
             queues.jobs.insert(job.id.clone(), running.clone());
-        }
+            (job, running)
+        };
         started(&job);
         let outcome = std::panic::AssertUnwindSafe(self.run(&running))
             .catch_unwind()

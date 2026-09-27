@@ -2,6 +2,7 @@
 pub mod changes;
 #[cfg(target_os = "linux")]
 mod cleanup;
+mod locks;
 pub mod repair;
 use crate::{
     paths::{self, AppPaths},
@@ -16,9 +17,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-static CREATION: Mutex<()> = Mutex::const_new(());
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     pub id: String,
@@ -98,20 +97,55 @@ async fn git(source: &Path, args: &[&str], cancel: CancellationToken) -> Result<
     ensure!(!result.truncated, "Git worktree output exceeded its limit");
     Ok(result.stdout.trim_end_matches('\n').into())
 }
+/// Lock namespace for task metadata operations. This conveys no destructive
+/// authority and never takes the core mutation guard; task callers must still
+/// use the normal inspected/journaled worktree APIs for all filesystem changes.
+pub(crate) async fn task_common_directory(
+    source: &Path,
+    cancel: &CancellationToken,
+) -> Result<PathBuf> {
+    let source = Workspace::open(source)?.path;
+    let common = git(
+        &source,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cancel.clone(),
+    )
+    .await?;
+    Ok(Path::new(&common).canonicalize()?)
+}
+
+/// Verify a task's persisted checkout binding without requiring its source or
+/// checkout to exist. Archived records support idempotent completed cleanup;
+/// malformed/foreign active records never fall back to an older archive.
+pub(crate) fn task_record(paths: &AppPaths, id: &str) -> Result<Record> {
+    ensure!(
+        id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()),
+        "Use the full managed worktree ID"
+    );
+    let (records, _) = roots(paths)?;
+    let archived = match fs::symlink_metadata(records.join(format!("{id}.json"))) {
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error.into()),
+    };
+    read_record_identity_at(paths, id, archived)
+}
+
 pub async fn create(
     paths: &AppPaths,
     source: &Path,
     reference: &str,
     cancel: CancellationToken,
 ) -> Result<Record> {
-    let _guard = tokio::select! {guard=CREATION.lock()=>guard,_=cancel.cancelled()=>anyhow::bail!("Worktree creation cancelled")};
-    create_unlocked(paths, source, reference, true, cancel).await
+    let ownership = locks::mutation(source, &cancel).await?;
+    create_locked(paths, source, reference, true, &ownership, cancel).await
 }
-async fn create_unlocked(
+async fn create_locked(
     paths: &AppPaths,
     source: &Path,
     reference: &str,
     ready_after_checkout: bool,
+    ownership: &locks::Mutation,
     cancel: CancellationToken,
 ) -> Result<Record> {
     let source = Workspace::open(source)?.path;
@@ -149,20 +183,12 @@ async fn create_unlocked(
     )
     .canonicalize()?;
     let (records, checkouts) = roots(paths)?;
-    ensure!(
-        fs::read_dir(&records)?
-            .collect::<std::io::Result<Vec<_>>>()?
-            .iter()
-            .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("json"))
-            .count()
-            < 64,
-        "At most 64 managed worktree records are allowed"
-    );
+    ownership.validate(&source, &common)?;
     let id = crate::id();
     let path = checkouts.join(&id);
     let branch = format!("shadowcode/{id}");
     let mut record=Record{id,source:source.clone(),path:path.clone(),common_directory:common,base_commit:commit.clone(),branch:branch.clone(),state:"creating".into(),created_at:crate::now(),detail:"Checkout starts from the selected commit; source uncommitted changes remain in the source checkout.".into()};
-    save(&records, &record)?;
+    locks::reserve_record(paths, &records, &record, ownership, &cancel).await?;
     // Write the recovery record before Git can create metadata or files. Never
     // recursively remove a partial checkout after failure or cancellation.
     let result = git(
@@ -261,6 +287,104 @@ fn read_record(paths: &AppPaths, source: &Path, id: &str) -> Result<Record> {
     );
     Ok(record)
 }
+/// Validate the live checkout before staging any task or Compare result. This
+/// intentionally avoids a full status/ignored-file scan of the project.
+pub(crate) async fn validate_task_checkout(
+    paths: &AppPaths,
+    source: &Path,
+    id: &str,
+    checkout: &Path,
+    base_commit: &str,
+    branch: &str,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let record = read_record(paths, source, id)?;
+    ensure!(
+        record.path == checkout && record.base_commit == base_commit && record.branch == branch,
+        "Managed task checkout binding changed; preserve it for review"
+    );
+    let meta = fs::symlink_metadata(checkout)?;
+    ensure!(
+        meta.is_dir() && !meta.file_type().is_symlink() && checkout.canonicalize()? == checkout,
+        "Managed checkout path changed"
+    );
+    let pointer = fs::symlink_metadata(checkout.join(".git"))?;
+    ensure!(
+        pointer.is_file() && !pointer.file_type().is_symlink(),
+        "Managed checkout Git pointer changed"
+    );
+    let root = git(checkout, &["rev-parse", "--show-toplevel"], cancel.clone()).await?;
+    ensure!(
+        Path::new(&root).canonicalize()? == record.path,
+        "Managed checkout repository root changed"
+    );
+    for path in [&record.source, &record.path] {
+        let common = git(
+            path,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cancel.clone(),
+        )
+        .await?;
+        ensure!(
+            Path::new(&common).canonicalize()? == record.common_directory,
+            "Managed checkout repository identity changed"
+        );
+    }
+    let admin = git(
+        checkout,
+        &["rev-parse", "--absolute-git-dir"],
+        cancel.clone(),
+    )
+    .await?;
+    ensure!(
+        Path::new(&admin).canonicalize()?
+            == record
+                .common_directory
+                .join("worktrees")
+                .join(id)
+                .canonicalize()?,
+        "Managed checkout administrative identity changed"
+    );
+    let current = git(
+        checkout,
+        &["symbolic-ref", "--quiet", "HEAD"],
+        cancel.clone(),
+    )
+    .await?;
+    let expected_branch = format!("refs/heads/{}", record.branch);
+    ensure!(
+        current == expected_branch,
+        "Checkout is no longer on its managed branch; preserve for review"
+    );
+    let registered = git(
+        source,
+        &["worktree", "list", "--porcelain", "-z"],
+        cancel.clone(),
+    )
+    .await?;
+    let expected = format!(
+        "worktree {}",
+        checkout.to_str().context("Worktree path must be UTF-8")?
+    );
+    let registration = registered
+        .split("\0\0")
+        .find(|block| block.split('\0').any(|field| field == expected))
+        .context("Managed checkout is no longer registered with its source")?;
+    ensure!(
+        registration
+            .split('\0')
+            .any(|field| field == format!("branch {expected_branch}")),
+        "Managed checkout registration branch changed"
+    );
+    ensure!(
+        !registration
+            .split('\0')
+            .any(|field| field == "locked" || field.starts_with("locked ")),
+        "Git worktree is locked; preserve it for review"
+    );
+    Ok(())
+}
+
 pub async fn inspect(
     paths: &AppPaths,
     source: &Path,
@@ -374,7 +498,7 @@ pub async fn remove(
     expected_hash: &str,
     cancel: CancellationToken,
 ) -> Result<Record> {
-    let _guard = tokio::select! {guard=CREATION.lock()=>guard,_=cancel.cancelled()=>anyhow::bail!("Worktree removal cancelled")};
+    let _ownership = locks::mutation(source, &cancel).await?;
     let inspection = inspect(paths, source, id, cancel.clone()).await?;
     ensure!(
         inspection.hash == expected_hash,
@@ -487,7 +611,7 @@ async fn dispose_checkout_legacy(
     delete_branch: bool,
     cancel: CancellationToken,
 ) -> Result<Option<String>> {
-    let _guard = tokio::select! {guard=CREATION.lock()=>guard,_=cancel.cancelled()=>anyhow::bail!("Worktree removal cancelled")};
+    let _ownership = locks::mutation(source, &cancel).await?;
     let mut record = read_record(paths, source, id)?;
     let (records, _) = roots(paths)?;
     let location = record
@@ -847,7 +971,7 @@ pub async fn return_changes(
     expected_hash: &str,
     cancel: CancellationToken,
 ) -> Result<Record> {
-    let _guard = tokio::select! {guard=CREATION.lock()=>guard,_=cancel.cancelled()=>anyhow::bail!("Worktree return cancelled")};
+    let _ownership = locks::mutation(source, &cancel).await?;
     let review = review_return(paths, source, id, cancel.clone()).await?;
     ensure!(
         review.hash == expected_hash,

@@ -143,7 +143,7 @@ pub async fn apply(
     hash: &str,
     cancel: CancellationToken,
 ) -> Result<Record> {
-    let _guard = tokio::select! {guard=super::CREATION.lock()=>guard,_=cancel.cancelled()=>anyhow::bail!("Worktree repair cancelled")};
+    let _ownership = super::locks::mutation(source, &cancel).await?;
     let reviewed = review(paths, source, id, cancel.clone()).await?;
     ensure!(
         reviewed.hash == hash,

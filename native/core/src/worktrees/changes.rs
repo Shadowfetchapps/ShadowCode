@@ -199,7 +199,7 @@ pub async fn copy<R>(
     cancel: CancellationToken,
     reserve: impl FnOnce(&Path) -> Result<R>,
 ) -> Result<Record> {
-    let _guard = tokio::select! {guard=super::CREATION.lock()=>guard,_=cancel.cancelled()=>anyhow::bail!("Copy cancelled")};
+    let ownership = super::locks::mutation(source, &cancel).await?;
     let snapshot = capture(source, cancel.clone()).await?;
     ensure!(
         snapshot.review.hash == expected_hash,
@@ -209,8 +209,15 @@ pub async fn copy<R>(
         capture(source, cancel.clone()).await?.review.hash == expected_hash,
         "Source changed during capture; review it again"
     );
-    let mut record =
-        super::create_unlocked(paths, source, &snapshot.review.head, false, cancel.clone()).await?;
+    let mut record = super::create_locked(
+        paths,
+        source,
+        &snapshot.review.head,
+        false,
+        &ownership,
+        cancel.clone(),
+    )
+    .await?;
     let (records, _) = super::roots(paths)?;
     record.state = "copying".into();
     record.detail =

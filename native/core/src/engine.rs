@@ -312,7 +312,7 @@ impl Engine {
         self.0.store.delete_session(id)
     }
     pub fn reserve_workspace(&self, workspace: &Path) -> Result<WorkspaceReservation> {
-        let workspace = workspace.canonicalize()?;
+        let workspace = crate::workspace::reservation_path(workspace)?;
         let mut queues = self
             .0
             .queues
@@ -327,10 +327,7 @@ impl Engine {
             "A manual operation is already using this workspace"
         );
         ensure!(
-            !queues
-                .lanes
-                .get(&workspace)
-                .is_some_and(|lane| lane.iter().any(|job| !job.finished.load(Ordering::Acquire))),
+            !queues.jobs.values().any(|job| job.workspace.path == workspace && !job.finished.load(Ordering::Acquire)),
             "Stop the running task before making manual changes"
         );
         let state = Arc::new(ManualState {
@@ -345,6 +342,68 @@ impl Engine {
             state,
         })
     }
+    /// Reserve admission first, then stop every job in the checkout (including
+    /// queued turns and child jobs). The caller retains ownership through removal.
+    pub(crate) async fn stop_and_reserve_workspace(
+        &self,
+        workspace: &Path,
+    ) -> Result<WorkspaceReservation> {
+        let workspace = crate::workspace::reservation_path(workspace)?;
+        let (reservation, jobs) = {
+            let mut queues = self
+                .0
+                .queues
+                .lock()
+                .map_err(|_| anyhow!("Task queue lock poisoned"))?;
+            ensure!(
+                !self.0.closing.load(Ordering::Acquire),
+                "Application is shutting down"
+            );
+            ensure!(
+                !queues.manual.contains_key(&workspace),
+                "A manual operation is already using this workspace"
+            );
+            let jobs: Vec<_> = queues
+                .jobs
+                .iter()
+                .filter(|(_, job)| {
+                    job.workspace.path == workspace && !job.finished.load(Ordering::Acquire)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            let state = Arc::new(ManualState {
+                cancel: CancellationToken::new(),
+                finished: AtomicBool::new(false),
+                done: Notify::new(),
+            });
+            queues.manual.insert(workspace.clone(), state.clone());
+            (
+                WorkspaceReservation {
+                    engine: self.clone(),
+                    workspace,
+                    state,
+                },
+                jobs,
+            )
+        };
+        for id in &jobs {
+            self.request_cancel(id)?;
+        }
+        tokio::time::timeout(Duration::from_secs(60), async {
+            for id in &jobs {
+                self.wait(id).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .context("Tasks are still stopping; the checkout was kept. Try again shortly")??;
+        ensure!(
+            !reservation.state.cancel.is_cancelled(),
+            "Workspace cleanup cancelled"
+        );
+        Ok(reservation)
+    }
+
     pub async fn start(&self, request: StartRequest) -> Result<Job> {
         self.start_for_purpose(request, "").await
     }

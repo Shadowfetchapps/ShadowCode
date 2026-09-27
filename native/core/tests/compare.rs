@@ -1054,7 +1054,10 @@ async fn recovery_reconciles_exact_images_and_preserves_ambiguous_edits() {
                     .unwrap();
                 assert_eq!(board["rows"][0]["wins"], 1);
             }
-            _ => assert!(assessed.is_err()),
+            _ => assert!(
+                assessed.is_err(),
+                "{outcome} unexpectedly reconciled: {assessed:?}"
+            ),
         }
         assert_eq!(fs::read(f.project.join("lib.txt")).unwrap(), content);
         assert!(alpha.is_dir());
@@ -2300,4 +2303,127 @@ async fn filesystem_deletion_failure_preserves_applied_winner_and_retries_after_
     assert_eq!(managed_branches(&project), "");
     assert_eq!(git(&project, &["worktree", "list"]).lines().count(), 1);
     reopened.engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn keep_refuses_a_lane_switched_to_a_user_branch_before_staging() {
+    let f = fixture().await;
+    let started = start(&f).await;
+    let id = started["id"].as_str().unwrap();
+    let ready = finished(&f, id).await;
+    let alpha = PathBuf::from(lane(&ready, "lane-alpha")["worktree"].as_str().unwrap());
+    git(&alpha, &["switch", "-c", "user-work"]);
+    let head = git(&alpha, &["rev-parse", "HEAD"]);
+    let git_dir = PathBuf::from(git(&alpha, &["rev-parse", "--absolute-git-dir"]));
+    let index = fs::read(git_dir.join("index")).unwrap();
+    let result = call(
+        &f.service,
+        "POST",
+        &format!("/api/compare/{id}/keep"),
+        json!({"model":"lane-alpha","accept_unverified":true}),
+    )
+    .await;
+    let branch_after = git(&f.project, &["rev-parse", "refs/heads/user-work"]);
+    let index_after = fs::read(git_dir.join("index")).unwrap();
+    let checkout_retained = alpha.is_dir();
+    let source_unchanged = !f.project.join("answer.txt").exists()
+        && fs::read_to_string(f.project.join("lib.txt")).unwrap() == "value = 1\n";
+    f.service.engine.shutdown().await.unwrap();
+    assert!(result.is_err(), "Keep accepted a user branch: {result:?}");
+    assert_eq!(
+        branch_after, head,
+        "Keep must not commit onto a user branch"
+    );
+    assert_eq!(index_after, index, "Refusal must happen before staging");
+    assert!(checkout_retained && source_unchanged);
+}
+
+#[tokio::test]
+async fn keep_refuses_a_lane_redirected_to_a_foreign_git_directory_before_staging() {
+    let f = fixture().await;
+    let started = start(&f).await;
+    let id = started["id"].as_str().unwrap();
+    let ready = finished(&f, id).await;
+    let alpha = PathBuf::from(lane(&ready, "lane-alpha")["worktree"].as_str().unwrap());
+    let foreign = f._root.path().join("foreign");
+    fs::create_dir(&foreign).unwrap();
+    git(&foreign, &["init", "-q"]);
+    fs::write(foreign.join("private.txt"), "user data\n").unwrap();
+    git(&foreign, &["add", "."]);
+    git(&foreign, &["commit", "-qm", "User data"]);
+    let head = git(&foreign, &["rev-parse", "HEAD"]);
+    let index = fs::read(foreign.join(".git/index")).unwrap();
+    let git_file = fs::read(alpha.join(".git")).unwrap();
+    fs::write(
+        alpha.join(".git"),
+        format!("gitdir: {}\n", foreign.join(".git").display()),
+    )
+    .unwrap();
+    let result = call(
+        &f.service,
+        "POST",
+        &format!("/api/compare/{id}/keep"),
+        json!({"model":"lane-alpha","accept_unverified":true}),
+    )
+    .await;
+    let head_after = git(&foreign, &["rev-parse", "HEAD"]);
+    let index_after = fs::read(foreign.join(".git/index")).unwrap();
+    let source_unchanged = !f.project.join("answer.txt").exists();
+    fs::write(alpha.join(".git"), git_file).unwrap();
+    f.service.engine.shutdown().await.unwrap();
+    assert!(
+        result.is_err(),
+        "Keep accepted a foreign Git directory: {result:?}"
+    );
+    assert_eq!(head_after, head, "Foreign branch must not receive a commit");
+    assert_eq!(index_after, index, "Foreign index must not be staged");
+    assert!(source_unchanged && alpha.is_dir());
+    assert_eq!(
+        fs::read_to_string(foreign.join("private.txt")).unwrap(),
+        "user data\n"
+    );
+}
+
+#[tokio::test]
+async fn discard_preserves_a_lane_with_an_active_background_process_until_retry() {
+    let f = fixture().await;
+    let started = start(&f).await;
+    let id = started["id"].as_str().unwrap();
+    let ready = finished(&f, id).await;
+    let beta = PathBuf::from(lane(&ready, "lane-beta")["worktree"].as_str().unwrap());
+    let config = Config::load(&f.paths, Some(&beta)).unwrap();
+    let task = f
+        .service
+        .engine
+        .background()
+        .start(&beta, &config, None, "held-fixture", "sleep 300")
+        .unwrap();
+    let discarded = call(
+        &f.service,
+        "POST",
+        &format!("/api/compare/{id}/discard"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    let retained = beta.is_dir();
+    // Stop and join the owned child before any assertion can panic.
+    f.service.engine.background().stop(&task.id).await.unwrap();
+    let retried = call(
+        &f.service,
+        "POST",
+        &format!("/api/compare/{id}/discard"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    f.service.engine.shutdown().await.unwrap();
+    assert!(
+        retained,
+        "Discard removed a live background process's checkout"
+    );
+    assert_eq!(discarded["cleanup_pending"], true);
+    assert_eq!(lane(&discarded, "lane-beta")["removed"], false);
+    assert_eq!(retried["cleanup_pending"], false);
+    assert!(!beta.exists());
 }

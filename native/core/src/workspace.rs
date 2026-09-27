@@ -42,6 +42,38 @@ pub struct Snapshot {
     pub hash: Option<String>,
 }
 
+/// Stable reservation key for an existing workspace or a managed checkout whose
+/// final directory was removed. Never resolve a missing ancestor or traversal.
+pub(crate) fn reservation_path(path: &Path) -> Result<PathBuf> {
+    match path.canonicalize() {
+        Ok(path) => {
+            ensure!(path.is_dir(), "Workspace must be a directory");
+            Ok(path)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ensure!(
+                path.is_absolute()
+                    && path.components().all(|part| matches!(
+                        part,
+                        Component::RootDir | Component::Normal(_) | Component::Prefix(_)
+                    )),
+                "Missing workspace reservation must use an absolute normalized path"
+            );
+            ensure!(
+                matches!(std::fs::symlink_metadata(path), Err(ref error) if error.kind() == std::io::ErrorKind::NotFound),
+                "Missing workspace must not be a dangling symbolic link"
+            );
+            let parent = path
+                .parent()
+                .context("Missing workspace parent")?
+                .canonicalize()?;
+            ensure!(parent.is_dir(), "Workspace parent must be a directory");
+            Ok(parent.join(path.file_name().context("Missing workspace name")?))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 impl Workspace {
     pub fn open(path: &Path) -> Result<Self> {
         let path = path.canonicalize().context("Workspace does not exist")?;

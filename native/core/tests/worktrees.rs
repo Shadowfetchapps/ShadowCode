@@ -1487,6 +1487,47 @@ mod cleanup_failure {
                 .contains("Another process owns worktree cleanup"),
             "{error:#}"
         );
+        let targets: Value =
+            serde_json::from_slice(&fs::read(root.join("mutation-targets.json")).unwrap()).unwrap();
+        let other = AppPaths::isolated(&root.join("other-profile")).unwrap();
+        let create_profile = AppPaths::isolated(&root.join("third-profile")).unwrap();
+        let create = runtime
+            .block_on(worktrees::create(
+                &create_profile,
+                &project,
+                "HEAD",
+                CancellationToken::new(),
+            ))
+            .unwrap_err();
+        let remove = runtime
+            .block_on(worktrees::remove(
+                &other,
+                &project,
+                targets["clean_id"].as_str().unwrap(),
+                targets["clean_hash"].as_str().unwrap(),
+                CancellationToken::new(),
+            ))
+            .unwrap_err();
+        let repair = runtime
+            .block_on(worktrees::repair::apply(
+                &other,
+                &project,
+                targets["repair_id"].as_str().unwrap(),
+                targets["repair_hash"].as_str().unwrap(),
+                CancellationToken::new(),
+            ))
+            .unwrap_err();
+        for error in [create, remove, repair] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("Another process owns worktree cleanup"),
+                "Mutation bypassed common-directory ownership: {error:#}"
+            );
+        }
+        assert!(worktrees::list(&create_profile, &project)
+            .unwrap()
+            .is_empty());
         assert!(record
             .path
             .parent()
@@ -1500,6 +1541,40 @@ mod cleanup_failure {
     async fn non_compare_cleanup_obeys_cross_process_disposal_lock() {
         use fs2::FileExt;
         let f = failed().await;
+        let other = AppPaths::isolated(&f.root.path().join("other-profile")).unwrap();
+        let clean = worktrees::create(&other, &f.project, "HEAD", CancellationToken::new())
+            .await
+            .unwrap();
+        let clean_review =
+            worktrees::inspect(&other, &f.project, &clean.id, CancellationToken::new())
+                .await
+                .unwrap();
+        let repair = worktrees::create(&other, &f.project, "HEAD", CancellationToken::new())
+            .await
+            .unwrap();
+        fs::remove_file(repair.path.join(".git")).unwrap();
+        let repair_review =
+            worktrees::repair::review(&other, &f.project, &repair.id, CancellationToken::new())
+                .await
+                .unwrap();
+        fs::write(f.root.path().join("mutation-targets.json"), serde_json::to_vec(&json!({"clean_id":clean.id,"clean_hash":clean_review.hash,"repair_id":repair.id,"repair_hash":repair_review.hash})).unwrap()).unwrap();
+        let source_index = fs::read(f.record.common_directory.join("index")).unwrap();
+        let clean_index = fs::read(
+            f.record
+                .common_directory
+                .join("worktrees")
+                .join(&clean.id)
+                .join("index"),
+        )
+        .unwrap();
+        let repair_index = fs::read(
+            f.record
+                .common_directory
+                .join("worktrees")
+                .join(&repair.id)
+                .join("index"),
+        )
+        .unwrap();
         let lock = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -1524,10 +1599,315 @@ mod cleanup_failure {
         );
         assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
         assert_eq!(fs::read(journal(&f)).unwrap(), before);
+        assert_eq!(
+            fs::read(f.record.common_directory.join("index")).unwrap(),
+            source_index
+        );
+        assert_eq!(
+            fs::read(
+                f.record
+                    .common_directory
+                    .join("worktrees")
+                    .join(&clean.id)
+                    .join("index")
+            )
+            .unwrap(),
+            clean_index
+        );
+        assert_eq!(
+            fs::read(
+                f.record
+                    .common_directory
+                    .join("worktrees")
+                    .join(&repair.id)
+                    .join("index")
+            )
+            .unwrap(),
+            repair_index
+        );
+        assert!(clean.path.join(".git").is_file());
+        assert!(!repair.path.join(".git").exists());
         drop(lock);
         worktrees::dispose(&f.paths, &f.project, &f.record.id, CancellationToken::new())
             .await
             .unwrap();
+        worktrees::remove(
+            &other,
+            &f.project,
+            &clean.id,
+            &clean_review.hash,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        worktrees::repair::apply(
+            &other,
+            &f.project,
+            &repair.id,
+            &repair_review.hash,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        worktrees::dispose(&other, &f.project, &repair.id, CancellationToken::new())
+            .await
+            .unwrap();
         assert!(!f.record.path.exists());
+    }
+}
+// Real processes contend for one profile's final slot while mutating different
+// repositories. A parent-held admission file proves both reached that boundary;
+// releasing it then permits exactly one durable reservation, never two.
+#[cfg(unix)]
+mod profile_admission {
+    use super::*;
+    use fs2::FileExt;
+    use std::{
+        path::PathBuf,
+        process::{Child, Stdio},
+        time::{Duration, Instant},
+    };
+
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn child() {
+        let Some(root) = std::env::var_os("SHADOWCODE_PROFILE_ADMISSION_FIXTURE") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let label = std::env::var("SHADOWCODE_PROFILE_ADMISSION_CHILD").unwrap();
+        assert!(matches!(label.as_str(), "a" | "b"));
+        let paths = AppPaths::isolated(&root.join("profile")).unwrap();
+        let project = root.join(&label);
+        fs::write(root.join(format!("{label}.ready")), b"ready").unwrap();
+        let started = Instant::now();
+        while !root.join("go").is_file() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "Parent never released child"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(async {
+            let cancel = CancellationToken::new();
+            let expiry = cancel.clone();
+            let watchdog = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                expiry.cancel();
+            });
+            let result = loop {
+                match worktrees::create(&paths, &project, "HEAD", cancel.clone()).await {
+                    Ok(record) => break json!({"outcome":"created", "record":record}),
+                    Err(error)
+                        if error
+                            .to_string()
+                            .contains("Another process owns worktree admission") =>
+                    {
+                        fs::write(
+                            root.join(format!("{label}.blocked")),
+                            b"observed actual advisory contention",
+                        )
+                        .unwrap();
+                        assert!(
+                            !cancel.is_cancelled(),
+                            "Admission remained busy until deadline: {error:#}"
+                        );
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    Err(error) => {
+                        assert!(
+                            error
+                                .to_string()
+                                .contains("At most 64 managed worktree records"),
+                            "Unexpected create failure: {error:#}"
+                        );
+                        break json!({"outcome":"capacity", "error":format!("{error:#}")});
+                    }
+                }
+            };
+            watchdog.abort();
+            let _ = watchdog.await;
+            result
+        });
+        fs::write(
+            root.join(format!("{label}.result.json")),
+            serde_json::to_vec_pretty(&result).unwrap(),
+        )
+        .unwrap();
+    }
+
+    async fn wait_for(root: &Path, names: &[&str], children: &mut [OwnedChild]) {
+        let started = Instant::now();
+        loop {
+            if names.iter().all(|name| root.join(name).is_file()) {
+                return;
+            }
+            for (index, child) in children.iter_mut().enumerate() {
+                if let Some(status) = child.0.try_wait().unwrap() {
+                    panic!(
+                        "Child {index} exited {status} before barrier {names:?}: {}",
+                        fs::read_to_string(root.join(format!("{}.log", ["a", "b"][index])))
+                            .unwrap()
+                    );
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "Timed out at {names:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn different_processes_and_repositories_reserve_only_one_final_profile_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a");
+        let b = root.path().join("b");
+        repository(&a);
+        repository(&b);
+        let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+        let first = worktrees::create(&paths, &a, "HEAD", CancellationToken::new())
+            .await
+            .unwrap();
+        let records = paths.data.join("managed-worktrees/records");
+        for _ in 0..62 {
+            let mut pending = first.clone();
+            pending.id = shadowcode_core::id();
+            pending.path = paths
+                .data
+                .join("managed-worktrees/checkouts")
+                .join(&pending.id);
+            pending.branch = format!("shadowcode/{}", pending.id);
+            pending.state = "creating".into();
+            pending.detail =
+                "Durable interrupted pre-Git reservation; never silently reclaim".into();
+            fs::write(
+                records.join(format!("{}.json", pending.id)),
+                serde_json::to_vec(&pending).unwrap(),
+            )
+            .unwrap();
+        }
+        let source_before: Vec<_> = [&a, &b]
+            .into_iter()
+            .map(|path| {
+                (
+                    git(path, &["rev-parse", "HEAD"]),
+                    fs::read(path.join(".git/index")).unwrap(),
+                )
+            })
+            .collect();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(records.join(".admission.lock"))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+        let mut children = Vec::new();
+        for label in ["a", "b"] {
+            let log = fs::File::create(root.path().join(format!("{label}.log"))).unwrap();
+            children.push(OwnedChild(
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "profile_admission::child", "--nocapture"])
+                    .env("SHADOWCODE_PROFILE_ADMISSION_FIXTURE", root.path())
+                    .env("SHADOWCODE_PROFILE_ADMISSION_CHILD", label)
+                    .stdin(Stdio::null())
+                    .stdout(log.try_clone().unwrap())
+                    .stderr(log)
+                    .spawn()
+                    .unwrap(),
+            ));
+        }
+        wait_for(root.path(), &["a.ready", "b.ready"], &mut children).await;
+        fs::write(root.path().join("go"), b"both processes ready").unwrap();
+        wait_for(root.path(), &["a.blocked", "b.blocked"], &mut children).await;
+        drop(lock);
+        let started = Instant::now();
+        for (index, child) in children.iter_mut().enumerate() {
+            let status = loop {
+                if let Some(status) = child.0.try_wait().unwrap() {
+                    break status;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(15),
+                    "Child did not complete"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            };
+            let log =
+                fs::read_to_string(root.path().join(format!("{}.log", ["a", "b"][index]))).unwrap();
+            assert!(status.success(), "{status}: {log}");
+            assert!(
+                log.contains("1 passed; 0 failed"),
+                "Child test selector did not run: {log}"
+            );
+        }
+        let results: Vec<Value> = ["a", "b"]
+            .into_iter()
+            .map(|label| {
+                serde_json::from_slice(
+                    &fs::read(root.path().join(format!("{label}.result.json"))).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result["outcome"] == "created")
+                .count(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result["outcome"] == "capacity")
+                .count(),
+            1,
+            "{results:?}"
+        );
+        let active: Vec<worktrees::Record> = fs::read_dir(&records)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("json"))
+            .map(|entry| serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap())
+            .collect();
+        assert_eq!(active.len(), 64);
+        assert_eq!(
+            active
+                .iter()
+                .filter(|record| record.state == "creating")
+                .count(),
+            62,
+            "Restart must not silently free interrupted reservations"
+        );
+        for (path, (head, index)) in [&a, &b].into_iter().zip(source_before) {
+            assert_eq!(git(path, &["rev-parse", "HEAD"]), head);
+            assert_eq!(fs::read(path.join(".git/index")).unwrap(), index);
+            assert_eq!(fs::read(path.join("tracked.txt")).unwrap(), b"committed\n");
+        }
+        for record in active.iter().filter(|record| record.state == "ready") {
+            assert_eq!(
+                fs::read(record.path.join("tracked.txt")).unwrap(),
+                b"committed\n"
+            );
+            worktrees::dispose(&paths, &record.source, &record.id, CancellationToken::new())
+                .await
+                .unwrap();
+        }
+        let retained = worktrees::list(&paths, &a).unwrap();
+        assert_eq!(retained.len(), 62);
+        assert!(retained.iter().all(|record| record.state == "creating"));
     }
 }

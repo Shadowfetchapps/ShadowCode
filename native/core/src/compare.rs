@@ -866,11 +866,10 @@ async fn remove_lanes(engine: &Engine, record: &mut Record) -> Vec<String> {
             if let Some(job) = engine.job(&lane.job_id)? {
                 ensure!(!active(&job.status), "Lane task is still stopping");
             }
-            if lane.worktree.exists() {
-                Ok(Some(engine.reserve_workspace(&lane.worktree)?))
-            } else {
-                Ok(None)
-            }
+            Ok((
+                engine.reserve_workspace(&lane.worktree)?,
+                engine.background().reserve_idle_workspace(&lane.worktree)?,
+            ))
         })();
         let _reservation = match reservation {
             Ok(reservation) => reservation,
@@ -1461,6 +1460,17 @@ pub async fn keep_reviewed(
     // Keep the selected lane stable against new application-owned tasks
     // while validating its evidence and capturing the immutable result.
     let _lane_reservation = engine.reserve_workspace(&lane.worktree)?;
+    let _lane_background = engine.background().reserve_idle_workspace(&lane.worktree)?;
+    worktrees::validate_task_checkout(
+        engine.paths(),
+        &record.workspace,
+        &lane.worktree_id,
+        &lane.worktree,
+        &lane.base_commit,
+        &lane.branch,
+        &cancel,
+    )
+    .await?;
     let mut acceptance_checks = lane.checks.clone();
     if let Some(job) = engine.job(&lane.job_id)? {
         let current = checks_from(&crate::verification::current(engine, &job).await?);
@@ -1481,6 +1491,9 @@ pub async fn keep_reviewed(
     }
     // No agent task may run in the source while its working tree changes.
     let _reservation = engine.reserve_workspace(&record.workspace)?;
+    let _source_background = engine
+        .background()
+        .reserve_idle_workspace(&record.workspace)?;
     // Commit the lane's result on its managed branch (never the user's).
     let (head, files) = commit_checkout(
         &lane.worktree,
@@ -1576,6 +1589,7 @@ pub async fn keep_reviewed(
     // A failed save leaves all lane material intact. The earlier apply/save
     // crash window still requires the operation journal.
     record = persist(&store, record).await?;
+    drop(_lane_background);
     drop(_lane_reservation);
     if let Err(error) = stop_lanes(engine, &record, Some(model)).await {
         record.notes.push(format!("Cleanup pending: {error:#}"));

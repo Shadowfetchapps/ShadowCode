@@ -94,6 +94,8 @@ fn snapshot(path: &Path, admin: bool, cancel: CancellationToken) -> Result<Tree>
         end: Instant::now() + Duration::from_secs(30),
         cancel,
     };
+    #[cfg(test)]
+    tests::pause_scan(path, &budget.cancel)?;
     walk(&dir, Path::new(""), admin, &mut tree.entries, &mut budget)?;
     ensure!(
         identity(&directory(path)?.dir_metadata()?) == tree.root,
@@ -239,7 +241,7 @@ struct Intent {
     pointer: String,
 }
 pub(super) struct Session {
-    _lock: fs::File,
+    _lock: super::locks::Mutation,
     journal: PathBuf,
     record: Record,
     delete_branch: bool,
@@ -288,10 +290,9 @@ impl Session {
         paths: &AppPaths,
         record: &Record,
         delete_branch: bool,
+        lock: super::locks::Mutation,
         cancel: &CancellationToken,
     ) -> Result<Self> {
-        use fs2::FileExt;
-        use std::os::unix::fs::MetadataExt;
         ensure!(!cancel.is_cancelled(), "Worktree removal cancelled");
         let common = git(
             &record.source,
@@ -303,23 +304,7 @@ impl Session {
             Path::new(&common).canonicalize()? == record.common_directory,
             "Source repository identity changed"
         );
-        // Distinct from Compare's outer repository lock: also protects callers
-        // of dispose/release outside Compare, without reentrant flock deadlock.
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(record.common_directory.join("shadowcode-disposal.lock"))?;
-        let meta = lock.metadata()?;
-        ensure!(
-            meta.is_file() && meta.nlink() == 1 && meta.uid() == unsafe { libc::geteuid() },
-            "Unsafe worktree disposal lock"
-        );
-        lock.try_lock_exclusive()
-            .context("Another process owns worktree cleanup; retry later")?;
+        lock.validate(&record.source, &record.common_directory)?;
         let directory = paths.data.join("managed-worktrees/records/cleanup");
         paths::private_directory(&directory)?;
         let journal = directory.join(format!("{}.json", record.id));
@@ -863,7 +848,7 @@ pub(super) async fn dispose(
     delete_branch: bool,
     cancel: CancellationToken,
 ) -> Result<Option<String>> {
-    let _guard = tokio::select! {guard=super::CREATION.lock()=>guard,_=cancel.cancelled()=>anyhow::bail!("Worktree removal cancelled")};
+    let ownership = super::locks::mutation(source, &cancel).await?;
     let (records, _) = super::roots(paths)?;
     let archived = !exists(&records.join(format!("{id}.json")))?;
     let mut record = super::read_record_identity_at(paths, id, archived)?;
@@ -871,7 +856,7 @@ pub(super) async fn dispose(
         record.source == crate::workspace::Workspace::open(source)?.path,
         "Worktree belongs to another source project"
     );
-    let mut session = Session::open(paths, &record, delete_branch, &cancel).await?;
+    let mut session = Session::open(paths, &record, delete_branch, ownership, &cancel).await?;
     if archived {
         let intent = session
             .intent
@@ -1166,9 +1151,17 @@ mod tests {
             .join(&record.id)
             .join("index");
         fs::set_permissions(&index, fs::Permissions::from_mode(0o640)).unwrap();
-        let mut session = Session::open(&paths, &record, true, &CancellationToken::new())
-            .await
-            .unwrap();
+        let mut session = Session::open(
+            &paths,
+            &record,
+            true,
+            super::super::locks::mutation(&record.source, &CancellationToken::new())
+                .await
+                .unwrap(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let started = Instant::now();
         session
             .prepare(
@@ -1627,6 +1620,573 @@ mod tests {
         assert!(!q.exists() && !f.record.path.exists());
         assert_eq!(
             fs::read_to_string(f.record.source.join("tracked.txt")).unwrap(),
+            "original\n"
+        );
+    }
+    // Compiled only into this unit-test target. Production has no environment
+    // variable, delay, or public API capable of holding a cleanup scan.
+    static PAUSED_SCANS: std::sync::LazyLock<
+        std::sync::Mutex<BTreeMap<PathBuf, std::sync::Weak<ScanPause>>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
+    struct PauseState {
+        entered: Option<tokio::sync::oneshot::Sender<()>>,
+        released: bool,
+    }
+    struct ScanPause {
+        state: std::sync::Mutex<PauseState>,
+        wake: std::sync::Condvar,
+    }
+    struct PausedScan {
+        path: PathBuf,
+        pause: std::sync::Arc<ScanPause>,
+    }
+    impl PausedScan {
+        fn install(path: &Path) -> (Self, tokio::sync::oneshot::Receiver<()>) {
+            let (send, receive) = tokio::sync::oneshot::channel();
+            let pause = std::sync::Arc::new(ScanPause {
+                state: std::sync::Mutex::new(PauseState {
+                    entered: Some(send),
+                    released: false,
+                }),
+                wake: std::sync::Condvar::new(),
+            });
+            let mut registry = PAUSED_SCANS.lock().unwrap();
+            registry.retain(|_, value| value.strong_count() > 0);
+            assert!(registry
+                .insert(path.to_owned(), std::sync::Arc::downgrade(&pause))
+                .is_none());
+            (
+                Self {
+                    path: path.to_owned(),
+                    pause,
+                },
+                receive,
+            )
+        }
+        fn release(&self) {
+            self.pause
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .released = true;
+            self.pause.wake.notify_all();
+        }
+    }
+    impl Drop for PausedScan {
+        fn drop(&mut self) {
+            self.release();
+            PAUSED_SCANS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.path);
+        }
+    }
+    pub(super) fn pause_scan(path: &Path, cancel: &CancellationToken) -> Result<()> {
+        let pause = PAUSED_SCANS
+            .lock()
+            .unwrap()
+            .remove(path)
+            .and_then(|weak| weak.upgrade());
+        let Some(pause) = pause else {
+            return Ok(());
+        };
+        let mut state = pause.state.lock().unwrap();
+        if let Some(entered) = state.entered.take() {
+            let _ = entered.send(());
+        }
+        let end = Instant::now() + Duration::from_secs(10);
+        while !state.released {
+            ensure!(!cancel.is_cancelled(), "Test cleanup scan cancelled");
+            ensure!(
+                Instant::now() < end,
+                "Test cleanup scan barrier was not released"
+            );
+            state = pause
+                .wake
+                .wait_timeout(state, Duration::from_millis(25))
+                .unwrap()
+                .0;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unrelated_repository_create_completes_during_held_cleanup_scan() {
+        let f = prepared().await;
+        let q = f.session.intent.as_ref().unwrap().quarantine.clone();
+        let second = f._root.path().join("independent-source");
+        fs::create_dir(&second).unwrap();
+        command(&second, &["init", "-q"]);
+        fs::write(second.join("tracked.txt"), "independent bytes\n").unwrap();
+        command(&second, &["add", "tracked.txt"]);
+        command(&second, &["commit", "-qm", "Independent"]);
+        let a_head = command(&f.record.source, &["rev-parse", "HEAD"]);
+        let b_head = command(&second, &["rev-parse", "HEAD"]);
+        let (hold, entered) = PausedScan::install(&q);
+        drop(f.session);
+        let paths = f.paths.clone();
+        let source = f.record.source.clone();
+        let id = f.record.id.clone();
+        let removal = tokio::spawn(async move {
+            super::super::dispose(&paths, &source, &id, CancellationToken::new()).await
+        });
+        tokio::time::timeout(Duration::from_secs(3), entered)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !removal.is_finished(),
+            "The real scan must remain at its barrier"
+        );
+        let created = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::super::create(&f.paths, &second, "HEAD", CancellationToken::new()),
+        )
+        .await;
+        let still_held = !removal.is_finished() && !hold.pause.state.lock().unwrap().released;
+        // Always release and join before asserting a regression, including the
+        // old global-lock failure. No orphan task may outlive the fixture root.
+        hold.release();
+        tokio::time::timeout(Duration::from_secs(5), removal)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let created = created
+            .expect("Unrelated repository creation waited for another repository's scan")
+            .unwrap();
+        assert!(
+            still_held,
+            "Creation only finished after the cleanup barrier released"
+        );
+        assert_eq!(created.state, "ready");
+        assert_eq!(
+            fs::read(created.path.join("tracked.txt")).unwrap(),
+            b"independent bytes\n"
+        );
+        assert!(!f.record.path.exists() && !q.exists());
+        assert_eq!(command(&f.record.source, &["rev-parse", "HEAD"]), a_head);
+        assert_eq!(command(&second, &["rev-parse", "HEAD"]), b_head);
+        assert_eq!(
+            fs::read_to_string(f.record.source.join("tracked.txt")).unwrap(),
+            "original\n"
+        );
+        super::super::dispose(&f.paths, &second, &created.id, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(super::super::list(&f.paths, &second).unwrap().is_empty());
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_repositories_share_one_profile_admission_limit() {
+        let f = prepared().await;
+        let (records, checkouts) = super::super::roots(&f.paths).unwrap();
+        // Durable pre-Git reservations are valid active inventory too. Seed
+        // 62 interrupted reservations plus the real existing checkout = 63.
+        // This does not pretend to create 63 live Git registrations.
+        for _ in 0..62 {
+            let mut pending = f.record.clone();
+            pending.id = crate::id();
+            pending.path = checkouts.join(&pending.id);
+            pending.branch = format!("shadowcode/{}", pending.id);
+            pending.state = "creating".into();
+            pending.detail = "Seeded durable pre-Git reservation after interrupted creation".into();
+            super::super::save(&records, &pending).unwrap();
+        }
+        let second = f._root.path().join("second-source");
+        fs::create_dir(&second).unwrap();
+        command(&second, &["init", "-q"]);
+        fs::write(second.join("tracked.txt"), "second\n").unwrap();
+        command(&second, &["add", "tracked.txt"]);
+        command(&second, &["commit", "-qm", "Second"]);
+        drop(f.session);
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let mut tasks = Vec::new();
+        for source in [f.record.source.clone(), second] {
+            let paths = f.paths.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                super::super::create(&paths, &source, "HEAD", CancellationToken::new()).await
+            }));
+        }
+        barrier.wait().await;
+        let mut successes = 0;
+        let mut refusals = 0;
+        for task in tasks {
+            match tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                Ok(record) => {
+                    successes += 1;
+                    assert_eq!(record.state, "ready");
+                }
+                Err(error) => {
+                    refusals += 1;
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("At most 64 managed worktree records"),
+                        "{error:#}"
+                    );
+                }
+            }
+        }
+        assert_eq!((successes, refusals), (1, 1));
+        let active = fs::read_dir(&records)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("json"))
+            .count();
+        assert_eq!(active, 64);
+        let interrupted = fs::read_dir(&records)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("json"))
+            .filter(|entry| {
+                serde_json::from_slice::<Record>(&fs::read(entry.path()).unwrap())
+                    .unwrap()
+                    .state
+                    == "creating"
+            })
+            .count();
+        assert_eq!(
+            interrupted, 62,
+            "Admission must not silently free interrupted ownership on restart"
+        );
+    }
+    // Separate follow-up regression: expected to fail even after the core lock
+    // patch until worktree_tasks::LOCK is replaced. No model is called; the real
+    // task prepare/discard entrypoints and actual cleanup scan are exercised.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unrelated_worktree_task_prepare_completes_during_held_task_cleanup() {
+        use crate::{engine::Engine, store::keys, worktree_tasks};
+        let f = prepared().await;
+        let q = f.session.intent.as_ref().unwrap().quarantine.clone();
+        let second = f._root.path().join("task-source-b");
+        fs::create_dir(&second).unwrap();
+        command(&second, &["init", "-q"]);
+        fs::write(second.join("tracked.txt"), "independent task bytes\n").unwrap();
+        command(&second, &["add", "tracked.txt"]);
+        command(&second, &["commit", "-qm", "Task B"]);
+        let before = command(&second, &["rev-parse", "HEAD"]);
+        drop(f.session);
+        let engine = Engine::open(f.paths.clone()).unwrap();
+        let store = engine.store();
+        let session = store
+            .create_session(&f.record.path, "fixture-only", "Task A")
+            .unwrap();
+        let task_id = crate::id();
+        let task: worktree_tasks::Record = serde_json::from_value(serde_json::json!({
+            "id":task_id,"workspace":f.record.source,"session_id":session["id"],
+            "worktree":f.record.path,"worktree_id":f.record.id,"branch":f.record.branch,
+            "base":{"commit":f.record.base_commit,"head":f.record.base_commit},
+            "state":"done","status":"completed","task":"Recorded local fixture"
+        }))
+        .unwrap();
+        store
+            .set_native_meta(
+                &keys::worktree_task_record(&task_id),
+                &serde_json::to_string(&task).unwrap(),
+            )
+            .unwrap();
+        store
+            .set_native_meta(
+                &keys::worktree_task_index(&task.workspace),
+                &serde_json::json!([task_id]).to_string(),
+            )
+            .unwrap();
+        let (hold, entered) = PausedScan::install(&q);
+        let closing_engine = engine.clone();
+        let closing_id = task_id.clone();
+        let closing =
+            tokio::spawn(
+                async move { worktree_tasks::discard(&closing_engine, &closing_id).await },
+            );
+        tokio::time::timeout(Duration::from_secs(3), entered)
+            .await
+            .unwrap()
+            .unwrap();
+        let created = tokio::time::timeout(
+            Duration::from_secs(2),
+            worktree_tasks::prepare(
+                &engine,
+                &second,
+                "Task B without a model turn",
+                &[],
+                "fixture-only",
+            ),
+        )
+        .await;
+        let visibility = if let Ok(Ok(record)) = &created {
+            Some(
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    let got = worktree_tasks::get(&engine, &record.id).await?;
+                    let listed = worktree_tasks::list(&engine, &second).await?;
+                    Ok::<_, anyhow::Error>((got, listed))
+                })
+                .await,
+            )
+        } else {
+            None
+        };
+        let still_held = !closing.is_finished() && !hold.pause.state.lock().unwrap().released;
+        hold.release();
+        let closed = tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let created_ok = created
+            .as_ref()
+            .ok()
+            .and_then(|result| result.as_ref().ok())
+            .cloned();
+        if let Some(record) = created_ok {
+            worktree_tasks::abandon(&engine, record).await;
+        }
+        engine.shutdown().await.unwrap();
+        assert!(
+            closed.removed,
+            "Task A cleanup did not complete: {closed:?}"
+        );
+        let created = created
+            .expect("Task B was blocked by worktree_tasks global LOCK while Task A scanned")
+            .unwrap();
+        assert!(
+            still_held,
+            "Task B only prepared after Task A released its scan"
+        );
+        assert_eq!(created.state, "starting");
+        let (got, listed) = visibility
+            .expect("Task B must exist for visibility checks")
+            .expect("Unrelated task get/list waited for Task A's scan")
+            .unwrap();
+        assert_eq!(got.id, created.id);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.id);
+        assert_eq!(command(&second, &["rev-parse", "HEAD"]), before);
+        assert_eq!(
+            fs::read(second.join("tracked.txt")).unwrap(),
+            b"independent task bytes\n"
+        );
+        assert!(!q.exists());
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_task_discard_and_cancelled_waiter_close_the_same_record_once() {
+        use crate::{engine::Engine, store::keys, worktree_tasks};
+        let f = prepared().await;
+        let q = f.session.intent.as_ref().unwrap().quarantine.clone();
+        let source_index = fs::read(f.record.source.join(".git/index")).unwrap();
+        let source_head = command(&f.record.source, &["rev-parse", "HEAD"]);
+        drop(f.session);
+        let engine = Engine::open(f.paths.clone()).unwrap();
+        let store = engine.store();
+        let session = store
+            .create_session(&f.record.path, "fixture-only", "One close")
+            .unwrap();
+        let task_id = crate::id();
+        let task: worktree_tasks::Record = serde_json::from_value(serde_json::json!({
+            "id":task_id,"workspace":f.record.source,"session_id":session["id"],
+            "worktree":f.record.path,"worktree_id":f.record.id,"branch":f.record.branch,
+            "base":{"commit":f.record.base_commit,"head":f.record.base_commit},
+            "state":"done","status":"completed","task":"Single close fixture"
+        }))
+        .unwrap();
+        store
+            .set_native_meta(
+                &keys::worktree_task_record(&task_id),
+                &serde_json::to_string(&task).unwrap(),
+            )
+            .unwrap();
+        store
+            .set_native_meta(
+                &keys::worktree_task_index(&task.workspace),
+                &serde_json::json!([task_id]).to_string(),
+            )
+            .unwrap();
+        let (hold, entered) = PausedScan::install(&q);
+        let owner_engine = engine.clone();
+        let owner_id = task_id.clone();
+        let owner =
+            tokio::spawn(async move { worktree_tasks::discard(&owner_engine, &owner_id).await });
+        tokio::time::timeout(Duration::from_secs(3), entered)
+            .await
+            .unwrap()
+            .unwrap();
+        let cancelled_engine = engine.clone();
+        let cancelled_id = task_id.clone();
+        let cancelled =
+            tokio::spawn(
+                async move { worktree_tasks::discard(&cancelled_engine, &cancelled_id).await },
+            );
+        let queued = tokio::time::timeout(Duration::from_secs(3), async {
+            while worktree_tasks::record_lock_references(&store, &task_id) < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        cancelled.abort();
+        let cancelled_result = tokio::time::timeout(Duration::from_secs(1), cancelled).await;
+        let second_engine = engine.clone();
+        let second_id = task_id.clone();
+        let second =
+            tokio::spawn(async move { worktree_tasks::discard(&second_engine, &second_id).await });
+        let second_queued = tokio::time::timeout(Duration::from_secs(3), async {
+            while worktree_tasks::record_lock_references(&store, &task_id) < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        let still_held = !owner.is_finished()
+            && !second.is_finished()
+            && !hold.pause.state.lock().unwrap().released;
+        // All actual work is joined before checking regressions; the temporary
+        // repository never disappears beneath a detached cleanup task.
+        hold.release();
+        let first = tokio::time::timeout(Duration::from_secs(5), owner)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let repeated = tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        engine.shutdown().await.unwrap();
+        assert!(
+            queued.is_ok() && second_queued.is_ok(),
+            "Both real discard calls must reach the shared queue"
+        );
+        assert!(cancelled_result.unwrap().unwrap_err().is_cancelled());
+        assert!(still_held);
+        assert!(first.removed && first.state == "discarded");
+        assert_eq!(first.to_json(), repeated.to_json(), "Second close must acknowledge the same outcome without duplicate notes or state changes");
+        assert_eq!(
+            worktree_tasks::load(&store, &task_id).unwrap().to_json(),
+            first.to_json()
+        );
+        let managed = super::super::task_record(&f.paths, &f.record.id).unwrap();
+        assert_eq!(managed.state, "removed");
+        let records = f.paths.data.join("managed-worktrees/records");
+        assert!(!records.join(format!("{}.json", f.record.id)).exists());
+        let mut archived: Vec<_> = fs::read_dir(records.join("archive"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        archived.sort();
+        assert_eq!(
+            archived,
+            vec![
+                format!("{}.cleanup", f.record.id),
+                format!("{}.json", f.record.id)
+            ]
+        );
+        assert!(!q.exists() && !f.record.path.exists());
+        assert_eq!(
+            fs::read(f.record.source.join(".git/index")).unwrap(),
+            source_index
+        );
+        assert_eq!(
+            command(&f.record.source, &["rev-parse", "HEAD"]),
+            source_head
+        );
+        assert!(command(&f.record.source, &["branch", "--list", &f.record.branch]).is_empty());
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_cleanup_blocks_new_commands_and_background_processes_during_original_scan() {
+        use crate::{
+            config::Config,
+            engine::{CommandRequest, Engine, StartRequest},
+            store::keys,
+            worktree_tasks,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        fs::create_dir(&source).unwrap();
+        command(&source, &["init", "-q"]);
+        fs::write(source.join("tracked.txt"), "original\n").unwrap();
+        command(&source, &["add", "."]);
+        command(&source, &["commit", "-qm", "Base"]);
+        let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+        Config::patch(&paths, serde_json::json!({"cli_agents":{"enabled":false}, "permissions":{"mode":"ask","approve_shell":true},
+            "model":{"provider":"local","name":"fixture-only","default":"fixture-only","endpoint":"http://127.0.0.1:9/v1","context_limit":16384}})).unwrap();
+        let engine = Engine::open(paths.clone()).unwrap();
+        let mut task =
+            worktree_tasks::prepare(&engine, &source, "No model turn", &[], "fixture-only")
+                .await
+                .unwrap();
+        task.state = "done".into();
+        task.status = "completed".into();
+        engine
+            .store()
+            .set_native_meta(
+                &keys::worktree_task_record(&task.id),
+                &serde_json::to_string(&task).unwrap(),
+            )
+            .unwrap();
+        let config = Config::load(&paths, Some(&task.worktree)).unwrap();
+        let (hold, entered) = PausedScan::install(&task.worktree);
+        let closing_engine = engine.clone();
+        let closing_id = task.id.clone();
+        let closing =
+            tokio::spawn(
+                async move { worktree_tasks::discard(&closing_engine, &closing_id).await },
+            );
+        tokio::time::timeout(Duration::from_secs(5), entered)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            task.worktree.is_dir(),
+            "Barrier must hold original checkout before rename"
+        );
+        let command_result = engine
+            .start_command(
+                StartRequest {
+                    workspace: task.worktree.clone(),
+                    task: "Never run".into(),
+                    session_id: Some(task.session_id.clone()),
+                    model: None,
+                    mode: "command".into(),
+                    queue: true,
+                    images: Vec::new(),
+                    web: false,
+                },
+                CommandRequest {
+                    command: "printf forbidden > must-not-run.txt".into(),
+                    timeout_sec: 30,
+                },
+                None,
+            )
+            .await;
+        let background_result = engine.background().start(
+            &task.worktree,
+            &config,
+            None,
+            "blocked-fixture",
+            "sleep 300",
+        );
+        hold.release();
+        let closed = tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .unwrap()
+            .unwrap();
+        engine.shutdown().await.unwrap();
+        assert!(command_result
+            .unwrap_err()
+            .to_string()
+            .contains("manual operation"));
+        assert!(background_result
+            .unwrap_err()
+            .to_string()
+            .contains("being removed"));
+        assert!(closed.unwrap().removed);
+        assert!(!task.worktree.exists() && !source.join("must-not-run.txt").exists());
+        assert_eq!(
+            fs::read_to_string(source.join("tracked.txt")).unwrap(),
             "original\n"
         );
     }

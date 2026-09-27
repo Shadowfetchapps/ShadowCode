@@ -104,7 +104,7 @@ impl Drop for IdleWorkspace {
 }
 impl BackgroundManager {
     pub(crate) fn reserve_idle_workspace(self: &Arc<Self>, path: &Path) -> Result<IdleWorkspace> {
-        let path = path.canonicalize()?;
+        let path = crate::workspace::reservation_path(path)?;
         let mut state = self
             .state
             .lock()
