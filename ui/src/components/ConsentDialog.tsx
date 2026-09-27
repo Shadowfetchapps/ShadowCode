@@ -7,6 +7,7 @@ import { providerLabel } from "../lib/transcript";
 export function ConsentDialog({
   request,
   destination,
+  billingWarning,
   attachments,
   onSend,
   onCancel,
@@ -14,6 +15,8 @@ export function ConsentDialog({
   request: ConsentRequest;
   /** Picker row name of the destination, e.g. "Cursor · Auto". */
   destination?: string;
+  /** Exact selected account warning; does not change the consent destination. */
+  billingWarning?: string;
   /** Local attachment names in this message. */
   attachments: string[];
   onSend: () => void;
@@ -37,6 +40,7 @@ export function ConsentDialog({
           ? `The conversation so far ran on ${from}.`
           : "It includes content that is only on this computer."}
       </p>
+      {billingWarning && <p className="warn-text">{billingWarning}</p>}
       <ul className="consent-list">
         <li>Your new message</li>
         {chars > 0 && (

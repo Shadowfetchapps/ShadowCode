@@ -17,7 +17,12 @@ import {
 } from "../../api";
 import { Dialog } from "../Dialog";
 import { listen } from "../../lib/transport";
-import { relativeTime, usageDetailLines, usageLabel } from "../../lib/picker";
+import {
+  billingWarning,
+  relativeTime,
+  usageDetailLines,
+  usageLabel,
+} from "../../lib/picker";
 
 const ORDER = ["codex", "claude", "cursor", "antigravity", "grok"];
 
@@ -389,7 +394,10 @@ export function AccountsPage({
       {keys.map((key) => {
         const status = vendors![key];
         const ready = status.state === "ready";
-        const apiKey = /api.?key/i.test(status.account?.auth_mode || "");
+        const apiKey =
+          status.billing == null
+            ? /api.?key/i.test(status.account?.auth_mode || "")
+            : status.billing === "api_key";
         // The account line already names the plan; don't repeat it below.
         const usageLines = usageDetailLines(status.usage).filter(
           (line) => !(status.account?.plan && / plan$/.test(line)),
@@ -444,6 +452,9 @@ export function AccountsPage({
               )}
             {apiKey && (
               <p className="warn-text">API key login · billed per token</p>
+            )}
+            {status.billing === "unknown" && (
+              <p className="warn-text">{billingWarning(status)}</p>
             )}
             {!needsInstall && !ready && status.fix && (
               <p className="hint">{status.fix}</p>

@@ -10,6 +10,9 @@ pub const ROUTE_VENDOR: &str = "vendor_cli";
 pub const ROUTE_LOCAL: &str = "local_llamacpp";
 /// Subtitle for a vendor row whose CLI is signed in with an API key.
 pub const API_KEY_SUBTITLE: &str = "API key login · billed per token";
+/// Authentication succeeded, but the current login's billing was not verified.
+pub const UNVERIFIED_BILLING_SUBTITLE: &str = "Cloud · billing unverified";
+pub const UNVERIFIED_BILLING_DETAIL: &str = "Could not verify how this CLI login is billed. API charges may apply; subscription usage is unavailable.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,6 +52,9 @@ pub struct PickerTarget {
     pub group: String,
     pub name: String,
     pub subtitle: String,
+    /// The catalog's explicit billing observation; independent of route/group.
+    #[serde(default)]
+    pub billing: Option<String>,
     pub inference: String,
     pub availability: Availability,
     pub availability_label: String,
@@ -72,6 +78,7 @@ impl PickerTarget {
             "group": self.group,
             "name": self.name,
             "subtitle": self.subtitle,
+            "billing": self.billing,
             "inference": self.inference,
             "availability": self.availability,
             "availability_label": self.availability_label,
@@ -127,6 +134,7 @@ pub fn vendor_target(
         group: GROUP_SUBSCRIPTIONS.into(),
         name,
         subtitle: "Cloud · subscription".into(),
+        billing: None,
         inference: "cloud".into(),
         availability,
         availability_label: availability.label().into(),

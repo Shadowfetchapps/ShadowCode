@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import {
   availabilityLabel,
+  billingWarning,
   groupTargets,
   isApiKey,
   isLocal,
@@ -133,12 +134,19 @@ export function UnifiedPicker({
       ]);
     // With no API-key rows at all, the group offers to add a key instead.
     const noApiRows = !targets.some(isApiKey);
+    const mixedVendorBilling = all.subscriptions.some(
+      (target) => target.billing === "unknown" || target.billing === "api_key",
+    );
     return [
       {
         id: "subscriptions",
-        title: "Subscriptions",
+        title: mixedVendorBilling ? "Vendor CLIs" : "Subscriptions",
         items: build(all.subscriptions),
-        empty: query ? "No subscription matches" : "No accounts connected yet",
+        empty: query
+          ? mixedVendorBilling
+            ? "No vendor CLI matches"
+            : "No subscription matches"
+          : "No accounts connected yet",
       },
       // Free local models come before paid API rows, so a search that
       // matches both picks the local one on Enter.
@@ -302,7 +310,9 @@ export function UnifiedPicker({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={
-          selected ? `${label}: ${selected.name}` : `${label}: none chosen`
+          selected
+            ? `${label}: ${selected.name}${billingWarning(selected) ? `; ${billingWarning(selected)}` : ""}`
+            : `${label}: none chosen`
         }
         onClick={() => (open ? close() : onOpenChange(true))}
       >
@@ -312,9 +322,11 @@ export function UnifiedPicker({
           >
             {isLocal(selected)
               ? "Local"
-              : isApiKey(selected)
-                ? "API key"
-                : "Cloud"}
+              : selected.billing === "unknown"
+                ? "Billing unverified"
+                : selected.billing === "api_key" || isApiKey(selected)
+                  ? "API key"
+                  : "Cloud"}
           </span>
         )}
         <span className="unified-picker-current">
@@ -579,6 +591,7 @@ function Row({
           <span className={`avail avail-${target.availability}`}>
             {availabilityLabel(target)}
           </span>
+          {billingWarning(target) && ` · ${billingWarning(target)}`}
           {/* Rows show allowance only when the provider reports one; the
               "Usage unavailable" explanation stays in the details panel. */}
           {target.usage?.state !== "unavailable" &&
@@ -622,6 +635,7 @@ function Details({
   return (
     <div className="unified-picker-details" id={id} aria-live="polite">
       <strong>{target.name}</strong>
+      {billingWarning(target) && <p>{billingWarning(target)}</p>}
       {apiKey && target.subtitle && <p>{target.subtitle}</p>}
       <p>
         {isLocal(target)

@@ -1,5 +1,5 @@
 import { request, ApiError } from "./lib/transport";
-import type { PickerTarget, UsageSnapshot } from "./lib/picker";
+import type { BillingMode, PickerTarget, UsageSnapshot } from "./lib/picker";
 import type { ContextAttachment } from "./lib/pendingAttachments";
 import type { PreviewOpened, PreviewServer } from "./lib/preview";
 
@@ -22,6 +22,7 @@ export type EditorRecoveryDraft = {
 };
 
 export type VendorStatus = {
+  billing?: BillingMode | null;
   /** Product name without the CLI binary, e.g. "Claude Code". */
   product?: string;
   id: string;

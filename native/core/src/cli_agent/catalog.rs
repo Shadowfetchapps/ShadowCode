@@ -176,6 +176,27 @@ impl VendorStatus {
             _ => false,
         }
     }
+    /// Codex's boolean login-status fallback establishes authentication, not
+    /// billing. Only the structured account types establish these two routes;
+    /// an absent or newer, unrecognized type cannot imply a subscription.
+    fn billing_unverified(&self) -> bool {
+        self.vendor == Vendor::Codex
+            && !matches!(
+                self.account
+                    .as_ref()
+                    .and_then(|account| account.auth_mode.as_deref()),
+                Some("chatgpt" | "apiKey")
+            )
+    }
+    fn billing(&self) -> &'static str {
+        if self.api_key_login() {
+            "api_key"
+        } else if self.billing_unverified() {
+            "unknown"
+        } else {
+            "subscription"
+        }
+    }
     /// Account identity used to key persisted usage (never a display name).
     pub fn account_key(&self) -> String {
         self.account
@@ -200,6 +221,15 @@ impl VendorStatus {
         let provider = self.vendor.provider();
         if self.api_key_login() {
             return UsageSnapshot::api_key_login(&provider);
+        }
+        if self.billing_unverified() && self.fetched_at > 0.0 {
+            // Do not attach the previous login's plan numbers to a newly
+            // probed, unidentified login. Before any probe, persisted receipts
+            // remain explicitly stale historical observations as before.
+            return UsageSnapshot::unavailable_because(
+                &provider,
+                picker::UNVERIFIED_BILLING_DETAIL,
+            );
         }
         let snap = match (&self.usage_raw, self.vendor) {
             (Some(raw), Vendor::Codex) => {
@@ -268,7 +298,7 @@ impl VendorStatus {
             "login_command": self.vendor.login_command(),
             "logout_command": self.vendor.logout_command(),
             "shared_cli_note": self.vendor.shared_cli_note(),
-            "billing": if self.api_key_login() { "api_key" } else { "subscription" },
+            "billing": self.billing(),
             "usage": self.usage_for("default", crate::now()),
             // Antigravity's agent server is installed by ShadowCode on request.
             "install": (self.vendor == Vendor::Antigravity).then(|| {
@@ -584,8 +614,11 @@ impl VendorCatalog {
                         status.accepts_images && model.vision,
                     );
                     row.is_default = model.is_default;
+                    row.billing = Some(status.billing().into());
                     if api_key {
                         row.subtitle = picker::API_KEY_SUBTITLE.into();
+                    } else if status.billing_unverified() {
+                        row.subtitle = picker::UNVERIFIED_BILLING_SUBTITLE.into();
                     }
                     rows.push(row);
                 }
@@ -604,8 +637,11 @@ impl VendorCatalog {
                     usage,
                     status.accepts_images,
                 );
+                row.billing = Some(status.billing().into());
                 if api_key {
                     row.subtitle = picker::API_KEY_SUBTITLE.into();
+                } else if status.billing_unverified() {
+                    row.subtitle = picker::UNVERIFIED_BILLING_SUBTITLE.into();
                 }
                 rows.push(row);
             }
@@ -676,6 +712,8 @@ fn ready_detail(status: &VendorStatus) -> String {
     let mut parts = vec![format!("Ready · {version}")];
     if status.api_key_login() {
         parts.push("API key login · billed per token".into());
+    } else if status.billing_unverified() {
+        parts.push("Billing unverified · API charges may apply".into());
     }
     if let Some(account) = &status.account {
         if let Some(plan) = &account.plan {
@@ -713,10 +751,12 @@ async fn probe_codex(binary: &Path, status: &mut VendorStatus) {
                         status.usage_note =
                             Some("Codex did not report rate limits for this login".into());
                     }
-                } else {
+                } else if status.api_key_login() {
                     status.usage_note = Some(
                         "Signed in with an API key: usage is billed per token, not a plan allowance".into(),
                     );
+                } else {
+                    status.usage_note = Some(picker::UNVERIFIED_BILLING_DETAIL.into());
                 }
                 status.availability = Availability::Ready;
                 status.detail = ready_detail(status);
@@ -737,6 +777,7 @@ async fn probe_codex(binary: &Path, status: &mut VendorStatus) {
             match state {
                 doctor::LoginState::LoggedIn => {
                     status.availability = Availability::Ready;
+                    status.usage_note = Some(picker::UNVERIFIED_BILLING_DETAIL.into());
                     status.detail =
                         format!("{} (app-server unavailable: {error})", ready_detail(status));
                 }

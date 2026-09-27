@@ -40,6 +40,8 @@ export type UsageSnapshot = {
 export type Availability =
   "ready" | "sign_in" | "setup_required" | "unavailable";
 
+export type BillingMode = "subscription" | "api_key" | "unknown";
+
 export type LocalDetail = {
   path?: string;
   bytes?: number;
@@ -57,6 +59,8 @@ export type PickerTarget = {
   group: "subscriptions" | "api" | "local" | string;
   name: string;
   subtitle?: string;
+  /** Explicit account observation; route/group never establish billing. */
+  billing?: BillingMode | null;
   inference: "cloud" | "local" | string;
   availability: Availability | string;
   availability_label?: string;
@@ -74,6 +78,16 @@ export type PickerTarget = {
 export const UNKNOWN_USAGE = "Usage unavailable · Open provider usage";
 export const LOCAL_USAGE = "Runs on this computer · No subscription quota";
 export const API_KEY_USAGE = "API key · billed per token";
+
+/** Missing legacy data remains unspecified, never inferred from the route. */
+export function billingWarning(
+  target?: { billing?: BillingMode | null } | null,
+): string | undefined {
+  if (target?.billing === "unknown")
+    return "Billing unverified · API charges may apply";
+  if (target?.billing === "api_key") return "API key login · billed per token";
+  return undefined;
+}
 
 export const isLocal = (target: PickerTarget) =>
   target.inference === "local" || target.group === "local";
@@ -252,9 +266,11 @@ export function matchesQuery(target: PickerTarget, query: string): boolean {
     target.availability_label,
     isLocal(target)
       ? "local this computer"
-      : isApiKey(target)
-        ? "cloud api key"
-        : "cloud subscription",
+      : target.billing === "unknown"
+        ? "cloud billing unverified"
+        : target.billing === "api_key" || isApiKey(target)
+          ? "cloud api key"
+          : "cloud subscription",
   ]
     .filter(Boolean)
     .join(" ")

@@ -23,6 +23,24 @@ afterEach(() => {
   delete window.__SHADOW_TEST_TRANSPORT__;
 });
 
+it("Accounts: explicit unknown billing overrides legacy auth labels without inventing quota", async () => {
+  Object.assign(fake.state.vendors.codex, {
+    billing: "unknown",
+    account: { auth_mode: "apiKey" },
+    usage: { state: "unavailable", label: "Usage unavailable", windows: [] },
+    usage_note: null,
+  });
+  render(<AccountsPage onChanged={vi.fn()} onToast={vi.fn()} />);
+  const codex = await screen.findByRole("article", { name: "Codex" });
+  expect(
+    within(codex).getByText("Billing unverified · API charges may apply"),
+  ).toBeTruthy();
+  expect(
+    within(codex).queryByText("API key login · billed per token"),
+  ).toBeNull();
+  expect(codex.textContent).not.toMatch(/\d+%|Shared plan usage|Pro plan/);
+});
+
 it("Accounts: status, usage windows, models and Connect for signed-out vendors", async () => {
   const onChanged = vi.fn();
   render(<AccountsPage onChanged={onChanged} onToast={vi.fn()} />);

@@ -141,6 +141,101 @@ async fn catalog_states_are_sign_in_setup_required_and_api_key() {
 }
 
 #[tokio::test]
+async fn codex_failed_probe_does_not_label_an_api_key_login_as_subscription() {
+    let root = tempfile::tempdir().unwrap();
+    let fake = FakeCodex::new(root.path(), json!({"auth":"apiKey","exit_on_start":true}));
+    let catalog = VendorCatalog::new();
+    let cfg = config(&fake);
+    let status = catalog.refresh(Vendor::Codex, &cfg, true).await;
+    // The documented login-status fallback establishes authentication only.
+    // Losing the structured account mode must not claim subscription billing.
+    assert_eq!(status.availability, Availability::Ready);
+    assert!(status.error.is_some());
+    assert_eq!(status.to_doctor_json()["billing"], "unknown");
+    let usage = status.usage_for("default", shadowcode_core::now());
+    assert!(usage.remaining_percent.is_none());
+    assert!(usage
+        .detail
+        .iter()
+        .any(|line| line.contains("API charges may apply")));
+    let rows = catalog.picker_rows(&cfg, false).await;
+    let codex: Vec<_> = rows
+        .iter()
+        .filter(|row| row.provider == "cli:codex")
+        .collect();
+    assert!(!codex.is_empty());
+    assert!(codex
+        .iter()
+        .all(|row| row.subtitle == "Cloud · billing unverified"));
+    assert!(codex
+        .iter()
+        .all(|row| row.to_json()["billing"] == "unknown"));
+    assert!(codex
+        .iter()
+        .all(|row| row.availability == Availability::Ready));
+    assert!(
+        fake.marker("exec_ran").is_none(),
+        "a catalog probe cannot send a turn"
+    );
+}
+
+#[tokio::test]
+async fn codex_failed_probe_does_not_reuse_previous_subscription_quota_for_unknown_login() {
+    let root = tempfile::tempdir().unwrap();
+    let fake = FakeCodex::new(root.path(), json!({"auth":"chatgpt","used":42}));
+    let catalog = VendorCatalog::new();
+    let cfg = config(&fake);
+    let original = catalog.refresh(Vendor::Codex, &cfg, true).await;
+    assert_eq!(original.to_doctor_json()["billing"], "subscription");
+    assert_eq!(
+        original
+            .usage_for("default", shadowcode_core::now())
+            .remaining_percent,
+        Some(58.0)
+    );
+    fake.configure(json!({"auth":"apiKey","exit_on_start":true}));
+    let fallback = catalog.refresh(Vendor::Codex, &cfg, true).await;
+    assert_eq!(fallback.availability, Availability::Ready);
+    assert_eq!(fallback.to_doctor_json()["billing"], "unknown");
+    let usage = fallback.usage_for("default", shadowcode_core::now());
+    assert!(
+        usage.remaining_percent.is_none(),
+        "old account quota is not the unknown login's allowance"
+    );
+    assert!(usage.windows.is_empty());
+    assert!(!usage.limit_reached);
+    let rows = catalog.picker_rows(&cfg, false).await;
+    assert!(rows
+        .iter()
+        .filter(|row| row.provider == "cli:codex")
+        .all(|row| row.subtitle == "Cloud · billing unverified"
+            && row.usage.remaining_percent.is_none()
+            && row.to_json()["billing"] == "unknown"));
+
+    // Successful structured probes still preserve the two known billing routes.
+    catalog.clear(Vendor::Codex).await;
+    fake.configure(json!({"auth":"apiKey"}));
+    let api_key = catalog.refresh(Vendor::Codex, &cfg, true).await;
+    assert!(api_key.api_key_login());
+    assert_eq!(api_key.to_doctor_json()["billing"], "api_key");
+    assert_eq!(
+        api_key.usage_for("default", shadowcode_core::now()).label,
+        "API key login · billed per token"
+    );
+    catalog.clear(Vendor::Codex).await;
+    fake.configure(json!({"auth":"chatgpt","used":12}));
+    let subscription = catalog.refresh(Vendor::Codex, &cfg, true).await;
+    assert_eq!(subscription.to_doctor_json()["billing"], "subscription");
+    assert_eq!(
+        subscription
+            .usage_for("default", shadowcode_core::now())
+            .remaining_percent,
+        Some(88.0)
+    );
+    assert!(fake.marker("exec_ran").is_none());
+}
+
+#[tokio::test]
 async fn replacing_vendor_binary_refreshes_image_capabilities_before_cache_expiry() {
     let root = tempfile::tempdir().unwrap();
     let fake = FakeCodex::new(root.path(), json!({"auth":"chatgpt","images":true}));

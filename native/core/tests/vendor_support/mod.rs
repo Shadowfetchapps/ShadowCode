@@ -35,7 +35,7 @@ if args[:1] == ["--help"]:
     print("Commands:\n  exec\n  app-server\n  login\n  logout"); sys.exit(0)
 if args[:2] == ["login", "status"]:
     if C.get("auth"):
-        print("Logged in using ChatGPT"); sys.exit(0)
+        print("Logged in using an API key" if C.get("auth") == "apiKey" else "Logged in using ChatGPT"); sys.exit(0)
     print("Not logged in"); sys.exit(1)
 if args[:1] == ["login"]:
     mark("login_ran", " ".join(args) + " keys=" + ",".join(k for k in KEYS if k in os.environ))

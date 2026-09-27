@@ -137,6 +137,42 @@ const activeOption = () => {
   return id ? document.getElementById(id) : null;
 };
 
+it.each([
+  [
+    "unknown",
+    "Billing unverified",
+    "Billing unverified · API charges may apply",
+  ],
+  ["api_key", "API key", "API key login · billed per token"],
+])(
+  "shows explicit %s vendor billing without changing the selected route",
+  (billing, badge, warning) => {
+    const target = {
+      ...codex,
+      billing: billing as "unknown" | "api_key",
+      usage: { state: "unavailable", label: "Usage unavailable", detail: [] },
+    };
+    const onSelect = vi.fn();
+    render(
+      <Harness targets={[target]} initial={target.id} onSelect={onSelect} />,
+    );
+    expect(trigger().textContent).toContain(badge);
+    expect(trigger().getAttribute("aria-label")).toContain(warning);
+    fireEvent.click(trigger());
+    const group = screen.getByRole("group", { name: "Vendor CLIs" });
+    const row = within(group).getByRole("option", {
+      name: /Codex · GPT-6-Astra/,
+    });
+    expect(row.textContent).toContain(warning);
+    expect(within(group).queryByText("Subscriptions")).toBeNull();
+    fireEvent.change(search(), { target: { value: "subscription" } });
+    expect(screen.queryByRole("option", { name: /Codex/ })).toBeNull();
+    fireEvent.change(search(), { target: { value: "codex" } });
+    key("Enter");
+    expect(onSelect).toHaveBeenCalledWith(target.id);
+  },
+);
+
 it("shows 'Choose a model' until a row is chosen and groups both sources", () => {
   render(<Harness />);
   expect(trigger().textContent).toContain("Choose a model");

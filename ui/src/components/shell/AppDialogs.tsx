@@ -12,7 +12,7 @@ import {
 } from "../overlays";
 import { Settings, type AdvancedTab, type SettingsSection } from "../Settings";
 import { readyLocalTargets } from "../../lib/allowance";
-import type { PickerTarget } from "../../lib/picker";
+import { billingWarning, type PickerTarget } from "../../lib/picker";
 import type { useAllowance } from "../../hooks/useCatalog";
 import type { Consent } from "../../hooks/useTaskActions";
 
@@ -104,6 +104,9 @@ export function AppDialogs({
         <ConsentDialog
           request={consent.request}
           destination={targets.find((t) => t.id === consent.body.model)?.name}
+          billingWarning={billingWarning(
+            targets.find((t) => t.id === consent.body.model),
+          )}
           attachments={consent.original.attachments.map((a) => a.name)}
           onCancel={onCancelConsent}
           onSend={onSendConsent}
