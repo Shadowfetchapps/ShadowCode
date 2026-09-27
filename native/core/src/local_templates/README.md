@@ -22,6 +22,18 @@ template variants prevent this override. File names and user labels do not
 select profiles. These metadata checks do not authenticate model weights.
 
 The template is embedded in ShadowCode and passed to its child runtime; model
-files and Ollama templates are not edited. The runtime must report the exact
-selected template before preparation succeeds. Rhea has no compatibility
+files and Ollama templates are not edited. The runtime must report one of two
+exact template identities before preparation succeeds: the 5,004-byte source
+above, or the same bytes with exactly its final LF removed (5,003 bytes, SHA-256
+`ce62e308475b364e1fc76699dccbddeb9ac08344f90d59719dba86a9922834d9`).
+The latter was observed from the pinned runtime's ready `/props` endpoint.
+It follows the pinned [Jinja lexer](https://github.com/ggml-org/llama.cpp/blob/18f9f7bef960b76b693d8dcbb33cbbd6148c1631/common/jinja/lexer.cpp#L39-L53):
+the lexer removes one final newline, [chat.h](https://github.com/ggml-org/llama.cpp/blob/18f9f7bef960b76b693d8dcbb33cbbd6148c1631/common/chat.h#L53-L65)
+retains that parsed source, and [`/props`](https://github.com/ggml-org/llama.cpp/blob/18f9f7bef960b76b693d8dcbb33cbbd6148c1631/tools/server/server-context.cpp#L4190-L4209)
+reports it. Selection does not use generic trimming or whitespace equivalence.
+
+Provenance retains the unchanged source identity separately from the actually
+confirmed runtime identity, with the exact match kind and normalization noted.
+Failures report only expected/observed identities and the reported field type,
+never raw templates or other runtime configuration. Rhea has no compatibility
 profile. Fixture protocol coverage does not establish live coding quality.

@@ -118,10 +118,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(401, {"error": "Invalid API Key"})
         if self.path == "/props":
             reported_template = opt("--chat-template", "runtime template fixture")
+            if os.path.exists(os.path.join(HERE, "lexer-template")) and reported_template.endswith("\n"):
+                reported_template = reported_template[:-1]
             if os.path.exists(os.path.join(HERE, "wrong-template")):
-                reported_template = "runtime ignored the requested template"
+                reported_template = "private-template-MUST-NOT-LEAK"
             if os.path.exists(os.path.join(HERE, "missing-template")):
                 reported_template = None
+            if os.path.exists(os.path.join(HERE, "wrong-type-template")):
+                reported_template = {"private": "MUST-NOT-LEAK"}
+            if os.path.exists(os.path.join(HERE, "whitespace-template")):
+                reported_template += " "
+            if os.path.exists(os.path.join(HERE, "unavailable-props")):
+                return self.reply(503, {"private": "MUST-NOT-LEAK"})
             return self.reply(200, {"default_generation_settings": {"n_ctx": ctx,
                                     "params": {"temperature":0.8,"top_k":40,"top_p":0.95,"seed":4294967295,
                                                "prompt":"must not appear in provenance"}},
@@ -393,7 +401,19 @@ fn hermes_capability_comes_from_metadata_and_template_not_the_label() {
 
 #[tokio::test]
 async fn hermes_verified_template_enables_structured_tools_and_retains_provenance() {
+    assert_hermes_template_roundtrip(false).await;
+}
+
+#[tokio::test]
+async fn hermes_pinned_lexer_template_enables_tools_with_actual_applied_provenance() {
+    assert_hermes_template_roundtrip(true).await;
+}
+
+async fn assert_hermes_template_roundtrip(lexer_report: bool) {
     let f = fixture(GPU);
+    if lexer_report {
+        fs::write(f.bin.join("lexer-template"), b"").unwrap();
+    }
     let model = f.models.join("unrelated-label.gguf");
     hermes_like(&model, "Hermes-2-Pro-Llama-3-8B", HERMES_DEFAULT_TEMPLATE);
     let original = fs::read(&model).unwrap();
@@ -440,18 +460,41 @@ async fn hermes_verified_template_enables_structured_tools_and_retains_provenanc
         ))
     );
     assert_eq!(receipt["template_override"]["profile"], profile.id());
+    let applied = shadowcode_core::gguf::string_identity(if lexer_report {
+        profile.template().strip_suffix('\n').unwrap()
+    } else {
+        profile.template()
+    });
+    assert_eq!(receipt["template_override"]["template"], json!(applied));
     assert_eq!(
-        receipt["template_override"]["template"],
+        receipt["template_override"]["source_template"],
         json!(profile.identity())
+    );
+    assert_eq!(
+        receipt["template_override"]["source_sha256"],
+        profile.identity().sha256
+    );
+    assert_eq!(
+        receipt["template_override"]["match_kind"],
+        if lexer_report {
+            "pinned_lexer_exact"
+        } else {
+            "source_exact"
+        }
+    );
+    assert_eq!(
+        receipt["template_override"]["normalization"],
+        if lexer_report {
+            "single_final_lf_removed"
+        } else {
+            "none"
+        }
     );
     assert_eq!(
         receipt["template_override"]["runtime_template_verified"],
         true
     );
-    assert_eq!(
-        receipt["runtime"]["reported_chat_template"],
-        json!(profile.identity())
-    );
+    assert_eq!(receipt["runtime"]["reported_chat_template"], json!(applied));
     assert_eq!(
         fs::read(model).unwrap(),
         original,
@@ -462,7 +505,13 @@ async fn hermes_verified_template_enables_structured_tools_and_retains_provenanc
 
 #[tokio::test]
 async fn hermes_unconfirmed_runtime_template_is_refused_and_reaped() {
-    for sentinel in ["wrong-template", "missing-template"] {
+    for sentinel in [
+        "wrong-template",
+        "missing-template",
+        "wrong-type-template",
+        "whitespace-template",
+        "unavailable-props",
+    ] {
         let f = fixture(GPU);
         let path = f.models.join("hermes.gguf");
         hermes_like(&path, "Hermes-2-Pro-Llama-3-8B", HERMES_DEFAULT_TEMPLATE);
@@ -484,6 +533,12 @@ async fn hermes_unconfirmed_runtime_template_is_refused_and_reaped() {
             error.to_string().contains("did not confirm the expected"),
             "{error}"
         );
+        assert!(error.to_string().contains("expected_template_identities"));
+        assert!(error.to_string().contains("reported_template_field_type"));
+        assert!(!error.to_string().contains("MUST-NOT-LEAK"));
+        if sentinel == "unavailable-props" {
+            assert!(error.to_string().contains("unavailable_or_invalid_props"));
+        }
         assert!(engine.local_runtime().loaded().is_none());
         assert_eq!(engine.local_runtime().in_use(), 0);
         assert!(lines(&f.bin.join("requests.jsonl")).is_empty());

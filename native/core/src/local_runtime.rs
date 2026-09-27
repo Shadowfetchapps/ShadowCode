@@ -726,15 +726,19 @@ async fn launch(
         terminate(&mut child).await;
         return Err(other(error));
     }
-    if let Some(profile) = spec.template_profile {
-        if !profile.reported_matches(&props) {
-            terminate(&mut child).await;
-            return Err(other(anyhow!(
-                "llama-server did not confirm the expected {} tool template; tools were not enabled",
-                profile.id()
-            )));
-        }
-    }
+    let template_override = match spec.template_profile {
+        Some(profile) => match profile.provenance(&props) {
+            Some(confirmed) => confirmed,
+            None => {
+                terminate(&mut child).await;
+                return Err(other(anyhow!(
+                    "llama-server did not confirm the expected {} tool template; tools were not enabled: {}",
+                    profile.id(), profile.mismatch_diagnostic(&props)
+                )));
+            }
+        },
+        None => Value::Null,
+    };
     let n_ctx = props
         .pointer("/default_generation_settings/n_ctx")
         .and_then(Value::as_u64);
@@ -781,7 +785,7 @@ async fn launch(
                 "identity_kind": "filesystem_metadata",
                 "files": sources,
                 "model": model_provenance,
-                "template_override": spec.template_profile.map(|profile| profile.provenance()),
+                "template_override": template_override,
                 "runtime": {
                     "reported_version": runtime_probe.version,
                     "reported_commit": runtime_probe.commit,
