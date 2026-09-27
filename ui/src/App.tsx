@@ -696,6 +696,7 @@ export default function App() {
           onOpenProject={(path) => void nav.pickProject(path)}
           memory={memory.memory}
           onMemory={memory.update}
+          onDiscardFileDraft={memory.discardFileDraft}
         />
       )}
       <Toasts toasts={toasts} onDismiss={dismiss} />

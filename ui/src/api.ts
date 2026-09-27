@@ -12,6 +12,15 @@ export type VendorModel = {
   vision?: boolean;
 };
 
+export type EditorRecoveryDraft = {
+  path: string;
+  base: string;
+  draft: string;
+  base_hash: string;
+  revision: string;
+  updated_at: number;
+};
+
 export type VendorStatus = {
   /** Product name without the CLI binary, e.g. "Claude Code". */
   product?: string;
@@ -1531,6 +1540,39 @@ export const api = {
       "/api/workspace/file?path=" + encodeURIComponent(path),
       "PUT",
       { content, expected_hash: expectedHash },
+    ),
+  editorDrafts: (workspace: string) =>
+    get<{ workspace: string; drafts: EditorRecoveryDraft[] }>(
+      "/api/workspace/editor-drafts?workspace=" + encodeURIComponent(workspace),
+    ),
+  saveEditorDraft: (
+    workspace: string,
+    path: string,
+    base: string,
+    draft: string,
+    baseHash: string,
+    expectedRevision: string,
+  ) =>
+    send<EditorRecoveryDraft>(
+      "/api/workspace/editor-draft?path=" + encodeURIComponent(path),
+      "PUT",
+      {
+        workspace,
+        base,
+        draft,
+        base_hash: baseHash,
+        expected_revision: expectedRevision,
+      },
+    ),
+  deleteEditorDraft: (
+    workspace: string,
+    path: string,
+    expectedRevision: string,
+  ) =>
+    send<{ removed: boolean }>(
+      "/api/workspace/editor-draft?path=" + encodeURIComponent(path),
+      "DELETE",
+      { workspace, expected_revision: expectedRevision },
     ),
   git: () =>
     get<{

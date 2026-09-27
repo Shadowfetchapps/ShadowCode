@@ -16,12 +16,17 @@ struct ExecBody {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct FileBody {
+    workspace: Text,
     name: Text,
     content: Text,
     expected_hash: Text,
     filename: Text,
     text: Text,
     data_base64: Text,
+    base: Text,
+    draft: Text,
+    base_hash: Text,
+    expected_revision: Text,
 }
 
 impl Service {
@@ -132,6 +137,72 @@ impl Service {
                 Ok(
                     json!({"path":workspace.relative(path)?.to_string_lossy(),"hash":hash,"bytes":body.content.as_str().len()}),
                 )
+            }
+            ("GET", "/api/workspace/editor-drafts") => {
+                let workspace = Workspace::open(&self.workspace()?)?;
+                ensure!(
+                    call.q("workspace") == workspace.path.to_string_lossy(),
+                    "Project selection changed; reopen its editor drafts"
+                );
+                let drafts = self.engine.store().editor_drafts(&workspace.path)?;
+                Ok(json!({"workspace":workspace.path,"drafts":drafts}))
+            }
+            ("PUT", "/api/workspace/editor-draft") => {
+                let workspace = Workspace::open(&self.workspace()?)?;
+                ensure!(
+                    body.workspace.as_str() == workspace.path.to_string_lossy(),
+                    "Project selection changed; this editor draft was not stored"
+                );
+                let path = workspace.writable(call.q("path"))?;
+                let path = path.to_string_lossy();
+                let expected = body.expected_revision.as_str();
+                ensure!(
+                    expected == "missing"
+                        || (expected.len() == 32
+                            && expected.bytes().all(|b| b.is_ascii_hexdigit())),
+                    "A valid recovery-draft revision is required"
+                );
+                ensure!(
+                    body.base_hash.as_str().len() == 64
+                        && body
+                            .base_hash
+                            .as_str()
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit())
+                        && crate::workspace::hash(body.base.as_str().as_bytes())
+                            == body.base_hash.as_str(),
+                    "The recovery draft's original file revision is invalid"
+                );
+                let record = self.engine.store().put_editor_draft(
+                    &workspace.path,
+                    &path,
+                    body.base.as_str(),
+                    body.draft.as_str(),
+                    body.base_hash.as_str(),
+                    expected,
+                )?;
+                Ok(json!(record))
+            }
+            ("DELETE", "/api/workspace/editor-draft") => {
+                let workspace = Workspace::open(&self.workspace()?)?;
+                ensure!(
+                    body.workspace.as_str() == workspace.path.to_string_lossy(),
+                    "Project selection changed; this editor draft was not removed"
+                );
+                let path = workspace.writable(call.q("path"))?;
+                let expected = body.expected_revision.as_str();
+                ensure!(
+                    expected == "missing"
+                        || (expected.len() == 32
+                            && expected.bytes().all(|b| b.is_ascii_hexdigit())),
+                    "A valid recovery-draft revision is required"
+                );
+                self.engine.store().delete_editor_draft(
+                    &workspace.path,
+                    &path.to_string_lossy(),
+                    expected,
+                )?;
+                Ok(json!({"removed":true}))
             }
             ("GET", "/api/workspace/instructions") => {
                 let ws = Workspace::open(&self.workspace()?)?;

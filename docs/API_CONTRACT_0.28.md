@@ -3,9 +3,18 @@
 The React window talks to the in-process Rust engine through
 `invoke("api", {request: {method, path, body}})` (see `ui/src/lib/transport.ts`).
 This file is the contract the UI and backend are built against. It started
-with 0.28 and keeps its name; it is current as of 0.30.1 (OpenRouter from
-0.29.0, Antigravity's agent server from 0.30.0). All shapes are JSON. Unknown
+with 0.28 and keeps its name as the app evolves. All shapes are JSON. Unknown
 values are `null`, never invented.
+
+## Local editor recovery drafts
+
+The desktop keeps acknowledged unsaved file drafts in its private profile database, separate from the project and its Git index. These routes are refused over remote access. Every request names the canonical selected workspace; a request queued across a project switch fails instead of writing under the new selection.
+
+- `GET /api/workspace/editor-drafts?workspace=<encoded path>` → `{workspace, drafts: [{path, base, draft, base_hash, revision, updated_at}]}`.
+- `PUT /api/workspace/editor-draft?path=<encoded relative path>` with `{workspace, base, draft, base_hash, expected_revision}` → the saved draft record. `base_hash` is the SHA-256 of `base`; `expected_revision` is `missing` for creation or the 32-character record revision returned by the previous read/write. A different revision refuses the write.
+- `DELETE /api/workspace/editor-draft?path=<encoded relative path>` with `{workspace, expected_revision}` → `{removed:true}`. A changed revision refuses deletion.
+
+Paths use the workspace's confined writable-path validation. Only dirty UTF-8 text is stored: the original and draft each have the file editor's 4 MB limit, with at most 32 drafts and 32 MB of text per project. The app shows whether its latest recovery copy has finished saving; input still in flight at a crash is not claimed as durable. Actual file saves continue to use `PUT /api/workspace/file` with the disk content hash and existing trust, permission and reservation checks.
 
 ## Picker
 

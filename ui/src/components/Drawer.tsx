@@ -62,6 +62,7 @@ export function Drawer({
   onOpenProject,
   memory,
   onMemory,
+  onDiscardFileDraft,
 }: {
   tab: DrawerTab;
   onTab: (t: DrawerTab) => void;
@@ -80,6 +81,7 @@ export function Drawer({
   onOpenProject?: (path: string) => void;
   memory: DrawerMemory;
   onMemory: DrawerMemoryUpdate;
+  onDiscardFileDraft: (path: string) => Promise<void>;
 }) {
   const tool = isToolTab(tab) ? tab : null;
   useEffect(() => {
@@ -169,6 +171,7 @@ export function Drawer({
             workspace={workspace}
             memory={memory}
             onMemory={onMemory}
+            onDiscardFileDraft={onDiscardFileDraft}
             toast={toast}
             onShowDiff={(p) => {
               onDiffPath(p);

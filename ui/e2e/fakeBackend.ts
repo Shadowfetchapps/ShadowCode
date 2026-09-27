@@ -2766,6 +2766,58 @@ export function installFakeBackend(options: FakeOptions = {}) {
         truncated: false,
       };
     }
+    if (path === "/api/workspace/editor-drafts" && method === "GET") {
+      if (q.get("workspace") !== workspace)
+        throw new Error(
+          "Project selection changed while loading recovery drafts",
+        );
+      const drafts = JSON.parse(
+        sessionStorage.getItem("shadow-fake-editor-drafts") || "{}",
+      );
+      return { workspace, drafts: Object.values(drafts) };
+    }
+    if (path === "/api/workspace/editor-draft") {
+      if (body.workspace !== workspace)
+        throw new Error(
+          "Project selection changed while saving a recovery draft",
+        );
+      const filePath = q.get("path") || "";
+      const drafts = JSON.parse(
+        sessionStorage.getItem("shadow-fake-editor-drafts") || "{}",
+      );
+      const current = drafts[filePath];
+      if (body.expected_revision !== (current?.revision || "missing"))
+        throw new Error("The recovery draft changed in another window");
+      if (method === "DELETE") {
+        delete drafts[filePath];
+        sessionStorage.setItem(
+          "shadow-fake-editor-drafts",
+          JSON.stringify(drafts),
+        );
+        return { removed: true };
+      }
+      const revisionNumber =
+        Number(sessionStorage.getItem("shadow-fake-editor-revision") || "0") +
+        1;
+      sessionStorage.setItem(
+        "shadow-fake-editor-revision",
+        String(revisionNumber),
+      );
+      const record = {
+        path: filePath,
+        base: String(body.base),
+        draft: String(body.draft),
+        base_hash: String(body.base_hash),
+        revision: revisionNumber.toString(16).padStart(32, "0"),
+        updated_at: now(),
+      };
+      drafts[filePath] = record;
+      sessionStorage.setItem(
+        "shadow-fake-editor-drafts",
+        JSON.stringify(drafts),
+      );
+      return record;
+    }
     if (path === "/api/workspace/files")
       return {
         workspace,

@@ -11,6 +11,7 @@ use std::{
 
 mod automations;
 mod background;
+mod editor_drafts;
 mod goals;
 pub mod keys;
 mod memory;
@@ -93,7 +94,18 @@ CREATE TABLE IF NOT EXISTS task_notes (
 
 /// Current schema version. Older databases are backed up, then migrated
 /// forward one step at a time inside one transaction.
-pub const SCHEMA_VERSION: i64 = 26;
+pub const SCHEMA_VERSION: i64 = 27;
+
+/// Version 27: bounded, profile-private editor drafts. Draft bytes are never
+/// written into the project until the user explicitly saves a reviewed file.
+const MIGRATION_27: &str = r#"
+CREATE TABLE IF NOT EXISTS editor_drafts (
+ workspace TEXT NOT NULL, path TEXT NOT NULL, revision TEXT NOT NULL,
+ base_hash TEXT NOT NULL, base TEXT NOT NULL, draft TEXT NOT NULL,
+ updated_at REAL NOT NULL, PRIMARY KEY(workspace,path)
+);
+CREATE INDEX IF NOT EXISTS editor_drafts_workspace ON editor_drafts(workspace,updated_at);
+"#;
 
 /// Version 25: persisted subscription usage snapshots, so the Accounts page
 /// and picker can show "Last checked …" before the first refresh. Execution
@@ -318,6 +330,9 @@ impl Store {
             }
             if version < 26 {
                 tx.execute_batch(MIGRATION_26)?;
+            }
+            if version < 27 {
+                tx.execute_batch(MIGRATION_27)?;
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;

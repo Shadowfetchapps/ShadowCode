@@ -126,6 +126,14 @@ pub fn check(path: &str, body: &Value, access: &Access, paths: &AppPaths) -> Res
     let family = parts.first().copied().unwrap_or("");
     match family {
         "remote" | "views" | "runtime" | "owned-jobs" => return Err(Refusal(MANAGED_LOCALLY)),
+        "workspace"
+            if matches!(
+                parts.get(1).copied(),
+                Some("editor-draft" | "editor-drafts")
+            ) =>
+        {
+            return Err(Refusal(MANAGED_LOCALLY));
+        }
         "terminals" | "background" if !access.allow_terminals => {
             return Err(Refusal(TERMINALS_OFF))
         }
@@ -289,6 +297,24 @@ mod tests {
             "/api/approvals/a1",
         ] {
             assert!(check(path, &Value::Null, &off, &paths).is_ok(), "{path}");
+        }
+    }
+
+    #[test]
+    fn unsaved_editor_recovery_is_local_to_the_desktop_profile() {
+        let (_root, paths) = paths();
+        let access = Access {
+            allow_terminals: true,
+        };
+        for path in [
+            "/api/workspace/editor-drafts",
+            "/api/workspace/editor-draft?path=source.rs",
+        ] {
+            assert_eq!(
+                check(path, &Value::Null, &access, &paths),
+                Err(Refusal(MANAGED_LOCALLY)),
+                "{path}"
+            );
         }
     }
 

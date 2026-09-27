@@ -296,6 +296,172 @@ test("keeps an unsaved file draft and reviews an agent edit before saving", asyn
   expect(saved).toBe("# My draft\n");
 });
 
+test("recovers an unsaved editor draft after window reload and clears it after save", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const drawer = page.getByRole("complementary", { name: "Drawer" });
+  const files = drawer
+    .locator(".drawer-tabs")
+    .getByRole("button", { name: "Files" });
+  await files.click();
+  await drawer.getByRole("button", { name: "README.md", exact: true }).click();
+  const editor = drawer.getByRole("textbox", { name: "Edit README.md" });
+  await editor.fill("# Draft after restart");
+  await expect(
+    drawer.getByText("Recovery copy saved on this computer"),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          JSON.parse(
+            sessionStorage.getItem("shadow-fake-editor-drafts") || "{}",
+          )["README.md"]?.draft,
+      ),
+    )
+    .toBe("# Draft after restart");
+  page.once("dialog", (dialog) => void dialog.accept());
+  await page.reload();
+  await page.evaluate(() => {
+    (window as any).__SHADOW_FAKE__.state.files["README.md"] =
+      "# Changed while closed\n";
+  });
+  await page.getByRole("button", { name: "Review changes" }).click();
+  await files.click();
+  await drawer.getByRole("button", { name: "Open README.md, unsaved" }).click();
+  await expect(editor).toHaveValue("# Draft after restart");
+  const conflict = drawer.getByRole("group", { name: "File conflict" });
+  await expect(conflict).toBeVisible();
+  await expect(
+    drawer.getByRole("button", { name: "Save", exact: true }),
+  ).toBeDisabled();
+  await conflict
+    .getByRole("button", { name: "Use disk revision as save base" })
+    .click();
+  await drawer.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(drawer.getByText("Saved", { exact: true })).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Object.keys(
+          JSON.parse(
+            sessionStorage.getItem("shadow-fake-editor-drafts") || "{}",
+          ),
+        ),
+      ),
+    )
+    .toEqual([]);
+});
+
+test("waits for an in-flight recovery write before discarding its draft", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const drawer = page.getByRole("complementary", { name: "Drawer" });
+  await drawer
+    .locator(".drawer-tabs")
+    .getByRole("button", { name: "Files" })
+    .click();
+  await drawer.getByRole("button", { name: "README.md", exact: true }).click();
+  await page.evaluate(() => {
+    const bridge = window.__SHADOW_TEST_TRANSPORT__!;
+    const request = bridge.request;
+    bridge.request = async (path, method, body) => {
+      if (path.startsWith("/api/workspace/editor-draft?") && method === "PUT")
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      return request(path, method, body);
+    };
+  });
+  const editor = drawer.getByRole("textbox", { name: "Edit README.md" });
+  await editor.fill("# Temporary draft");
+  await expect(drawer.getByText("Saving recovery copy…")).toBeVisible();
+  await drawer.getByRole("button", { name: "Discard draft" }).click();
+  await expect(
+    drawer.getByRole("button", { name: "Discarding…" }),
+  ).toBeVisible();
+  await expect(editor).toHaveValue("# Temporary draft");
+  await expect(editor).toHaveValue("# Demo\n");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Object.keys(
+          JSON.parse(
+            sessionStorage.getItem("shadow-fake-editor-drafts") || "{}",
+          ),
+        ),
+      ),
+    )
+    .toEqual([]);
+  await page.reload();
+  await page.getByRole("button", { name: "Review changes" }).click();
+  await drawer
+    .locator(".drawer-tabs")
+    .getByRole("button", { name: "Files" })
+    .click();
+  await expect(
+    drawer.getByRole("button", { name: "Open README.md, unsaved" }),
+  ).toHaveCount(0);
+});
+
+test("shows and retries a failed recovery cleanup after file save", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const drawer = page.getByRole("complementary", { name: "Drawer" });
+  await drawer
+    .locator(".drawer-tabs")
+    .getByRole("button", { name: "Files" })
+    .click();
+  await drawer.getByRole("button", { name: "README.md", exact: true }).click();
+  await page.evaluate(() => {
+    const bridge = window.__SHADOW_TEST_TRANSPORT__!;
+    const request = bridge.request;
+    let refusals = 2;
+    bridge.request = async (path, method, body) => {
+      if (
+        path.startsWith("/api/workspace/editor-draft?") &&
+        method === "DELETE" &&
+        refusals > 0
+      ) {
+        refusals -= 1;
+        throw new Error("Fixture draft cleanup refusal");
+      }
+      return request(path, method, body);
+    };
+  });
+  await drawer
+    .getByRole("textbox", { name: "Edit README.md" })
+    .fill("# Reviewed save");
+  await expect(
+    drawer.getByText("Recovery copy saved on this computer"),
+  ).toBeVisible();
+  await drawer.getByRole("button", { name: "Save", exact: true }).click();
+  const retry = drawer.getByRole("button", { name: "Retry recovery cleanup" });
+  await expect(retry).toBeVisible();
+  await expect(drawer.getByRole("alert")).toContainText(
+    "Fixture draft cleanup refusal",
+  );
+  await drawer.getByRole("button", { name: "Close file" }).click();
+  await expect(
+    drawer.getByRole("textbox", { name: "Edit README.md" }),
+  ).toBeVisible();
+  await expect(drawer.getByText(/The file stayed open/)).toBeVisible();
+  await retry.click();
+  await expect(retry).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Object.keys(
+          JSON.parse(
+            sessionStorage.getItem("shadow-fake-editor-drafts") || "{}",
+          ),
+        ),
+      ),
+    )
+    .toEqual([]);
+});
+
 test("asks for consent before sending local context to a cloud row", async ({
   page,
 }) => {

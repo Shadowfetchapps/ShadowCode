@@ -16,12 +16,14 @@ export function FileEditor({
   workspace,
   memory,
   onMemory,
+  onDiscardFileDraft,
   onShowDiff,
   toast,
 }: {
   workspace: string;
   memory: DrawerMemory;
   onMemory: DrawerMemoryUpdate;
+  onDiscardFileDraft: (path: string) => Promise<void>;
   onShowDiff: (path: string) => void;
   toast: Toast;
 }) {
@@ -31,6 +33,7 @@ export function FileEditor({
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
   const exitEditor = useRef<HTMLButtonElement>(null);
   const buffer = active ? memory.filesBuffers[active] : undefined;
   const dirty = Boolean(buffer && buffer.draft !== buffer.base);
@@ -164,7 +167,7 @@ export function FileEditor({
   }
 
   async function save(expectedHash?: string) {
-    if (!active || !buffer || saving) return;
+    if (!active || !buffer || saving || discarding) return;
     const path = active;
     const submitted = buffer.draft;
     setSaving(true);
@@ -215,6 +218,44 @@ export function FileEditor({
       }
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function discardDraft() {
+    if (!active || !buffer || discarding) return;
+    setDiscarding(true);
+    setError("");
+    try {
+      await onDiscardFileDraft(active);
+    } catch (reason) {
+      setError(`The draft was kept: ${String(reason)}`);
+    } finally {
+      setDiscarding(false);
+    }
+  }
+
+  async function closeFile() {
+    if (!active || !buffer || discarding || saving) return;
+    if (dirty) {
+      setActive(null);
+      return;
+    }
+    setDiscarding(true);
+    setError("");
+    try {
+      // A successful disk save can still have a queued recovery-record
+      // deletion. Confirm it before hiding the only visible retry control.
+      await onDiscardFileDraft(buffer.path);
+      onMemory("filesBuffers", (previous) => {
+        const next = { ...previous };
+        delete next[buffer.path];
+        return next;
+      });
+      setActive(null);
+    } catch (reason) {
+      setError(`The file stayed open: ${String(reason)}`);
+    } finally {
+      setDiscarding(false);
     }
   }
 
@@ -309,6 +350,11 @@ export function FileEditor({
           {error}
         </p>
       )}
+      {memory.filesRecoveryError && (
+        <p className="file-editor-error" role="alert">
+          {memory.filesRecoveryError}
+        </p>
+      )}
       {buffer && (
         <div className="file-view file-editor">
           <div className="crumb">
@@ -325,18 +371,8 @@ export function FileEditor({
               type="button"
               className="mini"
               aria-label={dirty ? "Hide editor and keep draft" : "Close file"}
-              onClick={() => {
-                if (dirty) {
-                  setActive(null);
-                } else {
-                  onMemory("filesBuffers", (previous) => {
-                    const next = { ...previous };
-                    delete next[buffer.path];
-                    return next;
-                  });
-                  setActive(null);
-                }
-              }}
+              disabled={discarding || saving}
+              onClick={() => void closeFile()}
               title={
                 dirty ? "Hide editor; your draft stays open" : "Close file"
               }
@@ -355,7 +391,9 @@ export function FileEditor({
             <button
               type="button"
               className="mini"
-              disabled={!dirty || saving || buffer.disk !== undefined}
+              disabled={
+                !dirty || saving || discarding || buffer.disk !== undefined
+              }
               onClick={() => void save()}
             >
               {saving ? "Saving…" : "Save"}
@@ -363,17 +401,38 @@ export function FileEditor({
             <button
               type="button"
               className="mini"
-              disabled={!dirty}
-              onClick={() =>
-                updateBuffer(buffer.path, (current) => ({
-                  ...current,
-                  draft: current.base,
-                }))
-              }
+              disabled={!dirty || discarding || saving}
+              onClick={() => void discardDraft()}
             >
-              Discard draft
+              {discarding ? "Discarding…" : "Discard draft"}
             </button>
+            {!dirty && buffer.recoveryStatus === "error" && (
+              <button
+                type="button"
+                className="mini"
+                disabled={discarding}
+                onClick={() => void discardDraft()}
+              >
+                Retry recovery cleanup
+              </button>
+            )}
           </div>
+          {!dirty && buffer.recoveryStatus === "error" && (
+            <p className="file-editor-error" role="alert">
+              {buffer.recoveryError}
+            </p>
+          )}
+          {dirty && (
+            <p className="file-editor-hint" role="status">
+              {buffer.recoveryStatus === "saved"
+                ? "Recovery copy saved on this computer"
+                : buffer.recoveryStatus === "saving"
+                  ? "Saving recovery copy…"
+                  : buffer.recoveryStatus === "error"
+                    ? `Recovery copy not saved: ${buffer.recoveryError}`
+                    : "Unsaved draft is in memory"}
+            </p>
+          )}
           {buffer.disk !== undefined && (
             <div
               className="file-editor-conflict"
@@ -449,6 +508,7 @@ export function FileEditor({
           <textarea
             className="file-editor-input"
             aria-label={`Edit ${buffer.path}`}
+            disabled={discarding}
             spellCheck={false}
             value={buffer.draft}
             onChange={(event) =>

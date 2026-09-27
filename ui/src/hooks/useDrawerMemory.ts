@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useState, type SetStateAction } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type SetStateAction,
+} from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { api } from "../api";
+import { transportKind } from "../lib/transport";
 import type { PreviewDevice } from "../components/PreviewPanel";
 import type { ToolsView } from "../components/ToolsTab";
 import type { IssueLink } from "../lib/issues";
@@ -25,6 +33,9 @@ export type FileBuffer = {
    * means the replacement is no longer readable as UTF-8 text; a null disk
    * means the path was deleted. */
   disk?: { content: string | null; hash: string } | null;
+  recoveryRevision?: string;
+  recoveryStatus?: "saving" | "saved" | "error";
+  recoveryError?: string;
 };
 
 /** Drawer work that must survive switching tabs (and closing the drawer):
@@ -37,6 +48,7 @@ export type DrawerMemory = {
   filesDir: string;
   filesActive: string | null;
   filesBuffers: Record<string, FileBuffer>;
+  filesRecoveryError: string;
   commitMessage: string;
   prDraft: PrDraft;
   toolsView: ToolsView;
@@ -55,6 +67,7 @@ export const emptyDrawerMemory = (): DrawerMemory => ({
   filesDir: ".",
   filesActive: null,
   filesBuffers: {},
+  filesRecoveryError: "",
   commitMessage: "",
   prDraft: { title: "", body: "", base: "", draft: false },
   toolsView: "goals",
@@ -68,6 +81,18 @@ export function useDrawerMemory(workspace: string) {
     () => ({ [workspace]: emptyDrawerMemory() }),
   );
   const memory = workspaces[workspace] ?? emptyDrawerMemory();
+  const hydrated = useRef(new Set<string>());
+  const loading = useRef(new Set<string>());
+  const recovery = useRef(
+    new Map<
+      string,
+      {
+        revision: string;
+        desired: string;
+        chain: Promise<void>;
+      }
+    >(),
+  );
   if (!workspaces[workspace])
     setWorkspaces((current) => ({
       ...current,
@@ -89,13 +114,236 @@ export function useDrawerMemory(workspace: string) {
     },
     [workspace],
   );
+  useEffect(() => {
+    if (
+      !["tauri", "test"].includes(transportKind()) ||
+      hydrated.current.has(workspace) ||
+      loading.current.has(workspace)
+    )
+      return;
+    loading.current.add(workspace);
+    void api
+      .editorDrafts(workspace)
+      .then(({ workspace: selectedWorkspace, drafts }) => {
+        if (selectedWorkspace !== workspace)
+          throw new Error(
+            "Project selection changed while loading recovery drafts",
+          );
+        setWorkspaces((current) => {
+          const selected = current[workspace] ?? emptyDrawerMemory();
+          const buffers = { ...selected.filesBuffers };
+          let keptNewerInput = false;
+          for (const draft of drafts) {
+            if (buffers[draft.path]?.draft !== buffers[draft.path]?.base) {
+              // A person started typing before the recovery read finished.
+              // Keep both copies; CAS will prevent overwriting the older one.
+              keptNewerInput = true;
+              continue;
+            }
+            const key = `${workspace}\0${draft.path}`;
+            recovery.current.set(key, {
+              revision: draft.revision,
+              desired: JSON.stringify([
+                draft.base,
+                draft.base_hash,
+                draft.draft,
+              ]),
+              chain: Promise.resolve(),
+            });
+            buffers[draft.path] = {
+              path: draft.path,
+              base: draft.base,
+              draft: draft.draft,
+              hash: draft.base_hash,
+              recoveryRevision: draft.revision,
+              recoveryStatus: "saved",
+            };
+          }
+          return {
+            ...current,
+            [workspace]: {
+              ...selected,
+              filesBuffers: buffers,
+              filesRecoveryError: keptNewerInput
+                ? "A saved recovery copy also exists for a file you started editing. Your current text is kept in memory; reopen the project to review the saved copy before replacing it."
+                : "",
+            },
+          };
+        });
+        hydrated.current.add(workspace);
+      })
+      .catch((reason) => {
+        setWorkspaces((current) => {
+          const selected = current[workspace] ?? emptyDrawerMemory();
+          return {
+            ...current,
+            [workspace]: {
+              ...selected,
+              filesRecoveryError: `Could not load saved editor drafts: ${String(reason)}`,
+            },
+          };
+        });
+      })
+      .finally(() => loading.current.delete(workspace));
+  }, [workspace]);
+  useEffect(() => {
+    if (!hydrated.current.has(workspace)) return;
+    const currentBuffers = memory.filesBuffers;
+    const mark = (
+      path: string,
+      desired: string,
+      status: FileBuffer["recoveryStatus"],
+      reason = "",
+      revision?: string,
+    ) => {
+      setWorkspaces((current) => {
+        const selected = current[workspace];
+        const buffer = selected?.filesBuffers[path];
+        if (
+          !buffer ||
+          JSON.stringify([buffer.base, buffer.hash, buffer.draft]) !== desired
+        )
+          return current;
+        const next = {
+          ...buffer,
+          recoveryStatus: status,
+          recoveryError: reason,
+          recoveryRevision: revision ?? buffer.recoveryRevision,
+        };
+        return {
+          ...current,
+          [workspace]: {
+            ...selected,
+            filesBuffers: { ...selected.filesBuffers, [path]: next },
+          },
+        };
+      });
+    };
+    const queueDelete = (
+      path: string,
+      item: { revision: string; desired: string; chain: Promise<void> },
+    ) => {
+      if (item.desired === "") return;
+      item.desired = "";
+      item.chain = item.chain
+        .catch(() => undefined)
+        .then(async () => {
+          if (item.revision !== "missing")
+            await api.deleteEditorDraft(workspace, path, item.revision);
+          item.revision = "missing";
+          if (
+            item.desired === "" &&
+            recovery.current.get(`${workspace}\0${path}`) === item
+          )
+            recovery.current.delete(`${workspace}\0${path}`);
+        })
+        .catch((reason) => {
+          const buffer = currentBuffers[path];
+          if (buffer)
+            mark(
+              path,
+              JSON.stringify([buffer.base, buffer.hash, buffer.draft]),
+              "error",
+              `Could not clear saved draft: ${String(reason)}`,
+            );
+        });
+    };
+    for (const [path, buffer] of Object.entries(currentBuffers)) {
+      const key = `${workspace}\0${path}`;
+      let item = recovery.current.get(key);
+      if (buffer.draft === buffer.base) {
+        if (item) queueDelete(path, item);
+        continue;
+      }
+      const desired = JSON.stringify([buffer.base, buffer.hash, buffer.draft]);
+      if (!item) {
+        item = {
+          revision: buffer.recoveryRevision ?? "missing",
+          desired: "",
+          chain: Promise.resolve(),
+        };
+        recovery.current.set(key, item);
+      }
+      if (item.desired === desired) continue;
+      item.desired = desired;
+      mark(path, desired, "saving");
+      const pending = item;
+      pending.chain = pending.chain
+        .catch(() => undefined)
+        .then(async () => {
+          const record = await api.saveEditorDraft(
+            workspace,
+            path,
+            buffer.base,
+            buffer.draft,
+            buffer.hash,
+            pending.revision,
+          );
+          pending.revision = record.revision;
+          mark(path, desired, "saved", "", record.revision);
+        })
+        .catch((reason) => mark(path, desired, "error", String(reason)));
+    }
+    for (const [key, item] of recovery.current) {
+      if (!key.startsWith(`${workspace}\0`)) continue;
+      const path = key.slice(workspace.length + 1);
+      if (!currentBuffers[path]) queueDelete(path, item);
+    }
+  }, [workspace, memory.filesBuffers]);
+  const discardFileDraft = useCallback(
+    async (path: string) => {
+      if (
+        ["tauri", "test"].includes(transportKind()) &&
+        !hydrated.current.has(workspace)
+      )
+        throw new Error(
+          "Wait for saved editor drafts to finish loading before discarding",
+        );
+      const item = recovery.current.get(`${workspace}\0${path}`);
+      if (item) {
+        await item.chain;
+        if (item.revision !== "missing")
+          await api.deleteEditorDraft(workspace, path, item.revision);
+        item.revision = "missing";
+        item.desired = "";
+      }
+      setWorkspaces((current) => {
+        const selected = current[workspace];
+        const buffer = selected?.filesBuffers[path];
+        if (!buffer) return current;
+        return {
+          ...current,
+          [workspace]: {
+            ...selected,
+            filesBuffers: {
+              ...selected.filesBuffers,
+              [path]: {
+                ...buffer,
+                draft: buffer.base,
+                recoveryRevision: undefined,
+                recoveryStatus: undefined,
+                recoveryError: undefined,
+              },
+            },
+          },
+        };
+      });
+    },
+    [workspace],
+  );
   const hasUnsavedFiles = Object.values(workspaces).some((item) =>
     Object.values(item.filesBuffers).some((file) => file.draft !== file.base),
   );
+  const hasUnprotectedFiles = Object.values(workspaces).some((item) =>
+    Object.values(item.filesBuffers).some(
+      (file) => file.draft !== file.base && file.recoveryStatus !== "saved",
+    ),
+  );
   useEffect(() => {
     if (!hasUnsavedFiles) return;
-    const warning =
-      "You have unsaved file edits. Close ShadowCode and lose those drafts?";
+    const warning = hasUnprotectedFiles
+      ? "Some unsaved file edits do not have a finished recovery copy. Close ShadowCode and risk losing them?"
+      : "Your unsaved file edits have a local recovery copy. Close ShadowCode and restore them next time?";
     const beforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = warning;
@@ -126,8 +374,8 @@ export function useDrawerMemory(workspace: string) {
     }
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [hasUnsavedFiles]);
-  return { memory, update };
+  }, [hasUnsavedFiles, hasUnprotectedFiles]);
+  return { memory, update, discardFileDraft };
 }
 
 /** `useState`-shaped access to one remembered drawer value. */

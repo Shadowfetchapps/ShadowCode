@@ -5,6 +5,7 @@ use shadowcode_core::{
     engine::StartRequest,
     paths::AppPaths,
     service::{Request, Service},
+    store::Store,
 };
 use std::{fs, path::Path, process::Command, time::Duration};
 
@@ -60,6 +61,154 @@ fn init(project: &Path) {
     .unwrap();
     git(project, &["add", "."]);
     git(project, &["commit", "-qm", "Fixture"]);
+}
+
+#[test]
+fn existing_profile_migrates_to_private_editor_draft_storage() {
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("state.sqlite");
+    drop(Store::open(&database).unwrap());
+    let db = rusqlite::Connection::open(&database).unwrap();
+    db.execute_batch("DROP TABLE editor_drafts; PRAGMA user_version=26;")
+        .unwrap();
+    drop(db);
+    let reopened = Store::open(&database).unwrap();
+    let workspace = root.path().join("project");
+    assert!(reopened.editor_drafts(&workspace).unwrap().is_empty());
+    let version: i64 = rusqlite::Connection::open(&database)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, shadowcode_core::store::SCHEMA_VERSION);
+}
+
+#[tokio::test]
+async fn editor_drafts_survive_restart_without_overwriting_workspace_files() {
+    let (root, service) = setup(true);
+    let project = service.workspace().unwrap();
+    let original = "let answer = 1;\n";
+    fs::write(project.join("editor.rs"), original).unwrap();
+    let opened = call(
+        &service,
+        "GET",
+        "/api/workspace/file?path=editor.rs&full=true",
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    let hash = opened["hash"].as_str().unwrap();
+    let body = json!({"workspace":project,"base":original,"draft":"let answer = 2;\n","base_hash":hash,"expected_revision":"missing"});
+    let first = call(
+        &service,
+        "PUT",
+        "/api/workspace/editor-draft?path=editor.rs",
+        body.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["draft"], "let answer = 2;\n");
+    assert_eq!(
+        fs::read_to_string(project.join("editor.rs")).unwrap(),
+        original
+    );
+    assert!(
+        call(
+            &service,
+            "PUT",
+            "/api/workspace/editor-draft?path=editor.rs",
+            body
+        )
+        .await
+        .is_err(),
+        "a second window cannot overwrite the saved draft with a stale revision"
+    );
+    assert!(call(
+        &service,
+        "PUT",
+        "/api/workspace/editor-draft?path=editor.rs",
+        json!({"workspace":root.path().join("wrong"),"base":original,"draft":"other","base_hash":hash,"expected_revision":first["revision"]})
+    )
+    .await
+    .is_err(), "a queued draft write cannot follow a project selection change");
+    drop(service);
+    let reopened = Service::open(
+        AppPaths::isolated(&root.path().join("profile")).unwrap(),
+        Some(project.clone()),
+    )
+    .unwrap();
+    let listed = call(
+        &reopened,
+        "GET",
+        &format!(
+            "/api/workspace/editor-drafts?workspace={}",
+            project.display()
+        ),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed["drafts"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["drafts"][0]["draft"], "let answer = 2;\n");
+    let other = root.path().join("other");
+    fs::create_dir(&other).unwrap();
+    let second_project = reopened.fork_selection(other.clone(), None).unwrap();
+    assert_eq!(
+        call(
+            &second_project,
+            "GET",
+            &format!("/api/workspace/editor-drafts?workspace={}", other.display()),
+            Value::Null
+        )
+        .await
+        .unwrap()["drafts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert!(call(
+        &reopened,
+        "PUT",
+        "/api/workspace/editor-draft?path=../outside",
+        json!({"workspace":project,"base":original,"draft":"changed","base_hash":hash,"expected_revision":"missing"})
+    )
+    .await
+    .is_err());
+    let revision = first["revision"].as_str().unwrap();
+    assert!(call(
+        &reopened,
+        "DELETE",
+        "/api/workspace/editor-draft?path=editor.rs",
+        json!({"workspace":project,"expected_revision":"missing"})
+    )
+    .await
+    .is_err());
+    call(
+        &reopened,
+        "DELETE",
+        "/api/workspace/editor-draft?path=editor.rs",
+        json!({"workspace":project,"expected_revision":revision}),
+    )
+    .await
+    .unwrap();
+    assert!(call(
+        &reopened,
+        "GET",
+        &format!(
+            "/api/workspace/editor-drafts?workspace={}",
+            project.display()
+        ),
+        Value::Null
+    )
+    .await
+    .unwrap()["drafts"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        fs::read_to_string(project.join("editor.rs")).unwrap(),
+        original
+    );
 }
 
 #[tokio::test]
