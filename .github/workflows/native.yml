@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths: ['native/**', 'vendor/**', 'scripts/fixtures/native-glib-variant.rs', 'src-tauri/**', 'ui/**', 'licenses/native/**', 'packaging/native-runtime/**', 'packaging/native-app-run.sh', 'packaging/llama.cpp/**', 'packaging/shadow-agent.desktop', 'tools/llama.cpp.pin', 'tools/glslc-flatpak.sh', 'scripts/build-llama.cpp.sh', 'scripts/*llama*.mjs', 'scripts/install-appimage.sh', 'scripts/test-install-appimage.sh', 'scripts/*native*.mjs', 'scripts/publisher-fixtures.mjs', 'scripts/test-publisher-auth.mjs', 'scripts/native-packaging-env.sh', 'scripts/native-release-auth-lib.sh', 'scripts/verify-native-release.sh', 'scripts/check-secrets.mjs', 'scripts/test-check-secrets.mjs', 'scripts/native-mcp-peer/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/native.yml', '.github/workflows/release.yml']
+    paths: ['native/**', 'vendor/**', 'scripts/fixtures/native-glib-variant.rs', 'src-tauri/**', 'ui/**', 'licenses/native/**', 'packaging/native-runtime/**', 'packaging/native-app-run.sh', 'packaging/llama.cpp/**', 'packaging/shadow-agent.desktop', 'tools/llama.cpp.pin', 'tools/glslc-flatpak.sh', 'scripts/build-llama.cpp.sh', 'scripts/*llama*.mjs', 'scripts/install-appimage.sh', 'scripts/install-release-state.sh', 'scripts/installer-auth-fixtures.mjs', 'scripts/test-install-auth.mjs', 'release/**', 'scripts/test-install-appimage.sh', 'scripts/*native*.mjs', 'scripts/publisher-fixtures.mjs', 'scripts/test-publisher-auth.mjs', 'scripts/native-packaging-env.sh', 'scripts/native-release-auth-lib.sh', 'scripts/verify-native-release.sh', 'scripts/check-secrets.mjs', 'scripts/test-check-secrets.mjs', 'scripts/native-mcp-peer/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/native.yml', '.github/workflows/release.yml']
 permissions:
   contents: read
 jobs:
@@ -121,7 +121,9 @@ jobs:
       - name: Exercise concurrent AppImage extraction and shutdown
         run: node scripts/test-native-runtime.mjs
       - name: Verify installer runtime swap and checksum refusal
-        run: bash scripts/test-install-appimage.sh
+        run: |
+          node --test --test-reporter=tap scripts/test-install-auth.mjs
+          bash scripts/test-install-appimage.sh
       - name: Exercise the packaged CLI without a display
         env:
           SHADOW_DESKTOP_BINARY: ${{ github.workspace }}/target/release/bundle/appimage/ShadowCode_${{ env.VERSION }}_amd64.AppImage

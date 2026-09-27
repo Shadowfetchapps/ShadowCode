@@ -49,4 +49,6 @@ jobs:
       - name: Pinned-source failures and mirror recovery
         run: node --test scripts/test-native-source-fetch.mjs
       - name: Installer replacement, runtime swap and checksum refusal
-        run: bash scripts/test-install-appimage.sh
+        run: |
+          node --test --test-reporter=tap scripts/test-install-auth.mjs
+          bash scripts/test-install-appimage.sh

@@ -1,3 +1,14 @@
+## Unreleased: reliability and authenticated releases
+
+- Compare cleanup can recover from partial filesystem deletion using a bounded ownership journal and private quarantine, while preserving the applied result and user work.
+- Reopening the selected conversation preserves pending approval cards; changing conversations immediately hides approvals from the previous one.
+- Release jobs separate build, signing and publication, authenticate private snapshots and require complete scoped verification receipts.
+- The AppImage installer now requires publisher signatures and durable accepted-state checks. Checksum-only installation, `SHADOWCODE_SHA256SUMS` overrides and `--unverified` are no longer supported in this entry point. Existing unsigned releases are not retroactively authenticated. Use a separate source-build profile for development.
+
+Production public trust, protected signing configuration and the first signed version are not provisioned yet. Full native, clean-install and recovery qualification remain release requirements. This section describes development changes, not a published release.
+
+## Published 0.32.0
+
 ShadowCode 0.32.0 is the biggest update yet: it's easier to use every day,
 the agent is smarter, commands are properly sandboxed, and you can use
 ShadowCode from your phone, your editor, or on a schedule. The 0.31.1 notes

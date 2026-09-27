@@ -4,11 +4,25 @@
 # links, refusal of broken runtimes, rollback, and preserved profile data.
 # Never touches the real HOME.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-INSTALLER="$ROOT/scripts/install-appimage.sh"
+SOURCE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRATCH="$(mktemp -d)"
 cleanup() { chmod -R u+w -- "$SCRATCH" 2>/dev/null || true; rm -rf -- "$SCRATCH"; }
 trap cleanup EXIT
+# Self-contained disposable trusted installer bundle; never provision the checkout.
+ROOT="$SCRATCH/installer"
+mkdir -p "$ROOT/scripts" "$ROOT/assets/icons" "$ROOT/packaging"
+for script in install-appimage.sh install-release-state.sh native-release-auth-lib.sh verify-native-release.sh native-release-auth.mjs installer-auth-fixtures.mjs; do
+  cp -- "$SOURCE_ROOT/scripts/$script" "$ROOT/scripts/$script"
+done
+cp -- "$SOURCE_ROOT/assets/icons/shadow-agent.svg" "$ROOT/assets/icons/shadow-agent.svg"
+cp -- "$SOURCE_ROOT/packaging/shadow-agent.desktop" "$ROOT/packaging/shadow-agent.desktop"
+INSTALLER="$ROOT/scripts/install-appimage.sh"
+FIXTURE_TOOL="$ROOT/scripts/installer-auth-fixtures.mjs"
+AUTH_FIXTURE_PRIVATE="$SCRATCH/fixture-private.pem"
+node "$FIXTURE_TOOL" provision "$ROOT" "$AUTH_FIXTURE_PRIVATE"
+# Exercise an existing built runtime in place as source data, copying into the
+# isolated fake AppImage only for scenario7. No runtime download/build occurs.
+REAL_BIN="$SOURCE_ROOT/packaging/llama.cpp/bin"
 HOME="$SCRATCH/home"
 export HOME
 export XDG_DATA_HOME="$HOME/.local/share"
@@ -26,6 +40,7 @@ printf 'old runtime' > "$LIB/old-runtime-marker"
 # MODE: good | absolute-link | dangling-link | broken-server | wrong-commit | no-runtime
 fake_appimage() {
   local file="$1" version="$2" commit="$3" mode="$4"
+  mkdir -p "$(dirname "$file")"
   cat > "$file" <<FAKE
 #!/usr/bin/env bash
 set -euo pipefail
@@ -38,7 +53,7 @@ if [[ "\${1:-}" == "--appimage-extract" && "\${2:-}" == "usr/lib/shadowcode" ]];
   dir=squashfs-root/usr/lib/shadowcode
   mkdir -p "\$dir/NOTICES"
   if [[ "$mode" == "real" ]]; then
-    cp -a "$ROOT/packaging/llama.cpp/bin/." "\$dir/"
+    cp -a "$REAL_BIN/." "\$dir/"
     exit 0
   fi
   reported="${commit:0:9}"
@@ -60,7 +75,7 @@ exit 1
 FAKE
   chmod +x "$file"
 }
-checksum() { (cd "$(dirname "$1")" && sha256sum "$(basename "$1")" >> SHA256SUMS); }
+checksum() { node "$FIXTURE_TOOL" sign "$1" "$AUTH_FIXTURE_PRIVATE"; }
 expect_refusal() {
   local label="$1"; shift
   if "$@" > "$SCRATCH/refused.txt" 2>&1; then
@@ -78,19 +93,19 @@ assert_state_unchanged() {
   test ! -e "$HOME/.local/lib/.shadowcode-install-intent"
 }
 
-APPIMAGE="$SCRATCH/release/ShadowCode_0.28.0_amd64.AppImage"
+APPIMAGE="$SCRATCH/release/0.28.0/ShadowCode_0.28.0_amd64.AppImage"
 fake_appimage "$APPIMAGE" 0.28.0 "$COMMIT_A" good
 
-# 1. No SHA256SUMS: refused unless --unverified; nothing changes.
+# 1. Missing publisher metadata is refused; nothing changes.
 expect_refusal 'missing SHA256SUMS' "$INSTALLER" "$APPIMAGE"
-grep -Fq 'pass --unverified' "$SCRATCH/refused.txt"
+grep -Fq 'Publisher authentication failed' "$SCRATCH/refused.txt"
 test "$(readlink "$HOME/Applications/ShadowCode.AppImage")" = ShadowCode-0.27.0-x86_64.AppImage
 test -f "$LIB/old-runtime-marker"
 
 # 2. Verified install: AppImage, runtime from inside it, launchers, entry.
 checksum "$APPIMAGE"
 "$INSTALLER" "$APPIMAGE" > "$SCRATCH/installed.txt"
-grep -Fq 'Verified SHA-256' "$SCRATCH/installed.txt"
+grep -Fq 'Publisher signature verified' "$SCRATCH/installed.txt"
 test -f "$HOME/Applications/ShadowCode-0.28.0-x86_64.AppImage"
 test "$(readlink "$HOME/Applications/ShadowCode.AppImage")" = ShadowCode-0.28.0-x86_64.AppImage
 test ! -e "$HOME/Applications/ShadowCode-0.27.0-x86_64.AppImage"
@@ -111,20 +126,18 @@ grep -Fxq 'X-ShadowCode-Version=0.28.0' "$DESKTOP"
 grep -Fxq 'StartupWMClass=shadowcode' "$DESKTOP"
 grep -Fxq "Exec=\"$HOME/.local/bin/shadow\" ui" "$DESKTOP"
 test -f "$XDG_DATA_HOME/icons/hicolor/scalable/apps/shadow-agent.svg"
-# The source commit is recorded once, from the checkout or an explicit override.
-test "$(grep -c '^X-ShadowCode-GitSha=' "$DESKTOP")" -le 1
-if EXPECTED_SHA="$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null)"; then
-  grep -Fxq "X-ShadowCode-GitSha=$EXPECTED_SHA" "$DESKTOP"
-fi
+# The source commit comes from signed metadata; an environment override is ignored.
+EXPECTED_SHA="$(printf 'c%.0s' {1..40})"
+grep -Fxq "X-ShadowCode-GitSha=$EXPECTED_SHA" "$DESKTOP"
 SHADOWCODE_GIT_SHA="$(printf 'a%.0s' {1..40})" "$INSTALLER" "$APPIMAGE" > /dev/null
-grep -Fxq "X-ShadowCode-GitSha=$(printf 'a%.0s' {1..40})" "$DESKTOP"
+grep -Fxq "X-ShadowCode-GitSha=$EXPECTED_SHA" "$DESKTOP"
 test "$(grep -c '^X-ShadowCode-GitSha=' "$DESKTOP")" -eq 1
 assert_state_unchanged ShadowCode-0.28.0-x86_64.AppImage "$COMMIT_A"
 
 # 3. Broken runtimes inside a correctly checksummed AppImage are refused
 #    before anything is replaced.
 for mode in absolute-link dangling-link broken-server wrong-commit no-runtime; do
-  BAD="$SCRATCH/release/ShadowCode_0.28.1_amd64.AppImage"
+  BAD="$SCRATCH/release/0.28.1/ShadowCode_0.28.1_amd64.AppImage"
   rm -f "$BAD" "$SCRATCH/release/SHA256SUMS"
   fake_appimage "$BAD" 0.28.1 "$COMMIT_B" "$mode"
   checksum "$BAD"
@@ -141,17 +154,20 @@ for mode in absolute-link dangling-link broken-server wrong-commit no-runtime; d
   assert_state_unchanged ShadowCode-0.28.0-x86_64.AppImage "$COMMIT_A"
 done
 
-# 4. --unverified installs without SHA256SUMS (explicit opt-in).
+# 4. --unverified cannot bypass publisher authentication; a signed install follows.
 UNVERIFIED="$SCRATCH/unverified/ShadowCode_0.28.1_amd64.AppImage"
 mkdir -p "$(dirname "$UNVERIFIED")"
 fake_appimage "$UNVERIFIED" 0.28.1 "$COMMIT_B" good
-"$INSTALLER" --unverified "$UNVERIFIED" > /dev/null 2> "$SCRATCH/unverified.txt"
-grep -Fq 'installing unverified' "$SCRATCH/unverified.txt"
+expect_refusal 'unverified cannot bypass signature' "$INSTALLER" --unverified "$UNVERIFIED"
+grep -Fq 'Publisher signatures are required' "$SCRATCH/refused.txt"
+assert_state_unchanged ShadowCode-0.28.0-x86_64.AppImage "$COMMIT_A"
+checksum "$UNVERIFIED"
+"$INSTALLER" "$UNVERIFIED" > /dev/null
 assert_state_unchanged ShadowCode-0.28.1-x86_64.AppImage "$COMMIT_B"
 test ! -e "$HOME/Applications/ShadowCode-0.28.0-x86_64.AppImage"
 
 # 5. A failure after the swap restores the previous runtime and AppImage link.
-NEXT="$SCRATCH/release/ShadowCode_0.28.2_amd64.AppImage"
+NEXT="$SCRATCH/release/0.28.2/ShadowCode_0.28.2_amd64.AppImage"
 rm -f "$SCRATCH/release/SHA256SUMS"
 fake_appimage "$NEXT" 0.28.2 "$COMMIT_A" good
 checksum "$NEXT"
@@ -165,12 +181,11 @@ assert_state_unchanged ShadowCode-0.28.1-x86_64.AppImage "$COMMIT_B"
 # 6. A changed AppImage fails its checksum.
 printf '# modified after checksum\n' >> "$NEXT"
 expect_refusal 'checksum mismatch' "$INSTALLER" "$NEXT"
-grep -Fq 'Checksum mismatch' "$SCRATCH/refused.txt"
+grep -Fq 'artifact digest/size mismatch' "$SCRATCH/refused.txt"
 assert_state_unchanged ShadowCode-0.28.1-x86_64.AppImage "$COMMIT_B"
 
 # 7. With a built runtime in this checkout, the real llama-server installs and
 #    starts from the isolated ~/.local/lib/shadowcode (no GPU work: --version).
-REAL_BIN="$ROOT/packaging/llama.cpp/bin"
 if [[ -x "$REAL_BIN/llama-server" && -f "$REAL_BIN/NOTICES/llama.cpp-LICENSE" ]]; then
   REAL_COMMIT="$(awk -F= '$1 == "commit" { print $2; exit }' "$REAL_BIN/COMMIT")"
   REAL="$SCRATCH/real/ShadowCode_0.28.3_amd64.AppImage"
@@ -235,7 +250,7 @@ esac
 exec "$SHADOW_TEST_REAL_MV" "$@"
 WRAPPER
 chmod +x "$FAULT_BIN/mv"
-NEXT="$SCRATCH/release/ShadowCode_0.28.4_amd64.AppImage"
+NEXT="$SCRATCH/release/0.28.4/ShadowCode_0.28.4_amd64.AppImage"
 rm -f "$SCRATCH/release/SHA256SUMS"
 fake_appimage "$NEXT" 0.28.4 "$COMMIT_A" good
 checksum "$NEXT"
@@ -250,15 +265,14 @@ for fault in old-runtime-failure new-runtime-failure after-old-runtime-term afte
 done
 
 # 9. Same-version retries are byte-immutable, even with a valid new checksum.
-PRIOR_VERSION="${PRIOR_LINK#ShadowCode-}"
-PRIOR_VERSION="${PRIOR_VERSION%-x86_64.AppImage}"
-SAME_VERSION="$SCRATCH/release/ShadowCode_${PRIOR_VERSION}_amd64.AppImage"
+PRIOR_VERSION=0.28.4
+SAME_VERSION="$SCRATCH/same-version/ShadowCode_${PRIOR_VERSION}_amd64.AppImage"
 fake_appimage "$SAME_VERSION" "$PRIOR_VERSION" "$COMMIT_A" good
 printf '# changed bytes under the same version\n' >> "$SAME_VERSION"
 checksum "$SAME_VERSION"
 PRIOR_HASH="$(sha256sum "$HOME/Applications/$PRIOR_LINK")"
 expect_refusal 'same-version changed bytes' "$INSTALLER" "$SAME_VERSION"
-grep -Fq 'refusing to overwrite that version' "$SCRATCH/refused.txt"
+grep -Fq 'changed release under accepted version' "$SCRATCH/refused.txt"
 test "$(sha256sum "$HOME/Applications/$PRIOR_LINK")" = "$PRIOR_HASH"
 assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
 
@@ -324,7 +338,7 @@ expect_refusal 'killed reinstall of identical version' env PATH="$FAULT_BIN:$PAT
 "$INSTALLER" --recover > /dev/null
 assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
 test "$(sha256sum "$HOME/Applications/$PRIOR_LINK")" = "$SAME_HASH"
-NEXT="$SCRATCH/release/ShadowCode_0.28.5_amd64.AppImage"
+NEXT="$SCRATCH/release/0.28.5/ShadowCode_0.28.5_amd64.AppImage"
 fake_appimage "$NEXT" 0.28.5 "$COMMIT_B" good
 checksum "$NEXT"
 

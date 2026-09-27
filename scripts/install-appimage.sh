@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
 # Install a ShadowCode AppImage for the current user.
 #
-#   * The AppImage must match its entry in SHA256SUMS beside it (or in
-#     SHADOWCODE_SHA256SUMS). Without a checksum file the install is refused
-#     unless --unverified is given.
+#   * A provisioned publisher trust policy authenticates the release envelope,
+#     manifest/checksums and exact AppImage bytes before any candidate executes.
+#     Only its private verified snapshot is executed. --unverified cannot bypass
+#     authentication; unsigned developer installation needs a separate path.
+#   * Durable signed receipt generations retain the highest accepted release
+#     even when runtime rollback restores an older working installation.
 #   * Nothing is replaced until the new executable starts (--version) and the
 #     llama.cpp runtime bundled inside it starts (llama-server --version with
 #     LD_LIBRARY_PATH unset, printing the commit in its COMMIT file).
@@ -17,8 +21,9 @@
 #   * Settings and task history are never touched. Previous ShadowCode
 #     AppImages are removed only after success.
 set -euo pipefail
+umask 077
 usage() {
-  echo 'Usage: install-appimage.sh [--unverified] /path/to/ShadowCode_VERSION_amd64.AppImage | --recover' >&2
+  echo 'Usage: install-appimage.sh /path/to/ShadowCode_VERSION_amd64.AppImage | --recover' >&2
   exit 2
 }
 fail() { echo "$*" >&2; exit 1; }
@@ -39,12 +44,17 @@ else
   [[ -n "$SOURCE_ARG" ]] || usage
 fi
 
+[[ "$UNVERIFIED" == 0 ]] || fail '--unverified is not supported by this signed-release installer. Publisher signatures are required; unsigned development installation needs a separate isolated development path.'
+
 APPS="$HOME/Applications"
 BIN="$HOME/.local/bin"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 LIB="$HOME/.local/lib/shadowcode"
 JOURNAL="$(dirname "$LIB")/.shadowcode-install-intent"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Resolve the actual script before selecting trusted sibling code and policy.
+# A convenience symlink next to downloads must not choose a substitute bundle.
+INSTALLER_FILE="$(realpath -- "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$INSTALLER_FILE")/.." && pwd)"
 mkdir -p "$APPS" "$BIN" "$(dirname "$LIB")" "$DATA/applications" "$DATA/icons/hicolor/scalable/apps"
 
 # Keep one stable lock inode, including between failed attempts. Two installers
@@ -87,6 +97,9 @@ read_field() {
     || recovery_refusal 'invalid intent record'
   cat -- "$field"
 }
+# shellcheck source=install-release-state.sh
+source "$ROOT/scripts/install-release-state.sh"
+
 recover_install() {
   private_dir "$JOURNAL" || recovery_refusal 'intent directory is not private'
   local schema phase prior prior_hash had old_hash candidate candidate_hash existed new_hash stage_name stage live_hash previous_hash runtime
@@ -97,7 +110,8 @@ recover_install() {
   candidate="$(read_field candidate)"; candidate_hash="$(read_field candidate-sha256)"
   existed="$(read_field candidate-existed)"; new_hash="$(read_field new-runtime-sha256)"
   stage_name="$(read_field stage)"
-  [[ "$schema" == 1 && "$phase" == prepared ]] || recovery_refusal 'unsupported intent or activation already started'
+  [[ ( "$schema" == 1 || "$schema" == 2 ) && "$phase" == prepared ]] || recovery_refusal 'unsupported intent or activation already started'
+  if [[ "$schema" == 1 ]] && exists "$STATE"; then recovery_refusal 'legacy intent conflicts with authenticated state'; fi
   [[ "$candidate" =~ ^ShadowCode-[0-9]+\.[0-9]+\.[0-9]+-x86_64\.AppImage$ && "$candidate_hash" =~ ^[a-f0-9]{64}$ && "$new_hash" =~ ^[a-f0-9]{64}$ ]] || recovery_refusal 'invalid candidate identity'
   [[ "$had" =~ ^[01]$ && "$existed" =~ ^[01]$ && "$stage_name" =~ ^\.shadowcode-install\.[A-Za-z0-9]{6}$ ]] || recovery_refusal 'invalid transaction identity'
   [[ ( "$had" == 1 && "$old_hash" =~ ^[a-f0-9]{64}$ ) || ( "$had" == 0 && "$old_hash" == - ) ]] || recovery_refusal 'invalid prior runtime identity'
@@ -134,6 +148,9 @@ recover_install() {
   else
     [[ "$previous_hash" == - && ( "$live_hash" == - || "$live_hash" == "$new_hash" ) ]] || recovery_refusal 'unexpected runtime or backup'
   fi
+  if [[ "$schema" == 2 ]]; then
+    validate_recovery_state "$stage" "$candidate" "$candidate_hash" "$existed" "$old_hash" "$live_hash" "$previous_hash"
+  fi
   # All identities are checked before any recovery mutation. Preserve the
   # candidate until restoration succeeds, including if recovery is killed.
   if [[ "$live_hash" == "$new_hash" && ( "$had" == 0 || "$previous_hash" == "$old_hash" ) ]]; then
@@ -160,42 +177,19 @@ if [[ "$RECOVER_ONLY" == 1 ]]; then
   exit 0
 fi
 
-SOURCE="$(realpath -- "$SOURCE_ARG")"
-[[ -f "$SOURCE" ]] || fail 'AppImage not found.'
-SOURCE_DIR="$(dirname "$SOURCE")"
-SOURCE_NAME="$(basename "$SOURCE")"
-CHECKSUMS="${SHADOWCODE_SHA256SUMS:-$SOURCE_DIR/SHA256SUMS}"
-ACTUAL="$(file_hash "$SOURCE")" || fail 'AppImage must be a regular file.'
-if [[ -f "$CHECKSUMS" ]]; then
-  EXPECTED="$(awk -v name="$SOURCE_NAME" '{ file=$2; sub(/^\*/, "", file); count=split(file, parts, "/"); if (parts[count] == name) { print $1; exit } }' "$CHECKSUMS")"
-  [[ "$EXPECTED" =~ ^[[:xdigit:]]{64}$ ]] || fail "No SHA-256 entry for $SOURCE_NAME in $CHECKSUMS"
-  [[ "$ACTUAL" == "$EXPECTED" ]] || fail "Checksum mismatch for $SOURCE_NAME; refusing to install it."
-  printf 'Verified SHA-256 from %s\n' "$CHECKSUMS"
-elif [[ "$UNVERIFIED" == 1 ]]; then
-  printf 'No SHA256SUMS beside the AppImage; installing unverified as requested (--unverified).\n' >&2
-else
-  fail "No SHA256SUMS beside $SOURCE_NAME. Download SHA256SUMS from the same release, or pass --unverified to install without checking."
-fi
-chmod +x "$SOURCE"
-VERSION_LINE="$("$SOURCE" --appimage-extract-and-run --version)" || fail 'The AppImage did not start.'
-[[ "$VERSION_LINE" =~ ^ShadowCode\ ([0-9]+\.[0-9]+\.[0-9]+)$ ]] || fail 'Not a supported ShadowCode release.'
-VERSION="${BASH_REMATCH[1]}"
-DEST="$APPS/ShadowCode-${VERSION}-x86_64.AppImage"
-[[ ! -e "$APPS/ShadowCode.AppImage" || -L "$APPS/ShadowCode.AppImage" ]] \
-  || fail 'ShadowCode.AppImage is not a symlink; refusing to replace it.'
-# A retry may reuse identical bytes, but must not destroy the only rollback
-# copy by replacing a versioned path with different content.
-DEST_EXISTED=0
-if [[ -e "$DEST" || -L "$DEST" ]]; then
-  [[ -f "$DEST" && ! -L "$DEST" ]] || fail 'The versioned AppImage is not a regular file.'
-  cmp -s -- "$SOURCE" "$DEST" \
-    || fail "Different AppImage bytes are already installed as $VERSION; refusing to overwrite that version."
-  DEST_EXISTED=1
-fi
-
-# Stage next to the destination so the final step is a rename.
+load_install_policy
+load_accepted_receipt
+check_legacy_identity
+[[ -z "${SHADOWCODE_SHA256SUMS:-}" ]] || fail 'Separate checksum overrides cannot replace authenticated release metadata.'
+DOWNLOAD="$(realpath -- "$SOURCE_ARG")"
+[[ -f "$DOWNLOAD" && ! -L "$DOWNLOAD" ]] || fail 'AppImage not found.'
+SOURCE_DIR="$(dirname "$DOWNLOAD")"
+SOURCE_NAME="$(basename "$DOWNLOAD")"
+[[ "$SOURCE_NAME" =~ ^ShadowCode_[0-9]+\.[0-9]+\.[0-9]+_amd64\.AppImage$ ]] || fail 'Only the authenticated AppImage role can be installed by this script.'
 STAGE="$(mktemp -d "$(dirname "$LIB")/.shadowcode-install.XXXXXX")"
-JOURNAL_TEMP=""
+VERIFIED="$STAGE/verified-release"
+DEST=''
+JOURNAL_TEMP=''
 JOURNAL_CREATED=0
 RUNTIME_REPLACING=0
 HAD_RUNTIME=0
@@ -241,10 +235,17 @@ finish() {
       fi
     fi
   fi
-  rm -f -- "$DEST.pending" "$APPS/.ShadowCode.AppImage.pending"
+  [[ -z "$DEST" ]] || rm -f -- "$DEST.pending"
+  rm -f -- "$APPS/.ShadowCode.AppImage.pending"
+  if [[ "$STATE_ADVANCING" == 1 && "$STATE_DURABLE" == 0 ]]; then
+    restored=0
+    echo "Accepted-release state needs recovery; preserve $JOURNAL and $STAGE." >&2
+  fi
   if [[ "$restored" == 1 ]]; then
-    [[ "$JOURNAL_CREATED" == 0 ]] || rm -rf -- "$JOURNAL"
-    rm -rf -- "$STAGE"
+    if [[ "$JOURNAL_CREATED" == 1 && -e "$JOURNAL" ]]; then
+      mv -T -- "$JOURNAL" "$STAGE/completed-intent" || restored=0
+    fi
+    [[ "$restored" == 0 ]] || rm -rf -- "$STAGE"
   fi
   [[ -z "$JOURNAL_TEMP" ]] || rm -rf -- "$JOURNAL_TEMP"
   exit "$status"
@@ -252,6 +253,28 @@ finish() {
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+
+VERIFY_ARGS=(--bundle-dir "$SOURCE_DIR" --trust-dir "$TRUST" --artifact "$SOURCE_NAME" --stage-dir "$VERIFIED")
+[[ "$ACCEPTED_ID" == - ]] || VERIFY_ARGS+=(--previous-dir "$ACCEPTED_DIR")
+bash "$ROOT/scripts/verify-native-release.sh" "${VERIFY_ARGS[@]}" || fail 'Publisher authentication failed; no downloaded candidate was executed.'
+SOURCE="$VERIFIED/$SOURCE_NAME"
+ACTUAL="$(file_hash "$SOURCE")" || fail 'Verified AppImage disappeared.'
+VERSION="$(awk -F= '$1 == "version" {print $2}' "$VERIFIED/RELEASE-AUTH")"
+VERIFIED_COMMIT="$(awk -F= '$1 == "commit" {print $2}' "$VERIFIED/RELEASE-AUTH")"
+version_compare "$VERSION" "$FIRST_AUTH_VERSION"
+(( CMP >= 0 )) || fail 'Signed candidate is before the first authenticated release boundary.'
+chmod 500 "$SOURCE"
+VERSION_LINE="$("$SOURCE" --appimage-extract-and-run --version)" || fail 'The AppImage did not start.'
+[[ "$VERSION_LINE" == "ShadowCode $VERSION" ]] || fail 'The AppImage version differs from its signed release identity.'
+DEST="$APPS/ShadowCode-${VERSION}-x86_64.AppImage"
+[[ ! -e "$APPS/ShadowCode.AppImage" || -L "$APPS/ShadowCode.AppImage" ]] || fail 'ShadowCode.AppImage is not a symlink; refusing to replace it.'
+DEST_EXISTED=0
+if [[ -e "$DEST" || -L "$DEST" ]]; then
+  [[ -f "$DEST" && ! -L "$DEST" ]] || fail 'The versioned AppImage is not a regular file.'
+  cmp -s -- "$SOURCE" "$DEST" || fail "Different AppImage bytes are already installed as $VERSION; refusing to overwrite that version."
+  DEST_EXISTED=1
+fi
 
 # The llama.cpp runtime shipped inside this AppImage.
 (cd "$STAGE" && "$SOURCE" --appimage-extract usr/lib/shadowcode >/dev/null) \
@@ -286,9 +309,10 @@ OLD_RUNTIME_HASH=-
 [[ "$HAD_RUNTIME" == 0 ]] || OLD_RUNTIME_HASH="$(runtime_hash "$LIB")" || fail 'Prior runtime cannot be identified.'
 NEW_RUNTIME_HASH="$(runtime_hash "$NEW_RUNTIME")" || fail 'Candidate runtime cannot be identified.'
 [[ "$(file_hash "$SOURCE")" == "$ACTUAL" ]] || fail 'AppImage changed during validation.'
+prepare_accepted_record
 JOURNAL_TEMP="$(mktemp -d "$(dirname "$LIB")/.shadowcode-intent.XXXXXX")"
 write_field() { printf '%s\n' "$2" > "$JOURNAL_TEMP/$1"; chmod 600 "$JOURNAL_TEMP/$1"; }
-write_field schema 1
+write_field schema 2
 write_field phase prepared
 write_field apps-root "$(realpath -- "$APPS")"
 write_field library-root "$(realpath -- "$(dirname "$LIB")")"
@@ -301,15 +325,22 @@ write_field candidate-sha256 "$ACTUAL"
 write_field candidate-existed "$DEST_EXISTED"
 write_field new-runtime-sha256 "$NEW_RUNTIME_HASH"
 write_field stage "$(basename "$STAGE")"
+write_field accepted-prior "$STATE_PRIOR"
+write_field accepted-candidate "$CANDIDATE_ID"
+write_field accepted-record-sha256 "$CANDIDATE_RECORD_HASH"
+write_field state-root "$STATE"
 sync -f "$JOURNAL_TEMP"
 JOURNAL_CREATED=1
 mv -T -- "$JOURNAL_TEMP" "$JOURNAL"
 JOURNAL_TEMP=""
 sync -f "$(dirname "$LIB")"
 
+advance_accepted_record
+
 # Everything verified: replace.
 if [[ "$DEST_EXISTED" == 0 ]]; then
   install -m 755 "$SOURCE" "$DEST.pending"
+  [[ "$(file_hash "$DEST.pending")" == "$ACTUAL" ]] || fail 'Candidate destination copy changed.'
   DEST_CREATING=1
   mv -f "$DEST.pending" "$DEST"
 fi
@@ -339,19 +370,15 @@ ln -sfn shadow "$BIN/.shadowcode-install"
 mv -Tf "$BIN/.shadowcode-install" "$BIN/shadowcode"
 cp "$ROOT/assets/icons/shadow-agent.svg" "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg"
 sed "s|^Exec=.*|Exec=\"${BIN}/shadow\" ui|; s|^TryExec=.*|TryExec=${BIN}/shadow|; s|^X-ShadowCode-Version=.*|X-ShadowCode-Version=${VERSION}|; /^X-ShadowCode-GitSha=/d" "$ROOT/packaging/shadow-agent.desktop" > "$DATA/applications/shadow-agent.desktop.pending"
-# Record the source commit when known: SHADOWCODE_GIT_SHA wins, then the
-# checkout this script runs from. Omitted rather than guessed otherwise.
-GIT_SHA="${SHADOWCODE_GIT_SHA:-$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null || true)}"
-if [[ "$GIT_SHA" =~ ^[[:xdigit:]]{40}$ ]]; then
-  printf 'X-ShadowCode-GitSha=%s\n' "$GIT_SHA" >> "$DATA/applications/shadow-agent.desktop.pending"
-fi
+# The desktop identity describes the authenticated package, not this checkout.
+printf 'X-ShadowCode-GitSha=%s\n' "$VERIFIED_COMMIT" >> "$DATA/applications/shadow-agent.desktop.pending"
 mv -f "$DATA/applications/shadow-agent.desktop.pending" "$DATA/applications/shadow-agent.desktop"
 # Success: drop the previous runtime and older AppImages.
+mv -T -- "$JOURNAL" "$STAGE/completed-intent"
+JOURNAL_CREATED=0
 RUNTIME_REPLACING=0
 LINK_REPLACING=0
 DEST_CREATING=0
-rm -rf -- "$JOURNAL"
-JOURNAL_CREATED=0
 rm -rf -- "$LIB.previous"
 for old in "$APPS"/ShadowCode-*-x86_64.AppImage; do
   [[ "$old" == "$DEST" || ! -f "$old" ]] || rm -- "$old"

@@ -36,7 +36,7 @@ SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_DESKTOP_ARGS='["--appimage-extract-and-ru
 SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_CLI_ARGS='["--appimage-extract-and-run"]' SHADOW_MCP_TRANSPORT=http node scripts/test-native-mcp-server.mjs
 npm --prefix scripts/native-mcp-peer ci --ignore-scripts --no-audit --no-fund
 SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_CLI_ARGS='["--appimage-extract-and-run"]' node scripts/test-native-mcp-peer.mjs` },
-  installer: { artifacts: true, unchanged: true, script: 'bash scripts/test-install-appimage.sh' },
+  installer: { artifacts: true, unchanged: true, script: 'node --test --test-reporter=tap scripts/test-install-auth.mjs\nbash scripts/test-install-appimage.sh' },
 };
 export const REQUIRED_GATES = Object.keys(GATES);
 const OPTIONAL_RUST_TESTS = new Set([

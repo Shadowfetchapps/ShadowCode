@@ -53,19 +53,28 @@ Download from [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/re
 
 ### AppImage (recommended)
 
-Put the AppImage and `SHA256SUMS` in the same folder, then run the installer
-from a checkout of this repository:
+The development branch now requires signed release packages. Published 0.32.0
+assets are checksum-only and cannot be installed by this new entry point; use
+the instructions shipped with that released version for those existing assets.
+Production public trust and the first signed release are still being provisioned.
+For development today, use [Build from source](#build-from-source).
 
-```bash
-sha256sum --ignore-missing -c SHA256SUMS
-git clone https://github.com/Shadowfetchapps/ShadowCode.git
-./ShadowCode/scripts/install-appimage.sh ~/Downloads/ShadowCode_0.32.0_amd64.AppImage
-```
+Once a signed release and independently authenticated installer bundle are
+available, put its AppImage, `SHA256SUMS`, `RELEASE-MANIFEST.json`,
+`RELEASE-AUTH` and `RELEASE-AUTH.sig` in one folder. Run the installer from the
+reviewed bundle, which supplies its own verifier, public keys and installation
+policy. Never obtain those trusted keys from the candidate download itself.
+See [publisher authentication](docs/RELEASE_AUTHENTICATION.md) for the exact
+bundle and bootstrap requirements.
 
 [`scripts/install-appimage.sh`](scripts/install-appimage.sh):
 
-- refuses the file unless it matches its `SHA256SUMS` entry. Pass
-  `--unverified` only if you knowingly want to skip the check.
+- verifies the publisher signature, release identity and exact private AppImage
+  snapshot before executing it. Checksum-only packages, checksum overrides and
+  `--unverified` are refused; the flag is not a signature bypass.
+- records the highest authenticated release durably and refuses downgrades or
+  changed bytes under the same version. Restoring an older working app after
+  failure does not lower this record.
 - starts the new AppImage (`--version`) before replacing anything.
 - extracts the bundled llama.cpp runtime (`usr/lib/shadowcode`) and checks it:
   no absolute or dangling symlinks, `COMMIT`, `architectures.txt` and `NOTICES`
@@ -80,7 +89,7 @@ git clone https://github.com/Shadowfetchapps/ShadowCode.git
 - records interrupted replacement before activation and restores the prior
   AppImage/runtime on retry when all recorded identities still match. Run
   `./ShadowCode/scripts/install-appimage.sh --recover` to attempt that recovery
-  without the original download. Changed, ambiguous or activation-stage states
+  without the original download, using the same trusted installer bundle. Changed, ambiguous or activation-stage states
   are preserved for manual recovery; first-window and database rollback are
   not yet qualified.
 

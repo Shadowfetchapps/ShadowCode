@@ -1,8 +1,8 @@
 # Publisher authentication contract
 
-The helpers in `scripts/native-release-auth.mjs` and `scripts/verify-native-release.sh` verify offline publisher signatures. They do not install, execute, download or publish an application, update trusted keys, or generate production keys. CI tests their behavior with disposable fixture keys; production trust is deliberately absent. The current installer and its explicit `--unverified` behavior are unchanged.
+The helpers in `scripts/native-release-auth.mjs` and `scripts/verify-native-release.sh` verify offline publisher signatures. They do not install, execute, download or publish an application, update trusted keys, or generate production keys. CI tests their behavior with disposable fixture keys; production trust is deliberately absent. The installer now uses these helpers before executing a candidate and explicitly refuses `--unverified`. Production public trust and a first signed release remain unprovisioned.
 
-The Bash verifier loads `scripts/native-release-auth-lib.sh` from its own script directory. Keep both reviewed code files together in the trusted tooling bundle; do not obtain the library from the candidate download or source metadata as shell code. The shared parser and signature routines also support the separately reviewed installer prototype's historical receipts. Sharing these routines does not integrate the production installer or make its accepted-release state durable.
+The Bash verifier loads `scripts/native-release-auth-lib.sh` from its own script directory. Keep both reviewed code files together in the trusted tooling bundle; do not obtain the library from the candidate download or source metadata as shell code. The installer uses the same reviewed routines for current candidates and signed historical receipts; it never sources release metadata as code.
 
 ## Trust and security contract
 
@@ -70,7 +70,7 @@ Production private-key generation/custody, public fingerprint distribution, key 
 
 Both verifiers can compare the candidate with a supplied prior accepted `RELEASE-AUTH` plus signature. They cryptographically verify that prior receipt, then reject a lower version, lower signing epoch, or any different envelope bytes under the same version. Identical retries are accepted. Comparison is numeric by stable version component, not lexicographic or a GitHub run number.
 
-This module does **not** discover, persist or atomically advance the installed high-water mark. That belongs to later installer integration under the existing flock and journal. The installer must supply its actual durable highest accepted receipt, refuse missing/corrupt state for an existing authenticated installation, and never decrement it during rollback/recovery. Supplying an older genuinely signed receipt or deleting local state cannot be detected by a stateless verifier. Local same-user compromise is outside this trust boundary.
+The stateless verifier module does **not** discover or persist installed state. The installer now supplies its durable highest accepted receipt under the installation lock/journal, refuses missing/corrupt state for an existing authenticated installation, and never decrements it during rollback/recovery. Supplying an older genuinely signed receipt or deleting local state cannot be detected by a stateless verifier. Local same-user compromise is outside this trust boundary.
 
 The trust policy's minimum version limits first-install replay to a known floor. A fresh offline host still cannot know the latest release or learn that a signing key was revoked after its last trusted policy update. There is no timestamp/expiry freshness claim. Unattended update discovery, trusted-clock freshness rules and database downgrade behavior are not implemented.
 
@@ -100,7 +100,7 @@ bash verify-native-release.sh \
 
 The shell snapshots all relevant inputs into a private 0700 directory. GNU `dd` uses `nofollow,nonblock,count_bytes` and copies at most the observed, bounded file size plus one byte. This closes a post-check symlink swap and prevents an injected FIFO from blocking the input open/read. Exact snapshot size/hash/signature are checked. The selected artifact remains mode 0400 and is **never executed**. On success a same-filesystem, non-overwriting rename retains only the five verified files at the requested new stage path. Failure removes private scratch data and leaves any pre-existing stage untouched.
 
-A future installer must execute/install only this verified private snapshot, never return to the original mutable download path. The read-only mode prevents accidental writes; it is not immutable against an attacker already controlling the same user. Existing checksum mismatch, managed-runtime and journal checks must remain. Existing `--unverified` behavior must not silently become a signature bypass.
+The installer executes and installs only this verified private snapshot, never the original mutable download path. The read-only mode prevents accidental writes; it is not immutable against an attacker already controlling the same user. Existing checksum mismatch, managed-runtime and journal checks must remain. The previous `--unverified` flag is explicitly refused before destination creation; it has not become a signature bypass.
 
 ## Release workflow and provisioning boundary
 
@@ -119,7 +119,26 @@ Owner review of the release workflow/source and repository protections remains n
 
 All existing required gates remain, with a new required `built-project-cleanup` gate running the exact release-profile cleanup test over actual installed UI dependencies and output. The default Rust suite transfers only this test to that gate; missing, failed or ignored qualification rejects signing and publication. This scope does not claim full Cargo-cache cleanup qualification.
 
-Installer integration remains separate. Its reviewed scratch prototype preserves accepted-state receipts, but the tracked installer has not adopted signatures or a durable authentication high-water mark. The initial installer bundle still needs the verifier, approved public trust and icon without a development-checkout prerequisite. Bootstrap distribution, authenticated .deb invocation, actual production signing, clean-host installation and full GitHub release qualification remain outstanding. Existing installed applications and public releases are not authenticated retroactively.
+The tracked AppImage installer now authenticates candidates and retains durable accepted-state receipts. Bootstrap distribution, authenticated .deb invocation, actual production signing, clean-host installation and full GitHub release qualification remain outstanding. Existing installed applications and public releases are not authenticated retroactively.
+
+## Trusted installer and durable accepted state
+
+Distribute a complete, independently authenticated bundle containing `scripts/install-appimage.sh`, `scripts/install-release-state.sh`, both Bash verifier files, `release/install-policy`, the `release/trust` policy/public keys, `assets/icons/shadow-agent.svg` and `packaging/shadow-agent.desktop`. A development checkout is not a runtime dependency when this bundle is complete. The installer resolves its actual script file before choosing sibling code/trust, so a convenience launcher symlink cannot choose an adjacent substitute bundle. The candidate, working directory and environment cannot override this trust root. Path resolution does not authenticate the initial bundle or protect it from its owner modifying it.
+
+The fixed install policy has exactly these two lines, with the actual first signed stable version substituted by the release owner:
+
+```text
+ShadowCode-Install-Policy-v1
+first-authenticated-version=MAJOR.MINOR.PATCH
+```
+
+This immutable boundary distinguishes old unsigned installations from an authenticated installation whose state disappeared. It is not the current minimum-version floor and must not be advanced during key rotation. Incoming candidates below it are refused before execution, even if the trust policy's floor is lower. No production boundary is supplied by the repository yet.
+
+The installer accepts only the authenticated AppImage role. It checks the private snapshot's reported version and bundled runtime before changing installed files. Signed metadata is retained in private, content-addressed receipt generations under `~/.local/lib/.shadowcode-release-state`. A schema2 intent binds the prior/candidate receipt identities, exact app/runtime fingerprints and installation roots. The accepted pointer becomes durable before app/runtime replacement; rollback can restore an earlier working application without lowering the highest accepted release.
+
+Recovery accepts only exact recorded pre-activation states and preserves changed or ambiguous material. Historical receipt checks retain signature/identity/key-range verification while allowing old current floors. Genuine schema1 recovery remains available when there is no authenticated state. Activation-started recovery, desktop/launcher rollback and first-window/database downgrade qualification remain incomplete. Restoring a complete old application/state backup cannot be detected by this offline local high-water record.
+
+Compatibility change: the signed entry point rejects checksum-only installation, `SHADOWCODE_SHA256SUMS` overrides and `--unverified`. Use the documented source build with a separate profile for development; a separate unsigned packaged-development installer has not been implemented. Existing published unsigned assets must not be silently repackaged or overwritten under the same version.
 
 ## Evidence and limitations
 
