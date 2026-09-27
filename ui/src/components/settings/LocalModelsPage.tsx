@@ -339,6 +339,16 @@ function ModelRow({
             <Eye size={11} aria-hidden="true" /> Vision
           </span>
         )}
+        {model.tools && model.tools_basis === "template_hint" && (
+          <span className="cap-badge" title={model.tools_reason}>
+            Tool hint
+          </span>
+        )}
+        {model.tools && model.tools_basis === "known_template_profile" && (
+          <span className="cap-badge" title={model.tools_reason}>
+            Tool template
+          </span>
+        )}
         {model.tools === false && (
           <span className="cap-badge" title={model.tools_reason}>
             <MessageSquareText size={11} aria-hidden="true" /> Chat only

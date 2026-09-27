@@ -107,8 +107,15 @@ export type GgufEntry = {
   reason: string;
   vision: boolean;
   mmproj: string | null;
+  /** Current schema-offering policy, not verified tool/coding capability. */
   tools: boolean;
   tools_reason?: string;
+  tools_basis?:
+    | "unknown"
+    | "known_template_profile"
+    | "template_hint"
+    | "no_template_hint"
+    | "no_template";
   memory?: MemoryEstimate | null;
   fits?: "gpu" | "cpu" | "no" | string;
   availability?: string;
@@ -803,6 +810,14 @@ export type LocalFileIdentity = {
   changed_nanoseconds?: number;
 };
 export type LocalStringIdentity = { sha256: string; bytes: number };
+export type LocalToolCapabilities = {
+  field_status: "missing" | "invalid" | "reported";
+  supports_tools: boolean | null;
+  supports_tool_calls: boolean | null;
+  supports_parallel_tool_calls: boolean | null;
+  supports_object_arguments: boolean | null;
+  invalid_fields: string[];
+};
 export type LocalModelProvenance = {
   schema: 1;
   identity_kind: "filesystem_metadata";
@@ -828,6 +843,8 @@ export type LocalModelProvenance = {
     reported_commit?: string | null;
     reported_generation_defaults?: Record<string, number | string[]> | null;
     reported_chat_template?: LocalStringIdentity | null;
+    reported_chat_template_tool_use?: LocalStringIdentity | null;
+    reported_tool_capabilities?: LocalToolCapabilities;
   };
   template_override?: {
     profile?: string;

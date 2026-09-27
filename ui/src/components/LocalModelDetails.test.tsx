@@ -127,7 +127,8 @@ it("confirms a compatibility template only against its recorded runtime identity
   expect(screen.getByText("Bundled Hermes 2 Pro template")).toBeTruthy();
   expect(screen.getByText("Matched runtime-reported template")).toBeTruthy();
   expect(screen.getByText("b".repeat(64))).toBeTruthy();
-  applied.runtime!.provenance!.runtime.reported_chat_template!.sha256 = "e".repeat(64);
+  applied.runtime!.provenance!.runtime.reported_chat_template!.sha256 =
+    "e".repeat(64);
   rerender(<LocalModelDetails receipt={applied} />);
   expect(screen.getByText("Not confirmed")).toBeTruthy();
   expect(screen.queryByText("Matched runtime-reported template")).toBeNull();
@@ -197,4 +198,156 @@ it("keeps background receipts separate without replacing the active task", () =>
   expect(state.activity.background.localRuntime?.model_id).toBe(
     receipt.model_id,
   );
+});
+
+function withCapabilities(capabilities: unknown) {
+  const copy = structuredClone(receipt);
+  Object.assign(copy.runtime!.provenance!.runtime, {
+    reported_tool_capabilities: capabilities,
+  });
+  return copy;
+}
+
+function detail(label: string) {
+  return screen.getByText(label, { selector: "dt" }).nextElementSibling
+    ?.textContent;
+}
+
+it("distinguishes runtime template reports from coding qualification", () => {
+  render(
+    <LocalModelDetails
+      receipt={withCapabilities({
+        field_status: "reported",
+        supports_tools: false,
+        supports_tool_calls: true,
+        supports_parallel_tool_calls: false,
+        supports_object_arguments: true,
+        invalid_fields: [],
+      })}
+    />,
+  );
+  expect(detail("Tool definitions · runtime report")).toBe("No");
+  expect(detail("Tool-call history · runtime report")).toBe("Yes");
+  expect(detail("Parallel tool calls · runtime report")).toBe("No");
+  expect(detail("Object tool arguments · runtime report")).toBe("Yes");
+  expect(
+    screen.getByText(
+      /do not establish successful tool execution or coding quality/,
+    ),
+  ).toBeTruthy();
+  expect(
+    screen.queryByText(/Tools verified|Coding verified|Tool support verified/),
+  ).toBeNull();
+});
+
+it("keeps missing and malformed capability declarations unknown", () => {
+  const { rerender } = render(
+    <LocalModelDetails
+      receipt={withCapabilities({
+        field_status: "missing",
+        supports_tools: true,
+        supports_tool_calls: true,
+      })}
+    />,
+  );
+  expect(detail("Tool definitions · runtime report")).toBe("Not reported");
+  expect(detail("Tool-call history · runtime report")).toBe("Not reported");
+  expect(detail("Runtime tool capability fields")).toBe("Not reported");
+  rerender(
+    <LocalModelDetails
+      receipt={withCapabilities({
+        field_status: "reported",
+        supports_tools: "true",
+        supports_tool_calls: 1,
+        supports_parallel_tool_calls: null,
+        supports_object_arguments: false,
+        invalid_fields: [
+          "supports_tools",
+          "supports_tool_calls",
+          "fake-private-field",
+        ],
+        private_value: "fake-private-secret",
+      })}
+    />,
+  );
+  expect(detail("Tool definitions · runtime report")).toBe("Not reported");
+  expect(detail("Tool-call history · runtime report")).toBe("Not reported");
+  expect(detail("Object tool arguments · runtime report")).toBe("No");
+  expect(detail("Invalid capability fields")).toBe(
+    "supports_tools, supports_tool_calls",
+  );
+  expect(document.body.textContent).not.toContain("fake-private");
+  rerender(
+    <LocalModelDetails
+      receipt={withCapabilities({
+        field_status: "invalid",
+        supports_tools: true,
+      })}
+    />,
+  );
+  expect(detail("Runtime tool capability fields")).toBe("Invalid report");
+  expect(detail("Tool definitions · runtime report")).toBe("Not reported");
+});
+
+it("does not add a tool capability claim to historical or unrecognized receipts", () => {
+  const { rerender } = render(<LocalModelDetails receipt={receipt} />);
+  expect(screen.queryByText("Tool definitions · runtime report")).toBeNull();
+  for (const malformed of [
+    null,
+    [],
+    true,
+    { field_status: "future", supports_tools: true },
+  ]) {
+    rerender(<LocalModelDetails receipt={withCapabilities(malformed)} />);
+    expect(screen.queryByText("Tool definitions · runtime report")).toBeNull();
+  }
+});
+
+it("keeps the full named tool-use template identity separate from the default", () => {
+  const copy = structuredClone(receipt);
+  Object.assign(copy.runtime!.provenance!.runtime, {
+    reported_chat_template_tool_use: { sha256: "d".repeat(64), bytes: 90000 },
+  });
+  render(<LocalModelDetails receipt={copy} />);
+  expect(detail("Runtime template SHA-256 · reported")).toBe("c".repeat(64));
+  expect(detail("Runtime tool-use template SHA-256 · reported")).toBe(
+    "d".repeat(64),
+  );
+  expect(detail("Runtime tool-use template bytes hashed")).toBe(
+    (90000).toLocaleString(),
+  );
+  expect(screen.queryByText("Matched runtime-reported template")).toBeNull();
+});
+
+it("renders only the selected task's runtime tool report after replay", () => {
+  const first = withCapabilities({
+    field_status: "reported",
+    supports_tools: false,
+    supports_tool_calls: false,
+  });
+  const other = withCapabilities({
+    field_status: "reported",
+    supports_tools: true,
+    supports_tool_calls: true,
+  });
+  other.model_id = "local:gguf:other";
+  const state = replay([
+    {
+      id: 1,
+      ts: 10,
+      task_id: "first",
+      type: "local.runtime_ready",
+      payload: first,
+    },
+    {
+      id: 2,
+      ts: 11,
+      task_id: "other",
+      type: "local.runtime_ready",
+      payload: other,
+    },
+  ]);
+  render(<TaskSummary activity={state.activity.first} onReview={() => {}} />);
+  expect(detail("Tool-call history · runtime report")).toBe("No");
+  expect(screen.queryByText("local:gguf:other")).toBeNull();
 });

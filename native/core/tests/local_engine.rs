@@ -130,11 +130,15 @@ class Handler(BaseHTTPRequestHandler):
                 reported_template += " "
             if os.path.exists(os.path.join(HERE, "unavailable-props")):
                 return self.reply(503, {"private": "MUST-NOT-LEAK"})
-            return self.reply(200, {"default_generation_settings": {"n_ctx": ctx,
-                                    "params": {"temperature":0.8,"top_k":40,"top_p":0.95,"seed":4294967295,
-                                               "prompt":"must not appear in provenance"}},
-                                    "chat_template": reported_template,
-                                    "modalities": {"vision": mmproj is not None}})
+            body = {"default_generation_settings": {"n_ctx": ctx,
+                    "params": {"temperature":0.8,"top_k":40,"top_p":0.95,"seed":4294967295,
+                               "prompt":"must not appear in provenance"}},
+                    "chat_template": reported_template,
+                    "modalities": {"vision": mmproj is not None}}
+            overrides = os.path.join(HERE, "props-overrides.json")
+            if os.path.exists(overrides):
+                body.update(json.load(open(overrides)))
+            return self.reply(200, body)
         self.reply(404, {})
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
@@ -2897,4 +2901,172 @@ fn live_acceptance_rejects_control_tokens_and_irrelevant_nonempty_answers() {
     assert!(addition_answer_valid(
         "The function adds its two arguments."
     ));
+}
+
+#[tokio::test]
+async fn runtime_tool_report_is_task_scoped_and_bound_to_reused_launch() {
+    let f = fixture(GPU);
+    let path = f.models.join("tool-hint.gguf");
+    qwen_like(&path, "qwen3", "{# tools are unavailable #}{{ messages }}");
+    Config::patch(&f.paths, json!({"local_engine":{"files":[path]}})).unwrap();
+    fs::write(f.project.join("hello.txt"), "hello\n").unwrap();
+    let named = format!("{}named tool template tail", "é".repeat(70_000));
+    fs::write(f.bin.join("props-overrides.json"), json!({
+        "chat_template_tool_use": named,
+        "chat_template_caps": {"supports_tools": false, "supports_tool_calls": false, "private": "fake-secret"}
+    }).to_string()).unwrap();
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let mut runs = Vec::new();
+    for step in 0..3 {
+        if step == 1 {
+            // The existing live lease keeps the report observed at its launch.
+            fs::write(
+                f.bin.join("props-overrides.json"),
+                json!({
+                    "chat_template_tool_use": "replacement named template",
+                    "chat_template_caps": {"supports_tools": true, "supports_tool_calls": true}
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        if step == 2 {
+            // Same model path, changed owned file identity: requires a fresh launch.
+            let replacement = path.with_extension("replacement");
+            let mut bytes = fs::read(&path).unwrap();
+            *bytes.last_mut().unwrap() = 17;
+            fs::write(&replacement, bytes).unwrap();
+            fs::rename(replacement, &path).unwrap();
+        }
+        let session = call(
+            &service,
+            "POST",
+            "/api/sessions",
+            json!({"workspace": f.project}),
+        )
+        .await
+        .unwrap();
+        let job = call(&service, "POST", "/api/jobs", json!({
+            "workspace": f.project, "session_id": session["id"], "task": "What does hello.txt say?", "model": local_engine::entry_id(&path)
+        })).await.unwrap();
+        let done = wait_job(&service, job["id"].as_str().unwrap()).await;
+        assert_eq!(done["status"], "completed", "{done}");
+        assert_eq!(done["timings"]["model_reused"], step == 1);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while service.engine.local_runtime().in_use() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completed task must release its runtime lease");
+        runs.push(done);
+    }
+    service.engine.shutdown().await.unwrap();
+    assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 2);
+    let requests = lines(&f.bin.join("requests.jsonl"));
+    assert_eq!(requests.len(), 6);
+    assert!(
+        requests.iter().all(|r| r["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t == "read_file")),
+        "runtime reports are observations, not a changed schema gate"
+    );
+    for (step, done) in runs.iter().enumerate() {
+        let events = service
+            .engine
+            .store()
+            .events_after(done["session_id"].as_str().unwrap(), 0, None, 2000)
+            .unwrap();
+        let receipts: Vec<_> = events
+            .iter()
+            .filter(|e| e["task_id"] == done["task_id"] && e["type"] == "local.runtime_ready")
+            .collect();
+        assert_eq!(receipts.len(), 1);
+        let runtime = &receipts[0]["payload"]["runtime"]["provenance"]["runtime"];
+        assert_eq!(
+            runtime["reported_tool_capabilities"]["field_status"],
+            "reported"
+        );
+        assert_eq!(
+            runtime["reported_tool_capabilities"]["supports_tools"],
+            step == 2
+        );
+        assert_eq!(
+            runtime["reported_tool_capabilities"]["supports_tool_calls"],
+            step == 2
+        );
+        assert!(runtime["reported_tool_capabilities"]["supports_object_arguments"].is_null());
+        assert_eq!(
+            runtime["reported_chat_template"],
+            json!(shadowcode_core::gguf::string_identity(
+                "runtime template fixture"
+            ))
+        );
+        assert_eq!(
+            runtime["reported_chat_template_tool_use"],
+            json!(shadowcode_core::gguf::string_identity(if step == 2 {
+                "replacement named template"
+            } else {
+                &named
+            }))
+        );
+        assert!(!runtime.to_string().contains("named tool template tail"));
+        assert!(!runtime.to_string().contains("fake-secret"));
+    }
+}
+
+#[tokio::test]
+async fn runtime_tool_report_missing_and_malformed_preserve_schema_compatibility() {
+    for (overrides, status, invalid_fields) in [
+        (json!({}), "missing", json!([])),
+        (
+            json!({"chat_template_caps": null, "chat_template_tool_use": true}),
+            "invalid",
+            json!([]),
+        ),
+        (json!({"chat_template_caps": "true"}), "invalid", json!([])),
+        (
+            json!({"chat_template_caps": {"supports_tools": "true", "supports_tool_calls": 1}}),
+            "reported",
+            json!(["supports_tools", "supports_tool_calls"]),
+        ),
+    ] {
+        let f = fixture(GPU);
+        let path = f.models.join("tool-hint.gguf");
+        qwen_like(&path, "qwen3", TOOLS_TEMPLATE);
+        fs::write(f.bin.join("props-overrides.json"), overrides.to_string()).unwrap();
+        Config::patch(&f.paths, json!({"local_engine":{"files":[path]}})).unwrap();
+        let cfg = Config::load(&f.paths, None).unwrap();
+        local_engine::scan(&cfg.local_engine);
+        let model = model_for(&local_engine::entry_id(&path));
+        let engine = Engine::open(f.paths.clone()).unwrap();
+        let prepared = engine
+            .prepare_model_client(&cfg, &model, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(
+            prepared.tools,
+            "unknown report must not disable legacy schemas"
+        );
+        let mut schemas = vec![json!({"type":"function","function":{"name":"read_file"}})];
+        prepared.filter_schemas(&mut schemas);
+        assert_eq!(schemas.len(), 1);
+        let loaded = engine.local_runtime().loaded().unwrap();
+        drop(prepared);
+        engine.shutdown().await.unwrap();
+        let runtime = &loaded.provenance["runtime"];
+        assert_eq!(
+            runtime["reported_tool_capabilities"]["field_status"],
+            status
+        );
+        assert!(runtime["reported_tool_capabilities"]["supports_tools"].is_null());
+        assert!(runtime["reported_tool_capabilities"]["supports_tool_calls"].is_null());
+        assert_eq!(
+            runtime["reported_tool_capabilities"]["invalid_fields"],
+            invalid_fields
+        );
+        assert!(runtime["reported_chat_template_tool_use"].is_null());
+    }
 }

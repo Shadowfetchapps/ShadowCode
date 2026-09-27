@@ -22,7 +22,8 @@ const MAX_HEADER_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_STRING_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_KV: u64 = 4096;
 const MAX_TENSORS: u64 = 65536;
-/// Strings longer than this are kept only as a prefix; chat templates fit.
+/// Strings longer than this are kept only as a prefix. Full default-template
+/// identity is recorded separately; a prefix cannot prove absence of tools.
 const KEEP_STRING_BYTES: usize = 64 * 1024;
 /// Integer arrays up to this length are kept (per-layer hyperparameters);
 /// longer ones (token types, merges) are skipped.
@@ -146,9 +147,10 @@ impl GgufHeader {
     pub fn chat_template(&self) -> Option<&str> {
         self.str("tokenizer.chat_template")
     }
-    /// The chat template mentions tool calling. This is the strongest signal
-    /// available from the file itself; the runtime still verifies at load.
-    pub fn template_supports_tools(&self) -> bool {
+    /// A retained default-template prefix mentions tools. Comments and literal
+    /// text can match; this is a schema-offering hint, not a capability check.
+    /// Generic runtime reports and successful tool execution are separate facts.
+    pub fn template_mentions_tools(&self) -> bool {
         self.chat_template()
             .is_some_and(|t| t.contains("tools") || t.contains("tool_call"))
     }
@@ -692,7 +694,7 @@ mod tests {
             Some(&Scalar::Array(2000))
         );
         assert!(header.has_tensor("token_embd.weight"));
-        assert!(header.template_supports_tools());
+        assert!(header.template_mentions_tools());
         assert!(!header.is_projector());
         let estimate = estimate_memory(&header, 9_000_000_000, 0, 8192);
         // 40 layers * 8 kv heads * (128+128) * 2 bytes * 8192 tokens.

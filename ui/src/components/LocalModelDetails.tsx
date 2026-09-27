@@ -26,6 +26,13 @@ export function LocalModelDetails({ receipt }: { receipt?: unknown }) {
   const quantization = obj(model.quantization);
   const template = obj(model.chat_template);
   const runtimeTemplate = obj(runtime.reported_chat_template);
+  const runtimeToolTemplate = obj(runtime.reported_chat_template_tool_use);
+  const toolCaps = obj(runtime.reported_tool_capabilities);
+  const toolCapsStatus = toolCaps.field_status;
+  const hasToolReport =
+    toolCapsStatus === "missing" ||
+    toolCapsStatus === "invalid" ||
+    toolCapsStatus === "reported";
   const override = obj(p.template_override);
   const appliedTemplate = obj(override.template);
   const policy = obj(parsed.request_policy);
@@ -98,6 +105,45 @@ export function LocalModelDetails({ receipt }: { receipt?: unknown }) {
     "Runtime template bytes hashed",
     number(runtimeTemplate.bytes)?.toLocaleString(),
   );
+  add(
+    "Runtime tool-use template SHA-256 · reported",
+    hash(runtimeToolTemplate.sha256),
+  );
+  add(
+    "Runtime tool-use template bytes hashed",
+    number(runtimeToolTemplate.bytes)?.toLocaleString(),
+  );
+  if (hasToolReport) {
+    add(
+      "Runtime tool capability fields",
+      toolCapsStatus === "reported"
+        ? "Reported"
+        : toolCapsStatus === "invalid"
+          ? "Invalid report"
+          : "Not reported",
+    );
+    const fields = [
+      ["supports_tools", "Tool definitions · runtime report"],
+      ["supports_tool_calls", "Tool-call history · runtime report"],
+      ["supports_parallel_tool_calls", "Parallel tool calls · runtime report"],
+      ["supports_object_arguments", "Object tool arguments · runtime report"],
+    ] as const;
+    for (const [key, label] of fields) {
+      const value = toolCapsStatus === "reported" ? toolCaps[key] : undefined;
+      add(
+        label,
+        typeof value === "boolean" ? (value ? "Yes" : "No") : "Not reported",
+      );
+    }
+    const invalidFields = toolCaps.invalid_fields;
+    const invalid =
+      toolCapsStatus === "reported" && Array.isArray(invalidFields)
+        ? fields
+            .map(([key]) => key)
+            .filter((key) => invalidFields.includes(key))
+        : [];
+    if (invalid.length) add("Invalid capability fields", invalid.join(", "));
+  }
   if (
     override.profile === "hermes-2-pro-llama-3-8b-tool-use-v1" &&
     override.source === "bundled_llama_cpp_template"
@@ -158,6 +204,13 @@ export function LocalModelDetails({ receipt }: { receipt?: unknown }) {
         defaults and backend are reported observations; they do not prove GPU
         offload or identical sampling behavior across models.
       </p>
+      {hasToolReport && (
+        <p className="dim">
+          Runtime template reports do not establish successful tool execution or
+          coding quality. Tool schema availability follows the existing model
+          policy.
+        </p>
+      )}
       {!Object.keys(sampling).length && (
         <p className="dim">
           Sampling defaults were not reported by this runtime.

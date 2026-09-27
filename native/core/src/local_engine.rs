@@ -129,6 +129,19 @@ impl LocalEngineConfig {
     }
 }
 
+/// Why the current catalog policy offers (or does not offer) tool schemas.
+/// None of these values certifies runtime parsing or model coding quality.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolsBasis {
+    #[default]
+    Unknown,
+    KnownTemplateProfile,
+    TemplateHint,
+    NoTemplateHint,
+    NoTemplate,
+}
+
 /// One local model row. Serialized as the contract's `GgufEntry`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GgufEntry {
@@ -147,8 +160,11 @@ pub struct GgufEntry {
     pub reason: String,
     pub vision: bool,
     pub mmproj: Option<String>,
+    /// Whether the current policy offers schemas, not verified tool support.
     pub tools: bool,
     pub tools_reason: String,
+    #[serde(default)]
+    pub tools_basis: ToolsBasis,
     pub memory: MemoryEstimate,
     /// `"gpu"`, `"cpu"`, or `"no"`.
     pub fits: String,
@@ -916,6 +932,7 @@ fn unusable_entry(candidate: &Candidate, reason: String) -> GgufEntry {
         mmproj: None,
         tools: false,
         tools_reason: "Unknown".into(),
+        tools_basis: ToolsBasis::Unknown,
         memory: MemoryEstimate {
             weights_bytes: 0,
             kv_cache_bytes: 0,
@@ -976,13 +993,26 @@ pub fn inspect(candidate: &Candidate, budget: &Budget) -> Result<GgufEntry> {
     };
     let (context_tokens, memory, fits) = plan_context(&header, bytes, projector_bytes, budget);
     let template_profile = crate::local_templates::select(&header);
-    let tools = template_profile.is_some() || header.template_supports_tools();
-    let tools_reason = match (template_profile, header.chat_template()) {
-        (Some(_), _) => "Bundled Hermes tool template · verified when the model loads".to_owned(),
-        (None, None) => "No chat template in the file · Chat only".to_owned(),
-        (None, Some(_)) if tools => "Chat template supports tool calls".to_owned(),
-        (None, Some(_)) => "Chat template has no tool-call support · Chat only".to_owned(),
+    let tools = template_profile.is_some() || header.template_mentions_tools();
+    let (tools_basis, tools_reason) = match (template_profile, header.chat_template()) {
+        (Some(_), _) => (
+            ToolsBasis::KnownTemplateProfile,
+            "Bundled Hermes tool template · verified when the model loads",
+        ),
+        (None, None) => (
+            ToolsBasis::NoTemplate,
+            "No chat template in the file · Chat only",
+        ),
+        (None, Some(_)) if tools => (
+            ToolsBasis::TemplateHint,
+            "Template mentions tools · file hint only",
+        ),
+        (None, Some(_)) => (
+            ToolsBasis::NoTemplateHint,
+            "No tool hint in the retained template · Chat only under current policy",
+        ),
     };
+    let tools_reason = tools_reason.to_owned();
     let availability = if !compatible || fits == "no" {
         if compatible {
             reason = format!(
@@ -1035,6 +1065,7 @@ pub fn inspect(candidate: &Candidate, budget: &Budget) -> Result<GgufEntry> {
         mmproj: mmproj.map(|p| p.display().to_string()),
         tools,
         tools_reason,
+        tools_basis,
         memory,
         fits: fits.into(),
         availability: availability.into(),
@@ -1736,6 +1767,68 @@ mod tests {
             context_cap: DEFAULT_CONTEXT_CAP,
             architectures: Some(Arc::new(archs.iter().map(|s| s.to_string()).collect())),
         }
+    }
+
+    #[test]
+    fn template_words_are_only_hints_and_preserve_schema_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, template, expected_tools, expected_basis) in [
+            (
+                "comment",
+                Some("{# tools are unavailable #}{{ messages }}"),
+                true,
+                "template_hint",
+            ),
+            (
+                "literal",
+                Some("No tool_call protocol. {{ messages }}"),
+                true,
+                "template_hint",
+            ),
+            ("chat", Some("{{ messages }}"), false, "no_template_hint"),
+            ("missing", None, false, "no_template"),
+        ] {
+            let path = dir.path().join(format!("{name}.gguf"));
+            model(&path, "qwen3", template);
+            let config = LocalEngineConfig {
+                files: vec![path.display().to_string()],
+                ..Default::default()
+            };
+            let entries = scan_with(&config, &budget(&["qwen3"]));
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].tools, expected_tools);
+            assert_eq!(json!(&entries[0])["tools_basis"], expected_basis);
+            if expected_tools {
+                assert!(entries[0].tools_reason.contains("file hint only"));
+                assert!(!entries[0].tools_reason.contains("supports tool calls"));
+            }
+            // Old catalog snapshots remain readable without gaining a claim.
+            let mut old = json!(&entries[0]);
+            old.as_object_mut().unwrap().remove("tools_basis");
+            let old: GgufEntry = serde_json::from_value(old).unwrap();
+            assert_eq!(json!(old)["tools_basis"], "unknown");
+        }
+    }
+
+    #[test]
+    fn tool_hint_does_not_infer_absence_beyond_retained_template_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long.gguf");
+        let template = format!("{}{{{{ tools }}}}", "x".repeat(64 * 1024));
+        model(&path, "qwen3", Some(&template));
+        let config = LocalEngineConfig {
+            files: vec![path.display().to_string()],
+            ..Default::default()
+        };
+        let entries = scan_with(&config, &budget(&["qwen3"]));
+        assert!(!entries[0].tools);
+        assert_eq!(json!(&entries[0])["tools_basis"], "no_template_hint");
+        assert!(entries[0].tools_reason.contains("retained template"));
+        assert!(!entries[0].tools_reason.contains("no tool-call support"));
+        assert_eq!(
+            header(&path).unwrap().template_identity,
+            Some(gguf::string_identity(&template))
+        );
     }
 
     #[test]

@@ -593,3 +593,19 @@ it("Accounts: an agent installed elsewhere has no Remove; offline disables Insta
     within(offline).getByText(/Offline mode: downloads are off/),
   ).toBeTruthy();
 });
+
+it("Local models: a file tool hint is not presented as verified support", async () => {
+  Object.assign(fake.state.local.models[0], {
+    tools: true,
+    tools_basis: "template_hint",
+    tools_reason: "Template mentions tools · file hint only",
+  });
+  render(<LocalModelsPage onChanged={vi.fn()} onToast={vi.fn()} />);
+  const model = await screen.findByRole("article", { name: "qwen3:14b" });
+  expect(within(model).getByText("Tool hint").getAttribute("title")).toBe(
+    "Template mentions tools · file hint only",
+  );
+  expect(
+    within(model).queryByText(/Tools verified|Tool support verified/),
+  ).toBeNull();
+});

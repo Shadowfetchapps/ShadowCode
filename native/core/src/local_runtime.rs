@@ -791,6 +791,8 @@ async fn launch(
                     "reported_commit": runtime_probe.commit,
                     "reported_generation_defaults": reported_generation_defaults(&props),
                     "reported_chat_template": props.get("chat_template").and_then(Value::as_str).map(crate::gguf::string_identity),
+                    "reported_chat_template_tool_use": props.get("chat_template_tool_use").and_then(Value::as_str).map(crate::gguf::string_identity),
+                    "reported_tool_capabilities": reported_tool_capabilities(&props),
                 },
                 "context": {"requested_tokens": spec.ctx, "reported_tokens": n_ctx},
                 "gpu": {"requested_mode": mode(spec.gpu), "launch_mode": mode(gpu), "reported_backend": spec.backend},
@@ -802,6 +804,35 @@ async fn launch(
         leases: Arc::new(AtomicUsize::new(0)),
         sources: sources.clone(),
     })
+}
+
+/// Runtime template-probe observations, not permission or coding qualification.
+/// Missing, malformed and false remain distinct; never copy raw props/template.
+fn reported_tool_capabilities(props: &Value) -> Value {
+    let raw = props.get("chat_template_caps");
+    let caps = raw.and_then(Value::as_object);
+    let status = match raw {
+        None => "missing",
+        Some(Value::Object(_)) => "reported",
+        Some(_) => "invalid",
+    };
+    let mut report = serde_json::Map::new();
+    report.insert("field_status".into(), json!(status));
+    let mut invalid_fields = Vec::new();
+    for key in [
+        "supports_tools",
+        "supports_tool_calls",
+        "supports_parallel_tool_calls",
+        "supports_object_arguments",
+    ] {
+        let field = caps.and_then(|c| c.get(key));
+        report.insert(key.into(), json!(field.and_then(Value::as_bool)));
+        if field.is_some_and(|v| !v.is_boolean()) {
+            invalid_fields.push(key);
+        }
+    }
+    report.insert("invalid_fields".into(), json!(invalid_fields));
+    Value::Object(report)
 }
 
 fn reported_generation_defaults(props: &Value) -> Value {
@@ -882,6 +913,43 @@ async fn props(client: &reqwest::Client, port: u16, key: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_tool_reports_keep_false_missing_and_malformed_distinct() {
+        let report = reported_tool_capabilities(&json!({"chat_template_caps": {
+            "supports_tools": false,
+            "supports_tool_calls": true,
+            "supports_parallel_tool_calls": "true",
+            "supports_object_arguments": null,
+            "private_key": "fake-secret"
+        }}));
+        assert_eq!(
+            report,
+            json!({
+                "field_status": "reported",
+                "supports_tools": false,
+                "supports_tool_calls": true,
+                "supports_parallel_tool_calls": null,
+                "supports_object_arguments": null,
+                "invalid_fields": ["supports_parallel_tool_calls", "supports_object_arguments"]
+            })
+        );
+        assert!(!report.to_string().contains("fake-secret"));
+        let missing = reported_tool_capabilities(&json!({}));
+        assert_eq!(missing["field_status"], "missing");
+        assert!(missing["supports_tools"].is_null());
+        for invalid in [Value::Null, json!(true), json!(1), json!("true"), json!([])] {
+            let report = reported_tool_capabilities(&json!({"chat_template_caps": invalid}));
+            assert_eq!(report["field_status"], "invalid");
+            assert!(report["supports_tool_calls"].is_null());
+        }
+        let partial = reported_tool_capabilities(
+            &json!({"chat_template_caps": {"supports_tool_calls": false}}),
+        );
+        assert_eq!(partial["supports_tool_calls"], false);
+        assert!(partial["supports_tools"].is_null());
+        assert_eq!(partial["invalid_fields"], json!([]));
+    }
 
     #[test]
     fn sampling_provenance_only_records_reported_allowlisted_values() {
