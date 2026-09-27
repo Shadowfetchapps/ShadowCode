@@ -7,7 +7,7 @@ import {
 } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api } from "../api";
+import { api, type EditorRecoveryDraft } from "../api";
 import { transportKind } from "../lib/transport";
 import type { PreviewDevice } from "../components/PreviewPanel";
 import type { ToolsView } from "../components/ToolsTab";
@@ -36,6 +36,8 @@ export type FileBuffer = {
   recoveryRevision?: string;
   recoveryStatus?: "saving" | "saved" | "error";
   recoveryError?: string;
+  /** A competing window's current saved copy; null means it was deleted. */
+  recoveryConflict?: EditorRecoveryDraft | null;
 };
 
 /** Drawer work that must survive switching tabs (and closing the drawer):
@@ -195,6 +197,7 @@ export function useDrawerMemory(workspace: string) {
       status: FileBuffer["recoveryStatus"],
       reason = "",
       revision?: string,
+      conflict?: EditorRecoveryDraft | null,
     ) => {
       setWorkspaces((current) => {
         const selected = current[workspace];
@@ -209,6 +212,7 @@ export function useDrawerMemory(workspace: string) {
           recoveryStatus: status,
           recoveryError: reason,
           recoveryRevision: revision ?? buffer.recoveryRevision,
+          recoveryConflict: conflict,
         };
         return {
           ...current,
@@ -251,6 +255,7 @@ export function useDrawerMemory(workspace: string) {
     for (const [path, buffer] of Object.entries(currentBuffers)) {
       const key = `${workspace}\0${path}`;
       let item = recovery.current.get(key);
+      if (buffer.recoveryConflict !== undefined) continue;
       if (buffer.draft === buffer.base) {
         if (item) queueDelete(path, item);
         continue;
@@ -286,7 +291,38 @@ export function useDrawerMemory(workspace: string) {
           pending.revision = record.revision;
           mark(path, desired, "saved", "", record.revision);
         })
-        .catch((reason) => mark(path, desired, "error", String(reason)));
+        .catch(async (reason) => {
+          const message = String(reason);
+          if (
+            message.includes("The recovery draft changed in another window")
+          ) {
+            try {
+              const records = await api.editorDrafts(workspace);
+              if (records.workspace !== workspace)
+                throw new Error(
+                  "Project selection changed while reviewing drafts",
+                );
+              mark(
+                path,
+                desired,
+                "error",
+                "A saved draft changed in another window. Review both versions before choosing one.",
+                undefined,
+                records.drafts.find((draft) => draft.path === path) ?? null,
+              );
+              return;
+            } catch (readError) {
+              mark(
+                path,
+                desired,
+                "error",
+                `Could not load the other draft: ${String(readError)}`,
+              );
+              return;
+            }
+          }
+          mark(path, desired, "error", message);
+        });
     }
     for (const [key, item] of recovery.current) {
       if (!key.startsWith(`${workspace}\0`)) continue;
@@ -327,6 +363,7 @@ export function useDrawerMemory(workspace: string) {
                 recoveryRevision: undefined,
                 recoveryStatus: undefined,
                 recoveryError: undefined,
+                recoveryConflict: undefined,
               },
             },
           },
@@ -334,6 +371,88 @@ export function useDrawerMemory(workspace: string) {
       });
     },
     [workspace],
+  );
+  const resolveFileDraftConflict = useCallback(
+    async (path: string, choice: "mine" | "saved") => {
+      const buffer = workspaces[workspace]?.filesBuffers[path];
+      if (!buffer || buffer.recoveryConflict === undefined)
+        throw new Error("There is no saved-draft conflict to resolve");
+      const key = `${workspace}\0${path}`;
+      const item = recovery.current.get(key);
+      if (!item) throw new Error("The draft write is no longer available");
+      await item.chain;
+      const records = await api.editorDrafts(workspace);
+      if (records.workspace !== workspace)
+        throw new Error("Project selection changed while reviewing drafts");
+      const latest =
+        records.drafts.find((draft) => draft.path === path) ?? null;
+      if (latest?.revision !== buffer.recoveryConflict?.revision) {
+        setWorkspaces((current) => {
+          const selected = current[workspace];
+          const draft = selected?.filesBuffers[path];
+          if (!draft) return current;
+          return {
+            ...current,
+            [workspace]: {
+              ...selected,
+              filesBuffers: {
+                ...selected.filesBuffers,
+                [path]: {
+                  ...draft,
+                  recoveryStatus: "error",
+                  recoveryError:
+                    "The other saved draft changed again. Review its latest version.",
+                  recoveryConflict: latest,
+                },
+              },
+            },
+          };
+        });
+        return;
+      }
+      if (choice === "saved" && !latest)
+        throw new Error(
+          "The other saved draft was removed; keep your local draft instead",
+        );
+      item.revision = latest?.revision ?? "missing";
+      item.desired =
+        choice === "mine"
+          ? ""
+          : JSON.stringify([latest!.base, latest!.base_hash, latest!.draft]);
+      setWorkspaces((current) => {
+        const selected = current[workspace];
+        const draft = selected?.filesBuffers[path];
+        if (!draft) return current;
+        return {
+          ...current,
+          [workspace]: {
+            ...selected,
+            filesBuffers: {
+              ...selected.filesBuffers,
+              [path]:
+                choice === "mine"
+                  ? {
+                      ...draft,
+                      recoveryStatus: undefined,
+                      recoveryError: undefined,
+                      recoveryConflict: undefined,
+                    }
+                  : {
+                      ...draft,
+                      base: latest!.base,
+                      hash: latest!.base_hash,
+                      draft: latest!.draft,
+                      recoveryRevision: latest!.revision,
+                      recoveryStatus: "saved",
+                      recoveryError: undefined,
+                      recoveryConflict: undefined,
+                    },
+            },
+          },
+        };
+      });
+    },
+    [workspace, workspaces],
   );
   const hasUnsavedFiles = Object.values(workspaces).some((item) =>
     Object.values(item.filesBuffers).some((file) => file.draft !== file.base),
@@ -379,7 +498,7 @@ export function useDrawerMemory(workspace: string) {
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
   }, [hasUnsavedFiles, hasUnprotectedFiles]);
-  return { memory, update, discardFileDraft };
+  return { memory, update, discardFileDraft, resolveFileDraftConflict };
 }
 
 /** `useState`-shaped access to one remembered drawer value. */

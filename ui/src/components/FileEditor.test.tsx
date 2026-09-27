@@ -25,13 +25,15 @@ afterEach(() => {
 });
 
 function Harness({ workspace }: { workspace: string }) {
-  const { memory, update, discardFileDraft } = useDrawerMemory(workspace);
+  const { memory, update, discardFileDraft, resolveFileDraftConflict } =
+    useDrawerMemory(workspace);
   return (
     <FileEditor
       workspace={workspace}
       memory={memory}
       onMemory={update}
       onDiscardFileDraft={discardFileDraft}
+      onResolveFileDraftConflict={resolveFileDraftConflict}
       onShowDiff={() => {}}
       toast={() => {}}
     />

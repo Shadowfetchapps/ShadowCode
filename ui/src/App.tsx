@@ -697,6 +697,7 @@ export default function App() {
           memory={memory.memory}
           onMemory={memory.update}
           onDiscardFileDraft={memory.discardFileDraft}
+          onResolveFileDraftConflict={memory.resolveFileDraftConflict}
         />
       )}
       <Toasts toasts={toasts} onDismiss={dismiss} />

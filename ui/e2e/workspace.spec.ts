@@ -455,6 +455,67 @@ test("coalesces superseded recovery drafts behind an in-flight write", async ({
   ]);
 });
 
+test("reviews a competing window's recovery draft before choosing either version", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const drawer = page.getByRole("complementary", { name: "Drawer" });
+  await drawer
+    .locator(".drawer-tabs")
+    .getByRole("button", { name: "Files" })
+    .click();
+  await drawer.getByRole("button", { name: "README.md", exact: true }).click();
+  const editor = drawer.getByRole("textbox", { name: "Edit README.md" });
+  const savedDraft = () =>
+    page.evaluate(
+      () =>
+        JSON.parse(sessionStorage.getItem("shadow-fake-editor-drafts") || "{}")[
+          "README.md"
+        ]?.draft,
+    );
+  const replaceSavedCopy = async (draft: string, revision: string) => {
+    await page.evaluate(
+      ({ draft, revision }) => {
+        const records = JSON.parse(
+          sessionStorage.getItem("shadow-fake-editor-drafts") || "{}",
+        );
+        records["README.md"] = { ...records["README.md"], draft, revision };
+        sessionStorage.setItem(
+          "shadow-fake-editor-drafts",
+          JSON.stringify(records),
+        );
+      },
+      { draft, revision },
+    );
+  };
+  await editor.fill("# First local draft");
+  await expect.poll(savedDraft).toBe("# First local draft");
+  await replaceSavedCopy("# Other window draft", "a".repeat(32));
+  await editor.fill("# Keep my draft");
+  const conflict = drawer.getByRole("group", { name: "Saved draft conflict" });
+  await expect(conflict).toBeVisible();
+  await conflict.getByText("Show other window's saved draft").click();
+  await expect(conflict).toContainText("# Other window draft");
+  await replaceSavedCopy("# Changed again while reviewing", "c".repeat(32));
+  await conflict
+    .getByRole("button", { name: "Keep this window's draft" })
+    .click();
+  await expect(conflict).toContainText("# Changed again while reviewing");
+  expect(await savedDraft()).toBe("# Changed again while reviewing");
+  await conflict
+    .getByRole("button", { name: "Keep this window's draft" })
+    .click();
+  await expect(conflict).toHaveCount(0);
+  await expect.poll(savedDraft).toBe("# Keep my draft");
+  await replaceSavedCopy("# Newer saved draft", "b".repeat(32));
+  await editor.fill("# My later edit");
+  await expect(conflict).toBeVisible();
+  await conflict.getByRole("button", { name: "Use other saved draft" }).click();
+  await expect(editor).toHaveValue("# Newer saved draft");
+  await expect(conflict).toHaveCount(0);
+  expect(await savedDraft()).toBe("# Newer saved draft");
+});
+
 test("shows and retries a failed recovery cleanup after file save", async ({
   page,
 }) => {

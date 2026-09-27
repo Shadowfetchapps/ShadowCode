@@ -63,6 +63,7 @@ export function Drawer({
   memory,
   onMemory,
   onDiscardFileDraft,
+  onResolveFileDraftConflict,
 }: {
   tab: DrawerTab;
   onTab: (t: DrawerTab) => void;
@@ -82,6 +83,10 @@ export function Drawer({
   memory: DrawerMemory;
   onMemory: DrawerMemoryUpdate;
   onDiscardFileDraft: (path: string) => Promise<void>;
+  onResolveFileDraftConflict: (
+    path: string,
+    choice: "mine" | "saved",
+  ) => Promise<void>;
 }) {
   const tool = isToolTab(tab) ? tab : null;
   useEffect(() => {
@@ -172,6 +177,7 @@ export function Drawer({
             memory={memory}
             onMemory={onMemory}
             onDiscardFileDraft={onDiscardFileDraft}
+            onResolveFileDraftConflict={onResolveFileDraftConflict}
             toast={toast}
             onShowDiff={(p) => {
               onDiffPath(p);

@@ -17,6 +17,7 @@ export function FileEditor({
   memory,
   onMemory,
   onDiscardFileDraft,
+  onResolveFileDraftConflict,
   onShowDiff,
   toast,
 }: {
@@ -24,6 +25,10 @@ export function FileEditor({
   memory: DrawerMemory;
   onMemory: DrawerMemoryUpdate;
   onDiscardFileDraft: (path: string) => Promise<void>;
+  onResolveFileDraftConflict: (
+    path: string,
+    choice: "mine" | "saved",
+  ) => Promise<void>;
   onShowDiff: (path: string) => void;
   toast: Toast;
 }) {
@@ -34,6 +39,7 @@ export function FileEditor({
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [discarding, setDiscarding] = useState(false);
+  const [resolving, setResolving] = useState(false);
   const exitEditor = useRef<HTMLButtonElement>(null);
   const buffer = active ? memory.filesBuffers[active] : undefined;
   const dirty = Boolean(buffer && buffer.draft !== buffer.base);
@@ -234,6 +240,19 @@ export function FileEditor({
     }
   }
 
+  async function resolveRecovery(choice: "mine" | "saved") {
+    if (!active || resolving) return;
+    setResolving(true);
+    setError("");
+    try {
+      await onResolveFileDraftConflict(active, choice);
+    } catch (reason) {
+      setError(`The draft was kept: ${String(reason)}`);
+    } finally {
+      setResolving(false);
+    }
+  }
+
   async function closeFile() {
     if (!active || !buffer || discarding || saving) return;
     if (dirty) {
@@ -269,7 +288,12 @@ export function FileEditor({
       event.key.toLowerCase() === "s"
     ) {
       event.preventDefault();
-      if (dirty && buffer?.disk === undefined) void save();
+      if (
+        dirty &&
+        buffer?.disk === undefined &&
+        buffer?.recoveryConflict === undefined
+      )
+        void save();
     } else if (event.key === "Tab" && !event.ctrlKey && !event.metaKey) {
       event.preventDefault();
       const input = event.currentTarget;
@@ -392,7 +416,11 @@ export function FileEditor({
               type="button"
               className="mini"
               disabled={
-                !dirty || saving || discarding || buffer.disk !== undefined
+                !dirty ||
+                saving ||
+                discarding ||
+                buffer.disk !== undefined ||
+                buffer.recoveryConflict !== undefined
               }
               onClick={() => void save()}
             >
@@ -401,7 +429,12 @@ export function FileEditor({
             <button
               type="button"
               className="mini"
-              disabled={!dirty || discarding || saving}
+              disabled={
+                !dirty ||
+                discarding ||
+                saving ||
+                buffer.recoveryConflict !== undefined
+              }
               onClick={() => void discardDraft()}
             >
               {discarding ? "Discarding…" : "Discard draft"}
@@ -432,6 +465,47 @@ export function FileEditor({
                     ? `Recovery copy not saved: ${buffer.recoveryError}`
                     : "Unsaved draft is in memory"}
             </p>
+          )}
+          {buffer.recoveryConflict !== undefined && (
+            <div
+              className="file-editor-conflict"
+              role="group"
+              aria-label="Saved draft conflict"
+            >
+              <strong>Saved draft changed in another window</strong>
+              <p>
+                Your text remains in the editor. Review the other saved copy
+                before choosing which draft to keep.
+              </p>
+              {buffer.recoveryConflict ? (
+                <details>
+                  <summary>Show other window's saved draft</summary>
+                  <pre>{buffer.recoveryConflict.draft}</pre>
+                </details>
+              ) : (
+                <p>The other saved copy was removed.</p>
+              )}
+              <div className="file-editor-toolbar">
+                <button
+                  type="button"
+                  className="mini"
+                  disabled={resolving}
+                  onClick={() => void resolveRecovery("mine")}
+                >
+                  Keep this window's draft
+                </button>
+                {buffer.recoveryConflict && (
+                  <button
+                    type="button"
+                    className="mini"
+                    disabled={resolving}
+                    onClick={() => void resolveRecovery("saved")}
+                  >
+                    Use other saved draft
+                  </button>
+                )}
+              </div>
+            </div>
           )}
           {buffer.disk !== undefined && (
             <div
@@ -508,7 +582,7 @@ export function FileEditor({
           <textarea
             className="file-editor-input"
             aria-label={`Edit ${buffer.path}`}
-            disabled={discarding}
+            disabled={discarding || resolving}
             spellCheck={false}
             value={buffer.draft}
             onChange={(event) =>
