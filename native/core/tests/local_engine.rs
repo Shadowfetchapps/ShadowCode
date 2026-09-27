@@ -1562,6 +1562,25 @@ async fn managed_jobs_run_in_submission_order_across_projects_and_skip_cancelled
     assert_eq!(engine.job(&middle.id).unwrap().unwrap().status, "queued");
     assert_eq!(engine.job(&last.id).unwrap().unwrap().status, "queued");
     assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 1);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let progress = engine
+                .store()
+                .last_task_event(&first.task_id, "local.runtime_progress")
+                .unwrap();
+            if progress.is_some_and(|event| event["payload"]["phase"] == "waiting") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first job reports its held-runtime wait");
+    assert!(engine
+        .store()
+        .last_task_event(&last.task_id, "local.runtime_progress")
+        .unwrap()
+        .is_none());
     let cancelled = tokio::time::timeout(Duration::from_secs(2), engine.cancel_queued(&middle.id))
         .await
         .unwrap()
@@ -1579,6 +1598,19 @@ async fn managed_jobs_run_in_submission_order_across_projects_and_skip_cancelled
     assert_eq!(first.status, "completed", "{}", first.summary);
     assert_eq!(last.status, "completed", "{}", last.summary);
     assert!(last.started_at >= first.finished_at.unwrap());
+    let phases: Vec<_> = engine
+        .store()
+        .events_after(&first.session_id, 0, None, 10_000)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event["task_id"] == first.task_id)
+        .filter_map(|event| match event["type"].as_str() {
+            Some("local.runtime_progress") => event["payload"]["phase"].as_str().map(str::to_owned),
+            Some("local.runtime_ready") => Some("ready".into()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(phases, ["preparing", "waiting", "loading", "ready"]);
     assert_eq!(engine.job(&middle.id).unwrap().unwrap().status, "cancelled");
     assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 3);
     engine.shutdown().await.unwrap();
@@ -1586,6 +1618,7 @@ async fn managed_jobs_run_in_submission_order_across_projects_and_skip_cancelled
 
 #[tokio::test]
 async fn compare_runs_two_installed_gguf_models_sequentially_in_offline_mode() {
+    use shadowcode_core::engine::StartRequest;
     let f = fixture(GPU);
     let a = f.models.join("a.gguf");
     let b = f.models.join("b.gguf");
@@ -1667,6 +1700,60 @@ async fn compare_runs_two_installed_gguf_models_sequentially_in_offline_mode() {
         assert_eq!(lane["base_commit"], result["base"]["commit"]);
     }
     assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 2);
+    // A new turn must replace the lane's old runtime receipt while it waits.
+    let held = service
+        .engine
+        .prepare_model_client(&cfg, &model_for(&ids[1]), &CancellationToken::new())
+        .await
+        .unwrap();
+    let lane = &result["lanes"][0];
+    let followup = service
+        .engine
+        .start(StartRequest {
+            workspace: PathBuf::from(lane["worktree"].as_str().unwrap()),
+            session_id: Some(lane["session_id"].as_str().unwrap().into()),
+            task: "Read hello.txt again".into(),
+            model: Some(model_for(&ids[0])),
+            mode: "code".into(),
+            queue: false,
+            images: vec![],
+            web: false,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let progress = service
+                .engine
+                .store()
+                .last_task_event(&followup.task_id, "local.runtime_progress")
+                .unwrap();
+            if progress.is_some_and(|event| event["payload"]["phase"] == "waiting") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("follow-up waits for held model");
+    let waiting = call(
+        &service,
+        "GET",
+        &format!("/api/compare/{record_id}"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert_eq!(waiting["lanes"][0]["job_id"], followup.id);
+    assert!(waiting["lanes"][0]["local_runtime"].is_null());
+    assert_eq!(waiting["lanes"][0]["local_progress"]["phase"], "waiting");
+    service.engine.cancel(&followup.id).await.unwrap();
+    let stopped = tokio::time::timeout(Duration::from_secs(5), service.engine.wait(&followup.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stopped.status, "cancelled");
+    drop(held);
     call(
         &service,
         "POST",

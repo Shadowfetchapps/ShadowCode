@@ -1792,13 +1792,30 @@ impl Engine {
             .store
             .session_meta(&job.session_id, keys::COMPARE_ID)?
             .is_some();
-        let mut prepared = if managed && comparison {
-            crate::local_engine::prepare_with_policy(
+        let mut prepared = if managed {
+            events.emit(
+                "local.runtime_progress",
+                json!({
+                    "model_id": running.config.model.default,
+                    "phase": "preparing"
+                }),
+            )?;
+            crate::local_engine::prepare_with_progress(
                 &running.config.local_engine,
                 &running.config.model,
                 &self.0.local_llama,
                 &running.cancel,
-                false,
+                !comparison,
+                &|phase| {
+                    events.emit(
+                        "local.runtime_progress",
+                        json!({
+                            "model_id": running.config.model.default,
+                            "phase": phase
+                        }),
+                    )?;
+                    Ok(())
+                },
             )
             .await?
         } else {

@@ -121,6 +121,16 @@ Protocol writes now observe task cancellation and have a 30-second per-batch dea
 
 Validation: 26 provider unit tests and 46 focused integration tests pass (72 total), including native streaming/approval order, blocked input cancellation, write deadlines, cancellation-before-write, native steering, account/limit handling and existing adapters. One opt-in live installer test remains ignored. Core all-target Clippy with warnings denied passes. An initial unrelated ACP fixture launch returned Linux `ETXTBSY`; its isolated rerun and subsequent complete focused runs passed. Tests used fake CLIs/local fixtures, with no paid provider turns. Actual native UI latency, full descendant shutdown cases, aggregate output bounds and overall deadlines during continuous irrelevant output remain open.
 
+## Local startup status and current-turn Compare evidence
+
+Managed local tasks now record catalog preparation, runtime waiting and model loading before the existing runtime-ready receipt. Waiting is emitted only when the runtime lock or a different model's lease prevents acquisition; loading starts when the task can actually replace/start the runtime. Reusing an already loaded model does not invent a loading step. Existing non-task preparation callers retain their API and behavior. Compare still disables automatic CPU fallback.
+
+The conversation consumes these events before `agent.started`, promotes its queued job to running, and displays the recorded startup phase. Compare shows a queued local lane as “Queued for local model” and consumes the current task's startup events. Stop, Pause, pending approvals and terminal outcomes take precedence over startup labels. A follow-up now clears the prior turn's runtime metadata when its own runtime-ready receipt does not yet exist. Previously, it could retain the previous turn's backend/context/preparation details.
+
+Validation: 12 Compare and 9 local-engine native integration tests pass; two opt-in real-model tests remain ignored. The held-lease fixture asserts preparing → waiting → loading → ready, and no preparation event for the queued successor. A Compare follow-up fixture asserts its new job ID, waiting phase, cleared old receipt and persisted cancellation. All 318 UI tests pass. One browser fixture verifies the visible preparation/wait/loading/reading progression before and after `agent.started`; its loading screenshot was inspected. Production UI build and core all-target Clippy with warnings denied pass. Initial test-only corrections were a missing Rust import and an expectation of an empty active-task string instead of `undefined`. The Vite bundle-size warning remains.
+
+This is task-startup status, not a complete generation/check timing matrix, native Wayland verification, p95 latency measurement or a new real-model benchmark. No paid provider turns, installed-app replacement or remote publication occurred. Next: finish separated task timings and model provenance, then qualify the same user flows against real models and packaged desktop builds.
+
 ## Full acceptance register
 
 Initial state below is **mapping pending**, not an assertion that existing functionality is missing. Each ID needs an exact test reference and qualified result before completion. Existing successful broad suites do not automatically prove each invariant.

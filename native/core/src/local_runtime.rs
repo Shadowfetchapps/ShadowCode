@@ -28,6 +28,13 @@ pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const STDERR_RING_BYTES: usize = 16 * 1024;
 const ERROR_TAIL_BYTES: usize = 2000;
 
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Progress {
+    Waiting,
+    Loading,
+}
+
 /// How to use the GPU for one launch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuMode {
@@ -228,18 +235,39 @@ impl LocalRuntime {
         cancel: &CancellationToken,
         allow_cpu_fallback: bool,
     ) -> Result<(Loaded, Lease)> {
+        self.acquire_with_progress(spec, cancel, allow_cpu_fallback, &|_| Ok(()))
+            .await
+    }
+
+    pub async fn acquire_with_progress(
+        &self,
+        spec: LaunchSpec,
+        cancel: &CancellationToken,
+        allow_cpu_fallback: bool,
+        progress: &(dyn Fn(Progress) -> Result<()> + Send + Sync),
+    ) -> Result<(Loaded, Lease)> {
         ensure!(!cancel.is_cancelled(), "Model load cancelled");
         let abort = self.abort_token();
+        let mut waiting_reported = false;
         loop {
             let released = self.released.notified();
             tokio::pin!(released);
             // Register before inspecting leases to avoid a last-drop wakeup race.
             released.as_mut().enable();
-            let mut slot = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => bail!("Model load cancelled"),
-                _ = abort.cancelled() => bail!("Model load cancelled because the model was unloaded"),
-                slot = self.slot.lock() => slot,
+            let mut slot = match self.slot.try_lock() {
+                Ok(slot) => slot,
+                Err(_) => {
+                    if !waiting_reported {
+                        progress(Progress::Waiting)?;
+                        waiting_reported = true;
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => bail!("Model load cancelled"),
+                        _ = abort.cancelled() => bail!("Model load cancelled because the model was unloaded"),
+                        slot = self.slot.lock() => slot,
+                    }
+                }
             };
             ensure!(
                 !cancel.is_cancelled() && !abort.is_cancelled(),
@@ -272,6 +300,10 @@ impl LocalRuntime {
                 let busy = current.leases.load(Ordering::Acquire);
                 if busy > 0 && alive {
                     drop(slot);
+                    if !waiting_reported {
+                        progress(Progress::Waiting)?;
+                        waiting_reported = true;
+                    }
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => bail!("Model load cancelled while waiting for the local runtime"),
@@ -281,6 +313,7 @@ impl LocalRuntime {
                     continue;
                 }
             }
+            progress(Progress::Loading)?;
             if let Some(previous) = slot.take() {
                 self.clear_snapshot();
                 previous.stop().await;

@@ -169,7 +169,11 @@ export function useConversation(onComplete: (done?: Job) => void) {
         }
         cursor.current = Math.max(cursor.current, row.id || 0);
         if (
-          row.type === "agent.started" &&
+          [
+            "agent.started",
+            "local.runtime_progress",
+            "local.runtime_ready",
+          ].includes(row.type) &&
           (!job?.task_id || row.task_id === job.task_id)
         ) {
           setJob((current) =>

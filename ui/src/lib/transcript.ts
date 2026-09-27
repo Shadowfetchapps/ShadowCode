@@ -18,6 +18,7 @@ import type { UsageSnapshot } from "./picker";
 import { CONTINUATION } from "./allowance";
 import { applySubagentEvent, isSubagentEvent } from "./subagents";
 import { keyRows } from "./rowKeys";
+import { localPhase } from "./localProgress";
 
 const ROUTE_PRODUCTS: Record<string, string> = {
   "cli:codex": "Codex",
@@ -565,6 +566,29 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     routing = undefined;
     limit = undefined;
     touch((a) => ({ ...a, startedAt: a.startedAt ?? event.ts }));
+  }
+  if (
+    event.type === "local.runtime_progress" ||
+    event.type === "local.runtime_ready"
+  ) {
+    const phase = localPhase(p.phase);
+    if (
+      taskId &&
+      !activity[taskId]?.finished &&
+      (phase || event.type === "local.runtime_ready")
+    ) {
+      touch((a) => ({
+        ...a,
+        localPhase: phase,
+        startedAt: a.startedAt ?? event.ts,
+      }));
+      // Local preparation precedes agent.started. Keep it on its own task;
+      // a background task cannot replace another task's active timeline.
+      if (!activeTaskId || activeTaskId === taskId) {
+        activeTaskId = taskId;
+        stage = phase ? "PREPARING" : "UNDERSTAND";
+      }
+    }
   }
   if (event.type === "routing.selected" || event.type === "routing.fallback") {
     if (p.model_id && p.model_name && p.provider)

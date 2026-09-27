@@ -154,6 +154,7 @@ pub struct Lane {
     pub duration_s: f64,
     pub usage: Value,
     pub local_runtime: Value,
+    pub local_progress: Value,
     pub error: Option<String>,
     /// The lane worktree and its managed branch were removed.
     pub removed: bool,
@@ -677,9 +678,19 @@ async fn refresh(engine: &Engine, record: &mut Record, cancel: &CancellationToke
         lane.job_id = job.id.clone();
         lane.status = job.status.clone();
         lane.summary = job.summary.clone();
-        if let Some(event) = store.last_task_event(&job.task_id, "local.runtime_ready")? {
-            lane.local_runtime = event["payload"].clone();
-        }
+        // A follow-up owns its runtime evidence; never retain the prior turn's.
+        lane.local_runtime = store
+            .last_task_event(&job.task_id, "local.runtime_ready")?
+            .map(|event| event["payload"].clone())
+            .unwrap_or(Value::Null);
+        lane.local_progress = if lane.local_runtime.is_null() {
+            store
+                .last_task_event(&job.task_id, "local.runtime_progress")?
+                .map(|event| event["payload"].clone())
+                .unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
         lane.usage = json!({
             "prompt_tokens": job.usage.prompt_tokens,
             "completion_tokens": job.usage.completion_tokens,

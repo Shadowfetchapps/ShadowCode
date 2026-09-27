@@ -57,6 +57,24 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
+it("promotes a queued local task on preparation without waiting for agent.started", () => {
+  const { result } = renderHook(() => useConversation(vi.fn()));
+  act(() => result.current.load(detail(), { ...job, status: "queued" }));
+  const stream = vi.mocked(jobEvents).mock.results.at(-1)!.value as JobStream;
+  act(() =>
+    stream.onmessage?.({
+      data: JSON.stringify({
+        id: 201,
+        ts: 2,
+        type: "local.runtime_progress",
+        task_id: "task",
+        payload: { phase: "loading" },
+      }),
+    }),
+  );
+  expect(result.current.job?.status).toBe("running");
+  expect(result.current.transcript.activity.task.localPhase).toBe("loading");
+});
 it("pages independently while live events continue and returns to the latest state", async () => {
   vi.mocked(api.historyPage).mockResolvedValue(page);
   const { result } = renderHook(() => useConversation(vi.fn()));

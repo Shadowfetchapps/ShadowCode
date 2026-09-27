@@ -1,7 +1,9 @@
 /** Activity derived only from recorded events: tool calls (native and vendor),
  * approvals, web sources, changed files, verification and completion. */
+import { localProgressLabel, type LocalPhase } from "./localProgress";
 
 export type StepId =
+  | "local"
   | "reading"
   | "editing"
   | "commands"
@@ -55,6 +57,7 @@ export type Verification = {
 export type TaskActivity = {
   taskId: string;
   startedAt?: number;
+  localPhase?: LocalPhase;
   finishedAt?: number;
   calls: ActivityCall[];
   sources: WebSource[];
@@ -240,6 +243,7 @@ export function classifyTool(
 }
 
 const LABELS: Record<StepId, string> = {
+  local: "Preparing local model",
   reading: "Reading project",
   editing: "Editing files",
   commands: "Running commands",
@@ -275,6 +279,17 @@ export function deriveSteps(
 ): TimelineStep[] {
   if (!activity) return [];
   const steps: TimelineStep[] = [];
+  if (
+    activity.localPhase &&
+    !activity.finished &&
+    Math.max(pendingApprovals, activity.approvalsPending) === 0
+  )
+    steps.push({
+      id: "local",
+      label: localProgressLabel(activity.localPhase),
+      state: "active",
+      calls: [],
+    });
   for (const id of ORDER) {
     if (id === "waiting") {
       // A state, not work done: shown only while a request waits.

@@ -23,6 +23,30 @@ const steps = (events: EventRow[], pending = 0) =>
   ]);
 
 describe("activity timeline from real events", () => {
+  it("shows task-scoped local preparation before agent.started and clears it when ready", () => {
+    const events = [ev("local.runtime_progress", { phase: "preparing" })];
+    const preparing = replay(events);
+    expect(preparing.activeTaskId).toBe("t1");
+    expect(preparing.items).toEqual([]);
+    expect(steps(events)).toEqual([["Preparing local model", "active"]]);
+    events.push(ev("local.runtime_progress", { phase: "waiting" }));
+    expect(steps(events)).toEqual([["Waiting for local runtime", "active"]]);
+    events.push(ev("local.runtime_progress", { phase: "loading" }));
+    expect(steps(events)).toEqual([["Loading local model", "active"]]);
+    const background = replay([
+      ...events,
+      ev("local.runtime_progress", { phase: "waiting" }, "t2"),
+    ]);
+    expect(background.activeTaskId).toBe("t1");
+    expect(background.activity.t2.localPhase).toBe("waiting");
+    events.push(ev("local.runtime_ready", {}));
+    expect(steps(events)).toEqual([]);
+    events.push(ev("agent.completed", { success: false, cancelled: true }));
+    events.push(ev("local.runtime_progress", { phase: "loading" }));
+    expect(steps(events)).toEqual([["Stopped", "failed"]]);
+    expect(replay(events).activeTaskId).toBeUndefined();
+  });
+
   it("native tools: read, write, pytest, completion", () => {
     const events = [
       ev("agent.started", { task: "Fix it" }),

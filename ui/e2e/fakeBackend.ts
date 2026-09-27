@@ -10,6 +10,8 @@
 export type FakeOptions = {
   /** Milliseconds between streamed task events. */
   stepMs?: number;
+  /** Include recorded managed-runtime startup before agent.started. */
+  localStartup?: boolean;
   /** Start with the onboarding screen. */
   onboarding?: boolean;
   /** Codex tasks stop at the plan limit (then limits.on_limit applies). */
@@ -993,6 +995,23 @@ export function installFakeBackend(options: FakeOptions = {}) {
     const sid = job.session_id;
     const tid = job.task_id;
     const steps: [string, Json][] = [
+      ...(local && options.localStartup
+        ? ([
+            [
+              "local.runtime_progress",
+              { model_id: job.model, phase: "preparing" },
+            ],
+            [
+              "local.runtime_progress",
+              { model_id: job.model, phase: "waiting" },
+            ],
+            [
+              "local.runtime_progress",
+              { model_id: job.model, phase: "loading" },
+            ],
+            ["local.runtime_ready", { model_id: job.model }],
+          ] as [string, Json][])
+        : []),
       ["agent.started", { task: job.task, job_id: job.id }],
       ...(job.handoff
         ? [["agent.handoff", job.handoff] as [string, Json]]

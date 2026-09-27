@@ -790,6 +790,7 @@ export type CompareLane = {
     }[];
   };
   duration_s: number;
+  local_progress?: { model_id: string; phase: string } | null;
   local_runtime?: {
     model_id: string;
     preparation_seconds: number;

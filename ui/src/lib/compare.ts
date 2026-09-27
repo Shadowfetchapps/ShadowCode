@@ -2,6 +2,7 @@
  * how a lane's state reads. The engine stays authoritative; these only explain
  * why a control is unavailable. */
 import type { Approval, CompareLane, CompareRecord } from "../api";
+import { localPhase, localProgressLabel } from "./localProgress";
 import {
   availabilityLabel,
   isApiKey,
@@ -135,16 +136,27 @@ export function laneState(
   approvals: Approval[] = [],
 ): LaneState {
   if (
-    isActive(lane.status) &&
+    lane.status === "running" &&
     approvals.some((a) => a.session_id === lane.session_id)
   )
     return { kind: "waiting", label: "Waiting for approval", tone: "warn" };
   switch (lane.status) {
     case "":
     case "queued":
-      return { kind: "queued", label: "Starting…", tone: "busy" };
+      return {
+        kind: "queued",
+        label: isLocalId(lane.model) ? "Queued for local model" : "Queued",
+        tone: "busy",
+      };
     case "running":
-      return { kind: "running", label: "Working…", tone: "busy" };
+      return {
+        kind: "running",
+        label:
+          localPhase(lane.local_progress?.phase) && !lane.local_runtime
+            ? localProgressLabel(localPhase(lane.local_progress?.phase)!)
+            : "Working…",
+        tone: "busy",
+      };
     case "paused":
       return { kind: "running", label: "Paused", tone: "busy" };
     case "cancelling":

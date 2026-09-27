@@ -212,6 +212,8 @@ export function ChatView({
           <div className="working" role="status" aria-live="polite">
             <ActivityTimeline
               activity={activity}
+              jobStatus={job?.status}
+              localQueued={job?.routing?.model_id?.startsWith("local:gguf:")}
               pendingApprovals={approvals.length}
               elapsed={busy && since ? <Elapsed since={since} /> : undefined}
             />

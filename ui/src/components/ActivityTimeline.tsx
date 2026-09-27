@@ -14,6 +14,8 @@ export const ActivityTimeline = memo(function ActivityTimeline({
   pendingApprovals = 0,
   elapsed,
   withSummary = false,
+  jobStatus,
+  localQueued = false,
 }: {
   activity: TaskActivity | undefined;
   pendingApprovals?: number;
@@ -21,17 +23,29 @@ export const ActivityTimeline = memo(function ActivityTimeline({
   elapsed?: ReactNode;
   /** A summary card follows and states the outcome; skip the last step. */
   withSummary?: boolean;
+  jobStatus?: string;
+  localQueued?: boolean;
 }) {
+  const statusLabel =
+    jobStatus === "cancelling"
+      ? "Stopping…"
+      : jobStatus === "paused"
+        ? "Paused"
+        : jobStatus === "queued"
+          ? localQueued
+            ? "Queued for local model"
+            : "Queued"
+          : undefined;
   const steps = deriveSteps(activity, pendingApprovals).filter(
     (step) => !(withSummary && step.id === "finished"),
   );
   if (!steps.length && withSummary) return null;
-  if (!steps.length)
+  if (!steps.length || statusLabel)
     return (
       <div className="activity-timeline" aria-label="Agent activity">
         <div className="activity-step is-active">
           <LoaderCircle size={14} className="spin" aria-hidden="true" />
-          <span>Working</span>
+          <span>{statusLabel || "Working"}</span>
           {elapsed && <small>{elapsed}</small>}
         </div>
       </div>

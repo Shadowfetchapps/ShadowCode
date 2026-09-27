@@ -164,6 +164,24 @@ const record = (over: Partial<CompareRecord> = {}): CompareRecord => ({
 });
 
 describe("lane state", () => {
+  it("distinguishes the local queue and recorded startup without overriding stop or approvals", () => {
+    const local = lane({
+      model: "local:gguf:a",
+      status: "queued",
+      local_progress: { model_id: "local:gguf:a", phase: "loading" },
+    });
+    expect(laneState(local).label).toBe("Queued for local model");
+    local.status = "running";
+    expect(laneState(local).label).toBe("Loading local model");
+    const approvals = [{ id: "a", session_id: local.session_id }];
+    expect(laneState(local, approvals).label).toBe("Waiting for approval");
+    local.status = "cancelling";
+    expect(laneState(local, approvals).label).toBe("Stopping…");
+    local.status = "paused";
+    expect(laneState(local, approvals).label).toBe("Paused");
+    local.status = "completed";
+    expect(laneState(local).label).toBe("Finished");
+  });
   it("reads status and pending approvals", () => {
     expect(laneState(lane()).label).toBe("Working…");
     expect(laneState(lane(), [{ id: "a", session_id: "s2" }]).kind).toBe(
