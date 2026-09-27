@@ -28,6 +28,10 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
+const TEXT_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+const INPUT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+const INTERRUPT_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
+
 struct ProcessGroup(u32);
 impl ProcessGroup {
     #[cfg(target_os = "linux")]
@@ -239,7 +243,7 @@ async fn run_once(
     )));
     let mut outgoing = adapter.on_start(&request.options);
     outgoing.extend(adapter.prompt(&request.prompt, &request.images)?);
-    send_lines(&mut stdin, &outgoing).await?;
+    send_lines(request, &mut stdin, &outgoing).await?;
     if adapter.one_shot() {
         // One-shot CLIs (`codex exec -`) read the prompt until EOF.
         stdin = None;
@@ -253,12 +257,13 @@ async fn run_once(
     let stall = Duration::from_secs(request.config.stall_timeout_sec.max(30));
     let mut message_id = crate::id();
     let mut pending_text = String::new();
+    let mut last_flush = Instant::now();
     let mut interrupted_turn = false;
     let mut finished = false;
     let mut final_text = None;
     loop {
         if request.cancel.is_cancelled() {
-            send_lines(&mut stdin, &adapter.interrupt()).await.ok();
+            interrupt_vendor(&mut stdin, &mut adapter).await;
             group.terminate();
             let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
             group.kill();
@@ -272,14 +277,23 @@ async fn run_once(
             bail!("{}", super::acp::ANTIGRAVITY_SIGN_IN);
         }
         if request.steer.is_paused() && !interrupted_turn && !finished {
-            send_lines(&mut stdin, &adapter.interrupt()).await.ok();
+            send_lines(request, &mut stdin, &adapter.interrupt()).await?;
             interrupted_turn = true;
         }
+        // Text must reach the transcript during generation, including a short
+        // delta followed by a quiet provider. Check between frames as well as
+        // on idle polls so a continuous stream cannot starve the flush.
+        if last_flush.elapsed() >= TEXT_FLUSH_INTERVAL {
+            flush_text(request, &message_id, &mut pending_text)?;
+            last_flush = Instant::now();
+        }
+        let poll_interval = if pending_text.is_empty() {
+            Duration::from_millis(250)
+        } else {
+            TEXT_FLUSH_INTERVAL.saturating_sub(last_flush.elapsed())
+        };
         let remaining = stall.saturating_sub(last_line.elapsed());
-        let read = tokio::time::timeout(
-            remaining.min(Duration::from_millis(250)),
-            reader.next_protocol_line(),
-        );
+        let read = tokio::time::timeout(remaining.min(poll_interval), reader.next_protocol_line());
         match read.await {
             Ok(Ok(None)) => {
                 flush_text(request, &message_id, &mut pending_text)?;
@@ -300,8 +314,10 @@ async fn run_once(
             Ok(Ok(Some(line))) => {
                 last_line = Instant::now();
                 let step = adapter.on_line(&line)?;
-                send_lines(&mut stdin, &step.send).await?;
+                // Once a prompt may be written, input failure must not start
+                // an exec fallback and risk submitting the task twice.
                 *reached_ready |= adapter.ready();
+                send_lines(request, &mut stdin, &step.send).await?;
                 let mut saw_protocol = false;
                 for update in step.updates {
                     match update {
@@ -382,7 +398,7 @@ async fn run_once(
                 interrupted_turn = false;
                 message_id = crate::id();
                 outgoing = adapter.prompt(&follow_up, &[])?;
-                send_lines(&mut stdin, &outgoing).await?;
+                send_lines(request, &mut stdin, &outgoing).await?;
             } else {
                 group.kill();
                 break;
@@ -486,13 +502,43 @@ fn ensure_workspace(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn send_lines(stdin: &mut Option<ChildStdin>, lines: &[String]) -> Result<()> {
+async fn send_lines(
+    request: &Request<'_>,
+    stdin: &mut Option<ChildStdin>,
+    lines: &[String],
+) -> Result<()> {
     if lines.is_empty() {
         return Ok(());
     }
     let Some(stdin) = stdin.as_mut() else {
         bail!("The vendor CLI input is closed");
     };
+    send_lines_bounded(stdin, lines, &request.cancel, INPUT_WRITE_TIMEOUT).await
+}
+
+async fn send_lines_bounded<W: tokio::io::AsyncWrite + Unpin>(
+    stdin: &mut W,
+    lines: &[String],
+    cancel: &CancellationToken,
+    deadline: Duration,
+) -> Result<()> {
+    // A cancelled/timed-out write may have sent a partial frame. Return an
+    // error and stop the owning runtime; never retry that frame on this pipe.
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => bail!("Task cancelled while sending input to the vendor CLI"),
+        result = tokio::time::timeout(deadline, write_lines(stdin, lines)) => {
+            result.map_err(|_| anyhow::anyhow!(
+                "Vendor CLI did not accept input within {} seconds", deadline.as_secs_f64()
+            ))?
+        }
+    }
+}
+
+async fn write_lines<W: tokio::io::AsyncWrite + Unpin>(
+    stdin: &mut W,
+    lines: &[String],
+) -> Result<()> {
     for line in lines {
         stdin.write_all(line.as_bytes()).await?;
         stdin.write_all(b"\n").await?;
@@ -501,6 +547,15 @@ async fn send_lines(stdin: &mut Option<ChildStdin>, lines: &[String]) -> Result<
         stdin.flush().await?;
     }
     Ok(())
+}
+
+async fn interrupt_vendor(stdin: &mut Option<ChildStdin>, adapter: &mut Box<dyn CliAdapter>) {
+    let lines = adapter.interrupt();
+    if let Some(stdin) = stdin.as_mut() {
+        // Best effort before mandatory process termination. This path also
+        // runs after cancellation, so it cannot use the cancelled task token.
+        let _ = tokio::time::timeout(INTERRUPT_WRITE_TIMEOUT, write_lines(stdin, &lines)).await;
+    }
 }
 
 async fn drain_stderr<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
@@ -623,7 +678,7 @@ async fn apply_update(
                         clip(&prompt.command, 300)
                     ),"vendor":vendor.id(),"kind":prompt.kind}),
                 )?;
-                send_lines(stdin, &adapter.approve(&prompt.request_id, false)?).await?;
+                send_lines(request, stdin, &adapter.approve(&prompt.request_id, false)?).await?;
                 return Ok(());
             }
             let answer = request_approval(request, prompt.clone(), adapter.deny_note()).await?;
@@ -635,7 +690,7 @@ async fn apply_update(
                 for_session: answer.for_task && !answer.automatic,
                 note: answer.note.clone(),
             };
-            send_lines(stdin, &adapter.answer(&prompt.request_id, &reply)?).await?;
+            send_lines(request, stdin, &adapter.answer(&prompt.request_id, &reply)?).await?;
         }
         Update::Warning(text) => {
             request.events.emit("agent.warning", json!({"text":text}))?;
@@ -674,7 +729,7 @@ async fn apply_update(
             if interrupted && request.steer.is_paused() {
                 if let Some(follow_up) = wait_for_steer(request).await? {
                     *message_id = crate::id();
-                    send_lines(stdin, &adapter.prompt(&follow_up, &[])?).await?;
+                    send_lines(request, stdin, &adapter.prompt(&follow_up, &[])?).await?;
                     return Ok(());
                 }
             }
@@ -734,7 +789,7 @@ async fn limit_reached(
     stdin: &mut Option<ChildStdin>,
     adapter: &mut Box<dyn CliAdapter>,
 ) -> anyhow::Error {
-    send_lines(stdin, &adapter.interrupt()).await.ok();
+    interrupt_vendor(stdin, adapter).await;
     let detail = clip(&redact(&detail), 600);
     let usage = match &request.catalog {
         Some(catalog) => {
@@ -881,6 +936,45 @@ pub fn resolve_launch_binary(configured: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod transport_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn blocked_input_write_obeys_its_deadline() {
+        let (mut writer, _unread) = tokio::io::duplex(8);
+        let error = send_lines_bounded(
+            &mut writer,
+            &["x".repeat(100)],
+            &CancellationToken::new(),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("did not accept input"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_takes_priority_over_a_ready_input_write() {
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let error = send_lines_bounded(
+            &mut writer,
+            &["must not be sent".into()],
+            &cancel,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        drop(writer);
+        let mut received = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut received)
+            .await
+            .unwrap();
+        assert!(received.is_empty());
+    }
 
     #[tokio::test]
     async fn oversized_stderr_is_omitted_and_later_diagnostics_still_arrive() {

@@ -92,12 +92,40 @@ for raw in sys.stdin:
             {"id":"gpt-5.6-luna","displayName":"GPT-5.6-Luna","isDefault":False,"inputModalities":["text","image"]}]}})
     elif method in ("thread/start", "thread/resume"):
         mark("threads.log", method + " " + json.dumps(params.get("model")) + " " + json.dumps(params.get("threadId")))
+        if C.get("block_stdin"):
+            import fcntl
+            fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETPIPE_SZ, 4096)
+        if C.get("close_stdin_after_thread"):
+            os.close(sys.stdin.fileno())
         send({"jsonrpc":"2.0","id":mid,"result":{"thread":{"id": params.get("threadId") or "thr-1"}}})
+        if C.get("close_stdin_after_thread"):
+            time.sleep(20)
+            sys.exit(0)
+        if C.get("block_stdin"):
+            mark("stdin_blocked", str(os.getpid()))
+            until = time.monotonic() + 20
+            while not os.path.exists(os.path.join(HERE, "release_stdin")) and time.monotonic() < until:
+                time.sleep(0.01)
+            sys.exit(0)
     elif method == "turn/start":
         text = "".join(i.get("text","") for i in params.get("input", []) if i.get("type") == "text")
         mark("prompts.log", json.dumps(text))
         send({"jsonrpc":"2.0","id":mid,"result":{"turn":{"id":"turn-1"}}})
         mode = C.get("turn", "ok")
+        if mode == "stream_approval":
+            for _ in range(300):
+                send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"x"}})
+            send({"jsonrpc":"2.0","id":77,"method":"item/commandExecution/requestApproval","params":{"command":"printf fixture","reason":"fixture approval"}})
+            continue
+        if mode == "stream_wait":
+            send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"live prefix"}})
+            mark("stream_waiting")
+            until = time.monotonic() + 5
+            while not os.path.exists(os.path.join(HERE, "observed_stream")) and time.monotonic() < until:
+                time.sleep(0.01)
+            send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":" and end"}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}})
+            continue
         if mode == "limit":
             send({"jsonrpc":"2.0","method":"account/rateLimits/updated","params":{"rateLimits":snapshot(used=100, reached="rate_limit_reached")}})
             time.sleep(10)

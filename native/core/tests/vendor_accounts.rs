@@ -462,6 +462,26 @@ async fn exec_fallback_only_before_a_turn_and_never_under_approvals() {
 }
 
 #[tokio::test]
+async fn input_failure_after_thread_readiness_does_not_launch_exec_fallback() {
+    let run = run_setup(json!({"auth":"chatgpt","close_stdin_after_thread":true}));
+    let error = tokio::time::timeout(Duration::from_secs(2), run_fake(&run, false, false, None))
+        .await
+        .expect("a broken input pipe must fail promptly")
+        .unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe),
+        "{error:#}"
+    );
+    assert!(run.fake.marker("threads.log").is_some());
+    assert!(
+        run.fake.marker("exec_ran").is_none(),
+        "do not resubmit after a prompt may have started"
+    );
+}
+
+#[tokio::test]
 async fn read_only_tasks_auto_deny_vendor_prompts() {
     let mut run = run_setup(json!({"auth":"chatgpt","turn":"approval"}));
     let outcome = run_fake(&run, true, true, None).await.unwrap();
