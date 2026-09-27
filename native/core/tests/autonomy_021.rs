@@ -243,19 +243,32 @@ fn provider_chaos_does_not_invent_output() {
         "fragmented malformed JSON must not become invented output"
     );
 
-    let repeated_ids = [
+    let repeated_ids = |second_id: &str| {
+        [
         sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":\"a.rs\"}"}}]}}]})),
-        sse(json!({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_a","function":{"name":"write_file","arguments":"{}"}}]}}]})),
+        sse(json!({"choices":[{"delta":{"tool_calls":[{"index":1,"id":second_id,"function":{"name":"write_file","arguments":"{}"}}]}}]})),
         sse(json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})),
         "data: [DONE]\n\n".into(),
     ]
-    .concat();
+    .concat()
+    };
     let mut decoder = StreamDecoder::new(false);
-    decoder.push(repeated_ids.as_bytes()).unwrap();
+    decoder.push(repeated_ids("call_a").as_bytes()).unwrap();
     decoder.flush().unwrap();
-    let repeated = decoder.finish().unwrap();
-    assert!(!repeated.tool_calls.is_empty());
-    assert!(repeated.tool_calls.iter().all(|call| !call.id.is_empty()));
+    let error = decoder.finish().unwrap_err();
+    assert!(error.to_string().contains("duplicate tool call IDs"));
+
+    // Distinct response slots remain valid; refuse ambiguous IDs rather than
+    // removing multi-tool support or mistaking continuation for a new call.
+    let mut decoder = StreamDecoder::new(false);
+    decoder.push(repeated_ids("call_b").as_bytes()).unwrap();
+    decoder.flush().unwrap();
+    let distinct = decoder.finish().unwrap();
+    assert_eq!(distinct.tool_calls.len(), 2);
+    assert_eq!(distinct.tool_calls[0].id, "call_a");
+    assert_eq!(distinct.tool_calls[0].name, "read_file");
+    assert_eq!(distinct.tool_calls[1].id, "call_b");
+    assert_eq!(distinct.tool_calls[1].name, "write_file");
 }
 
 #[test]
