@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 /** Modal focus containment and restoration shared by settings and pickers. */
 export function Dialog({
@@ -13,8 +13,15 @@ export function Dialog({
   className?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  // Child autoFocus runs during commit, before this effect. Retain the
+  // opener during the initial render so cleanup never targets a removed
+  // input inside the dialog instead of the control that opened it.
+  const [previous] = useState<HTMLElement | null>(() =>
+    typeof document === "undefined"
+      ? null
+      : (document.activeElement as HTMLElement | null),
+  );
   useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
     const dialog = ref.current;
     if (!dialog) return;
     const focusables = () =>
@@ -55,7 +62,7 @@ export function Dialog({
     return () => {
       dialog.removeEventListener("keydown", trap);
       document.removeEventListener("focusin", containFocus);
-      previous?.focus();
+      if (previous?.isConnected) previous.focus();
     };
   }, []);
   return (

@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { StrictMode, useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
 import { Dialog } from "./Dialog";
+import { Palette } from "./overlays";
+import { useShortcuts } from "../hooks/useShortcuts";
 
 afterEach(cleanup);
 
@@ -32,4 +34,65 @@ it("restores keyboard focus to the opener when the dialog unmounts", () => {
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
   expect(document.activeElement).toBe(opener);
+});
+
+function PaletteHarness() {
+  const [open, setOpen] = useState(false);
+  useShortcuts(
+    {
+      consent: false,
+      overlay: open,
+      trust: false,
+      picker: false,
+      panel: false,
+      onboarding: false,
+    },
+    (action) => {
+      if (action === "palette") setOpen(true);
+      if (action === "close-overlay") setOpen(false);
+    },
+  );
+  return (
+    <>
+      <textarea aria-label="Message ShadowCode" />
+      <button type="button" onClick={() => setOpen(true)}>
+        Open commands
+      </button>
+      {open && <Palette items={[]} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+it("returns focus to the composer after the real autofocus palette closes with Escape", () => {
+  render(<PaletteHarness />);
+  const composer = screen.getByRole("textbox", { name: "Message ShadowCode" });
+  composer.focus();
+  fireEvent.keyDown(composer, { key: "k", ctrlKey: true });
+  const search = screen.getByRole("textbox", { name: "Search commands" });
+  expect(document.activeElement).toBe(search);
+  fireEvent.keyDown(search, { key: "Escape" });
+  expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull();
+  expect(document.activeElement).toBe(composer);
+});
+
+it("restores the actual palette opener across repeated StrictMode mounts", () => {
+  render(
+    <StrictMode>
+      <PaletteHarness />
+    </StrictMode>,
+  );
+  const composer = screen.getByRole("textbox", { name: "Message ShadowCode" });
+  const opener = screen.getByRole("button", { name: "Open commands" });
+  for (const target of [opener, composer, opener]) {
+    target.focus();
+    if (target === opener) fireEvent.click(opener);
+    else fireEvent.keyDown(target, { key: "k", ctrlKey: true });
+    const search = screen.getByRole("textbox", { name: "Search commands" });
+    expect(document.activeElement).toBe(search);
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(
+      screen.queryByRole("dialog", { name: "Command palette" }),
+    ).toBeNull();
+    expect(document.activeElement).toBe(target);
+  }
 });
