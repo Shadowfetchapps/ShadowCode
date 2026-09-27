@@ -2082,6 +2082,7 @@ impl Engine {
             )?;
         }
         let mut repeated = HashMap::new();
+        let mut observation_loop = autonomy::ObservationLoop::default();
         if let Some(workflow) = &job.workflow {
             let mut selected = json!(workflow);
             selected["effective_mode"] = json!(job.mode);
@@ -2626,6 +2627,7 @@ impl Engine {
             // Parallelize adjacent safe observations only. Every mutation and
             // plan update is a barrier, preserving the model's requested order.
             let mut viewed_images = Vec::new();
+            let mut repeated_observation_note = false;
             let mut index = 0;
             while index < response.tool_calls.len() {
                 if self
@@ -2719,6 +2721,16 @@ impl Engine {
                     if call.name == "view_image" && result.success && prepared.vision() {
                         viewed_images.extend(crate::vision::viewed_image(&result.output));
                     }
+                    if job.mode == "code"
+                        && observation_loop.record(
+                            &call.name,
+                            &call.arguments,
+                            &result.output,
+                            result.success,
+                        )
+                    {
+                        repeated_observation_note = true;
+                    }
                     messages.push(
                         result.message(
                             &call.name,
@@ -2731,6 +2743,14 @@ impl Engine {
             }
             if !viewed_images.is_empty() {
                 messages.push(crate::vision::viewed_images_message(&viewed_images));
+                self.save_tape(&job.id, &messages).await?;
+            }
+            if repeated_observation_note {
+                events.emit(
+                    "runaway.warning",
+                    json!({"kind":"redundant_observation","action":"replan","repeats":3}),
+                )?;
+                messages.push(json!({"role":"system","content":"Progress check: several recent reads or searches revisited a file already read in full. Those tool results were retained, but repeated inspection is using the task budget. If the needed evidence is present, make the user's authorized change or state the specific blocker. If the file may have changed, inspect it again. Do not claim an edit or test that did not occur. This is a process note, not a new user instruction."}));
                 self.save_tape(&job.id, &messages).await?;
             }
         }

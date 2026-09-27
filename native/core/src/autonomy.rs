@@ -4,7 +4,57 @@
 use crate::{context, permissions, tools};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+/// Notice repeated inspection of files already read in full during a code task.
+/// This only adds a process note; it never hides a tool result or grants edits.
+#[derive(Default)]
+pub struct ObservationLoop {
+    complete_reads: HashMap<String, String>,
+    redundant: usize,
+    warned: bool,
+}
+
+impl ObservationLoop {
+    pub fn record(&mut self, name: &str, arguments: &Value, output: &Value, success: bool) -> bool {
+        if !success {
+            self.redundant = 0;
+            return false;
+        }
+        if tool_class(name) != ToolClass::ReadOnly {
+            self.complete_reads.clear();
+            self.redundant = 0;
+            return false;
+        }
+        let path = arguments["path"].as_str();
+        let repeated = match (name, path) {
+            ("read_file", Some(path))
+                if output["truncated"] == false && output["next_offset"].is_null() =>
+            {
+                if let Some(hash) = output["hash"].as_str() {
+                    let previous = self.complete_reads.insert(path.to_owned(), hash.to_owned());
+                    previous.as_deref() == Some(hash)
+                } else {
+                    false
+                }
+            }
+            ("search_code" | "search_text" | "search_symbol", Some(path)) => {
+                self.complete_reads.contains_key(path)
+            }
+            _ => false,
+        };
+        if repeated {
+            self.redundant += 1;
+        } else {
+            self.redundant = 0;
+        }
+        if self.redundant >= 3 && !self.warned {
+            self.warned = true;
+            return true;
+        }
+        false
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1297,6 +1347,31 @@ mod tests {
         assert_eq!(runaway_action(3), RunawayAction::Warn);
         assert_eq!(runaway_action(4), RunawayAction::Replan);
         assert_eq!(runaway_action(5), RunawayAction::Pause);
+    }
+
+    #[test]
+    fn repeated_inspection_prompts_once_and_resets_after_a_write() {
+        let mut observations = ObservationLoop::default();
+        let read = json!({"path":"helpers.py"});
+        let full = json!({"hash":"first","truncated":false,"next_offset":null});
+        assert!(!observations.record("read_file", &read, &full, true));
+        for query in ["clamp", "unique"] {
+            assert!(!observations.record(
+                "search_code",
+                &json!({"path":"helpers.py","query":query}),
+                &json!({"hits":[]}),
+                true
+            ));
+        }
+        assert!(observations.record("read_file", &read, &full, true));
+        assert!(!observations.record("read_file", &read, &full, true));
+        assert!(!observations.record("write_file", &read, &json!({}), true));
+        assert!(!observations.record(
+            "read_file",
+            &read,
+            &json!({"hash":"second","truncated":false,"next_offset":null}),
+            true
+        ));
     }
 
     #[test]
