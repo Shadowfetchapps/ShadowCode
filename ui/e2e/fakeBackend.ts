@@ -2776,11 +2776,43 @@ export function installFakeBackend(options: FakeOptions = {}) {
           { name: "src", path: "src", type: "dir" },
         ],
       };
-    if (path === "/api/workspace/file")
-      return {
-        path: q.get("path"),
-        content: `# Demo\nContents of ${q.get("path")}\n`,
+    if (path === "/api/workspace/file") {
+      const filePath = q.get("path") || "";
+      const original = state.files[filePath];
+      // Deterministic fixture revision, not a cryptographic hash or native
+      // persistence proof. The real service supplies SHA-256.
+      const revision = (content: string) => {
+        let hash = 2166136261;
+        for (const char of content) {
+          hash ^= char.charCodeAt(0);
+          hash = Math.imul(hash, 16777619);
+        }
+        return (hash >>> 0).toString(16).padStart(8, "0").repeat(8);
       };
+      if (method === "PUT") {
+        const current =
+          original === undefined || original === null
+            ? "missing"
+            : revision(original);
+        if (body.expected_hash !== current)
+          throw new Error("File changed since it was read");
+        state.files[filePath] = String(body.content);
+        return {
+          path: filePath,
+          hash: revision(state.files[filePath]!),
+          bytes: state.files[filePath]!.length,
+        };
+      }
+      if (original === undefined || original === null)
+        throw new Error("File not found");
+      const base = {
+        path: filePath,
+        hash: revision(original),
+        bytes: original.length,
+      };
+      if (q.get("head") === "true") return base;
+      return { ...base, content: original, truncated: false };
+    }
     if (path === "/api/workspace/exec" && method === "POST")
       return {
         ok: true,

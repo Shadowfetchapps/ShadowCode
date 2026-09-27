@@ -1510,9 +1510,27 @@ export const api = {
       path: string;
       parent: string;
     }>("/api/workspace/files?path=" + encodeURIComponent(path)),
-  file: (path: string) =>
-    get<{ content: string; path: string }>(
+  file: (path: string, full = false) =>
+    get<{
+      content: string;
+      path: string;
+      hash: string;
+      bytes: number;
+      truncated: boolean;
+    }>(
+      "/api/workspace/file?path=" +
+        encodeURIComponent(path) +
+        (full ? "&full=true" : ""),
+    ),
+  fileRevision: (path: string) =>
+    get<{ path: string; hash: string; bytes: number }>(
+      "/api/workspace/file?path=" + encodeURIComponent(path) + "&head=true",
+    ),
+  saveFile: (path: string, content: string, expectedHash: string) =>
+    send<{ path: string; hash: string; bytes: number }>(
       "/api/workspace/file?path=" + encodeURIComponent(path),
+      "PUT",
+      { content, expected_hash: expectedHash },
     ),
   git: () =>
     get<{

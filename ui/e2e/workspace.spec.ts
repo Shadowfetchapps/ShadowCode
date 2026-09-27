@@ -146,7 +146,11 @@ test("runs a task with streamed events and reviews the changes", async ({
       ".msg-with-activity .activity-timeline, .msg-summary .activity-timeline",
     )
     .last();
-  for (const step of ["Reading project", "Editing files", "Checks not verified"])
+  for (const step of [
+    "Reading project",
+    "Editing files",
+    "Checks not verified",
+  ])
     await expect(timeline.getByText(step, { exact: true })).toBeVisible();
   await expect(timeline.getByText("Finished", { exact: true })).toHaveCount(0);
   await expect(summary).toContainText("Finished");
@@ -159,7 +163,9 @@ test("runs a task with streamed events and reviews the changes", async ({
   await expect(checks).toHaveClass(/is-incomplete/);
   await expect(checks.locator("svg.lucide-circle-dashed")).toHaveCount(1);
   await expect(checks.locator("svg.lucide-check")).toHaveCount(0);
-  await expect(timeline.getByText("Running checks", { exact: true })).toHaveCount(0);
+  await expect(
+    timeline.getByText("Running checks", { exact: true }),
+  ).toHaveCount(0);
   await expect(summary).toContainText("Verification not run");
   await checks.getByText("Checks not verified", { exact: true }).click();
   await expect(timeline.getByText("Tests  4 passed (4)")).toBeVisible();
@@ -228,7 +234,9 @@ test("drawer tabs keep the terminal, the open file and the commit message", asyn
   await page.keyboard.type("echo half-typed");
   await tab("Files").click();
   await drawer.getByRole("button", { name: /README\.md/ }).click();
-  await expect(drawer).toContainText("Contents of README.md");
+  await expect(
+    drawer.getByRole("textbox", { name: "Edit README.md" }),
+  ).toHaveValue("# Demo\n");
   await tab("Changes").click();
   await expect(drawer.getByPlaceholder("Commit message")).toHaveValue(
     "Fix the add function",
@@ -237,13 +245,52 @@ test("drawer tabs keep the terminal, the open file and the commit message", asyn
   await expect(shell).toContainText("ls: ran in /work/demo");
   await expect(shell).toContainText("echo half-typed");
   await tab("Files").click();
-  await expect(drawer).toContainText("Contents of README.md");
+  await expect(
+    drawer.getByRole("textbox", { name: "Edit README.md" }),
+  ).toHaveValue("# Demo\n");
   // Closing and reopening the drawer keeps them too.
   await drawer.getByRole("button", { name: "Close drawer" }).click();
   await page.getByRole("button", { name: "Review changes" }).click();
   await expect(drawer.getByPlaceholder("Commit message")).toHaveValue(
     "Fix the add function",
   );
+});
+
+test("keeps an unsaved file draft and reviews an agent edit before saving", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const drawer = page.getByRole("complementary", { name: "Drawer" });
+  const tab = (name: string) =>
+    drawer.locator(".drawer-tabs").getByRole("button", { name });
+  await tab("Files").click();
+  await drawer.getByRole("button", { name: "README.md", exact: true }).click();
+  const editor = drawer.getByRole("textbox", { name: "Edit README.md" });
+  await expect(editor).toHaveValue("# Demo\n");
+  await editor.fill("# My draft\n");
+  await tab("Changes").click();
+  await tab("Files").click();
+  await expect(editor).toHaveValue("# My draft\n");
+  await page.evaluate(() => {
+    (window as any).__SHADOW_FAKE__.state.files["README.md"] = "# Agent edit\n";
+  });
+  const conflict = drawer.getByRole("group", { name: "File conflict" });
+  await expect(conflict).toBeVisible({ timeout: 7000 });
+  await expect(editor).toHaveValue("# My draft\n");
+  await expect(
+    drawer.getByRole("button", { name: "Save", exact: true }),
+  ).toBeDisabled();
+  await conflict.getByText("Show current disk version").click();
+  await expect(conflict).toContainText("# Agent edit");
+  await conflict
+    .getByRole("button", { name: "Use disk revision as save base" })
+    .click();
+  await drawer.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(drawer.getByText("Saved", { exact: true })).toBeVisible();
+  const saved = await page.evaluate(
+    () => (window as any).__SHADOW_FAKE__.state.files["README.md"],
+  );
+  expect(saved).toBe("# My draft\n");
 });
 
 test("asks for consent before sending local context to a cloud row", async ({

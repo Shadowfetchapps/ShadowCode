@@ -1,15 +1,15 @@
 import { X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api, type FileEntry, type Session } from "../api";
+import { api, type Session } from "../api";
 import { Empty } from "./cards";
 import { ChangesTab } from "./ChangesTab";
 import { BranchPanel } from "./BranchPanel";
 import { PreviewPanel } from "./PreviewPanel";
+import { FileEditor } from "./FileEditor";
 import { TerminalPanel } from "./TerminalPanel";
 import { ToolsTab, type ToolsView } from "./ToolsTab";
 import { exportSession } from "../lib/transport";
 import {
-  remembered,
   type DrawerMemory,
   type DrawerMemoryUpdate,
 } from "../hooks/useDrawerMemory";
@@ -165,10 +165,11 @@ export function Drawer({
           />
         )}
         {tab === "files" && (
-          <FilesTab
+          <FileEditor
             workspace={workspace}
             memory={memory}
             onMemory={onMemory}
+            toast={toast}
             onShowDiff={(p) => {
               onDiffPath(p);
               onTab("changes");
@@ -354,94 +355,6 @@ function SessionsTab({
           </div>
         ))}
       </div>
-    </>
-  );
-}
-
-// --- Files -------------------------------------------------------------------
-
-function FilesTab({
-  workspace,
-  onShowDiff,
-  memory,
-  onMemory,
-}: {
-  workspace: string;
-  onShowDiff: (path: string) => void;
-  memory: DrawerMemory;
-  onMemory: DrawerMemoryUpdate;
-}) {
-  const [dir, setDir] = remembered(memory, onMemory, "filesDir");
-  const [files, setFiles] = useState<FileEntry[]>([]);
-  const [view, setView] = remembered(memory, onMemory, "filesView");
-
-  useEffect(() => {
-    void api
-      .files(dir)
-      .then((d) => setFiles(d.entries))
-      .catch(() => setFiles([]));
-  }, [dir, workspace]);
-
-  return (
-    <>
-      <div className="crumb">
-        <button
-          type="button"
-          className="mini"
-          disabled={dir === "."}
-          onClick={() => setDir(dir.split("/").slice(0, -1).join("/") || ".")}
-        >
-          ↑
-        </button>
-        <span>
-          {workspace.split("/").pop()}
-          {dir === "." ? "" : `/${dir}`}
-        </span>
-      </div>
-      <div className="list">
-        {files.length === 0 && <Empty title="Empty folder" />}
-        {files.map((f) => (
-          <button
-            type="button"
-            key={f.path}
-            className="file"
-            onClick={() => {
-              if (f.type === "dir") {
-                setDir(f.path);
-                return;
-              }
-              void api
-                .file(f.path)
-                .then((r) => setView({ path: f.path, content: r.content }));
-            }}
-          >
-            <span className="file-icon">{f.type === "dir" ? "▸" : "·"}</span>
-            {f.name}
-          </button>
-        ))}
-      </div>
-      {view && (
-        <div className="file-view">
-          <div className="crumb">
-            <span>{view.path}</span>
-            <button
-              type="button"
-              className="mini"
-              onClick={() => onShowDiff(view.path)}
-            >
-              Diff
-            </button>
-            <button
-              type="button"
-              className="mini"
-              onClick={() => setView(null)}
-            >
-              ×
-            </button>
-          </div>
-          <pre className="plan">{view.content.slice(0, 12000)}</pre>
-        </div>
-      )}
     </>
   );
 }

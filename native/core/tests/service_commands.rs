@@ -197,6 +197,191 @@ async fn manual_mutations_require_trust_and_respect_read_only_mode() {
 }
 
 #[tokio::test]
+async fn editor_save_preserves_external_changes_and_requires_project_write_access() {
+    let (_root, service) = setup(false);
+    let workspace = service.workspace().unwrap();
+    init(&workspace);
+    fs::write(workspace.join("staged.txt"), "keep staged\n").unwrap();
+    git(&workspace, &["add", "staged.txt"]);
+    let index_before = fs::read(workspace.join(".git/index")).unwrap();
+    fs::write(workspace.join("source.rs"), "fn old() {}\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            workspace.join("source.rs"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let opened = call(
+        &service,
+        "GET",
+        "/api/workspace/file?path=source.rs&full=true",
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert_eq!(opened["content"], "fn old() {}\n");
+    assert_eq!(opened["truncated"], false);
+    let head = call(
+        &service,
+        "GET",
+        "/api/workspace/file?path=source.rs&head=true",
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert_eq!(head["hash"], opened["hash"]);
+    assert!(head.get("content").is_none());
+    let original_hash = opened["hash"].as_str().unwrap();
+    let save = || {
+        call(
+            &service,
+            "PUT",
+            "/api/workspace/file?path=source.rs",
+            json!({"content":"fn draft() {}\n","expected_hash":original_hash}),
+        )
+    };
+    assert!(save().await.unwrap_err().to_string().contains("Trust"));
+    call(
+        &service,
+        "POST",
+        "/api/projects/trust",
+        json!({"path":workspace}),
+    )
+    .await
+    .unwrap();
+    fs::write(workspace.join("source.rs"), "fn agent() {}\n").unwrap();
+    assert!(save()
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("File changed"));
+    assert_eq!(
+        fs::read_to_string(workspace.join("source.rs")).unwrap(),
+        "fn agent() {}\n"
+    );
+    let current = call(
+        &service,
+        "GET",
+        "/api/workspace/file?path=source.rs&full=true",
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    let result = call(
+        &service,
+        "PUT",
+        "/api/workspace/file?path=source.rs",
+        json!({"content":"fn merged() {}\n","expected_hash":current["hash"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(workspace.join("source.rs")).unwrap(),
+        "fn merged() {}\n"
+    );
+    assert_ne!(result["hash"], current["hash"]);
+    assert_eq!(
+        fs::read(workspace.join(".git/index")).unwrap(),
+        index_before
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(workspace.join("source.rs"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+    }
+    assert!(call(
+        &service,
+        "PUT",
+        "/api/workspace/file?path=source.rs",
+        json!({"content":"invalid revision","expected_hash":""}),
+    )
+    .await
+    .unwrap_err()
+    .to_string()
+    .contains("revision"));
+    fs::remove_file(workspace.join("source.rs")).unwrap();
+    assert!(call(
+        &service,
+        "GET",
+        "/api/workspace/file?path=source.rs&head=true",
+        Value::Null,
+    )
+    .await
+    .unwrap_err()
+    .to_string()
+    .contains("File not found"));
+    assert!(call(
+        &service,
+        "PUT",
+        "/api/workspace/file?path=source.rs",
+        json!({"content":"stale","expected_hash":result["hash"]}),
+    )
+    .await
+    .unwrap_err()
+    .to_string()
+    .contains("File changed"));
+    let recreated = call(
+        &service,
+        "PUT",
+        "/api/workspace/file?path=source.rs",
+        json!({"content":"fn recreated() {}\n","expected_hash":"missing"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(workspace.join("source.rs")).unwrap(),
+        "fn recreated() {}\n"
+    );
+    #[cfg(unix)]
+    {
+        let outside = workspace.parent().unwrap().join("outside.txt");
+        fs::write(&outside, "Outside\n").unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("linked.txt")).unwrap();
+        assert!(call(
+            &service,
+            "GET",
+            "/api/workspace/file?path=linked.txt&head=true",
+            Value::Null,
+        )
+        .await
+        .is_err());
+        assert!(call(
+            &service,
+            "GET",
+            "/api/workspace/file?path=linked.txt&full=true",
+            Value::Null,
+        )
+        .await
+        .is_err());
+    }
+    Config::patch(
+        service.engine.paths(),
+        json!({"permissions":{"level":"read_only"}}),
+    )
+    .unwrap();
+    assert!(call(
+        &service,
+        "PUT",
+        "/api/workspace/file?path=source.rs",
+        json!({"content":"forbidden","expected_hash":recreated["hash"]}),
+    )
+    .await
+    .unwrap_err()
+    .to_string()
+    .contains("read-only"));
+}
+
+#[tokio::test]
 async fn job_gate_blocks_untrusted_projects_until_trust_reloads() {
     let (_root, service) = setup(false);
     let workspace = service.workspace().unwrap();

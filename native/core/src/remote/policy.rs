@@ -381,6 +381,15 @@ mod tests {
         );
         assert_eq!(
             check(
+                "/api/workspace/file?path=.env",
+                &json!({"content":"overwrite","expected_hash":"missing"}),
+                &access,
+                &paths
+            ),
+            Err(Refusal(SECRET_FILE))
+        );
+        assert_eq!(
+            check(
                 "/api/workspace/diff?path=config%2Fsecrets.env",
                 &Value::Null,
                 &access,

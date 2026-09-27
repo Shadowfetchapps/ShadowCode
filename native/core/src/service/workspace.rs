@@ -75,9 +75,62 @@ impl Service {
                 )
             }
             ("GET", "/api/workspace/file") => {
-                let file = Workspace::open(&self.workspace()?)?.read(call.q("path"))?;
+                let workspace = Workspace::open(&self.workspace()?)?;
+                let head = call.q("head") == "true";
+                let full = call.q("full") == "true";
+                if head || full {
+                    let (bytes, size) = workspace
+                        .inspect(call.q("path"), crate::workspace::MAX_FILE_BYTES + 1)
+                        .map_err(|error| {
+                            if error.chain().any(|cause| {
+                                cause
+                                    .downcast_ref::<std::io::Error>()
+                                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+                            }) {
+                                anyhow::anyhow!("File not found")
+                            } else {
+                                error
+                            }
+                        })?;
+                    ensure!(
+                        size <= crate::workspace::MAX_FILE_BYTES as u64
+                            && bytes.len() == size as usize,
+                        "File exceeds the 4 MB edit limit or changed while being read"
+                    );
+                    let path = workspace.relative(call.q("path"))?;
+                    let hash = crate::workspace::hash(&bytes);
+                    if full && !head {
+                        ensure!(
+                            !bytes.contains(&0),
+                            "Binary files cannot be displayed as text"
+                        );
+                        let content =
+                            String::from_utf8(bytes).context("File is not valid UTF-8")?;
+                        return Ok(
+                            json!({"path":path.to_string_lossy(),"hash":hash,"bytes":size,"content":content,"truncated":false}),
+                        );
+                    }
+                    return Ok(json!({"path":path.to_string_lossy(),"hash":hash,"bytes":size}));
+                }
+                let file = workspace.read(call.q("path"))?;
                 Ok(
-                    json!({"path":file.path,"content":truncate(&file.content,200000),"hash":file.hash,"truncated":file.content.len()>200000}),
+                    json!({"path":file.path,"content":truncate(&file.content,200000),"hash":file.hash,"bytes":file.bytes,"truncated":file.content.len()>200000}),
+                )
+            }
+            ("PUT", "/api/workspace/file") => {
+                let expected = body.expected_hash.as_str();
+                ensure!(
+                    expected == "missing"
+                        || (expected.len() == 64
+                            && expected.bytes().all(|b| b.is_ascii_hexdigit())),
+                    "A valid opened-file revision is required to save"
+                );
+                let workspace = self.mutable_workspace()?;
+                let path = call.q("path");
+                let hash =
+                    workspace.write(path, body.content.as_str().as_bytes(), Some(expected))?;
+                Ok(
+                    json!({"path":workspace.relative(path)?.to_string_lossy(),"hash":hash,"bytes":body.content.as_str().len()}),
                 )
             }
             ("GET", "/api/workspace/instructions") => {

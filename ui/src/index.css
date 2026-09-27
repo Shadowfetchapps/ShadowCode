@@ -853,6 +853,84 @@ button.mini.primary-mini {
   margin-top: 6px;
   padding-top: 6px;
 }
+.file-editor-tabs,
+.file-editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.file-editor-tabs {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 0;
+}
+.file-editor-tabs button {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-2);
+  padding: 4px 8px;
+  font: 11px var(--mono);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-editor-tabs button[aria-current="page"] {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.file-editor-toolbar {
+  justify-content: flex-end;
+  padding: 4px 0 8px;
+}
+.file-editor-toolbar span {
+  color: var(--muted);
+  font-size: 11px;
+  margin-right: auto;
+}
+.file-editor-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 330px;
+  resize: vertical;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  font: 12px/1.55 var(--mono);
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+}
+.file-editor-input:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.file-editor-hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+.file-editor-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+.file-editor-conflict {
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.file-editor-conflict p {
+  margin: 5px 0;
+}
+.file-editor-conflict pre {
+  max-height: 220px;
+  overflow: auto;
+  background: var(--surface-2);
+  padding: 8px;
+  white-space: pre;
+}
 .plan {
   color: var(--text-2);
   background: var(--surface-2);

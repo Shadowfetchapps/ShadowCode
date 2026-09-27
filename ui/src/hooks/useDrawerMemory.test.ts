@@ -12,7 +12,15 @@ it("keeps drawer work per project and starts fresh in another", () => {
   act(() => {
     hook.current.update("commitMessage", "Fix the add function");
     hook.current.update("terminalActive", "t1");
-    hook.current.update("filesView", { path: "README.md", content: "# A" });
+    hook.current.update("filesActive", "README.md");
+    hook.current.update("filesBuffers", {
+      "README.md": {
+        path: "README.md",
+        base: "# A",
+        draft: "# Draft",
+        hash: "abc",
+      },
+    });
     hook.current.update("filesDir", "src");
   });
   // Functional updates see the latest value (a draft edited twice quickly).
@@ -29,14 +37,21 @@ it("keeps drawer work per project and starts fresh in another", () => {
     title: "Add login",
     draft: true,
   });
-  expect(hook.current.memory.filesView?.path).toBe("README.md");
+  expect(hook.current.memory.filesActive).toBe("README.md");
+  expect(hook.current.memory.filesBuffers["README.md"].draft).toBe("# Draft");
   expect(hook.current.memory.filesDir).toBe("src");
   rerender({ workspace: "/b" });
   expect(hook.current.memory.commitMessage).toBe("");
   expect(hook.current.memory.terminalActive).toBe("");
   expect(hook.current.memory.prDraft.title).toBe("");
-  expect(hook.current.memory.filesView).toBeNull();
+  expect(hook.current.memory.filesActive).toBeNull();
+  expect(hook.current.memory.filesBuffers).toEqual({});
   expect(hook.current.memory.filesDir).toBe(".");
+  const close = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(close);
+  expect(close.defaultPrevented).toBe(true);
+  rerender({ workspace: "/a" });
+  expect(hook.current.memory.filesBuffers["README.md"].draft).toBe("# Draft");
 });
 
 it("gives each tab a useState-shaped value and setter", () => {
