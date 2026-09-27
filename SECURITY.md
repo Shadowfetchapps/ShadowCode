@@ -30,9 +30,11 @@ as your Linux user. ShadowCode's own `exec` tool limits what they can reach:
   message. Otherwise they run under **Landlock** when the kernel supports it
   (Linux 5.13+). Landlock allows reading only the system folders, the toolchain
   folders and the project, and writing only the project and temporary folders.
-  It blocks TCP when the shell network is off. Landlock doesn't cover UDP and
-  gives no process isolation. If neither layer is available, commands run
-  unrestricted. Either way, the conversation shows a warning once.
+  TCP blocking when the shell network is off needs Landlock ABI 4 or newer;
+  earlier supported kernels provide file limits only. ShadowCode's Landlock
+  rules don't cover UDP and give no process isolation. If neither layer is
+  available, commands run unrestricted. Either way, the conversation shows a
+  warning once.
   Landlock isn't layered under bubblewrap: it forbids the mount calls
   bubblewrap needs, and ShadowCode runs no helper inside the sandbox.
 - **Network** for shell commands is `off`, `on`, or `allowlist`
@@ -51,12 +53,10 @@ as your Linux user. ShadowCode's own `exec` tool limits what they can reach:
 
 Command classification (privileged, network, destructive Git) is a lexical
 policy check. It is not containment. Background processes started with
-`background_start` and lifecycle hooks are not run in this sandbox.
-
-Vendor CLIs (Codex, Claude Code, Cursor, Antigravity, Grok) run as your user
-with their own tools and sandboxes. ShadowCode doesn't wrap them in bubblewrap,
-and its network and `sudo` rules don't apply to them. Use a container or a
-separate account when you need stronger isolation.
+`background_start`, lifecycle hooks and interactive terminal sessions are not
+run in this sandbox. The command sandbox settings, including "Require sandbox"
+and its network limits, apply to the built-in `exec` tool. Background-process
+approvals disclose this difference before execution.
 
 Vendor CLIs (Codex, Claude Code, Cursor, Antigravity, Grok) run as your user
 with their own tools and sandboxes. ShadowCode doesn't wrap them in bubblewrap,

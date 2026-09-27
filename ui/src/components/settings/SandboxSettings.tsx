@@ -47,7 +47,7 @@ function statusLine(status: SandboxStatus): string {
     case "bubblewrap":
       return "Sandbox active (bubblewrap): commands see an empty home folder with read-only toolchains, and only this project is writable.";
     case "landlock":
-      return "bubblewrap is not installed. Commands run under Landlock file limits only; install bubblewrap for the full sandbox.";
+      return "bubblewrap is unavailable. Commands can fall back to Landlock file limits; network and process isolation are incomplete. Turn on Require sandbox to refuse fallback.";
     case "blocked":
       return status.bubblewrap.works
         ? "The host allow-list needs private network namespaces, which this system does not allow. Shell commands will be refused."
@@ -58,7 +58,11 @@ function statusLine(status: SandboxStatus): string {
 }
 
 const NETWORK_OPTIONS: [ShellNetwork, string, string][] = [
-  ["off", "No network", "Shell commands cannot reach the network."],
+  [
+    "off",
+    "No network",
+    "Request no network access. Full isolation needs working bubblewrap.",
+  ],
   [
     "allowlist",
     "Only allowed hosts",
@@ -88,7 +92,12 @@ export function SandboxSettings({
   }, []);
   return (
     <fieldset className="mode-options sandbox-settings">
-      <legend>Shell commands</legend>
+      <legend>Agent command sandbox</legend>
+      <p className="hint">
+        These settings apply to ShadowCode's built-in command tool. Background
+        processes, lifecycle hooks and terminal sessions run outside this
+        sandbox. Subscription tools use their vendor's permissions and sandbox.
+      </p>
       {status && (
         <p className="hint" role="status">
           {statusLine(status)}

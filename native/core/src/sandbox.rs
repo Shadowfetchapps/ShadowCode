@@ -621,6 +621,12 @@ pub fn prepare_shell(
             let note = json!({
                 "mode": "bubblewrap",
                 "network": network_label(policy.network),
+                "network_requested": network_label(policy.network),
+                "network_enforcement": match net {
+                    Net::Off => "private_namespace",
+                    Net::On => "none",
+                    Net::Proxy => "host_allowlist_proxy",
+                },
                 "allow": if net == Net::Proxy { json!(policy.allow_text) } else { Value::Null },
                 "home": "empty temporary folder",
                 "home_read_only": layout.binds.iter().map(|(_, d)| d.to_string_lossy()).collect::<Vec<_>>(),
@@ -667,10 +673,23 @@ pub fn prepare_shell(
             #[cfg(not(target_os = "linux"))]
             let landlock: Option<()> = None;
             let limited = landlock.is_some();
+            // BestEffort supports older kernels too, but Landlock's TCP
+            // rights start at ABI 4. Requested network=off is not proof that
+            // any network restriction is enforced by the fallback.
+            #[cfg(target_os = "linux")]
+            let tcp_blocked = limited && deny_tcp && lsm::kernel_abi() >= 4;
+            #[cfg(not(target_os = "linux"))]
+            let tcp_blocked = false;
             let warning = if limited {
                 format!(
                     "Shell commands are running without bubblewrap ({error:#}). Landlock limits them to this project, temporary folders and read-only system and toolchain folders{}; other isolation (process, network namespace) is missing. Install bubblewrap for the full sandbox, or turn on 'Require sandbox' to refuse commands instead.",
-                    if deny_tcp { ", and blocks TCP connections" } else { "" }
+                    if tcp_blocked {
+                        ", and blocks TCP connections (UDP remains unrestricted)"
+                    } else if deny_tcp {
+                        ", but this kernel cannot enforce the requested network restriction"
+                    } else {
+                        ""
+                    }
                 )
             } else {
                 format!(
@@ -680,9 +699,14 @@ pub fn prepare_shell(
             let note = json!({
                 "mode": if limited { "landlock" } else { "none" },
                 "reason": format!("{error:#}"),
+                // Keep network as the historical requested-policy field.
                 "network": network_label(policy.network),
-                "note": if limited {
-                    "No bubblewrap: Landlock restricts file access (and TCP when the network is off). UDP and process isolation are not enforced."
+                "network_requested": network_label(policy.network),
+                "network_enforcement": if tcp_blocked { "tcp_only" } else { "none" },
+                "note": if tcp_blocked {
+                    "No bubblewrap: Landlock restricts supported file operations and blocks TCP. UDP and process isolation are not enforced."
+                } else if limited {
+                    "No bubblewrap: Landlock restricts supported file operations. Network and process isolation are not enforced."
                 } else {
                     "No bubblewrap and no Landlock: the command runs as your user without isolation; only the approval policy applies."
                 }

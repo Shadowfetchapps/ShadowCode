@@ -123,6 +123,10 @@ async fn scoped_approvals_gate_start_stop_and_cleanup_with_durable_origin() {
             .command
             .contains(tools.workspace.path.to_str().unwrap()));
         assert!(approval.reason.contains("including cancellation"));
+        assert!(approval
+            .reason
+            .contains("outside ShadowCode's command sandbox"));
+        assert!(approval.reason.contains("file and network access"));
         assert!(!tools.workspace.path.join("child.pid").exists());
         assert!(service
             .engine

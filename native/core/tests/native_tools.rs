@@ -528,3 +528,99 @@ async fn sandbox_subdirectory_command_can_access_project_and_discards_its_scratc
         assert!(!std::path::Path::new(path).exists());
     }
 }
+
+/// Exercise the actual tool execution boundary, not only prepare_shell. Each
+/// scenario gets its own subprocess so PATH cannot affect concurrent tests.
+/// The bwrap stand-ins test refusal/no replay, not kernel containment.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "current_thread")]
+async fn strict_sandbox_refuses_execution_and_never_replays_after_launch_failure() {
+    const CASE: &str = "SHADOWCODE_SANDBOX_EXEC_CASE";
+    const PROBE: &str = "SHADOWCODE_SANDBOX_EXEC_PROBE";
+    let scenario = match std::env::var(CASE) {
+        Ok(scenario) => scenario,
+        Err(_) => {
+            use std::os::unix::fs::PermissionsExt;
+            for scenario in ["missing", "probe-failed", "launch-failed"] {
+                let temp = tempfile::tempdir().unwrap();
+                let bin = temp.path().join("bin");
+                fs::create_dir(&bin).unwrap();
+                let script = match scenario {
+                    "missing" => None,
+                    "probe-failed" => Some("#!/bin/sh\nexit 77\n"),
+                    "launch-failed" => Some(
+                        "#!/bin/sh\nprobe=\"$0.probe\"\nif test ! -e \"$probe\"; then\n  printf 'probe\\n' > \"$probe\"\n  exit 0\nfi\nprintf 'launch\\n' >> \"$probe\"\nexit 78\n",
+                    ),
+                    _ => unreachable!(),
+                };
+                if let Some(script) = script {
+                    let path = bin.join("bwrap");
+                    fs::write(&path, script).unwrap();
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+                }
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "strict_sandbox_refuses_execution_and_never_replays_after_launch_failure",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(CASE, scenario)
+                    .env(PROBE, bin.join("bwrap.probe"))
+                    .env("PATH", &bin)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{scenario}: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+    };
+    let mut config = Config::default();
+    config.permissions.approve_shell = false;
+    config.sandbox.require = true;
+    config.sandbox.landlock = true;
+    let (_root, mut tools) = fixture(config);
+    let command = json!({"command":"printf once >> marker.txt", "timeout_sec":2});
+    let refused = call(&tools, "exec", command.clone()).await;
+    assert!(!refused.success, "{scenario}: {:?}", refused.output);
+    assert!(
+        !tools.workspace.path.join("marker.txt").exists(),
+        "The refused command must never execute through a fallback"
+    );
+    if scenario == "launch-failed" {
+        assert_eq!(refused.output["exit_code"], 78);
+        assert_eq!(
+            fs::read_to_string(std::env::var_os(PROBE).unwrap()).unwrap(),
+            "probe\nlaunch\n",
+            "Only the availability probe and one attempted launch are allowed"
+        );
+    } else {
+        assert!(refused.error.contains("did not run"), "{}", refused.error);
+        assert!(
+            refused.error.contains("Require sandbox"),
+            "{}",
+            refused.error
+        );
+        assert!(refused.output.is_null());
+    }
+
+    // An explicit policy change makes the same valid command runnable. With
+    // both isolation layers disabled, the result must report that fact.
+    tools.config.sandbox.require = false;
+    tools.config.sandbox.landlock = false;
+    tools.config.permissions.network = false;
+    let allowed = call(&tools, "exec", command).await;
+    assert!(allowed.success, "{} {:?}", allowed.error, allowed.output);
+    assert_eq!(allowed.output["sandbox"]["mode"], "none");
+    assert_eq!(allowed.output["sandbox"]["network_requested"], "off");
+    assert_eq!(allowed.output["sandbox"]["network_enforcement"], "none");
+    assert_eq!(
+        fs::read_to_string(tools.workspace.path.join("marker.txt")).unwrap(),
+        "once"
+    );
+}

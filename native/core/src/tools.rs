@@ -469,6 +469,11 @@ impl ToolExecutor {
         match decision {
             Decision::Deny(reason) => bail!(reason),
             Decision::Ask(reason) => {
+                let reason = if call.name == "background_start" {
+                    format!("{reason}\nThis process runs outside ShadowCode's command sandbox. Its file and network access follow your account's permissions and the host's restrictions; command sandbox settings do not apply.")
+                } else {
+                    reason
+                };
                 // A subagent asks in its parent's conversation, with its name.
                 let (session_id, reason) = self
                     .extensions
