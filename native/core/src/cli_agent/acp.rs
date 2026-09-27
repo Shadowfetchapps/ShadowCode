@@ -504,8 +504,11 @@ impl AcpAdapter {
         }
         let res = &message["result"];
         if Some(id) == self.init_id {
-            if res["protocolVersion"].as_u64() != Some(1) {
-                bail!("{} runtime returned an unsupported or missing ACP protocol version; ShadowCode supports version 1. No session was started.", self.vendor.product_label());
+            if let Err(error) = super::acp_probe::require_protocol_v1(res) {
+                bail!(
+                    "{} runtime returned an {error}",
+                    self.vendor.product_label()
+                );
             }
             self.images_supported = res["agentCapabilities"]["promptCapabilities"]["image"] == true;
             if let Some((_, images)) = &self.pending_prompt {

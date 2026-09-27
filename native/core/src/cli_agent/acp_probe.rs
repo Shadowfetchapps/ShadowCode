@@ -17,6 +17,30 @@ use tokio::{io::AsyncWriteExt, process::Command};
 
 use tokio_util::task::AbortOnDropHandle;
 
+/// A negotiated incompatibility is different from a transient probe failure:
+/// neither a login check nor a model-list fallback can make this runtime usable.
+#[derive(Debug)]
+pub(super) struct UnsupportedProtocolVersion;
+
+impl std::fmt::Display for UnsupportedProtocolVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("unsupported or missing ACP protocol version; ShadowCode supports version 1. No session was started.")
+    }
+}
+
+impl std::error::Error for UnsupportedProtocolVersion {}
+
+/// Keep discovery and execution on the same exact supported wire version.
+/// In particular, string/float/null declarations do not establish ACP v1.
+pub(super) fn require_protocol_v1(
+    result: &Value,
+) -> std::result::Result<u64, UnsupportedProtocolVersion> {
+    match result["protocolVersion"].as_u64() {
+        Some(1) => Ok(1),
+        _ => Err(UnsupportedProtocolVersion),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AcpModel {
     /// Value accepted by the vendor's `--model` flag / `session/set_model`.
@@ -304,7 +328,8 @@ async fn probe_inner(
                 if let Some(error) = error {
                     bail!("{} rejected initialize: {error}", binary.display());
                 }
-                probe.protocol_version = result["protocolVersion"].as_u64();
+                // Validate before trusting capabilities or sending authenticate/session/new.
+                probe.protocol_version = Some(require_protocol_v1(result)?);
                 probe.agent_version = result["_meta"]["agentVersion"]
                     .as_str()
                     .or_else(|| result["agentInfo"]["version"].as_str())

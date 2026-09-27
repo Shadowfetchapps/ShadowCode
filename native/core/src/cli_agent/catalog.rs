@@ -943,11 +943,20 @@ async fn probe_acp_vendor(binary: &Path, args: &[&str], status: &mut VendorStatu
             }
         }
         Err(error) => {
+            let incompatible = error.is::<acp_probe::UnsupportedProtocolVersion>();
             status.error = Some(error.to_string());
             status.availability = Availability::Unavailable;
-            status.detail = format!("{} did not respond: {error}", vendor.product_label());
-            if vendor == Vendor::Grok {
-                // Cheaper documented fallback.
+            status.detail = if incompatible {
+                format!(
+                    "{} runtime is incompatible: {error}",
+                    vendor.product_label()
+                )
+            } else {
+                format!("{} did not respond: {error}", vendor.product_label())
+            };
+            if vendor == Vendor::Grok && !incompatible {
+                // Cheaper documented fallback for ordinary probe failures only.
+                // A model list cannot override observed protocol incompatibility.
                 if let Some((logged_in, models)) = doctor::grok_models(binary, None).await {
                     status.models = models
                         .into_iter()
