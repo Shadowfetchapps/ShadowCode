@@ -146,12 +146,22 @@ test("runs a task with streamed events and reviews the changes", async ({
       ".msg-with-activity .activity-timeline, .msg-summary .activity-timeline",
     )
     .last();
-  for (const step of ["Reading project", "Editing files", "Running checks"])
+  for (const step of ["Reading project", "Editing files", "Checks not verified"])
     await expect(timeline.getByText(step, { exact: true })).toBeVisible();
   await expect(timeline.getByText("Finished", { exact: true })).toHaveCount(0);
   await expect(summary).toContainText("Finished");
   // Each step expands to the real tool call and its output.
-  await timeline.getByText("Running checks", { exact: true }).click();
+  // This legacy fixture records a successful command without a configured
+  // check receipt. Keep its output available without certifying verification.
+  const checks = timeline.locator(".activity-step").filter({
+    has: page.getByText("Checks not verified", { exact: true }),
+  });
+  await expect(checks).toHaveClass(/is-incomplete/);
+  await expect(checks.locator("svg.lucide-circle-dashed")).toHaveCount(1);
+  await expect(checks.locator("svg.lucide-check")).toHaveCount(0);
+  await expect(timeline.getByText("Running checks", { exact: true })).toHaveCount(0);
+  await expect(summary).toContainText("Verification not run");
+  await checks.getByText("Checks not verified", { exact: true }).click();
   await expect(timeline.getByText("Tests  4 passed (4)")).toBeVisible();
   await summary.getByRole("button", { name: "Review changes" }).click();
   // The task's own changes open full width, file by file.
