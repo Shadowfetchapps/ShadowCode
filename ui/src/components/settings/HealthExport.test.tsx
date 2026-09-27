@@ -35,6 +35,8 @@ afterEach(() => {
 it("shows an exact preview before the only save action", async () => {
   render(<HealthTab health={null} />);
   await screen.findByText("Native runtime");
+  const previewButton = screen.getByRole("button", { name: "Preview diagnostics export" });
+  expect(previewButton.compareDocumentPosition(screen.getByText("Native runtime")) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   expect(exportDiagnostics).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: "Save diagnostics…" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Preview diagnostics export" }));

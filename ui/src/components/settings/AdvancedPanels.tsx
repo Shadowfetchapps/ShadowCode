@@ -489,6 +489,24 @@ function HealthTab({ health }: { health: Health | null }) {
         </p>
       )}
       {loading && !report && <p role="status">Running diagnostics…</p>}
+      {snapshot && (
+        <div className="diagnostic-export">
+          <button type="button" className="mini" onClick={() => setPreviewOpen((open) => !open)}>
+            {previewOpen ? "Hide export preview" : "Preview diagnostics export"}
+          </button>
+          {previewOpen && (
+            <div>
+              <p>Review these local Doctor check statuses before saving. The export excludes paths, project content, credentials, prompts and raw logs. It is not a full system or model qualification.</p>
+              <pre aria-label="Diagnostics export preview">{snapshot.content}</pre>
+              {saveError && <p className="health-bad" role="alert">{saveError}</p>}
+              {saved && <p role="status">Diagnostics saved.</p>}
+              <button type="button" className="mini" disabled={saving || loading} onClick={() => void save()}>
+                {saving ? "Saving…" : "Save diagnostics…"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       {report && (
         <div className="diagnostic-list">
           {report.checks.map((c) => {
@@ -519,24 +537,6 @@ function HealthTab({ health }: { health: Health | null }) {
               </div>
             );
           })}
-        </div>
-      )}
-      {snapshot && (
-        <div className="diagnostic-export">
-          <button type="button" className="mini" onClick={() => setPreviewOpen((open) => !open)}>
-            {previewOpen ? "Hide export preview" : "Preview diagnostics export"}
-          </button>
-          {previewOpen && (
-            <div>
-              <p>Review these local Doctor check statuses before saving. The export excludes paths, project content, credentials, prompts and raw logs. It is not a full system or model qualification.</p>
-              <pre aria-label="Diagnostics export preview">{snapshot.content}</pre>
-              {saveError && <p className="health-bad" role="alert">{saveError}</p>}
-              {saved && <p role="status">Diagnostics saved.</p>}
-              <button type="button" className="mini" disabled={saving || loading} onClick={() => void save()}>
-                {saving ? "Saving…" : "Save diagnostics…"}
-              </button>
-            </div>
-          )}
         </div>
       )}
       <div className="row">
