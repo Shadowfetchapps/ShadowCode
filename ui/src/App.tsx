@@ -605,6 +605,7 @@ export default function App() {
         sessions={sessions}
         targets={pickerTargets}
         pickerLoaded={picker.loaded}
+        onRefreshModels={() => picker.reload(true)}
         pickerOpen={pickerOpen}
         setPickerOpen={setPickerOpen}
         selectedTarget={selectedTarget}

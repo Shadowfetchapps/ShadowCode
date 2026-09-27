@@ -52,6 +52,7 @@ export function Stage({
   sessions,
   targets,
   pickerLoaded,
+  onRefreshModels,
   pickerOpen,
   setPickerOpen,
   selectedTarget,
@@ -102,6 +103,7 @@ export function Stage({
   sessions: Session[];
   targets: PickerTarget[];
   pickerLoaded: boolean;
+  onRefreshModels: () => Promise<void>;
   pickerOpen: boolean;
   setPickerOpen: (open: boolean) => void;
   selectedTarget: PickerTarget | undefined;
@@ -346,6 +348,7 @@ export function Stage({
           open: pickerOpen,
           onOpenChange: setPickerOpen,
           loading: !pickerLoaded,
+          onRefresh: onRefreshModels,
           note: pendingNote,
           onSelect: (id) => {
             void nav.selectTarget(id);

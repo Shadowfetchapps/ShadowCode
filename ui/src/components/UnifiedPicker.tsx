@@ -15,6 +15,7 @@ import {
   KeyRound,
   MessageSquareText,
   Plus,
+  RefreshCw,
   Search,
 } from "lucide-react";
 import {
@@ -69,6 +70,7 @@ export function UnifiedPicker({
   onConnect,
   onSetup,
   onAddLocal,
+  onRefresh,
   note,
   loading,
   label = "Model for this task",
@@ -83,6 +85,7 @@ export function UnifiedPicker({
   /** Where a setup-required row is fixed (Accounts or Local models). */
   onSetup: (target: PickerTarget) => void;
   onAddLocal: () => void;
+  onRefresh?: () => Promise<void>;
   note?: string;
   loading?: boolean;
   /** Accessible name of the trigger, before the chosen row's name. */
@@ -93,6 +96,7 @@ export function UnifiedPicker({
   const [expanded, setExpanded] = useState<string[]>([]);
   const [details, setDetails] = useState<string | null>(null);
   const [recent] = useState(recentTargets);
+  const [refreshing, setRefreshing] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const root = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
@@ -471,6 +475,24 @@ export function UnifiedPicker({
             />
           )}
           <div className="unified-picker-actions">
+            {onRefresh && (
+              <button
+                type="button"
+                disabled={refreshing}
+                onClick={async () => {
+                  setRefreshing(true);
+                  try {
+                    await onRefresh();
+                  } finally {
+                    setRefreshing(false);
+                    requestAnimationFrame(() => search.current?.focus());
+                  }
+                }}
+              >
+                <RefreshCw size={14} aria-hidden="true" />
+                {refreshing ? "Checking models…" : "Refresh models"}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {

@@ -501,6 +501,10 @@ button.link {
   background: var(--hover);
   color: var(--text);
 }
+.unified-picker-actions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
 .unified-picker-keys {
   margin: 2px 8px 2px;
   font-size: 10px;

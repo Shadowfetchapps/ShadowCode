@@ -99,12 +99,14 @@ function Harness({
   onConnect = vi.fn(),
   onSetup = vi.fn(),
   onSelect = vi.fn(),
+  onRefresh,
 }: {
   targets?: PickerTarget[];
   initial?: string;
   onConnect?: (vendor?: string) => void;
   onSetup?: (target: PickerTarget) => void;
   onSelect?: (id: string) => void;
+  onRefresh?: () => Promise<void>;
 }) {
   const [value, setValue] = useState(initial);
   const [open, setOpen] = useState(false);
@@ -120,6 +122,7 @@ function Harness({
       }}
       onConnect={onConnect}
       onSetup={onSetup}
+      onRefresh={onRefresh}
       onAddLocal={vi.fn()}
     />
   );
@@ -168,6 +171,29 @@ it("shows 'Choose a model' until a row is chosen and groups both sources", () =>
   const blocked = screen.getByRole("option", { name: /Cursor · Auto/ });
   expect(blocked.tagName).not.toBe("BUTTON");
   expect(document.body.textContent).not.toMatch(/72% remaining|\$12,430/);
+});
+
+it("refreshes an open picker once and restores search focus", async () => {
+  let finishRefresh!: () => void;
+  const onRefresh = vi.fn(
+    () => new Promise<void>((resolve) => (finishRefresh = resolve)),
+  );
+  render(<Harness onRefresh={onRefresh} />);
+  fireEvent.click(trigger());
+  await waitFor(() => expect(document.activeElement).toBe(search()));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+  expect(onRefresh).toHaveBeenCalledTimes(1);
+  expect(
+    screen
+      .getByRole("button", { name: "Checking models…" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  finishRefresh();
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Refresh models" })).toBeTruthy(),
+  );
+  await waitFor(() => expect(document.activeElement).toBe(search()));
+  expect(screen.getByRole("listbox")).toBeTruthy();
 });
 
 it("selects with the keyboard and restores focus to the trigger", async () => {
