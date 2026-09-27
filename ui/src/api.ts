@@ -335,7 +335,12 @@ export type LimitsConfig = {
 export type LoginProgress = {
   running: boolean;
   lines: string[];
-  done: { ok: boolean; detail?: string } | null;
+  done: {
+    ok: boolean;
+    detail?: string;
+    availability?: string;
+    availability_label?: string;
+  } | null;
 };
 
 export type ConsentRequest = {
@@ -1159,6 +1164,7 @@ export const api = {
   pickerCached: () => get<PickerResponse>("/api/picker?cached=1"),
   accounts: (refresh = false) =>
     get<AccountsResponse>(`/api/accounts${refresh ? "?refresh=1" : ""}`),
+  accountsCached: () => get<AccountsResponse>("/api/accounts?cached=1"),
   connectAccount: (vendor: string) =>
     send<{
       ok: boolean;
@@ -1172,7 +1178,7 @@ export const api = {
     const raw = await get<{
       running: boolean;
       lines?: (string | { line?: string })[];
-      done: { ok: boolean; detail?: string } | null;
+      done: LoginProgress["done"];
     }>(`/api/accounts/${encodeURIComponent(vendor)}/login`);
     // The engine sends {vendor, line, url} records; the page shows text lines.
     return {

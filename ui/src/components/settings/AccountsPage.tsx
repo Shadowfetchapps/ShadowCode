@@ -30,7 +30,9 @@ export const vendorId = (key: string) => key.replace(/^cli[-:]/, "");
 
 type Login = {
   vendor: string;
-  state: "running" | "done" | "failed" | "unsupported";
+  attempt: number;
+  state:
+    "running" | "stopping" | "done" | "unconfirmed" | "failed" | "unsupported";
   lines: string[];
   detail?: string;
 };
@@ -86,6 +88,7 @@ export function AccountsPage({
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [login, setLogin] = useState<Login | null>(null);
+  const loginSequence = useRef(0);
   const [confirm, setConfirm] = useState<VendorStatus | null>(null);
   const [agentConfirm, setAgentConfirm] = useState<"install" | "remove" | null>(
     null,
@@ -100,11 +103,13 @@ export function AccountsPage({
   );
   const finishing = useRef(false);
 
-  const load = useCallback(async (refresh = false) => {
+  const load = useCallback(async (refresh = false, cached = false) => {
     setLoading(true);
     setError("");
     try {
-      const result = await api.accounts(refresh);
+      const result = await (cached
+        ? api.accountsCached()
+        : api.accounts(refresh));
       const next: Record<string, VendorStatus> = {};
       for (const [key, value] of Object.entries(result.vendors || {}))
         next[vendorId(key)] = value;
@@ -196,7 +201,11 @@ export function AccountsPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [installing, installPollMs, setInstall]);
 
-  const running = login?.state === "running" ? login.vendor : null;
+  const running =
+    login?.state === "running" || login?.state === "stopping"
+      ? login.vendor
+      : null;
+  const runningAttempt = running ? login?.attempt : null;
   // Follow a running sign-in: engine events wake the reader; a slow poll covers
   // missed wake-ups.
   useEffect(() => {
@@ -210,22 +219,30 @@ export function AccountsPage({
         const progress: LoginProgress = await api.loginProgress(running!);
         if (!live) return;
         setLogin((current) =>
-          current && current.vendor === running
+          current &&
+          current.vendor === running &&
+          current.attempt === runningAttempt
             ? {
                 ...current,
                 lines: progress.lines?.length ? progress.lines : current.lines,
                 state: progress.done
                   ? progress.done.ok
-                    ? "done"
+                    ? progress.done.availability === "ready"
+                      ? "done"
+                      : "unconfirmed"
                     : "failed"
-                  : "running",
+                  : current.state,
                 detail: progress.done?.detail || current.detail,
               }
             : current,
         );
         if (progress.done) {
-          await refreshOne(running!);
-          onChanged();
+          live = false;
+          // The login already owns its final account check. A cancellation
+          // must not start another probe or leave retry waiting for one.
+          await load(false, true);
+          if (progress.done.ok && progress.done.availability === "ready")
+            onChanged();
         }
       } catch {
         // The progress route is optional; keep the instructions visible and
@@ -249,7 +266,7 @@ export function AccountsPage({
       stop?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running]);
+  }, [running, runningAttempt]);
 
   async function refreshOne(vendor: string) {
     setBusy((b) => ({ ...b, [vendor]: true }));
@@ -271,12 +288,15 @@ export function AccountsPage({
   }
 
   async function connect(vendor: string) {
+    const attempt = ++loginSequence.current;
     setBusy((b) => ({ ...b, [vendor]: true }));
     try {
       const result = await api.connectAccount(vendor);
+      if (attempt !== loginSequence.current) return;
       if (result.state === "unsupported")
         setLogin({
           vendor,
+          attempt,
           state: "unsupported",
           lines: [],
           detail:
@@ -285,25 +305,37 @@ export function AccountsPage({
       else
         setLogin({
           vendor,
+          attempt,
           state: "running",
           lines: result.lines || [],
           detail: result.note,
         });
     } catch (e) {
-      onToast(String(e), "err");
+      if (attempt === loginSequence.current) onToast(String(e), "err");
     } finally {
       setBusy((b) => ({ ...b, [vendor]: false }));
     }
   }
 
   async function cancelLogin(vendor: string) {
+    if (!login || login.vendor !== vendor || login.state !== "running") return;
+    const attempt = login.attempt;
+    setLogin((current) =>
+      current?.attempt === attempt
+        ? { ...current, state: "stopping" }
+        : current,
+    );
     try {
       await api.cancelLogin(vendor);
-      setLogin((l) =>
-        l ? { ...l, state: "failed", detail: "Sign-in cancelled." } : l,
-      );
+      // The request only acknowledges cancellation. Keep reading until the
+      // engine reports a terminal result after its owned work has stopped.
     } catch (e) {
-      onToast(String(e), "err");
+      setLogin((current) =>
+        current?.attempt === attempt && current.state === "stopping"
+          ? { ...current, state: "running" }
+          : current,
+      );
+      if (attempt === loginSequence.current) onToast(String(e), "err");
     }
   }
 
@@ -404,6 +436,8 @@ export function AccountsPage({
         );
         const models = status.models || [];
         const thisLogin = login?.vendor === key ? login : null;
+        const loginActive =
+          thisLogin?.state === "running" || thisLogin?.state === "stopping";
         // Antigravity before its agent server is installed: the install
         // controls replace the usual status and sign-in.
         const install = key === "antigravity" ? status.install : null;
@@ -528,10 +562,14 @@ export function AccountsPage({
                     type="button"
                     className="primary"
                     data-primary
-                    disabled={busy[key] || thisLogin?.state === "running"}
+                    disabled={busy[key] || loginActive}
                     onClick={() => void connect(key)}
                   >
-                    {thisLogin?.state === "running" ? "Signing in…" : "Connect"}
+                    {thisLogin?.state === "stopping"
+                      ? "Stopping…"
+                      : loginActive
+                        ? "Signing in…"
+                        : "Connect"}
                   </button>
                 )}
                 <button
@@ -1114,6 +1152,10 @@ function LoginPanel({
         </p>
       )}
       {login.state === "done" && <p className="health-ok">Signed in.</p>}
+      {login.state === "stopping" && <p>Stopping sign-in…</p>}
+      {login.state === "unconfirmed" && (
+        <p>Sign-in command finished. Account status is not confirmed.</p>
+      )}
       {login.state === "failed" && (
         <p className="health-bad">
           {login.detail || "Sign-in did not finish."}
@@ -1129,8 +1171,13 @@ function LoginPanel({
           ))}
         </pre>
       )}
-      {login.state === "running" && (
-        <button type="button" className="mini ghost" onClick={onCancel}>
+      {(login.state === "running" || login.state === "stopping") && (
+        <button
+          type="button"
+          className="mini ghost"
+          disabled={login.state === "stopping"}
+          onClick={onCancel}
+        >
           Cancel sign-in
         </button>
       )}

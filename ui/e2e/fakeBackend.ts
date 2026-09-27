@@ -445,7 +445,11 @@ export function installFakeBackend(options: FakeOptions = {}) {
     /** Install progress steps still to come (one per status check);
      * `installFails` makes the next install stop with an error. */
     agent: { steps: [] as Json[], installFails: false, hold: false },
-    login: null as null | { vendor: string; polls: number },
+    login: null as null | {
+      vendor: string;
+      polls: number;
+      cancelled?: boolean;
+    },
     local: {
       hardware: {
         cpu_cores: 16,
@@ -2116,6 +2120,16 @@ export function installFakeBackend(options: FakeOptions = {}) {
         const login = state.login;
         if (!login || login.vendor !== vendor)
           return { running: false, lines: [], done: null };
+        if (login.cancelled)
+          return {
+            running: false,
+            lines: [],
+            done: {
+              ok: false,
+              detail: "Sign-in cancelled",
+              availability: "unavailable",
+            },
+          };
         login.polls += 1;
         const google = vendor === "antigravity";
         // Antigravity's engine relays {vendor, line, url} records.
@@ -2186,7 +2200,12 @@ export function installFakeBackend(options: FakeOptions = {}) {
           return {
             running: false,
             lines,
-            done: { ok: true, detail: "Signed in" },
+            done: {
+              ok: true,
+              detail: "Signed in",
+              availability: "ready",
+              availability_label: "Ready",
+            },
           };
         }
         return {
@@ -2197,7 +2216,7 @@ export function installFakeBackend(options: FakeOptions = {}) {
       }
       if (action === "refresh") return v;
       if (action === "cancel-login") {
-        state.login = null;
+        if (state.login?.vendor === vendor) state.login.cancelled = true;
         return { ok: true };
       }
       if (action === "disconnect") {
