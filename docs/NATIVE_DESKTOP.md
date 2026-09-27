@@ -237,8 +237,32 @@ and `tauri-driver` 2.0.6, then run:
 
 ```sh
 cargo install tauri-driver --version 2.0.6 --locked
-xvfb-run -a -s '-screen 0 1440x1100x24' dbus-run-session -- \
-  node scripts/test-native-desktop.mjs
+node scripts/run-native-x11.mjs node scripts/test-native-desktop.mjs
+node scripts/run-native-x11.mjs node scripts/test-native-markdown.mjs
+```
+
+The wrapper declares X11 before creating the private D-Bus session and uses a
+fresh runtime directory with mode 0700. HOME and the original XDG config/data/state/cache
+roots remain available for the existing read-only provider probes. Runtime
+service discovery therefore differs from the physical desktop. No GTK portal
+backend is mandated; this qualifies the controlled X11 app and Markdown/CSP
+behavior, not physical Wayland or all portal features.
+
+Both probes capture their direct private session identity and clean only newly
+activated services bound to that exact bus, with PID/start/executable/user
+revalidation. Cleanup is bounded and fails closed. The outer wrapper then
+requires command/output closure, disappearance of recorded session processes,
+and no surviving late activation before removing its runtime directory. It
+never performs a general process kill. Incomplete output, unknown ownership,
+a residual process or missing cleanup report fails the gate. Identity checks
+are not atomic pidfd protection against a hostile PID-reuse race.
+
+Session diagnostics are retained under `artifacts/native-x11/run-*` (override
+`SHADOW_X11_ARTIFACTS`). The generated private-bus fixture exercises lifecycle
+checks without opening a display:
+
+```sh
+node --test scripts/test-native-test-session.mjs
 ```
 
 Optional environment variables `SHADOW_DESKTOP_BINARY`, `SHADOW_TAURI_DRIVER`,

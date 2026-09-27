@@ -2,8 +2,7 @@
 // No model turns, subscriptions, account probes, or production configuration.
 //
 // Build ui/dist and the desktop binary first, then run:
-//   xvfb-run -a -s '-screen 0 1440x1100x24' dbus-run-session -- \
-//     node scripts/test-native-markdown.mjs
+//   node scripts/run-native-x11.mjs node scripts/test-native-markdown.mjs
 // This qualifies the supplied native binary under Xvfb/X11 and WebKitGTK.
 // It does not qualify Wayland, an AppImage package, or native UI performance.
 //
@@ -13,6 +12,7 @@
 // SHADOW_NATIVE_ARTIFACTS output parent (default artifacts/native-markdown)
 // Each run creates its own output directory; previous evidence is retained.
 import assert from 'node:assert/strict';
+import { capturePrivateSession, writePrivateSessionReport } from './native-test-session.mjs';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const privateSession = await capturePrivateSession();
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const binary = await realpath(process.env.SHADOW_DESKTOP_BINARY || path.join(repo, 'target/debug/shadowcode'));
 const driverBinary = process.env.SHADOW_TAURI_DRIVER || 'tauri-driver';
@@ -338,6 +339,10 @@ try {
       : 'Owned probe process remained after bounded cleanup';
     process.exitCode = 1;
   }
+  const busCleanup = await privateSession.cleanup();
+  await writePrivateSessionReport(privateSession, busCleanup);
+  report.cleanup.private_session = busCleanup;
+  if (!busCleanup.ok) { report.cleanup.incomplete = true; report.ok = false; process.exitCode = 1; }
   log.end();
   // Scratch contains only this test's generated profile and project.
   if (!report.cleanup.incomplete) {

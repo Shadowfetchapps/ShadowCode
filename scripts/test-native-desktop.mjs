@@ -10,8 +10,7 @@
 // layouts with axe checks, and process cleanup after quit.
 //
 // Requirements: a display (xvfb-run), DBus, tauri-driver, WebKitWebDriver.
-//   xvfb-run -a -s '-screen 0 1440x1100x24' dbus-run-session -- \
-//     node scripts/test-native-desktop.mjs
+//   node scripts/run-native-x11.mjs node scripts/test-native-desktop.mjs
 // Environment:
 //   SHADOW_DESKTOP_BINARY   binary to drive (default target/debug/shadowcode)
 //   SHADOW_DESKTOP_ARGS     JSON array of extra arguments (e.g. AppImage flags)
@@ -21,6 +20,7 @@
 //   SHADOW_EXPECT_VENDORS   e.g. "codex=Ready,claude=Sign in": exact picker
 //                           availability expected for vendors on this machine
 import assert from "node:assert/strict";
+import { capturePrivateSession, writePrivateSessionReport } from "./native-test-session.mjs";
 import { createServer } from "node:http";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -30,6 +30,8 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+const privateSession = await capturePrivateSession();
+let finalReport;
 const root = fileURLToPath(new URL("../", import.meta.url));
 const binary = process.env.SHADOW_DESKTOP_BINARY || path.join(root, "target/debug/shadowcode");
 const binaryArgs = JSON.parse(process.env.SHADOW_DESKTOP_ARGS || "[]");
@@ -673,9 +675,9 @@ try {
   note(`quit: app and ${children.length} child processes (${serverPids.length} llama-server launches) exited`);
   await wd("DELETE", `/session/${session}`).catch(() => {}); session = undefined;
 
-  await writeFile(path.join(artifacts, "result.json"), JSON.stringify({ passed: true, version: version.version, vendors: vendorSummary, checks, axe: axeFindings, screenshots: shots }, null, 2));
-  console.log(`Native desktop window passed (${checks.length} checks). Screenshots in ${artifacts}`);
+  finalReport = { passed: true, version: version.version, vendors: vendorSummary, checks, axe: axeFindings, screenshots: shots };
 } catch (error) {
+  finalReport = { passed: false, checks, failure: error.stack || String(error) };
   if (session) {
     await writeFile(path.join(artifacts, "failure.png"), Buffer.from(await wd("GET", `/session/${session}/screenshot`), "base64")).catch(() => {});
     await text().then((body) => writeFile(path.join(artifacts, "failure.txt"), body)).catch(() => {});
@@ -692,25 +694,13 @@ try {
   await delay(300);
   try { process.kill(-driver.pid, "SIGKILL"); } catch { /* exited */ }
   for (const record of await launches()) try { process.kill(record.pid, "SIGKILL"); } catch { /* exited */ }
-  await stopPrivateBusServices();
+  const busCleanup = await privateSession.cleanup();
+  await writePrivateSessionReport(privateSession, busCleanup);
+  finalReport ||= { passed: false, checks, failure: "Window test did not complete" };
+  finalReport.private_session_cleanup = busCleanup;
+  if (!busCleanup.ok) { finalReport.passed = false; process.exitCode = 1; }
+  await writeFile(path.join(artifacts, "result.json"), JSON.stringify(finalReport, null, 2) + "\n");
+  console.log(`Native desktop window ${finalReport.passed ? "passed" : "failed"} (${checks.length} checks). Screenshots in ${artifacts}`);
   driverLog.end();
   if (!process.env.SHADOW_KEEP_SCRATCH) await rm(scratch, { recursive: true, force: true });
-}
-
-// Services D-Bus activated on the test's private bus (for example
-// xdg-desktop-portal) outlive dbus-run-session and get reparented to init.
-// Stop every process of this user bound to that private bus, never the
-// desktop session's own bus under /run/user.
-async function stopPrivateBusServices() {
-  const bus = process.env.DBUS_SESSION_BUS_ADDRESS || "";
-  if (!bus || bus.includes("/run/user/")) return;
-  for (const entry of await readdir("/proc").catch(() => [])) {
-    const pid = Number(entry);
-    if (!Number.isInteger(pid) || pid === process.pid) continue;
-    const environ = await readFile(`/proc/${pid}/environ`, "latin1").catch(() => "");
-    if (!environ.split("\0").includes(`DBUS_SESSION_BUS_ADDRESS=${bus}`)) continue;
-    const comm = (await readFile(`/proc/${pid}/comm`, "utf8").catch(() => "")).trim();
-    if (["node", "dbus-daemon", "dbus-run-session", "xvfb-run", "Xvfb", "bash", "sh"].includes(comm)) continue;
-    try { process.kill(pid, "SIGTERM"); } catch { /* exited */ }
-  }
 }
