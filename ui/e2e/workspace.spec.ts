@@ -455,6 +455,43 @@ test("coalesces superseded recovery drafts behind an in-flight write", async ({
   ]);
 });
 
+test("starts a fresh recovery revision after saving a file and editing again", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const drawer = page.getByRole("complementary", { name: "Drawer" });
+  await drawer
+    .locator(".drawer-tabs")
+    .getByRole("button", { name: "Files" })
+    .click();
+  await drawer.getByRole("button", { name: "README.md", exact: true }).click();
+  const editor = drawer.getByRole("textbox", { name: "Edit README.md" });
+  const record = () =>
+    page.evaluate(
+      () =>
+        JSON.parse(sessionStorage.getItem("shadow-fake-editor-drafts") || "{}")[
+          "README.md"
+        ],
+    );
+  await editor.fill("# First saved edit");
+  await expect
+    .poll(async () => (await record())?.draft)
+    .toBe("# First saved edit");
+  await drawer.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(drawer.getByText("Saved", { exact: true })).toBeVisible();
+  await expect.poll(record).toBeUndefined();
+  await editor.fill("# Second unsaved edit");
+  await expect
+    .poll(async () => (await record())?.draft)
+    .toBe("# Second unsaved edit");
+  await expect(
+    drawer.getByRole("group", { name: "Saved draft conflict" }),
+  ).toHaveCount(0);
+  await expect(
+    drawer.getByText("Recovery copy saved on this computer"),
+  ).toBeVisible();
+});
+
 test("reviews a competing window's recovery draft before choosing either version", async ({
   page,
 }) => {

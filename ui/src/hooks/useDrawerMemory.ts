@@ -232,14 +232,42 @@ export function useDrawerMemory(workspace: string) {
       item.chain = item.chain
         .catch(() => undefined)
         .then(async () => {
+          const removedRevision = item.revision;
           if (item.revision !== "missing")
             await api.deleteEditorDraft(workspace, path, item.revision);
           item.revision = "missing";
           if (
             item.desired === "" &&
             recovery.current.get(`${workspace}\0${path}`) === item
-          )
+          ) {
             recovery.current.delete(`${workspace}\0${path}`);
+            setWorkspaces((current) => {
+              const selected = current[workspace];
+              const buffer = selected?.filesBuffers[path];
+              if (
+                !buffer ||
+                buffer.draft !== buffer.base ||
+                (buffer.recoveryRevision &&
+                  buffer.recoveryRevision !== removedRevision)
+              )
+                return current;
+              return {
+                ...current,
+                [workspace]: {
+                  ...selected,
+                  filesBuffers: {
+                    ...selected.filesBuffers,
+                    [path]: {
+                      ...buffer,
+                      recoveryRevision: undefined,
+                      recoveryStatus: undefined,
+                      recoveryError: undefined,
+                    },
+                  },
+                },
+              };
+            });
+          }
         })
         .catch((reason) => {
           const buffer = currentBuffers[path];
@@ -263,7 +291,10 @@ export function useDrawerMemory(workspace: string) {
       const desired = JSON.stringify([buffer.base, buffer.hash, buffer.draft]);
       if (!item) {
         item = {
-          revision: buffer.recoveryRevision ?? "missing",
+          // An existing saved record has a live entry in the map (including
+          // restored drafts). A newly created entry must start from missing:
+          // the buffer may still carry the revision of a record just deleted.
+          revision: "missing",
           desired: "",
           chain: Promise.resolve(),
         };
