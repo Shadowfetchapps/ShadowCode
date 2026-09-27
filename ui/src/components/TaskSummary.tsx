@@ -4,6 +4,7 @@ import {
   formatDuration,
   verificationLine,
   parseVerification,
+  receiptOutput,
   type Verification,
   type TaskActivity,
 } from "../lib/activity";
@@ -280,7 +281,7 @@ export const TaskSummary = memo(function TaskSummary({
                             : "failed"
                           : `exit ${c.exit_code}`}
                   </span>
-                  {c.callId && (
+                  {(c.callId || c.outputRef) && (
                     <details>
                       <summary>Execution receipt</summary>
                       <p>{c.scope}</p>
@@ -296,9 +297,8 @@ export const TaskSummary = memo(function TaskSummary({
                         </p>
                       )}
                       <pre>
-                        {activity.calls.find((call) => call.callId === c.callId)
-                          ?.output ||
-                          "Recorded output is available in this task’s command activity."}
+                        {receiptOutput(activity, c) ??
+                          "The recorded output could not be matched to this execution receipt."}
                       </pre>
                     </details>
                   )}

@@ -11,6 +11,7 @@ import {
   classifyTool,
   emptyActivity,
   parseVerification,
+  usableCallId,
   type TaskActivity,
   type WebSource,
 } from "./activity";
@@ -720,6 +721,7 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
       {
         kind: "tool",
         tool: String(p.tool),
+        originEventId: event.id,
         text: "",
         live: true,
         collapsed: true,
@@ -733,13 +735,17 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     ];
   }
   if (event.type === "tool.completed") {
-    const index = items.findIndex(
-      (i) =>
-        i.kind === "tool" &&
-        i.live &&
-        i.taskId === taskId &&
-        (p.call_id ? i.callId === p.call_id : i.tool === p.tool),
+    const candidates = items.flatMap((i, index) =>
+      i.kind === "tool" &&
+      i.live &&
+      i.taskId === taskId &&
+      (p.call_id
+        ? usableCallId(p.call_id) && i.callId === p.call_id
+        : i.tool === p.tool)
+        ? [index]
+        : [],
     );
+    const index = candidates.length === 1 ? candidates[0] : -1;
     // ACP can learn the tool kind and input after tool.started. Completion
     // carries the final typed input; a display title is never command evidence.
     const args = objectFields(p.arguments);
@@ -753,6 +759,7 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     const previous = index >= 0 ? items[index] : undefined;
     const card: ChatItem = {
       kind: "tool",
+      originEventId: event.id,
       tool,
       text: vendorOutput?.text || String(p.output_preview || p.error || ""),
       fullOutput:
@@ -783,13 +790,15 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     if (index < 0) items.push(card);
     else items[index] = { ...card, key: items[index].key };
     touch((a) => {
-      const at = a.calls.findIndex(
-        (call) =>
-          call.live &&
-          (p.call_id
-            ? call.callId === String(p.call_id)
-            : call.tool === p.tool),
+      const matches = a.calls.flatMap((call, index) =>
+        call.live &&
+        (p.call_id
+          ? usableCallId(p.call_id) && call.callId === p.call_id
+          : call.tool === p.tool)
+          ? [index]
+          : [],
       );
+      const at = matches.length === 1 ? matches[0] : -1;
       const previousCall = at >= 0 ? a.calls[at] : undefined;
       const value =
         completedArgs?.command ??
@@ -811,6 +820,7 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
       const path =
         (card.kind === "tool" && card.path) || previousCall?.path || undefined;
       const call = {
+        completedEventId: event.id,
         callId: String(
           p.call_id || previousCall?.callId || `call-${a.calls.length}`,
         ),

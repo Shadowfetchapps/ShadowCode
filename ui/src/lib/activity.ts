@@ -15,6 +15,7 @@ export type StepId =
 
 export type ActivityCall = {
   callId: string;
+  completedEventId?: number;
   tool: string;
   step: StepId;
   label: string;
@@ -40,6 +41,7 @@ export type VerificationCommand = {
   kind?: string;
   state?: string;
   callId?: string;
+  outputRef?: string;
   attemptId?: string;
   cwd?: string;
   fingerprint?: string;
@@ -492,6 +494,13 @@ export function parseVerification(value: unknown): Verification | undefined {
           state: typeof c.state === "string" ? c.state : undefined,
           callId:
             typeof c.tool_call_id === "string" ? c.tool_call_id : undefined,
+          // Invalid explicit references must not use the legacy ID fallback.
+          outputRef:
+            c.output_ref === undefined
+              ? undefined
+              : typeof c.output_ref === "string"
+                ? c.output_ref
+                : "",
           attemptId:
             typeof c.attempt_id === "string" ? c.attempt_id : undefined,
           cwd: typeof c.cwd === "string" ? c.cwd : undefined,
@@ -515,6 +524,36 @@ export function parseVerification(value: unknown): Verification | undefined {
     note: typeof v.note === "string" ? v.note : undefined,
     vendor: typeof v.vendor_agent === "string" ? v.vendor_agent : undefined,
   };
+}
+
+/** Redaction placeholders cannot identify a tool execution. */
+export function usableCallId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    !value.includes("[redacted")
+  );
+}
+
+/** Resolve within this task only. An explicit reference never falls back to
+ * a potentially reused provider ID, even when its event is unavailable. */
+export function receiptOutput(
+  activity: TaskActivity,
+  receipt: VerificationCommand,
+): string | undefined {
+  let matches: ActivityCall[];
+  if (receipt.outputRef !== undefined) {
+    const match = /^event:([1-9][0-9]*)$/.exec(receipt.outputRef);
+    const id = match ? Number(match[1]) : NaN;
+    if (!Number.isSafeInteger(id)) return undefined;
+    matches = activity.calls.filter((call) => call.completedEventId === id);
+  } else {
+    if (!usableCallId(receipt.callId)) return undefined;
+    matches = activity.calls.filter((call) => call.callId === receipt.callId);
+  }
+  return matches.length === 1 && !matches[0].live && matches[0].tool === "exec"
+    ? matches[0].output
+    : undefined;
 }
 
 export function addChanged(list: string[], paths: unknown): string[] {

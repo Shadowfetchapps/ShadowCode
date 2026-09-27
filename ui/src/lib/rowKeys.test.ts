@@ -38,7 +38,8 @@ describe("transcript row keys", () => {
     // The answer kept the key its first fragment got.
     expect(answer.key).toBe(keys["agent:Look"]);
     const tool = state.items.find((item) => item.kind === "tool")!;
-    expect(tool.key).toBe("t:t1:c1");
+    expect(tool.key).toBe(keys["tool:"]);
+    expect(tool.key).toBe("t:t1:event:3");
     expect(state.items[0].key).toBe("e:1:0");
   });
 

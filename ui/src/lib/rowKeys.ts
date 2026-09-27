@@ -1,10 +1,12 @@
 import type { ChatItem } from "../components/cards";
 
 /** The identity a row keeps while it updates: a streamed answer by its
- * message id, a tool or hook card by its call id. */
+ * message id, a tool by its creating event, a legacy tool/hook by its call id. */
 function stableKey(item: ChatItem): string | undefined {
   if (item.kind === "agent" && item.messageId)
     return `m:${item.taskId || ""}:${item.messageId}`;
+  if (item.kind === "tool" && item.originEventId)
+    return `t:${item.taskId || ""}:event:${item.originEventId}`;
   if (item.kind === "tool" && item.callId)
     return `t:${item.taskId || ""}:${item.callId}`;
   if (item.kind === "subagent") return `s:${item.run.runId}`;

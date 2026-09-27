@@ -67,6 +67,7 @@ export type ChatItem = (
     }
   | {
       kind: "tool";
+      originEventId?: number;
       tool: string;
       ok?: boolean;
       text: string;
