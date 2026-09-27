@@ -407,7 +407,7 @@ test -d "$JOURNAL" && test -d "$STAGED"
 rm "$LIB.previous/external.txt"
 ln -sfn other.AppImage "$HOME/Applications/ShadowCode.AppImage"
 expect_refusal 'changed active link' "$INSTALLER" --recover
-grep -Fq 'prior AppImage changed' "$SCRATCH/refused.txt"
+grep -Fq 'active AppImage changed' "$SCRATCH/refused.txt"
 ln -sfn "$PRIOR_LINK" "$HOME/Applications/ShadowCode.AppImage"
 printf 'external change' > "$LIB/external.txt"
 expect_refusal 'edited candidate runtime' "$INSTALLER" --recover
@@ -450,12 +450,17 @@ cp -p "$SCRATCH/prior-desktop" "$XDG_DATA_HOME/applications/shadow-agent.desktop
 grep -Fq 'Recovered the previous runtime and AppImage' "$SCRATCH/recovered-activation.txt"
 assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
 
-# 19. Once the active link changes, the old installer cannot safely infer
-# whether desktop/launcher activation was completed. Preserve for review.
+# 19. A crash after the active link changes recovers only if the package and
+# all four desktop integrations still match their recorded identities.
 expect_refusal 'killed after link replacement' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=after-link-kill "$INSTALLER" "$NEXT"
-expect_refusal 'changed active link needs manual review' "$INSTALLER" --recover
-grep -Fq 'prior AppImage changed' "$SCRATCH/refused.txt"
+printf 'external edit\n' >> "$XDG_DATA_HOME/applications/shadow-agent.desktop"
+expect_refusal 'changed desktop after link replacement' "$INSTALLER" --recover
+grep -Fq 'desktop integration changed after activation began' "$SCRATCH/refused.txt"
 test -d "$JOURNAL"
 grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
+cp -p "$SCRATCH/prior-desktop" "$XDG_DATA_HOME/applications/shadow-agent.desktop"
+"$INSTALLER" --recover > "$SCRATCH/recovered-after-link.txt"
+grep -Fq 'Recovered the previous runtime and AppImage' "$SCRATCH/recovered-after-link.txt"
+assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
 test "$(cat "$XDG_DATA_HOME/shadow-agent/profile.txt")" = 'keep this profile data'
 printf 'AppImage installer checks passed.\n'

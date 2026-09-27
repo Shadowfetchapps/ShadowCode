@@ -115,7 +115,7 @@ source "$ROOT/scripts/install-release-state.sh"
 
 recover_install() {
   private_dir "$JOURNAL" || recovery_refusal 'intent directory is not private'
-  local schema phase prior prior_hash had old_hash candidate candidate_hash existed new_hash stage_name stage live_hash previous_hash runtime
+  local schema phase prior prior_hash had old_hash candidate candidate_hash existed new_hash stage_name stage live_hash previous_hash runtime active_link_candidate=0
   schema="$(read_field schema)"; phase="$(read_field phase)"
   [[ "$(read_field apps-root)" == "$(realpath -- "$APPS")" && "$(read_field library-root)" == "$(realpath -- "$(dirname "$LIB")")" ]] || recovery_refusal 'installation directory changed'
   prior="$(read_field prior-link)"; prior_hash="$(read_field prior-app-sha256)"
@@ -132,10 +132,22 @@ recover_install() {
   [[ "$had" =~ ^[01]$ && "$existed" =~ ^[01]$ && "$stage_name" =~ ^\.shadowcode-install\.[A-Za-z0-9]{6}$ ]] || recovery_refusal 'invalid transaction identity'
   [[ ( "$had" == 1 && "$old_hash" =~ ^[a-f0-9]{64}$ ) || ( "$had" == 0 && "$old_hash" == - ) ]] || recovery_refusal 'invalid prior runtime identity'
   if [[ "$prior" == - ]]; then
-    if [[ "$prior_hash" != - ]] || exists "$APPS/ShadowCode.AppImage"; then recovery_refusal 'active AppImage changed'; fi
+    [[ "$prior_hash" == - ]] || recovery_refusal 'active AppImage changed'
   else
     [[ "$prior" =~ ^ShadowCode-[0-9]+\.[0-9]+\.[0-9]+-x86_64\.AppImage$ && "$prior_hash" =~ ^[a-f0-9]{64}$ ]] || recovery_refusal 'invalid prior AppImage identity'
-    [[ -L "$APPS/ShadowCode.AppImage" && "$(readlink -- "$APPS/ShadowCode.AppImage")" == "$prior" && "$(file_hash "$APPS/$prior")" == "$prior_hash" ]] || recovery_refusal 'prior AppImage changed'
+    [[ "$(file_hash "$APPS/$prior")" == "$prior_hash" ]] || recovery_refusal 'prior AppImage changed'
+  fi
+  if exists "$APPS/ShadowCode.AppImage"; then
+    [[ -L "$APPS/ShadowCode.AppImage" ]] || recovery_refusal 'active AppImage changed'
+    case "$(readlink -- "$APPS/ShadowCode.AppImage")" in
+      "$prior") [[ "$prior" != - ]] || recovery_refusal 'active AppImage changed' ;;
+      "$candidate")
+        [[ "$schema" == 3 && "$phase" == activation_started ]] || recovery_refusal 'active AppImage changed'
+        active_link_candidate=1 ;;
+      *) recovery_refusal 'active AppImage changed' ;;
+    esac
+  else
+    [[ "$prior" == - ]] || recovery_refusal 'prior AppImage changed'
   fi
   stage="$(dirname "$LIB")/$stage_name"
   private_dir "$stage" || recovery_refusal 'staging directory changed or missing'
@@ -146,6 +158,9 @@ recover_install() {
   fi
   if exists "$APPS/$candidate.pending"; then
     [[ "$(file_hash "$APPS/$candidate.pending")" == "$candidate_hash" ]] || recovery_refusal 'pending AppImage is incomplete or changed'
+  fi
+  if exists "$APPS/.ShadowCode.AppImage.pending"; then
+    [[ -L "$APPS/.ShadowCode.AppImage.pending" && "$(readlink -- "$APPS/.ShadowCode.AppImage.pending")" == "$candidate" ]] || recovery_refusal 'pending active AppImage link changed'
   fi
   for runtime in "$stage/squashfs-root/usr/lib/shadowcode" "$stage/recovery-runtime"; do
     if exists "$runtime"; then
@@ -182,8 +197,22 @@ recover_install() {
       [[ "$actual" == "$expected" ]] || recovery_refusal "$name integration changed after activation began"
     done
   fi
+  if [[ "$active_link_candidate" == 1 ]]; then
+    [[ "$(file_hash "$APPS/$candidate")" == "$candidate_hash" ]] || recovery_refusal 'active candidate AppImage changed'
+  fi
+  if exists "$stage/recovery-link"; then
+    [[ "$active_link_candidate" == 1 && "$prior" != - && -L "$stage/recovery-link" && "$(readlink -- "$stage/recovery-link")" == "$prior" ]] || recovery_refusal 'recovery link changed'
+  fi
   # All identities are checked before any recovery mutation. Preserve the
   # candidate until restoration succeeds, including if recovery is killed.
+  if [[ "$active_link_candidate" == 1 ]]; then
+    if [[ "$prior" == - ]]; then
+      rm -f -- "$APPS/ShadowCode.AppImage" || recovery_refusal 'could not remove candidate active link'
+    else
+      if ! exists "$stage/recovery-link"; then ln -s -- "$prior" "$stage/recovery-link" || recovery_refusal 'could not stage prior active link'; fi
+      mv -Tf -- "$stage/recovery-link" "$APPS/ShadowCode.AppImage" || recovery_refusal 'could not restore prior active link'
+    fi
+  fi
   if [[ "$live_hash" == "$new_hash" && ( "$had" == 0 || "$previous_hash" == "$old_hash" ) ]]; then
     ! exists "$stage/recovery-runtime" || recovery_refusal 'two candidate runtime copies'
     mv -T -- "$LIB" "$stage/recovery-runtime" || recovery_refusal 'could not retain candidate runtime'
@@ -193,6 +222,7 @@ recover_install() {
   fi
   [[ "$existed" == 1 ]] || rm -f -- "$APPS/$candidate"
   rm -f -- "$APPS/$candidate.pending"
+  rm -f -- "$APPS/.ShadowCode.AppImage.pending"
   sync -f "$(dirname "$LIB")"
   # Retire the active record by rename, so interruption of recursive staging
   # cleanup cannot leave a partially deleted active journal blocking recovery.
@@ -338,6 +368,7 @@ if [[ -e "$DEST" || -L "$DEST" ]]; then
   cmp -s -- "$SOURCE" "$DEST" || fail "Different AppImage bytes are already installed as $VERSION; refusing to overwrite that version."
   DEST_EXISTED=1
 fi
+! exists "$APPS/.ShadowCode.AppImage.pending" || fail 'Active AppImage staging link already exists; preserve and review it.'
 
 # The llama.cpp runtime shipped inside this AppImage.
 (cd "$STAGE" && "$SOURCE" --appimage-extract usr/lib/shadowcode >/dev/null) \

@@ -162,12 +162,30 @@ test('activation marker recovers only while launcher and desktop identities rema
   assert.equal(await readlink(path.join(f.home, 'Applications/ShadowCode.AppImage')), 'ShadowCode-0.28.0-x86_64.AppImage');
   await missing(f.journal); await missing(`${f.library}.previous`);
 });
-test('interruption after active-link replacement preserves the ambiguous installation for review', async t => {
+test('interruption after active-link replacement recovers only with unchanged desktop integration', async t => {
   const f = await fixture(t), first = await candidate(f), next = await candidate(f, '0.28.1');
   passed(f.run([first])); const faults = await faultWrapper(f);
   refused(f.run([next], { ...faults, AUTH_FAULT: 'link' })); const receipt = await accepted(f);
-  const result = f.run(['--recover']); refused(result); assert.match(result.stderr, /prior AppImage changed/);
+  const desktop = path.join(f.home, '.local/share/applications/shadow-agent.desktop');
+  const priorDesktop = await readFile(desktop, 'utf8');
+  await writeFile(desktop, `${priorDesktop}external edit\n`);
+  const changed = f.run(['--recover']); refused(changed); assert.match(changed.stderr, /desktop integration changed after activation began/);
   assert.equal(await accepted(f), receipt); await stat(f.journal); await stat(`${f.library}.previous`);
+  await writeFile(desktop, priorDesktop);
+  passed(f.run(['--recover']));
+  assert.equal(await readlink(path.join(f.home, 'Applications/ShadowCode.AppImage')), 'ShadowCode-0.28.0-x86_64.AppImage');
+  assert.equal(await accepted(f), receipt); await missing(f.journal); await missing(`${f.library}.previous`);
+});
+test('first-install interruption after active-link replacement restores recorded absence', async t => {
+  const f = await fixture(t), first = await candidate(f), faults = await faultWrapper(f);
+  refused(f.run([first], { ...faults, AUTH_FAULT: 'link' }));
+  const receipt = await accepted(f);
+  assert.equal(await readlink(path.join(f.home, 'Applications/ShadowCode.AppImage')), 'ShadowCode-0.28.0-x86_64.AppImage');
+  passed(f.run(['--recover']));
+  await missing(path.join(f.home, 'Applications/ShadowCode.AppImage'));
+  await missing(path.join(f.home, 'Applications/ShadowCode-0.28.0-x86_64.AppImage'));
+  await missing(f.library); await missing(f.journal);
+  assert.equal(await accepted(f), receipt);
 });
 test('state-pointer traversal and receipt tampering refuse execution and preserve evidence', async t => {
   const f = await fixture(t), first = await candidate(f), next = await candidate(f, '0.28.1');
