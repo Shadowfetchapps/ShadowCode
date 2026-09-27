@@ -379,6 +379,12 @@ fn has_unperformed_action(text: &str, commands_only: bool) -> bool {
         regex::Regex::new(r"\b(?:i(?:'ll| will)|i(?:'m| am) (?:going|about) to|let me)\s+(?:(?:first|now|next|then|also|just)\s+){0,2}(make|apply|edit|modify|patch|fix|repair|update|rewrite|implement|create|delete|remove|rename|run|execute|invoke|launch|rerun|do|set|call|issue|inspect|read|open|search|examine|check|verify|test)\b")
             .expect("action promise regex")
     });
+    static CURRENT: LazyLock<regex::Regex> = LazyLock::new(|| {
+        // Explicit first-person status, not arbitrary progressive narration.
+        // Targets and quote/conditional/negative exclusions still apply below.
+        regex::Regex::new(r"\bi(?:'m| am)\s+(?:now|currently)\s+(making|applying|editing|modifying|patching|fixing|repairing|updating|rewriting|implementing|creating|deleting|removing|renaming|running|executing|invoking|launching|rerunning|inspecting|reading|opening|searching|examining|checking|verifying|testing)\b")
+            .expect("current action status regex")
+    });
     static RUNNING_COMMAND: LazyLock<regex::Regex> = LazyLock::new(|| {
         // A bare progressive phrase is often explanatory prose. Accept only
         // an entire status sentence with an opaque inline command target.
@@ -438,7 +444,10 @@ fn has_unperformed_action(text: &str, commands_only: bool) -> bool {
         if RUNNING_COMMAND.is_match(sentence.trim()) {
             return true;
         }
-        let Some(action) = FUTURE.captures(sentence) else {
+        let Some(action) = FUTURE
+            .captures(sentence)
+            .or_else(|| CURRENT.captures(sentence))
+        else {
             continue;
         };
         let found = action.get(0).expect("action match");
@@ -456,7 +465,19 @@ fn has_unperformed_action(text: &str, commands_only: bool) -> bool {
         if NO_ACTION_OBJECT.is_match(&target) || PROSE_OBJECT.is_match(&target) {
             continue;
         }
-        let verb = action.get(1).expect("action verb").as_str();
+        let verb = match action.get(1).expect("action verb").as_str() {
+            "making" => "make",
+            "applying" => "apply",
+            "running" => "run",
+            "executing" => "execute",
+            "invoking" => "invoke",
+            "launching" => "launch",
+            "rerunning" => "rerun",
+            "checking" => "check",
+            "verifying" => "verify",
+            "testing" => "test",
+            verb => verb,
+        };
         let command_target = COMMAND.is_match(&target) || SHELL_TARGET.is_match(&target);
         let command_action = match verb {
             "run" | "execute" | "invoke" | "launch" | "rerun" | "call" | "issue" | "set" => {
@@ -486,6 +507,38 @@ fn has_unperformed_action(text: &str, commands_only: bool) -> bool {
         }
     }
     false
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InspectionTarget {
+    Workspace,
+    Host,
+}
+
+/// Keep the existing anchored inspection requirement, while distinguishing
+/// explicit host questions from project inspection. Tool choice cannot weaken
+/// the request; project/path cues take precedence over a host noun.
+pub(crate) fn inspection_target(task: &str) -> Option<InspectionTarget> {
+    use std::sync::LazyLock;
+    static REQUEST: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(?i)^(?:please\s+)?(?:read|inspect|open)\b").unwrap());
+    static HOST: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(?i)^(?:please\s+)?(?:read|inspect|open)\s+(?:(?:the|my|our|this|current)\s+)?(?:computer|machine|host|os|operating system|(?:connected\s+)?(?:screens?|monitors?|displays?))\b").unwrap()
+    });
+    static PROJECT: LazyLock<regex::Regex> = LazyLock::new(|| {
+        // Host configuration/version words are not project evidence. Paths,
+        // explicit project/file nouns and recognizable source/config filenames
+        // override a host noun; a numeric OS version such as 6.8 does not.
+        regex::Regex::new(r"(?i)\b(?:files?|paths?|directories|directory|folders?|repository|repo|workspace|project|codebase|database)\b|\bsource\s+code\b|[/\\]|\b[\w-]+\.(?:rs|py|js|jsx|ts|tsx|json|toml|ya?ml|md|txt|sh|c|h|cpp|go|java)\b").unwrap()
+    });
+    let task = task.trim();
+    REQUEST.is_match(task).then(|| {
+        if HOST.is_match(task) && !PROJECT.is_match(task) {
+            InspectionTarget::Host
+        } else {
+            InspectionTarget::Workspace
+        }
+    })
 }
 
 /// Remove Markdown examples before looking for commitments. Inline code is
@@ -1085,6 +1138,60 @@ pub fn narrow_verify_command(task: &str, workspace: &std::path::Path) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_workspace_status_is_unfinished_but_explanations_are_not() {
+        for text in [
+            "I am now inspecting the files and applying the necessary fixes according to the requirements provided. Please wait while I make the changes.",
+            "I'm currently editing helpers.py.",
+            "I am now running the tests.",
+        ] {
+            assert!(promises_tool_action(text), "{text}");
+        }
+        for text in [
+            "I am now explaining the file format.",
+            "I am not modifying the files.",
+            "If approved, I am now editing helpers.py would describe the next step.",
+            "The sample says \"I am now inspecting the files.\"",
+            "I am now reporting the OS and display facts returned by system_info.",
+            "I am currently reading the answer aloud to explain the file layout.",
+        ] {
+            assert!(!promises_tool_action(text), "{text}");
+        }
+        assert!(!claims_command_execution(
+            "I'm currently editing helpers.py."
+        ));
+        assert!(claims_command_execution("I am now running the tests."));
+    }
+
+    #[test]
+    fn inspection_scope_comes_from_explicit_request_not_tool_choice() {
+        use InspectionTarget::{Host, Workspace};
+        for task in [
+            "Inspect my computer's OS and connected displays.",
+            "Inspect my computer's display configuration.",
+            "Inspect my computer running Linux 6.8 and connected displays.",
+            "Please inspect the operating system.",
+        ] {
+            assert_eq!(inspection_target(task), Some(Host), "{task}");
+        }
+        for task in [
+            "Inspect my computer OS and project files.",
+            "Inspect my computer and helpers.py.",
+            "Inspect host.rs.",
+            "Inspect my computer and /tmp/project.",
+            "Inspect the project database billing.db",
+            "Read whichever file contains the current value",
+        ] {
+            assert_eq!(inspection_target(task), Some(Workspace), "{task}");
+        }
+        assert_eq!(inspection_target("How many screens do I have?"), None);
+        // This narrow change does not add arbitrary later-clause parsing.
+        assert_eq!(
+            inspection_target("Fix helpers.py. Inspect the files."),
+            None
+        );
+    }
 
     #[test]
     fn tool_action_promises_catch_observed_edit_stalls_and_concrete_next_actions() {

@@ -301,7 +301,12 @@ pub async fn current(engine: &crate::engine::Engine, job: &crate::engine::Job) -
     } else {
         ""
     };
-    let assessed = classify(text, &commands, summary["inspected_workspace"] == true);
+    let assessed = classify_observations(
+        text,
+        &commands,
+        summary["inspected_workspace"] == true,
+        summary["inspected_host"] == true,
+    );
     if let (Some(target), Some(fields)) = (summary.as_object_mut(), assessed.as_object()) {
         target.extend(fields.clone());
     }
@@ -318,8 +323,7 @@ pub async fn current(engine: &crate::engine::Engine, job: &crate::engine::Job) -
         });
     }
     summary["assessed_at"] = json!(crate::now());
-    summary["freshness_scope"] =
-        json!("Point-in-time assessment of current files; original task history is unchanged.");
+    summary["freshness_scope"] = json!("Point-in-time assessment of current file fingerprints for command receipts. Recorded inspection scope is historical and not revalidated, including legacy summaries without separate host scope. Original task history is unchanged.");
     Ok(summary)
 }
 
@@ -340,6 +344,15 @@ pub fn latest_checks(commands: &[Value]) -> Vec<Value> {
 }
 
 pub fn classify(text: &str, commands: &[Value], inspected: bool) -> Value {
+    classify_observations(text, commands, inspected, false)
+}
+
+pub(crate) fn classify_observations(
+    text: &str,
+    commands: &[Value],
+    inspected_workspace: bool,
+    inspected_host: bool,
+) -> Value {
     // A rerun supersedes only the same exact command in the same directory.
     // An unrelated success can never hide another failed or stale check.
     let mut latest = BTreeMap::new();
@@ -393,13 +406,13 @@ pub fn classify(text: &str, commands: &[Value], inspected: bool) -> Value {
         "verified"
     } else if claims {
         "model_claim"
-    } else if inspected || !commands.is_empty() {
+    } else if inspected_workspace || inspected_host || !commands.is_empty() {
         "observed"
     } else {
         "model_claim"
     };
     json!({"schema_version":1,"status":status,"claim":claim,"verified":verified,
-        "model_claimed_success":claims,"inspected_workspace":inspected,"commands":commands,"red_green":red_green,
+        "model_claimed_success":claims,"inspected_workspace":inspected_workspace,"inspected_host":inspected_host,"commands":commands,"red_green":red_green,
         "unverified_claim":claims && !verified,"execution_failed":execution_failed,
         "note":"Only recorded configured checks count. Passing checks do not establish complete task acceptance; arbitrary commands and model prose are not verification."})
 }
@@ -407,6 +420,36 @@ pub fn classify(text: &str, commands: &[Value], inspected: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn legacy_inspection_scope_is_preserved_as_historical_not_revalidated() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let paths = crate::paths::AppPaths::isolated(&root.path().join("profile")).unwrap();
+        let engine = crate::engine::Engine::open(paths).unwrap();
+        let legacy = json!({"status":"not_run","claim":"observed","commands":[],
+            "inspected_workspace":true,"verified":false});
+        let job = crate::engine::Job {
+            id: "attempt".into(),
+            task_id: "task".into(),
+            workspace: project,
+            status: "completed".into(),
+            result: Some(json!({"verification":legacy.clone()})),
+            ..Default::default()
+        };
+        let assessed = current(&engine, &job).await.unwrap();
+        assert_eq!(assessed["inspected_host"], false);
+        assert_eq!(assessed["inspected_workspace"], true);
+        assert_eq!(assessed["verified"], false);
+        assert!(assessed["freshness_scope"]
+            .as_str()
+            .unwrap()
+            .contains("historical and not revalidated"));
+        assert_eq!(job.result.as_ref().unwrap()["verification"], legacy);
+        engine.shutdown().await.unwrap();
+    }
+
     fn check(command: &str, state: State) -> Value {
         serde_json::to_value(Receipt {
             schema_version: 1,

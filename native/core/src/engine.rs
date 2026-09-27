@@ -2028,9 +2028,9 @@ impl Engine {
             events.emit("workflow.selected", selected)?;
         }
         let mut commands = Vec::new();
-        let requires_inspection = regex::Regex::new(r"(?i)^(?:please\s+)?(?:read|inspect|open)\b")?
-            .is_match(job.task.trim());
+        let inspection_target = autonomy::inspection_target(&job.task);
         let mut inspected = false;
+        let mut inspected_host = false;
         let mut completion_retries = 0;
         // Cumulative across this task, including intervening tool calls. A
         // harmless observation must not reset an unfinished-action loop.
@@ -2453,7 +2453,12 @@ impl Engine {
                             .await;
                         events.emit(
                             "verification.summary",
-                            autonomy::classify_verification(&response.text, &commands, inspected),
+                            crate::verification::classify_observations(
+                                &response.text,
+                                &commands,
+                                inspected,
+                                inspected_host,
+                            ),
                         )?;
                         bail!("Model promised further work without performing it; stopped after {action_retries} completion retries. Existing changes and command results remain available.");
                     }
@@ -2466,11 +2471,33 @@ impl Engine {
                     self.save_tape(&job.id, &messages).await?;
                     continue;
                 }
-                if requires_inspection && !inspected {
-                    ensure!(completion_retries<running.config.agent.max_fix_retries,"The model did not inspect the current workspace as requested. Its answer has not been verified against current files.");
+                let missing_inspection = match inspection_target {
+                    Some(autonomy::InspectionTarget::Workspace) => !inspected,
+                    Some(autonomy::InspectionTarget::Host) => !inspected_host,
+                    None => false,
+                };
+                if missing_inspection {
+                    let (failure, reason, note) = if inspection_target
+                        == Some(autonomy::InspectionTarget::Host)
+                    {
+                        ("The model did not inspect the current host as requested. Its answer has not been checked against current host observations.",
+                         "No current host inspection",
+                         "Execution check: the user explicitly requested current host information. Use system_info to observe OS and display facts before answering. It cannot inspect project files or screen contents. Historical conversation is not current evidence; do not invent a result.")
+                    } else {
+                        ("The model did not inspect the current workspace as requested. Its answer has not been verified against current files.",
+                         "No current workspace inspection",
+                         "Execution check: the user explicitly requested inspection of the current workspace. You have not read or searched any current files in this task. Use the appropriate read-only tool before giving the final answer. Historical conversation is not proof of current file contents. If inspection fails, report that limitation; do not invent a result.")
+                    };
+                    ensure!(
+                        completion_retries < running.config.agent.max_fix_retries,
+                        "{failure}"
+                    );
                     completion_retries += 1;
-                    events.emit("verification.retry",json!({"attempt":completion_retries,"reason":"No current workspace inspection"}))?;
-                    messages.push(json!({"role":"system","content":"Execution check: the user explicitly requested inspection of the current workspace. You have not read or searched any current files in this task. Use the appropriate read-only tool before giving the final answer. Historical conversation is not proof of current file contents. If inspection fails, report that limitation; do not invent a result."}));
+                    events.emit(
+                        "verification.retry",
+                        json!({"attempt":completion_retries,"reason":reason}),
+                    )?;
+                    messages.push(json!({"role":"system","content":note}));
                     continue;
                 }
                 let _checks_timing = running.clock.span(crate::timing::Section::FinalChecks);
@@ -2523,9 +2550,12 @@ impl Engine {
                     "Task cancelled during completion assessment"
                 );
                 let mut summary = json!({"commands":commands,"hooks":outcomes});
-                if let Value::Object(extra) =
-                    autonomy::classify_verification(&response.text, &commands, inspected)
-                {
+                if let Value::Object(extra) = crate::verification::classify_observations(
+                    &response.text,
+                    &commands,
+                    inspected,
+                    inspected_host,
+                ) {
                     if let Value::Object(map) = &mut summary {
                         map.extend(extra);
                     }
@@ -2596,11 +2626,13 @@ impl Engine {
                             .clock
                             .record_check(&result.output["verification_receipt"]);
                     }
+                    if result.success && call.name == "system_info" {
+                        inspected_host = true;
+                    }
                     if result.success
                         && matches!(
                             call.name.as_str(),
-                            "system_info"
-                                | "read_file"
+                            "read_file"
                                 | "search_text"
                                 | "search_symbol"
                                 | "workspace_symbols"

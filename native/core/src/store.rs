@@ -1236,15 +1236,30 @@ fn task_verification_on(db: &Connection, tid: &str) -> Result<Value> {
     .map(|event| event["payload"].clone())
     .filter(|receipt| receipt.is_object() && receipt["task_id"] == tid)
     .collect();
-    let needs_assessment = previous.is_none() || !receipts.is_empty();
+    // A host observation can precede a model error/cancellation and therefore
+    // have no final summary. Use only this task's durable successful native
+    // tool event; host data must never imply project-file inspection.
+    let host_event: Option<i64> = db.query_row(
+        "SELECT MAX(id) FROM events WHERE task_id=? AND type='tool.completed' AND json_extract(payload,'$.tool')='system_info' AND json_type(payload,'$.success')='true'",
+        [tid],
+        |row| row.get(0),
+    )?;
+    let observed_host = host_event.is_some();
+    let newer_host_observation = host_event.is_some_and(|id| id > after);
+    let needs_assessment = previous.is_none() || !receipts.is_empty() || newer_host_observation;
     let mut summary = previous
         .map(|event| event["payload"].clone())
         .unwrap_or_else(|| json!({"commands":[]}));
     if needs_assessment {
+        let inspected_host = observed_host || summary["inspected_host"] == true;
         let mut commands = summary["commands"].as_array().cloned().unwrap_or_default();
         commands.extend(receipts);
-        let assessed =
-            crate::verification::classify("", &commands, summary["inspected_workspace"] == true);
+        let assessed = crate::verification::classify_observations(
+            "",
+            &commands,
+            summary["inspected_workspace"] == true,
+            inspected_host,
+        );
         summary
             .as_object_mut()
             .expect("verification summary is an object")
@@ -1257,13 +1272,14 @@ fn task_verification_on(db: &Connection, tid: &str) -> Result<Value> {
         // Successful individual commands describe their observed snapshots;
         // they cannot substitute for the final assessment that did not run.
         summary["verified"] = json!(false);
-        summary["claim"] = json!(
-            if !commands.is_empty() || summary["inspected_workspace"] == true {
-                "observed"
-            } else {
-                "model_claim"
-            }
-        );
+        summary["claim"] = json!(if !commands.is_empty()
+            || summary["inspected_workspace"] == true
+            || inspected_host
+        {
+            "observed"
+        } else {
+            "model_claim"
+        });
         summary["status"] = json!("incomplete");
         summary["red_green"] = json!(false);
         summary["final_assessment"] = json!("not_completed");
@@ -1342,6 +1358,92 @@ fn finish_task_on(
 #[cfg(test)]
 mod verification_tests {
     use super::*;
+
+    #[test]
+    fn terminal_verification_preserves_only_owned_successful_host_observations() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        for (task, tool, success) in [
+            ("host", "system_info", json!(true)),
+            ("failed", "system_info", json!(false)),
+            ("numeric", "system_info", json!(1)),
+            ("other-tool", "read_file", json!(true)),
+        ] {
+            store
+                .add_event(
+                    "tool.completed",
+                    &json!({"tool":tool,"success":success,
+                "task_id":"wrong-payload-owner"}),
+                    None,
+                    Some(task),
+                )
+                .unwrap();
+        }
+        for task in [
+            "host",
+            "failed",
+            "numeric",
+            "other-tool",
+            "wrong-payload-owner",
+            "missing",
+        ] {
+            let summary = store.task_verification(task).unwrap();
+            assert_eq!(
+                summary["inspected_host"],
+                task == "host",
+                "{task}: {summary}"
+            );
+            assert_eq!(summary["inspected_workspace"], false, "{task}: {summary}");
+            assert_eq!(
+                summary["claim"],
+                if task == "host" {
+                    "observed"
+                } else {
+                    "model_claim"
+                }
+            );
+            assert_eq!(summary["verified"], false);
+            assert_eq!(summary["status"], "incomplete");
+        }
+        let expected = store.task_verification("host").unwrap();
+        drop(store);
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .task_verification("host")
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn terminal_host_history_does_not_replace_a_later_assessment_but_new_evidence_does() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("store.sqlite")).unwrap();
+        let observation = json!({"tool":"system_info","success":true});
+        store
+            .add_event("tool.completed", &observation, None, Some("task"))
+            .unwrap();
+        // Legacy summary: retained exactly, not retroactively reclassified
+        // because the modern separate host scope was absent.
+        let summary = json!({"status":"not_run","commands":[],"inspected_workspace":true,
+            "claim":"observed","verified":false,"custom":"retain"});
+        store
+            .add_event("verification.summary", &summary, None, Some("task"))
+            .unwrap();
+        assert_eq!(store.task_verification("task").unwrap(), summary);
+        store
+            .add_event("tool.completed", &observation, None, Some("task"))
+            .unwrap();
+        let after = store.task_verification("task").unwrap();
+        assert_eq!(after["inspected_host"], true);
+        assert_eq!(after["inspected_workspace"], true);
+        assert_eq!(after["custom"], "retain");
+        assert_eq!(after["status"], "incomplete");
+        assert_eq!(after["final_assessment"], "not_completed");
+        assert_eq!(after["verified"], false);
+    }
 
     fn receipt(task: &str, call: &str) -> Value {
         json!({

@@ -2484,3 +2484,452 @@ async fn timings_separate_model_attempts_from_check_processes_and_survive_restar
     );
     reopened.shutdown().await.unwrap();
 }
+
+// Retained Hermes failure: progress prose is not the authorized file change.
+#[tokio::test]
+async fn completion_current_action_status_continues_after_unrelated_host_observation() {
+    let server = support::server(|index, body| {
+        context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+        let answer = match index {
+            0 => response("", json!([tool("host", "system_info", json!({}))])),
+            1 => response(
+                "I am now inspecting the files and applying the necessary fixes according to the requirements provided. Please wait while I make the changes.",
+                json!([]),
+            ),
+            2 => response("", json!([tool("write", "write_file", json!({
+                "path":"greeting.txt", "content":"hello\n", "expected_hash":"missing"
+            }))])),
+            _ => response("Created greeting.txt containing hello. No tests were run.", json!([])),
+        };
+        (answer, Duration::ZERO)
+    }).await;
+    let (root, engine) = setup(&server.endpoint);
+    Config::patch(engine.paths(), json!({"agent":{"max_fix_retries":1}})).unwrap();
+    let job = engine
+        .start(request(
+            root.path(),
+            "Create greeting.txt containing hello.",
+            None,
+        ))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    let (saved, events) = reopen_terminal_job(engine, result).await;
+    assert_eq!(saved.status, "completed", "{}", saved.summary);
+    assert!(
+        root.path().join("project/greeting.txt").is_file(),
+        "current-action status was accepted before the requested edit: {}",
+        saved.summary
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("project/greeting.txt")).unwrap(),
+        "hello\n"
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 4);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "completion.retry"
+                && e["payload"]["reason"] == "unperformed_action")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "tool.completed"
+                && e["payload"]["tool"] == "write_file"
+                && e["payload"]["success"] == true)
+            .count(),
+        1
+    );
+    assert!(!events
+        .iter()
+        .any(|e| e["type"] == "tool.started" && e["payload"]["tool"] == "exec"));
+    let verification = &saved.result.as_ref().unwrap()["verification"];
+    assert_eq!(verification["status"], "not_run");
+    assert_eq!(verification["verified"], false);
+    assert_eq!(verification["commands"], json!([]));
+}
+
+#[tokio::test]
+async fn completion_repeated_current_action_status_is_bounded_without_fake_verification() {
+    for max_fix_retries in [0usize, 2] {
+        let server = support::server(|_, body| {
+            context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+            (response(
+                "I am now inspecting the files and applying the necessary fixes according to the requirements provided. Please wait while I make the changes.",
+                json!([]),
+            ), Duration::ZERO)
+        }).await;
+        let (root, engine) = setup(&server.endpoint);
+        Config::patch(
+            engine.paths(),
+            json!({"agent":{"max_steps":10,"max_fix_retries":max_fix_retries}}),
+        )
+        .unwrap();
+        let job = engine
+            .start(request(
+                root.path(),
+                "Create greeting.txt containing hello.",
+                None,
+            ))
+            .await
+            .unwrap();
+        let result = wait(&engine, &job.id).await;
+        let (saved, events) = reopen_terminal_job(engine, result).await;
+        assert_eq!(
+            saved.status, "failed",
+            "an unfinished status must not complete: {}",
+            saved.summary
+        );
+        assert_eq!(server.requests.lock().unwrap().len(), max_fix_retries + 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["type"] == "completion.retry"
+                    && e["payload"]["reason"] == "unperformed_action")
+                .count(),
+            max_fix_retries
+        );
+        assert!(!events.iter().any(|e| e["type"] == "tool.started"));
+        assert!(!root.path().join("project/greeting.txt").exists());
+        let terminal = events
+            .iter()
+            .find(|e| e["type"] == "agent.completed")
+            .unwrap();
+        assert_eq!(terminal["payload"]["success"], false);
+        let verification = &saved.result.as_ref().unwrap()["verification"];
+        assert_eq!(verification["verified"], false);
+        assert_eq!(verification["red_green"], false);
+        assert_eq!(verification["commands"], json!([]));
+    }
+}
+
+#[tokio::test]
+async fn completion_current_action_quotes_conditions_and_explanations_remain_final_prose() {
+    let answers = [
+        "The sample says \"I am now inspecting the files and applying the necessary fixes.\" It is an example of progress wording.",
+        "```text\nI am now inspecting the files and applying the necessary fixes.\n```\nThis is quoted example text.",
+        "If you approve, I am now applying the changes would describe the next stage. No files were changed.",
+        "I am not modifying the files. This is an explanation only.",
+        "I am now explaining why the function preserves input order; this answer makes no file changes.",
+    ];
+    for mode in ["code", "review"] {
+        for answer in answers {
+            let server =
+                support::server(move |_, _| (response(answer, json!([])), Duration::ZERO)).await;
+            let (root, engine) = setup(&server.endpoint);
+            Config::patch(engine.paths(), json!({"agent":{"max_fix_retries":0}})).unwrap();
+            let mut req = request(
+                root.path(),
+                "Explain the wording only; do not modify files or run commands.",
+                None,
+            );
+            req.mode = mode.into();
+            let job = engine.start(req).await.unwrap();
+            let result = wait(&engine, &job.id).await;
+            let (saved, events) = reopen_terminal_job(engine, result).await;
+            assert_eq!(
+                saved.status, "completed",
+                "{mode}: {answer}: {}",
+                saved.summary
+            );
+            assert_eq!(server.requests.lock().unwrap().len(), 1);
+            assert!(!events
+                .iter()
+                .any(|e| e["type"] == "completion.retry" || e["type"] == "tool.started"));
+        }
+    }
+}
+
+// The host tool has no workspace/path input and reads only fixed OS interfaces.
+// It must not satisfy a distinct explicit request to inspect project files.
+#[tokio::test]
+async fn inspection_host_metadata_does_not_satisfy_current_project_files() {
+    let server = support::server(|index, body| {
+        context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+        let answer = match index {
+            0 => response("", json!([tool("host", "system_info", json!({}))])),
+            1 => response(
+                "The host inspection returned OS and display information.",
+                json!([]),
+            ),
+            2 => response(
+                "",
+                json!([tool("read", "read_file", json!({"path":"current"}))]),
+            ),
+            _ => response(
+                "The current project file contains the fresh value.",
+                json!([]),
+            ),
+        };
+        (answer, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    Config::patch(engine.paths(), json!({"agent":{"max_fix_retries":1}})).unwrap();
+    fs::write(root.path().join("project/current"), "fresh value").unwrap();
+    let mut req = request(
+        root.path(),
+        "Inspect the project files and report the current value.",
+        None,
+    );
+    req.mode = "review".into();
+    let workspace = Workspace::open(&root.path().join("project")).unwrap();
+    assert!(
+        context::requested_file(&req.task, &workspace).is_none(),
+        "exercise the model inspection gate, not automatic attachment"
+    );
+    let job = engine.start(req).await.unwrap();
+    let result = wait(&engine, &job.id).await;
+    let (saved, events) = reopen_terminal_job(engine, result).await;
+    assert_eq!(saved.status, "completed", "{}", saved.summary);
+    assert_eq!(
+        server.requests.lock().unwrap().len(),
+        4,
+        "successful host metadata must not complete a project-files inspection request"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "verification.retry")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "tool.completed"
+                && e["payload"]["tool"] == "read_file"
+                && e["payload"]["success"] == true)
+            .count(),
+        1
+    );
+    assert!(!events
+        .iter()
+        .any(|e| e["type"] == "context.attached" || e["type"] == "completion.retry"));
+    let verification = &saved.result.as_ref().unwrap()["verification"];
+    assert_eq!(verification["inspected_workspace"], true);
+    assert_eq!(verification["verified"], false);
+    assert_eq!(verification["status"], "not_run");
+}
+
+#[tokio::test]
+async fn inspection_host_answers_remain_observed_without_claiming_project_inspection() {
+    for task in [
+        "How many screens do I have on my computer right now?",
+        "Inspect my computer's OS and connected displays; report only those host facts.",
+        "Inspect my computer's display configuration.",
+        "Inspect my computer running Linux 6.8 and connected displays.",
+    ] {
+        let server = support::server(|index, body| {
+            context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+            let answer = if index == 0 {
+                response("", json!([tool("host", "system_info", json!({}))]))
+            } else {
+                let message = body["messages"].as_array().unwrap().last().unwrap();
+                assert_eq!(message["name"], "system_info");
+                let output: Value =
+                    serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
+                assert_eq!(output["success"], true);
+                assert_eq!(output["output"]["os"], std::env::consts::OS);
+                response(
+                    "The native host inspection returned current OS and display information.",
+                    json!([]),
+                )
+            };
+            (answer, Duration::ZERO)
+        })
+        .await;
+        let (root, engine) = setup(&server.endpoint);
+        Config::patch(engine.paths(), json!({"agent":{"max_fix_retries":0}})).unwrap();
+        let mut req = request(root.path(), task, None);
+        req.mode = "review".into();
+        let job = engine.start(req).await.unwrap();
+        let result = wait(&engine, &job.id).await;
+        let current = shadowcode_core::verification::current(&engine, &result)
+            .await
+            .unwrap();
+        let (saved, events) = reopen_terminal_job(engine, result).await;
+        assert_eq!(saved.status, "completed", "{task}: {}", saved.summary);
+        assert_eq!(server.requests.lock().unwrap().len(), 2);
+        assert!(!events
+            .iter()
+            .any(|e| e["type"] == "verification.retry" || e["type"] == "completion.retry"));
+        for summary in [&saved.result.as_ref().unwrap()["verification"], &current] {
+            assert_eq!(summary["inspected_host"], true);
+            assert_eq!(
+                summary["inspected_workspace"], false,
+                "host-only evidence must not be presented as project inspection: {summary}"
+            );
+            assert_eq!(
+                summary["claim"], "observed",
+                "retain actual host observations: {summary}"
+            );
+            assert_eq!(summary["status"], "not_run");
+            assert_eq!(summary["verified"], false);
+            assert_eq!(summary["commands"], json!([]));
+        }
+    }
+}
+
+#[tokio::test]
+async fn inspection_host_requests_still_require_real_host_evidence() {
+    for max_fix_retries in [0usize, 2] {
+        let server =
+            support::server(|_, _| (response("The host uses Linux.", json!([])), Duration::ZERO))
+                .await;
+        let (root, engine) = setup(&server.endpoint);
+        Config::patch(
+            engine.paths(),
+            json!({"agent":{"max_fix_retries":max_fix_retries}}),
+        )
+        .unwrap();
+        let mut req = request(
+            root.path(),
+            "Inspect my computer's OS and connected displays.",
+            None,
+        );
+        req.mode = "review".into();
+        let job = engine.start(req).await.unwrap();
+        let result = wait(&engine, &job.id).await;
+        let (saved, events) = reopen_terminal_job(engine, result).await;
+        assert_eq!(saved.status, "failed", "{}", saved.summary);
+        assert!(saved.summary.contains("did not inspect the current host"));
+        assert_eq!(server.requests.lock().unwrap().len(), max_fix_retries + 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["type"] == "verification.retry")
+                .count(),
+            max_fix_retries
+        );
+        assert!(!events.iter().any(|e| e["type"] == "tool.started"));
+        let v = &saved.result.as_ref().unwrap()["verification"];
+        assert_eq!(v["inspected_host"], false);
+        assert_eq!(v["inspected_workspace"], false);
+        assert_eq!(v["verified"], false);
+    }
+}
+
+#[tokio::test]
+async fn inspection_host_nouns_cannot_override_explicit_project_files() {
+    let server = support::server(|index, _| {
+        (
+            if index == 0 {
+                response("", json!([tool("host", "system_info", json!({}))]))
+            } else {
+                response(
+                    "The host inspection returned OS and display information.",
+                    json!([]),
+                )
+            },
+            Duration::ZERO,
+        )
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    Config::patch(engine.paths(), json!({"agent":{"max_fix_retries":0}})).unwrap();
+    let mut req = request(
+        root.path(),
+        "Inspect my computer OS and project files.",
+        None,
+    );
+    req.mode = "review".into();
+    let job = engine.start(req).await.unwrap();
+    let result = wait(&engine, &job.id).await;
+    let (saved, _) = reopen_terminal_job(engine, result).await;
+    assert_eq!(saved.status, "failed", "{}", saved.summary);
+    assert!(saved
+        .summary
+        .contains("did not inspect the current workspace"));
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+    let v = &saved.result.as_ref().unwrap()["verification"];
+    assert_eq!(v["inspected_host"], true);
+    assert_eq!(v["inspected_workspace"], false);
+    assert_eq!(v["claim"], "observed");
+    assert_eq!(v["verified"], false);
+}
+
+#[tokio::test]
+async fn inspection_host_evidence_survives_model_error_without_leaking_to_next_task() {
+    let server = support::server(|index, _| {
+        let answer = if index == 0 {
+            response("", json!([tool("host", "system_info", json!({}))]))
+        } else {
+            let mut rejected = response("", json!([]));
+            rejected["choices"][0]["finish_reason"] = json!("length");
+            rejected
+        };
+        (answer, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    let first = engine
+        .start(request(root.path(), "Inspect my computer's OS.", None))
+        .await
+        .unwrap();
+    let first = wait(&engine, &first.id).await;
+    assert_eq!(first.status, "failed");
+    assert!(first.summary.contains("cut short"));
+    assert!(
+        engine
+            .store()
+            .last_task_event(&first.task_id, "verification.summary")
+            .unwrap()
+            .is_none(),
+        "exercise fallback from durable tool evidence, not a final summary"
+    );
+    let current = shadowcode_core::verification::current(&engine, &first)
+        .await
+        .unwrap();
+    let second = engine
+        .start(request(
+            root.path(),
+            "Explain this text.",
+            Some(first.session_id.clone()),
+        ))
+        .await
+        .unwrap();
+    let second = wait(&engine, &second.id).await;
+    let second_current = shadowcode_core::verification::current(&engine, &second)
+        .await
+        .unwrap();
+    let paths = engine.paths().clone();
+    let (saved_first, events) = reopen_terminal_job(engine, first).await;
+    let reopened = Engine::open(paths).unwrap();
+    let saved_second = reopened.job(&second.id).unwrap().unwrap();
+    reopened.shutdown().await.unwrap();
+    for v in [
+        &saved_first.result.as_ref().unwrap()["verification"],
+        &current,
+    ] {
+        assert_eq!(v["inspected_host"], true);
+        assert_eq!(v["inspected_workspace"], false);
+        assert_eq!(v["claim"], "observed");
+        assert_eq!(v["status"], "failed");
+        assert_eq!(v["verified"], false);
+        assert_eq!(v["commands"], json!([]));
+    }
+    assert_eq!(saved_second.status, "failed");
+    for v in [
+        &saved_second.result.as_ref().unwrap()["verification"],
+        &second_current,
+    ] {
+        assert_eq!(v["inspected_host"], false);
+        assert_eq!(v["inspected_workspace"], false);
+        assert_eq!(v["claim"], "model_claim");
+        assert_eq!(v["verified"], false);
+    }
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
+    for task_id in [&saved_first.task_id, &saved_second.task_id] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["type"] == "agent.completed" && e["task_id"] == *task_id)
+                .count(),
+            1
+        );
+    }
+}
