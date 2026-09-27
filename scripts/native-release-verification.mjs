@@ -28,6 +28,7 @@ grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' artifacts/built-pro
   packages: { artifacts: true, script: `${version}\n` + String.raw`node scripts/build-native.mjs
 node --test --test-reporter=tap scripts/test-native-packaging-env.mjs
 node scripts/check-native-package.mjs "target/release/bundle/appimage/ShadowCode_${'${VERSION}'}_amd64.AppImage" "target/release/bundle/deb/ShadowCode_${'${VERSION}'}_amd64.deb"
+node scripts/test-native-runtime-write-errors.mjs
 node scripts/test-native-runtime-sources.mjs
 node scripts/test-native-runtime.mjs` },
   'clean-host-packages': { artifacts: true, unchanged: true, scope: 'Both packages installed or extracted in a network-disabled Debian 13 runtime container; offline CLI status, Debian launcher/icon metadata and a visible first GUI window under Xvfb. GUI interaction, physical Wayland, local inference, model downloads and installer rollback remain separate.', script: `${version}\n` + String.raw`docker build -f scripts/clean-host-runtime.Dockerfile -t shadowcode-clean-runtime:ci scripts

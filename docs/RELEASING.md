@@ -84,6 +84,7 @@ node scripts/build-native.mjs
 node scripts/check-native-package.mjs \
   target/release/bundle/appimage/ShadowCode_VERSION_amd64.AppImage \
   target/release/bundle/deb/ShadowCode_VERSION_amd64.deb
+node scripts/test-native-runtime-write-errors.mjs
 node scripts/test-native-runtime-sources.mjs
 node scripts/test-native-runtime.mjs
 bash scripts/test-install-appimage.sh

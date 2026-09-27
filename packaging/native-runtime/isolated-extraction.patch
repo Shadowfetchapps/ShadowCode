@@ -45,7 +45,38 @@
  
                  if (verbose)
                      fprintf(stdout, "%s\n", prefixed_path_to_extract);
-@@ -945,7 +965,7 @@
+@@ -871,15 +891,27 @@
+                                 break;
+                             }
+                             // fwrite(buf, 1, bytes_at_a_time, stdout);
+-                            fwrite(buf, 1, bytes_at_a_time, f);
++                            if (fwrite(buf, 1, bytes_at_a_time, f) != (size_t) bytes_at_a_time) {
++                                perror("Extraction write failed");
++                                rv = false;
++                                break;
++                            }
+                             bytes_already_read = bytes_already_read + bytes_at_a_time;
+                         }
+-                        fflush(f);
++                        if (fflush(f) != 0) {
++                            perror("Extraction flush failed");
++                            rv = false;
++                        }
+                         int fd = fileno(f);
+                         struct timespec times[] = { st.st_atim, st.st_mtim };
+                         if (futimens(fd, times) != 0)
+                             fprintf(stderr, "futimens: %s\n", strerror(errno));
+-                        fclose(f);
++                        // fclose must run exactly once, even after an earlier error.
++                        // A delayed write failure must never reach AppRun execution.
++                        if (fclose(f) != 0) {
++                            perror("Extraction close failed");
++                            rv = false;
++                        }
+                         chmod(prefixed_path_to_extract, st.st_mode);
+                         if (!rv)
+                             break;
+@@ -945,7 +977,7 @@
          case FTW_SLN:
              if (remove(path) != 0) {
                  fprintf(stderr, "Failed to remove %s: %s\n", path, strerror(errno));
@@ -54,7 +85,7 @@
              }
              break;
  
-@@ -953,7 +973,7 @@
+@@ -953,7 +985,7 @@
          case FTW_DP:
              if (rmdir(path) != 0) {
                  fprintf(stderr, "Failed to remove directory %s: %s\n", path, strerror(errno));
@@ -63,7 +94,7 @@
              }
              break;
  
-@@ -970,7 +990,7 @@
+@@ -970,7 +1002,7 @@
      // FTW_MOUNT: prevent deletion of files on other mounted filesystems
      // FTW_PHYS: do not follow symlinks, but report symlinks as such; this way, the symlink targets, which might point
      //           to locations outside path will not be deleted accidentally (attackers might abuse this)
@@ -72,15 +103,15 @@
  
      return rv == 0;
  }
-@@ -1525,6 +1545,7 @@
+@@ -1525,6 +1557,7 @@
      /* Just print the runtime version and then exit */
      if(arg && strcmp(arg,"appimage-version") == 0) {
          fprintf(stderr,"AppImage runtime version: %s\n", GIT_COMMIT);
-+        fprintf(stderr,"ShadowCode runtime patchset: isolated-extraction-v1\n");
++        fprintf(stderr,"ShadowCode runtime patchset: isolated-extraction-v2\n");
          exit(0);
      }
  
-@@ -1578,49 +1599,74 @@
+@@ -1578,49 +1611,74 @@
      }
  
      if (getenv("APPIMAGE_EXTRACT_AND_RUN") != NULL || (arg && strcmp(arg, "appimage-extract-and-run") == 0)) {
@@ -189,7 +220,7 @@
              const char apprun_fname[] = "AppRun";
              char* apprun_path = malloc(strlen(prefix) + 1 + strlen(apprun_fname) + 1);
              strcpy(apprun_path, prefix);
-@@ -1628,7 +1674,7 @@
+@@ -1628,7 +1686,7 @@
              strcat(apprun_path, apprun_fname);
  
              // create copy of argument list without the --appimage-extract-and-run parameter
@@ -198,7 +229,7 @@
              int new_argc = 0;
              new_argv[new_argc++] = strdup(apprun_path);
              for (int i = 1; i < argc; ++i) {
-@@ -1654,10 +1700,33 @@
+@@ -1654,10 +1712,33 @@
              exit(EXIT_EXECERROR);
          }
  
@@ -236,7 +267,7 @@
          if (getenv("NO_CLEANUP") == NULL) {
              if (!rm_recursive(prefix)) {
                  fprintf(stderr, "Failed to clean up cache directory\n");
-@@ -1666,9 +1735,15 @@
+@@ -1666,9 +1747,15 @@
              }
          }
  

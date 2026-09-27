@@ -193,7 +193,7 @@ try {
     await readFile(path.join(runtimeBase, "runtime.json"), "utf8"),
   );
   assert.equal(runtime.schema, 1);
-  assert.equal(runtime.patchset, "isolated-extraction-v1");
+  assert.equal(runtime.patchset, "isolated-extraction-v2");
   const runtimeVersion = await run(
     appimagePath,
     ["--appimage-version"],

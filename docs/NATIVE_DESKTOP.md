@@ -152,6 +152,7 @@ node scripts/check-native-package.mjs \
   target/release/bundle/deb/ShadowCode_VERSION_amd64.deb
 node scripts/test-native-runtime.mjs
 node --test scripts/test-native-source-fetch.mjs
+node scripts/test-native-runtime-write-errors.mjs
 node scripts/test-native-runtime-sources.mjs
 ```
 

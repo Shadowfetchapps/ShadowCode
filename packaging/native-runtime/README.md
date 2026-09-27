@@ -20,6 +20,11 @@ directory. The native payload observes wrapper loss and stops owned work. The
 explicit upstream `NO_CLEANUP` diagnostic option still retains extraction files.
 FUSE-mounted operation uses the upstream mount path.
 
+Patchset `isolated-extraction-v2` also rejects short writes and errors reported by
+`fflush` or `fclose`. It closes each opened stream exactly once and returns through
+the existing owned-directory cleanup before any payload can execute. This is
+output-error handling, not a disk-performance or power-loss durability claim.
+
 ## Build and provenance
 
 `node scripts/native-runtime.mjs` builds in Docker, or Podman with
@@ -77,6 +82,16 @@ reproducibility across compiler build timestamps.
 bodies, HTTP errors, redirects, identical-byte mirror recovery, both digest
 algorithms, retained-source reuse without HTTP requests, corrupt retained inputs,
 and cleanup after exhausted downloads. It uses only a disposable local server.
+
+After `node scripts/native-runtime.mjs` has populated the verified source cache,
+`node --test scripts/test-native-runtime-write-errors.mjs` verifies the pinned
+archive digest, applies the current patch with zero fuzz, and mechanically extracts
+the actual C extraction/cleanup functions into a small host-compiler harness.
+It uses a synthetic one-file SquashFS reader, real stdio, injected short/flush/close
+errors, and real `/dev/full` refusal. Success actually executes a fixture payload;
+errors must return false, never attempt payload execution, close once, remove the
+owned directory and preserve a sibling sentinel. This fast test does not build
+the full runtime or qualify the static musl/AppImage integration.
 
 After packaging, `node scripts/test-native-runtime-sources.mjs` extracts the
 shipped source archive, verifies its receipt, and rebuilds in a disposable
