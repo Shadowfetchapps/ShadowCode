@@ -21,6 +21,7 @@ import {
 import { applicationNotices, appdirNotices } from "./native-notices.mjs";
 import { applyPackagingPath } from "./native-packaging-env.mjs";
 import { buildRuntime, runtimeNotices } from "./native-runtime.mjs";
+import { METAINFO_FILE, normalizeDesktopEntry } from "./native-desktop-metadata.mjs";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const packagingPath = applyPackagingPath(root);
 console.log(`Using sanitized packaging PATH: ${packagingPath}`);
@@ -56,7 +57,13 @@ console.log(
 const notices = path.join(root, "target/native-notices");
 const nativeRuntime = await buildRuntime();
 await applicationNotices(notices, llama);
-const files = { "/usr/share/doc/shadowcode/notices": notices };
+const files = {
+  "/usr/share/doc/shadowcode/notices": notices,
+  [`/usr/share/metainfo/${METAINFO_FILE}`]: path.join(
+    root,
+    `packaging/${METAINFO_FILE}`,
+  ),
+};
 const config = JSON.stringify({
   bundle: {
     useLocalToolsDir: true,
@@ -96,7 +103,7 @@ try {
         ),
         llama,
         scratch,
-        { run: (binary, args) => command(binary, args) },
+        { run: (binary, args) => command(binary, args), normalizeDesktop: true },
       );
     }
     if (format === "appimage") {
@@ -108,6 +115,7 @@ try {
         root,
         "target/release/bundle/appimage/ShadowCode.AppDir",
       );
+      await normalizeDesktopEntry(appdir, true);
       const runtimeInfo = await exec(appimage, ["--appimage-version"]);
       const runtimeVersion = runtimeInfo.stderr + runtimeInfo.stdout;
       if (!runtimeVersion.includes("/commit/75849dc"))

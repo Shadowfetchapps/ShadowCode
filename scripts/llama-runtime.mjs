@@ -17,6 +17,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeDesktopEntry } from "./native-desktop-metadata.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 export const RUNTIME_LOCATION = "usr/lib/shadowcode";
@@ -369,10 +370,16 @@ export async function verifyRuntimeDirectory(directory, pin, { run }) {
  * symlinks (the Tauri bundler's custom-files copy would dereference them),
  * regenerating md5sums and Installed-Size. Replaces `deb` atomically.
  */
-export async function addRuntimeToDeb(deb, runtime, scratch, { run }) {
+export async function addRuntimeToDeb(
+  deb,
+  runtime,
+  scratch,
+  { run, normalizeDesktop = false },
+) {
   const work = path.join(scratch, "deb-root");
   await rm(work, { recursive: true, force: true });
   await run("dpkg-deb", ["--raw-extract", deb, work]);
+  if (normalizeDesktop) await normalizeDesktopEntry(work);
   await copyManagedRuntime(runtime, path.join(work, RUNTIME_LOCATION));
   const sums = [];
   let kibibytes = 0;

@@ -20,6 +20,7 @@ import {
   parseFields,
   verifyRuntimeDirectory,
 } from "./llama-runtime.mjs";
+import { DESKTOP_FILE, METAINFO_FILE } from "./native-desktop-metadata.mjs";
 const run = promisify(execFile);
 const [appimagePath, debPath] = process.argv
   .slice(2)
@@ -42,6 +43,10 @@ const pin = parseFields(
     fileURLToPath(new URL("../tools/llama.cpp.pin", import.meta.url)),
     "utf8",
   ),
+);
+const metainfoName = METAINFO_FILE;
+const metainfoSource = fileURLToPath(
+  new URL(`../packaging/${metainfoName}`, import.meta.url),
 );
 const digest = async (file) =>
   createHash("sha256")
@@ -137,6 +142,21 @@ async function verifyNotices(directory, includeSystem) {
     noticeFiles: new Set(files.map((file) => file.file)).size,
   };
 }
+async function verifyMetainfo(directory) {
+  const metainfo = path.join(directory, "usr/share/metainfo", metainfoName);
+  assert.equal(
+    await digest(metainfo),
+    await digest(metainfoSource),
+    "The package must ship the reviewed AppStream metadata unchanged",
+  );
+  const desktop = await readFile(
+    path.join(directory, "usr/share/applications", DESKTOP_FILE),
+    "utf8",
+  );
+  assert.match(desktop, /^Name=ShadowCode$/m);
+  assert.match(desktop, /^Type=Application$/m);
+  await run("appstreamcli", ["validate", "--no-net", metainfo], options);
+}
 try {
   const version = (
     await run(
@@ -148,6 +168,7 @@ try {
   assert.match(version, /^ShadowCode \d+\.\d+\.\d+$/);
   await run(appimagePath, ["--appimage-extract"], { ...options, cwd: scratch });
   const appdir = path.join(scratch, "squashfs-root");
+  await verifyMetainfo(appdir);
   assert.equal(
     await digest(path.join(appdir, "AppRun")),
     await digest(
@@ -262,6 +283,7 @@ try {
   assert.equal(/libpython/i.test(dependencies), false);
   const deb = path.join(scratch, "deb");
   await run("dpkg-deb", ["--extract", debPath, deb], options);
+  await verifyMetainfo(deb);
   const debNotices = await verifyNotices(deb, false);
   const debRuntime = await verifyRuntimeDirectory(
     path.join(deb, RUNTIME_LOCATION),
@@ -345,6 +367,7 @@ try {
       "host dependency resolution",
       "matching compiled code and versions in AppImage and Debian packages",
       "versioned dependency inventories and SHA-256 verification of every notice",
+      "validated matching AppStream metadata and desktop launcher in both packages",
       "patched AppImage runtime machine code, notices, and matching source archive",
       "managed llama.cpp in usr/lib/shadowcode of both packages: pinned commit, relative symlinks, bundled libraries resolved inside the directory, llama-server --version with LD_LIBRARY_PATH unset, llama.cpp MIT notice",
     ],

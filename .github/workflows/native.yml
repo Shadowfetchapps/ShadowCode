@@ -27,7 +27,7 @@ jobs:
       - name: Package version
         run: echo "VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_ENV"
       - name: Native window dependencies
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libasound2-dev patchelf webkit2gtk-driver xvfb
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libasound2-dev patchelf webkit2gtk-driver xvfb appstream
       - name: Managed llama.cpp build dependencies
         run: sudo apt-get install -y cmake ninja-build libssl-dev libvulkan-dev glslc spirv-headers
       - run: npm --prefix ui ci && npm --prefix ui run build && npm --prefix ui test
@@ -111,7 +111,7 @@ jobs:
       - name: Build the managed llama.cpp runtime (Vulkan + all CPU variants)
         run: bash scripts/build-llama.cpp.sh --no-user-install
       - name: Check the managed runtime packaging steps
-        run: node --test scripts/test-llama-runtime.mjs
+        run: node --test scripts/test-llama-runtime.mjs scripts/test-native-desktop-metadata.mjs
       - name: Build native development packages with dependency notices
         run: node scripts/build-native.mjs
       - name: Inspect both packages

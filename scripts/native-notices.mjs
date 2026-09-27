@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { RUNTIME_LOCATION } from "./llama-runtime.mjs";
+import { METAINFO_FILE } from "./native-desktop-metadata.mjs";
 import {
   GLIB_DIRECTORY,
   GLIB_PROVENANCE,
@@ -372,6 +373,18 @@ export async function appdirNotices(appdir) {
   const generated = [];
   const managedRuntime = [];
   for (const file of await walk(appdir)) {
+    if (file === `usr/share/metainfo/${METAINFO_FILE}`) {
+      assert.equal(
+        sha256(await readFile(path.join(appdir, file))),
+        sha256(
+          await readFile(
+            path.join(root, "packaging", METAINFO_FILE),
+          ),
+        ),
+        "Bundled AppStream metadata differs from the reviewed source",
+      );
+      continue;
+    }
     if (file.startsWith(`${RUNTIME_LOCATION}/`)) {
       managedRuntime.push(file);
       continue;

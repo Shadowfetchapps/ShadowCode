@@ -115,7 +115,7 @@ statusContainer(
     ! command -v node; ! command -v cargo; ! command -v rustc
     dpkg -i /opt/ShadowCode.deb >/dev/null
     test -x /usr/bin/shadowcode
-    test -f /usr/share/applications/ShadowCode.desktop
+    test -f /usr/share/applications/com.shadowfetch.shadowcode.desktop
     test -f /usr/share/icons/hicolor/256x256/apps/shadowcode.png
     runuser -u nobody -- env HOME=/tmp sh -ceu '
       mkdir -p /tmp/project /tmp/profile

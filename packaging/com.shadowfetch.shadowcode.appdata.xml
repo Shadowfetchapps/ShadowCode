@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.shadowfetch.shadowcode</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>ShadowCode</name>
+  <summary>Run coding agents and local models in one workspace</summary>
+  <description>
+    <p>ShadowCode brings coding agents and local GGUF models into one desktop workspace. Choose a model for each task, review proposed changes, and decide when commands may run.</p>
+    <p>Use supported coding tools through their existing sign-ins, or run compatible local models with the bundled llama.cpp runtime. Conversations, changes, and task checks stay visible in the same project.</p>
+  </description>
+  <launchable type="desktop-id">com.shadowfetch.shadowcode.desktop</launchable>
+  <url type="homepage">https://github.com/Shadowfetchapps/ShadowCode</url>
+  <categories>
+    <category>Development</category>
+    <category>IDE</category>
+  </categories>
+  <provides>
+    <binary>shadowcode</binary>
+  </provides>
+</component>
