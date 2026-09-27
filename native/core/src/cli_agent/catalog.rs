@@ -20,9 +20,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
+    fs,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tokio::sync::{broadcast, Mutex};
 
@@ -33,6 +34,33 @@ pub const PERSISTED_POOL: &str = "*";
 pub const MIN_REFRESH_SECS: f64 = 5.0 * 60.0;
 const MAX_BACKOFF_SECS: f64 = 60.0 * 60.0;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BinaryStamp {
+    path: PathBuf,
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    file_id: (u64, u64),
+}
+
+fn binary_stamp(vendor: Vendor, config: &CliAgentsConfig) -> Option<BinaryStamp> {
+    let path = if vendor == Vendor::Antigravity {
+        super::antigravity_server::installation(config.binary(vendor)).map(|i| i.server)
+    } else {
+        resolve_binary(config.binary(vendor))
+    }?;
+    let metadata = fs::metadata(&path).ok()?;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Some(BinaryStamp {
+        path,
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        file_id: (metadata.dev(), metadata.ino()),
+    })
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VendorModel {
@@ -61,6 +89,9 @@ pub struct VendorStatus {
     pub detail: String,
     pub version: Option<String>,
     pub binary: Option<PathBuf>,
+    /// In-memory identity of the executable that supplied these capabilities.
+    #[serde(skip)]
+    binary_stamp: Option<BinaryStamp>,
     pub account: Option<AccountInfo>,
     pub models: Vec<VendorModel>,
     /// The runtime's protocol accepts image bytes from ShadowCode.
@@ -100,6 +131,7 @@ impl VendorStatus {
             },
             version: None,
             binary: None,
+            binary_stamp: None,
             account: None,
             models: Vec::new(),
             accepts_images: false,
@@ -456,7 +488,8 @@ impl VendorCatalog {
         if let Some(existing) = &previous {
             let fresh = now - existing.fetched_at < MIN_REFRESH_SECS;
             let backing_off = existing.next_allowed > now;
-            if backing_off || (!force && fresh) {
+            let binary_changed = existing.binary_stamp != binary_stamp(vendor, config);
+            if !binary_changed && (backing_off || (!force && fresh)) {
                 return existing.clone();
             }
         }
@@ -611,6 +644,7 @@ async fn probe_vendor(vendor: Vendor, config: &CliAgentsConfig, now: f64) -> Ven
         detail: String::new(),
         version,
         binary: Some(binary.clone()),
+        binary_stamp: binary_stamp(vendor, config),
         account: None,
         models: Vec::new(),
         accepts_images: false,

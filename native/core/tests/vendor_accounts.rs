@@ -141,6 +141,42 @@ async fn catalog_states_are_sign_in_setup_required_and_api_key() {
 }
 
 #[tokio::test]
+async fn replacing_vendor_binary_refreshes_image_capabilities_before_cache_expiry() {
+    let root = tempfile::tempdir().unwrap();
+    let fake = FakeCodex::new(root.path(), json!({"auth":"chatgpt","images":true}));
+    let catalog = VendorCatalog::new();
+    let cfg = config(&fake);
+    let initial = catalog.refresh(Vendor::Codex, &cfg, false).await;
+    assert_eq!(initial.availability, Availability::Ready);
+    assert!(initial.models.iter().all(|model| model.vision));
+
+    fake.configure(json!({"auth":"chatgpt","images":false}));
+    assert!(
+        catalog
+            .refresh(Vendor::Codex, &cfg, false)
+            .await
+            .models
+            .iter()
+            .all(|model| model.vision),
+        "unchanged binaries keep the bounded cache"
+    );
+
+    let binary = fake.dir.join("codex");
+    let replacement = fake.dir.join("codex.next");
+    fs::write(&replacement, fs::read(&binary).unwrap()).unwrap();
+    fs::set_permissions(&replacement, fs::metadata(&binary).unwrap().permissions()).unwrap();
+    fs::rename(&replacement, &binary).unwrap();
+    let refreshed = catalog.refresh(Vendor::Codex, &cfg, false).await;
+    assert_eq!(refreshed.availability, Availability::Ready);
+    assert!(refreshed.models.iter().all(|model| !model.vision));
+    let rows = catalog.picker_rows(&cfg, false).await;
+    assert!(rows
+        .iter()
+        .filter(|row| row.provider == "cli:codex")
+        .all(|row| !row.vision));
+}
+
+#[tokio::test]
 async fn codex_usage_pools_persist_go_stale_and_reset_on_account_switch() {
     let root = tempfile::tempdir().unwrap();
     let fake = FakeCodex::new(

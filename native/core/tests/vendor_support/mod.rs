@@ -106,8 +106,8 @@ for raw in sys.stdin:
             send({"jsonrpc":"2.0","id":mid,"result":rate_limits()})
     elif method == "model/list":
         send({"jsonrpc":"2.0","id":mid,"result":{"data":[
-            {"id":"gpt-6-astra","displayName":"GPT-6-Astra","isDefault":True,"inputModalities":["text","image"]},
-            {"id":"gpt-5.6-luna","displayName":"GPT-5.6-Luna","isDefault":False,"inputModalities":["text","image"]}]}})
+            {"id":"gpt-6-astra","displayName":"GPT-6-Astra","isDefault":True,"inputModalities":["text","image"] if C.get("images", True) else ["text"]},
+            {"id":"gpt-5.6-luna","displayName":"GPT-5.6-Luna","isDefault":False,"inputModalities":["text","image"] if C.get("images", True) else ["text"]}]}})
     elif method in ("thread/start", "thread/resume"):
         mark("threads.log", method + " " + json.dumps(params.get("model")) + " " + json.dumps(params.get("threadId")))
         if C.get("block_stdin"):
