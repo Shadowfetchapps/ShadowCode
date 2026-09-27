@@ -1229,7 +1229,8 @@ impl Store {
 
 /// Shared by ordinary finalization and startup recovery (inside its existing
 /// transaction). Preserve a completed assessment verbatim unless a newer
-/// observed receipt proves it was not the task's final evidence snapshot.
+/// observed receipt or native inspection proves it was not the task's final
+/// evidence snapshot.
 fn task_verification_on(db: &Connection, tid: &str) -> Result<Value> {
     let previous = query_rows(
         db,
@@ -1251,28 +1252,66 @@ fn task_verification_on(db: &Connection, tid: &str) -> Result<Value> {
     .map(|event| event["payload"].clone())
     .filter(|receipt| receipt.is_object() && receipt["task_id"] == tid)
     .collect();
-    // A host observation can precede a model error/cancellation and therefore
-    // have no final summary. Use only this task's durable successful native
-    // tool event; host data must never imply project-file inspection.
-    let host_event: Option<i64> = db.query_row(
-        "SELECT MAX(id) FROM events WHERE task_id=? AND type='tool.completed' AND json_extract(payload,'$.tool')='system_info' AND json_type(payload,'$.success')='true'",
+    // Both native and vendor tasks emit tool.completed. The host-generated
+    // start event identifies the execution owner; provider-controlled tool
+    // names must not become native inspection evidence on a failed vendor turn.
+    let native_start = query_rows(
+        db,
+        "SELECT id,json_type(payload,'$.native') AS native_type FROM events WHERE task_id=? AND type='agent.started' ORDER BY id DESC LIMIT 1",
         [tid],
-        |row| row.get(0),
-    )?;
-    let observed_host = host_event.is_some();
-    let newer_host_observation = host_event.is_some_and(|id| id > after);
-    let needs_assessment = previous.is_none() || !receipts.is_empty() || newer_host_observation;
+    )?
+    .pop()
+    .filter(|event| event["native_type"] == "true")
+    .and_then(|event| event["id"].as_i64());
+    let mut observed_workspace = false;
+    let mut observed_host = false;
+    let mut newer_observation = false;
+    if let Some(native_start) = native_start {
+        // Project only known names and their latest event IDs, never arguments
+        // or output. The result is bounded by the shared inspection allowlist.
+        let tools = crate::verification::INSPECTION_TOOLS;
+        let placeholders = vec!["?"; tools.len()].join(",");
+        let mut arguments = vec![
+            rusqlite::types::Value::from(tid.to_owned()),
+            rusqlite::types::Value::from(native_start),
+        ];
+        arguments.extend(
+            tools
+                .iter()
+                .map(|(tool, _)| rusqlite::types::Value::from((*tool).to_owned())),
+        );
+        let observations = query_rows(
+            db,
+            &format!(
+                "SELECT json_extract(payload,'$.tool') AS tool,MAX(id) AS id FROM events WHERE task_id=? AND id>? AND type='tool.completed' AND json_type(payload,'$.success')='true' AND json_type(payload,'$.tool')='text' AND json_extract(payload,'$.tool') IN ({placeholders}) GROUP BY json_extract(payload,'$.tool')"
+            ),
+            rusqlite::params_from_iter(arguments),
+        )?;
+        for event in observations {
+            match event["tool"]
+                .as_str()
+                .and_then(crate::verification::inspection_scope)
+            {
+                Some(crate::verification::InspectionScope::Workspace) => observed_workspace = true,
+                Some(crate::verification::InspectionScope::Host) => observed_host = true,
+                None => continue,
+            }
+            newer_observation |= event["id"].as_i64().is_some_and(|id| id > after);
+        }
+    }
+    let needs_assessment = previous.is_none() || !receipts.is_empty() || newer_observation;
     let mut summary = previous
         .map(|event| event["payload"].clone())
         .unwrap_or_else(|| json!({"commands":[]}));
     if needs_assessment {
+        let inspected_workspace = observed_workspace || summary["inspected_workspace"] == true;
         let inspected_host = observed_host || summary["inspected_host"] == true;
         let mut commands = summary["commands"].as_array().cloned().unwrap_or_default();
         commands.extend(receipts);
         let assessed = crate::verification::classify_observations(
             "",
             &commands,
-            summary["inspected_workspace"] == true,
+            inspected_workspace,
             inspected_host,
         );
         summary
@@ -1287,14 +1326,13 @@ fn task_verification_on(db: &Connection, tid: &str) -> Result<Value> {
         // Successful individual commands describe their observed snapshots;
         // they cannot substitute for the final assessment that did not run.
         summary["verified"] = json!(false);
-        summary["claim"] = json!(if !commands.is_empty()
-            || summary["inspected_workspace"] == true
-            || inspected_host
-        {
-            "observed"
-        } else {
-            "model_claim"
-        });
+        summary["claim"] = json!(
+            if !commands.is_empty() || inspected_workspace || inspected_host {
+                "observed"
+            } else {
+                "model_claim"
+            }
+        );
         summary["status"] = json!("incomplete");
         summary["red_green"] = json!(false);
         summary["final_assessment"] = json!("not_completed");
@@ -1375,6 +1413,315 @@ mod verification_tests {
     use super::*;
 
     #[test]
+    fn terminal_workspace_inspections_require_owned_successful_allowlisted_events() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        // Independent behavior inventory: never derive expectations from the
+        // production allowlist, so accidentally broadening it cannot pass.
+        let workspace_tools = [
+            "read_file",
+            "search_text",
+            "search_symbol",
+            "workspace_symbols",
+            "goto_definition",
+            "find_references",
+            "get_diagnostics",
+            "get_type_signature",
+            "repo_map",
+            "search_code",
+            "git_diff",
+            "git_status",
+            "git_log",
+            "mcp_sqlite_tables",
+            "mcp_sqlite_query",
+            "background_list",
+            "background_output",
+        ];
+        for tool in workspace_tools {
+            store
+                .add_event("agent.started", &json!({"native":true}), None, Some(tool))
+                .unwrap();
+            store
+                .add_event(
+                    "tool.completed",
+                    &json!({"tool":tool,"success":true,"task_id":"forged-payload-owner"}),
+                    Some("shared-session"),
+                    Some(tool),
+                )
+                .unwrap();
+        }
+        for (task, kind, tool, success) in [
+            ("failed", "tool.completed", json!("read_file"), json!(false)),
+            ("numeric", "tool.completed", json!("read_file"), json!(1)),
+            (
+                "string",
+                "tool.completed",
+                json!("read_file"),
+                json!("true"),
+            ),
+            ("missing", "tool.completed", json!("read_file"), Value::Null),
+            ("started", "tool.started", json!("read_file"), json!(true)),
+            ("exec", "tool.completed", json!("exec"), json!(true)),
+            ("edit", "tool.completed", json!("edit_file"), json!(true)),
+            (
+                "unknown",
+                "tool.completed",
+                json!("vendor_read_file"),
+                json!(true),
+            ),
+            (
+                "nested-tool",
+                "tool.completed",
+                json!({"name":"read_file"}),
+                json!(true),
+            ),
+            (
+                "host-only",
+                "tool.completed",
+                json!("system_info"),
+                json!(true),
+            ),
+        ] {
+            store
+                .add_event("agent.started", &json!({"native":true}), None, Some(task))
+                .unwrap();
+            store
+                .add_event(
+                    kind,
+                    &json!({"tool":tool,"success":success}),
+                    Some("shared-session"),
+                    Some(task),
+                )
+                .unwrap();
+        }
+        for task in ["session-only", "forged-payload-owner", "unrelated"] {
+            store
+                .add_event("agent.started", &json!({"native":true}), None, Some(task))
+                .unwrap();
+        }
+        store
+            .add_event(
+                "tool.completed",
+                &json!({"tool":"read_file","success":true,
+            "task_id":"session-only"}),
+                Some("shared-session"),
+                None,
+            )
+            .unwrap();
+        for tool in workspace_tools {
+            let summary = store.task_verification(tool).unwrap();
+            assert_eq!(summary["inspected_workspace"], true, "{tool}: {summary}");
+            assert_eq!(summary["inspected_host"], false, "{tool}: {summary}");
+            assert_eq!(summary["claim"], "observed");
+            assert_eq!(summary["verified"], false);
+            assert_eq!(summary["red_green"], false);
+            assert_eq!(summary["status"], "incomplete");
+            assert_eq!(summary["final_assessment"], "not_completed");
+            assert_eq!(summary["commands"], json!([]));
+        }
+        for task in [
+            "failed",
+            "numeric",
+            "string",
+            "missing",
+            "started",
+            "exec",
+            "edit",
+            "unknown",
+            "nested-tool",
+            "host-only",
+            "session-only",
+            "forged-payload-owner",
+            "unrelated",
+        ] {
+            let summary = store.task_verification(task).unwrap();
+            assert_eq!(summary["inspected_workspace"], false, "{task}: {summary}");
+            assert_eq!(summary["inspected_host"], task == "host-only");
+            assert_eq!(summary["verified"], false);
+            assert_eq!(
+                summary["claim"],
+                if task == "host-only" {
+                    "observed"
+                } else {
+                    "model_claim"
+                }
+            );
+        }
+        let expected = store.task_verification("read_file").unwrap();
+        drop(store);
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .task_verification("read_file")
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn terminal_workspace_history_preserves_later_assessment_and_retains_receipts() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("store.sqlite")).unwrap();
+        store
+            .add_event("agent.started", &json!({"native":true}), None, Some("task"))
+            .unwrap();
+        let observation = json!({"tool":"read_file","success":true});
+        store
+            .add_event("tool.completed", &observation, None, Some("task"))
+            .unwrap();
+        let command = receipt("task", "check");
+        let mut summary = crate::verification::classify_observations(
+            "",
+            std::slice::from_ref(&command),
+            false,
+            true,
+        );
+        summary["custom"] = json!("preserve");
+        store
+            .add_event("verification.summary", &summary, None, Some("task"))
+            .unwrap();
+        // A newer assessment takes precedence over historical inspection events.
+        assert_eq!(store.task_verification("task").unwrap(), summary);
+        store
+            .add_event("tool.completed", &observation, None, Some("task"))
+            .unwrap();
+        let after = store.task_verification("task").unwrap();
+        assert_eq!(after["inspected_workspace"], true);
+        assert_eq!(after["inspected_host"], true);
+        assert_eq!(after["custom"], "preserve");
+        assert_eq!(after["commands"], json!([command]));
+        assert_eq!(after["commands"][0]["state"], "passed");
+        assert_eq!(after["status"], "incomplete");
+        assert_eq!(after["final_assessment"], "not_completed");
+        assert_eq!(after["claim"], "observed");
+        assert_eq!(after["verified"], false);
+        assert_eq!(after["red_green"], false);
+        assert_eq!(store.task_verification("task").unwrap(), after);
+    }
+
+    #[test]
+    fn interrupted_workspace_inspection_recovery_is_durable_and_task_scoped() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        let session = store.create_session(root.path(), "fixture", "").unwrap();
+        let sid = session["id"].as_str().unwrap();
+        let first = store.create_task(sid, "Observed task").unwrap();
+        let second = store.create_task(sid, "Unobserved task").unwrap();
+        for (id, task) in [("observed-job", &first), ("unobserved-job", &second)] {
+            store
+                .save_job(&json!({"id":id,"session_id":sid,"task_id":task,"status":"running"}))
+                .unwrap();
+            store
+                .add_event(
+                    "agent.started",
+                    &json!({"native":true}),
+                    Some(sid),
+                    Some(task),
+                )
+                .unwrap();
+        }
+        store
+            .add_event(
+                "tool.completed",
+                &json!({"tool":"search_text","success":true,
+            "task_id":second}),
+                Some(sid),
+                Some(&first),
+            )
+            .unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.recover_jobs().unwrap(), 2);
+        assert_eq!(reopened.recover_jobs().unwrap(), 0);
+        for (id, inspected) in [("observed-job", true), ("unobserved-job", false)] {
+            let job = reopened.job(id).unwrap().unwrap();
+            let v = &job["result"]["verification"];
+            assert_eq!(job["status"], "interrupted");
+            assert_eq!(v["inspected_workspace"], inspected, "{id}: {v}");
+            assert_eq!(v["inspected_host"], false);
+            assert_eq!(v["verified"], false);
+            assert_eq!(v["red_green"], false);
+            assert_eq!(v["status"], "incomplete");
+            assert_eq!(v["final_assessment"], "interrupted");
+            assert_eq!(
+                v["claim"],
+                if inspected { "observed" } else { "model_claim" }
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_inspections_require_native_origin_before_the_observation() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("store.sqlite")).unwrap();
+        for tool in ["read_file", "system_info"] {
+            for (kind, marker) in [
+                ("native", Some(json!(true))),
+                ("vendor", Some(json!(false))),
+                ("numeric", Some(json!(1))),
+                ("string", Some(json!("true"))),
+                ("missing", None),
+                ("before-start", None),
+                ("latest-vendor", Some(json!(true))),
+            ] {
+                let task = format!("{tool}-{kind}");
+                if let Some(native) = marker {
+                    store
+                        .add_event(
+                            "agent.started",
+                            &json!({"native":native}),
+                            None,
+                            Some(&task),
+                        )
+                        .unwrap();
+                }
+                if kind == "latest-vendor" {
+                    store
+                        .add_event("agent.started", &json!({"native":false}), None, Some(&task))
+                        .unwrap();
+                }
+                // Copied native/task claims inside a provider tool payload are not authority.
+                store
+                    .add_event(
+                        "tool.completed",
+                        &json!({"tool":tool,"success":true,
+                    "native":true,"task_id":"native"}),
+                        None,
+                        Some(&task),
+                    )
+                    .unwrap();
+                if kind == "before-start" {
+                    store
+                        .add_event("agent.started", &json!({"native":true}), None, Some(&task))
+                        .unwrap();
+                }
+                let v = store.task_verification(&task).unwrap();
+                assert_eq!(
+                    v["inspected_workspace"],
+                    kind == "native" && tool == "read_file",
+                    "{task}: {v}"
+                );
+                assert_eq!(
+                    v["inspected_host"],
+                    kind == "native" && tool == "system_info",
+                    "{task}: {v}"
+                );
+                assert_eq!(v["verified"], false);
+                assert_eq!(
+                    v["claim"],
+                    if kind == "native" {
+                        "observed"
+                    } else {
+                        "model_claim"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn terminal_verification_preserves_only_owned_successful_host_observations() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("store.sqlite");
@@ -1383,8 +1730,11 @@ mod verification_tests {
             ("host", "system_info", json!(true)),
             ("failed", "system_info", json!(false)),
             ("numeric", "system_info", json!(1)),
-            ("other-tool", "read_file", json!(true)),
+            ("other-tool", "edit_file", json!(true)),
         ] {
+            store
+                .add_event("agent.started", &json!({"native":true}), None, Some(task))
+                .unwrap();
             store
                 .add_event(
                     "tool.completed",
@@ -1436,6 +1786,9 @@ mod verification_tests {
     fn terminal_host_history_does_not_replace_a_later_assessment_but_new_evidence_does() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("store.sqlite")).unwrap();
+        store
+            .add_event("agent.started", &json!({"native":true}), None, Some("task"))
+            .unwrap();
         let observation = json!({"tool":"system_info","success":true});
         store
             .add_event("tool.completed", &observation, None, Some("task"))

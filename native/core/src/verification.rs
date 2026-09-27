@@ -12,6 +12,41 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
+/// Native inspection scope records successful observations, not verification.
+/// Keep the live loop and durable failure/recovery assessment on one allowlist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InspectionScope {
+    Workspace,
+    Host,
+}
+
+pub(crate) const INSPECTION_TOOLS: &[(&str, InspectionScope)] = &[
+    ("read_file", InspectionScope::Workspace),
+    ("search_text", InspectionScope::Workspace),
+    ("search_symbol", InspectionScope::Workspace),
+    ("workspace_symbols", InspectionScope::Workspace),
+    ("goto_definition", InspectionScope::Workspace),
+    ("find_references", InspectionScope::Workspace),
+    ("get_diagnostics", InspectionScope::Workspace),
+    ("get_type_signature", InspectionScope::Workspace),
+    ("repo_map", InspectionScope::Workspace),
+    ("search_code", InspectionScope::Workspace),
+    ("git_diff", InspectionScope::Workspace),
+    ("git_status", InspectionScope::Workspace),
+    ("git_log", InspectionScope::Workspace),
+    ("mcp_sqlite_tables", InspectionScope::Workspace),
+    ("mcp_sqlite_query", InspectionScope::Workspace),
+    ("background_list", InspectionScope::Workspace),
+    ("background_output", InspectionScope::Workspace),
+    ("system_info", InspectionScope::Host),
+];
+
+pub(crate) fn inspection_scope(tool: &str) -> Option<InspectionScope> {
+    INSPECTION_TOOLS
+        .iter()
+        .find_map(|(name, scope)| (*name == tool).then_some(*scope))
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CheckConfig {

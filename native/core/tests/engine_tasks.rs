@@ -3256,3 +3256,112 @@ async fn unindexed_duplicate_provider_ids_cannot_overwrite_first_call_arguments(
     assert_eq!(usage.len(), 1);
     assert_eq!(usage[0]["payload"]["purpose"], "failed_attempt");
 }
+
+#[tokio::test]
+async fn inspection_workspace_evidence_survives_model_error_without_leaking_to_next_task() {
+    let server = support::server(|index, _| {
+        let answer = if index == 0 {
+            response(
+                "",
+                json!([
+                    tool("map", "repo_map", json!({})),
+                    tool("read", "read_file", json!({"path":"fixture.txt"})),
+                    tool("search", "search_text", json!({"query":"fixture"}))
+                ]),
+            )
+        } else {
+            let mut rejected = response("", json!([]));
+            rejected["choices"][0]["finish_reason"] = json!("length");
+            rejected
+        };
+        (answer, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    fs::write(
+        root.path().join("project/fixture.txt"),
+        "fixture observation\n",
+    )
+    .unwrap();
+    let first = engine
+        .start(request(root.path(), "Inspect the current project.", None))
+        .await
+        .unwrap();
+    let first = wait(&engine, &first.id).await;
+    assert_eq!(first.status, "failed");
+    assert!(first.summary.contains("cut short"));
+    assert!(
+        engine
+            .store()
+            .last_task_event(&first.task_id, "verification.summary")
+            .unwrap()
+            .is_none(),
+        "exercise durable tool evidence without a final summary"
+    );
+    let current = shadowcode_core::verification::current(&engine, &first)
+        .await
+        .unwrap();
+    let second = engine
+        .start(request(
+            root.path(),
+            "Explain this text.",
+            Some(first.session_id.clone()),
+        ))
+        .await
+        .unwrap();
+    let second = wait(&engine, &second.id).await;
+    let second_current = shadowcode_core::verification::current(&engine, &second)
+        .await
+        .unwrap();
+    let paths = engine.paths().clone();
+    let (saved_first, events) = reopen_terminal_job(engine, first).await;
+    let reopened = Engine::open(paths).unwrap();
+    let saved_second = reopened.job(&second.id).unwrap().unwrap();
+    reopened.shutdown().await.unwrap();
+    for tool in ["repo_map", "read_file", "search_text"] {
+        assert!(
+            events
+                .iter()
+                .any(|event| event["task_id"] == saved_first.task_id
+                    && event["type"] == "tool.completed"
+                    && event["payload"]["tool"] == tool
+                    && event["payload"]["success"] == true),
+            "{tool} must actually succeed before the failure"
+        );
+    }
+    for v in [
+        &saved_first.result.as_ref().unwrap()["verification"],
+        &current,
+    ] {
+        assert_eq!(v["inspected_workspace"], true);
+        assert_eq!(v["inspected_host"], false);
+        assert_eq!(v["claim"], "observed");
+        assert_eq!(v["status"], "failed");
+        assert_eq!(v["verified"], false);
+        assert_eq!(v["commands"], json!([]));
+        assert_eq!(v["final_assessment"], "not_completed");
+    }
+    assert_eq!(saved_second.status, "failed");
+    for v in [
+        &saved_second.result.as_ref().unwrap()["verification"],
+        &second_current,
+    ] {
+        assert_eq!(v["inspected_workspace"], false);
+        assert_eq!(v["inspected_host"], false);
+        assert_eq!(v["claim"], "model_claim");
+        assert_eq!(v["verified"], false);
+    }
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
+    assert!(!events
+        .iter()
+        .any(|event| event["task_id"] == saved_second.task_id && event["type"] == "tool.started"));
+    for task_id in [&saved_first.task_id, &saved_second.task_id] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["type"] == "agent.completed" && e["task_id"] == *task_id)
+                .count(),
+            1
+        );
+    }
+}

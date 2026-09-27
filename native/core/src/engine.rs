@@ -2688,32 +2688,16 @@ impl Engine {
                             .clock
                             .record_check(&result.output["verification_receipt"]);
                     }
-                    if result.success && call.name == "system_info" {
-                        inspected_host = true;
-                    }
-                    if result.success
-                        && matches!(
-                            call.name.as_str(),
-                            "read_file"
-                                | "search_text"
-                                | "search_symbol"
-                                | "workspace_symbols"
-                                | "goto_definition"
-                                | "find_references"
-                                | "get_diagnostics"
-                                | "get_type_signature"
-                                | "repo_map"
-                                | "search_code"
-                                | "git_diff"
-                                | "git_status"
-                                | "git_log"
-                                | "mcp_sqlite_tables"
-                                | "mcp_sqlite_query"
-                                | "background_list"
-                                | "background_output"
-                        )
-                    {
-                        inspected = true;
+                    if result.success {
+                        match crate::verification::inspection_scope(&call.name) {
+                            Some(crate::verification::InspectionScope::Workspace) => {
+                                inspected = true
+                            }
+                            Some(crate::verification::InspectionScope::Host) => {
+                                inspected_host = true
+                            }
+                            None => {}
+                        }
                     }
                     if call.name == "exec" {
                         commands.push(result.output["verification_receipt"].clone());
