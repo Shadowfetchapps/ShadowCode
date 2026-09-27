@@ -208,7 +208,9 @@ impl Service {
     }
     fn config(&self) -> Result<Config> {
         let config = Config::load(self.engine.paths(), Some(&self.workspace()?))?;
-        self.engine.vendors().set_offline(config.offline());
+        self.engine
+            .vendors()
+            .configure(&config.cli_agents, config.offline());
         Ok(config)
     }
     fn snapshot_selection(&self) -> Result<Selection> {

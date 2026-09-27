@@ -432,3 +432,46 @@ it("Compare runs a task on two models in hidden lanes, opens a lane and returns"
   );
   expect(fake.state.selected).toBe("/work/demo");
 });
+
+it("offers cached local choices before a held full picker refresh without selecting a model", async () => {
+  const bridge = window.__SHADOW_TEST_TRANSPORT__!;
+  const request = bridge.request;
+  let release!: (value: unknown) => void;
+  const held = new Promise<unknown>((resolve) => {
+    release = resolve;
+  });
+  let fullStarted = 0;
+  bridge.request = (path, method, body) => {
+    if (
+      method === "GET" &&
+      path.startsWith("/api/picker") &&
+      !path.includes("cached=1")
+    ) {
+      fullStarted += 1;
+      return held;
+    }
+    return request(path, method, body);
+  };
+  try {
+    render(<App />);
+    await screen.findByRole("textbox", { name: "Message ShadowCode" });
+    await waitFor(() => expect(fullStarted).toBeGreaterThan(0));
+    fireEvent.click(trigger());
+    expect(
+      await screen.findByRole("option", { name: /qwen3:14b · This computer/ }),
+    ).toBeTruthy();
+    expect(trigger().textContent).toContain("Choose a model");
+    fireEvent.change(prompt(), { target: { value: "Inspect the project" } });
+    expect(send()).toHaveProperty("disabled", true);
+    expect(fake.log.some((r) => r.path === "/api/picker?cached=1")).toBe(true);
+    expect(
+      fake.log.some((r) => r.path === "/api/jobs" && r.method === "POST"),
+    ).toBe(false);
+  } finally {
+    const response = await request("/api/picker", "GET", null);
+    await act(async () => {
+      release(response);
+      await held;
+    });
+  }
+});

@@ -3,9 +3,11 @@ import { api, type AllowanceResponse } from "../api";
 import type { PickerTarget } from "../lib/picker";
 import type { ToastKind } from "./useToasts";
 
-/** The model picker's rows. Requests can overlap (vendor checks are slow);
- * only the newest one may replace the rows, or an older answer would hide a
- * model that was just added. */
+const PICKER_POLL_INTERVAL_MS = 1000;
+const PICKER_POLL_LIFETIME_MS = 60000;
+
+/** Publish local and already-cached rows while the full vendor refresh runs.
+ * A full answer wins over its snapshots; a newer reload wins over both. */
 export function usePickerTargets(
   toast: (text: string, kind?: ToastKind) => void,
 ) {
@@ -13,19 +15,61 @@ export function usePickerTargets(
   const [loaded, setLoaded] = useState(false);
   const fetched = useRef(0);
   const seq = useRef(0);
+  const mounted = useRef(false);
+  const stopPolling = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      seq.current += 1;
+      stopPolling.current?.();
+      stopPolling.current = null;
+    };
+  }, []);
   const reload = useCallback(
     async (refresh = false) => {
+      if (!mounted.current) return;
+      stopPolling.current?.();
       fetched.current = Date.now();
       const ticket = ++seq.current;
+      const current = () => mounted.current && ticket === seq.current;
+      let polling = true;
+      let next: ReturnType<typeof setTimeout> | undefined;
+      let lifetime: ReturnType<typeof setTimeout> | undefined;
+      const stop = () => {
+        polling = false;
+        clearTimeout(next);
+        clearTimeout(lifetime);
+      };
+      stopPolling.current = stop;
+      lifetime = setTimeout(stop, PICKER_POLL_LIFETIME_MS);
+      const snapshot = async () => {
+        try {
+          const result = await api.pickerCached();
+          if (!polling || !current()) return;
+          setTargets(Array.isArray(result.targets) ? result.targets : []);
+          setLoaded(true);
+        } catch {
+          // The full request owns error reporting. A snapshot can recover.
+        } finally {
+          // Never overlap snapshots, including when the bridge is slow.
+          if (polling && current())
+            next = setTimeout(() => void snapshot(), PICKER_POLL_INTERVAL_MS);
+        }
+      };
+      void snapshot();
       try {
         const result = await api.picker(refresh);
-        if (ticket !== seq.current) return;
+        stop();
+        if (!current()) return;
         setTargets(Array.isArray(result.targets) ? result.targets : []);
       } catch (e) {
-        if (ticket === seq.current)
-          toast(`Could not load models: ${String(e)}`, "err");
+        stop();
+        if (current()) toast(`Could not load models: ${String(e)}`, "err");
       } finally {
-        if (ticket === seq.current) setLoaded(true);
+        stop();
+        if (stopPolling.current === stop) stopPolling.current = null;
+        if (current()) setLoaded(true);
       }
     },
     [toast],

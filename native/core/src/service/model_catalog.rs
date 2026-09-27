@@ -61,7 +61,8 @@ impl Service {
             }
             ("GET", "/api/picker") => {
                 let cfg = self.config()?;
-                self.picker_catalog(&cfg, q("refresh") == "1").await
+                self.picker_catalog_with(&cfg, q("refresh") == "1", q("cached") == "1")
+                    .await
             }
             ("GET", "/api/local-models") => {
                 let cfg = self.config()?;
@@ -229,13 +230,14 @@ impl Service {
     /// The composer picker: subscription rows from the vendor catalog and
     /// local GGUF rows from the local catalog, in one list.
     pub(super) async fn picker_catalog(&self, cfg: &Config, force: bool) -> Result<Value> {
+        self.picker_catalog_with(cfg, force, false).await
+    }
+    async fn picker_catalog_with(&self, cfg: &Config, force: bool, cached: bool) -> Result<Value> {
         let vendors = self.engine.vendors();
-        let mut targets: Vec<Value> = vendors
-            .picker_rows(&cfg.cli_agents, force)
-            .await
-            .iter()
-            .map(crate::cli_agent::picker::PickerTarget::to_json)
-            .collect();
+        if !cached {
+            vendors.refresh_all(&cfg.cli_agents, force).await;
+        }
+        let mut targets: Vec<Value> = Vec::new();
         let local_cfg = cfg.local_engine.clone();
         let engine = self.engine.clone();
         let local = tokio::task::spawn_blocking(move || {
@@ -244,17 +246,18 @@ impl Service {
         .await
         .context("Local model catalog stopped")?;
         targets.extend(crate::local_engine::picker_rows(&local, &cfg.model.default));
-        // OpenRouter rows appear once a key is saved (saving fetches the list;
-        // until then the picker offers to add one). A stale cached list is
-        // shown at once and refreshed in the background, so the picker never
-        // waits on the network.
+        // Snapshot reads never fetch missing or stale OpenRouter metadata.
+        // Full requests retain their existing first-fetch/background-refresh
+        // behavior; the independent snapshot path makes local rows available
+        // while that network request is pending.
         let paths = self.engine.paths();
         let offline = cfg.offline();
         let key_set = crate::openrouter::key(paths).is_some();
+        let snapshot_only = cached;
         let catalog = match (key_set, crate::openrouter::cached(paths)) {
             (false, _) => None,
             (true, Some(cached)) => {
-                if !offline && !crate::openrouter::is_fresh(&cached) {
+                if !snapshot_only && !offline && !crate::openrouter::is_fresh(&cached) {
                     let paths = paths.clone();
                     tokio::spawn(async move {
                         let _ = crate::openrouter::refresh(&paths, true).await;
@@ -262,7 +265,9 @@ impl Service {
                 }
                 Some(cached)
             }
-            (true, None) if !offline => crate::openrouter::refresh(paths, false).await.ok(),
+            (true, None) if !snapshot_only && !offline => {
+                crate::openrouter::refresh(paths, false).await.ok()
+            }
             (true, None) => None,
         };
         targets.extend(crate::openrouter::picker_rows(
@@ -270,13 +275,22 @@ impl Service {
             key_set,
             offline,
         ));
+        // Project last: provider observations may change while the local or
+        // OpenRouter catalog is being read. Both vendor views must agree, and
+        // an obsolete per-probe return must not overwrite a newer snapshot.
+        let (rows, vendor_json) = vendors.picker_cached(&cfg.cli_agents).await;
+        targets.splice(
+            0..0,
+            rows.iter()
+                .map(crate::cli_agent::picker::PickerTarget::to_json),
+        );
         // The composer shows its reasoning-effort control only on these.
         for row in &mut targets {
             row["reasoning"] = json!(crate::effort::row_supports(row));
         }
         Ok(json!({
             "targets": targets,
-            "vendors": vendors.status_json(&cfg.cli_agents, false).await,
+            "vendors": vendor_json,
             "local_engine": local,
             "generated_at": crate::now(),
         }))

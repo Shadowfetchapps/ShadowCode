@@ -560,7 +560,9 @@ impl Engine {
         );
         let workspace = Arc::new(Workspace::open(&request.workspace)?);
         let mut config = Config::load(&self.0.paths, Some(&workspace.path))?;
-        self.0.vendors.set_offline(config.offline());
+        self.0
+            .vendors
+            .configure(&config.cli_agents, config.offline());
         // Every entry point (desktop, CLI, goals, MCP, workflows) passes here.
         ensure!(
             config.is_trusted(&workspace.path),

@@ -156,6 +156,11 @@ impl Service {
             *cfg = updated;
             Ok(())
         })?;
+        // A successful settings save is authoritative immediately, even if
+        // no follow-up catalog request arrives before an old probe finishes.
+        self.engine
+            .vendors()
+            .configure(&cfg.cli_agents, cfg.offline());
         self.register(&cfg.model)?;
         config_view(&cfg)
     }

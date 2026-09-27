@@ -1155,6 +1155,8 @@ export const api = {
   /** The composer's only source of rows (vendor + local). */
   picker: (refresh = false) =>
     get<PickerResponse>(`/api/picker${refresh ? "?refresh=1" : ""}`),
+  /** Local and cached rows only; does not start provider or network probes. */
+  pickerCached: () => get<PickerResponse>("/api/picker?cached=1"),
   accounts: (refresh = false) =>
     get<AccountsResponse>(`/api/accounts${refresh ? "?refresh=1" : ""}`),
   connectAccount: (vendor: string) =>
