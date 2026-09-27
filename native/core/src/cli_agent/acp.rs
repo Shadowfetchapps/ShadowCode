@@ -21,6 +21,41 @@ use std::collections::HashMap;
 const OUTPUT_PREVIEW: usize = 8000;
 const TOOL_METADATA_COUNT: usize = 128;
 const TOOL_METADATA_BYTES: usize = 64_000;
+const RAW_OUTPUT_BYTES: usize = 8000;
+
+#[derive(Clone)]
+struct RawToolOutput {
+    value: Value,
+    truncated: bool,
+}
+
+impl RawToolOutput {
+    fn capture(value: &Value) -> Self {
+        // Redact before clipping, including known credential keys: clipping
+        // first could leave a token prefix that no longer matches redaction.
+        let mut value = value.clone();
+        crate::redaction::redact_known_secrets(&mut value);
+        let value = redact_value(value);
+        let encoded = value.to_string();
+        if encoded.len() <= RAW_OUTPUT_BYTES {
+            return Self {
+                value,
+                truncated: false,
+            };
+        }
+        // Oversize JSON becomes explicitly labeled JSON text, not a partial
+        // structured result. Each source byte needs at most two bytes when
+        // this already-escaped JSON prefix is serialized as a JSON string.
+        let mut end = (RAW_OUTPUT_BYTES - 2) / 2;
+        while !encoded.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self {
+            value: Value::String(encoded[..end].to_owned()),
+            truncated: true,
+        }
+    }
+}
 
 /// Shown when the Antigravity server has no valid Google sign-in.
 pub const ANTIGRAVITY_SIGN_IN: &str = "Antigravity isn't signed in, or its sign-in expired. Choose Connect for Antigravity in Settings › Accounts.";
@@ -69,6 +104,10 @@ pub struct AcpAdapter {
     // of current pending tools so omitted input cannot erase the operation
     // the user is being asked to approve.
     tool_metadata: HashMap<String, Value>,
+    // Kept separately: a large result must not evict approval metadata.
+    // At most 128 values of 8,000 serialized bytes; IDs have the existing
+    // metadata byte ceiling. These are payload bounds, not heap estimates.
+    tool_outputs: HashMap<String, RawToolOutput>,
     options: Option<LaunchOptions>,
     prompt_active: bool,
     /// A model switch was sent and not yet answered. Prompts wait for it:
@@ -97,6 +136,7 @@ impl AcpAdapter {
             pending_permissions: HashMap::new(),
             tool_names: HashMap::new(),
             tool_metadata: HashMap::new(),
+            tool_outputs: HashMap::new(),
             options: None,
             prompt_active: false,
             switching: false,
@@ -135,6 +175,7 @@ impl AcpAdapter {
         self.prompt_id = Some(id);
         self.prompt_active = true;
         self.tool_metadata.clear();
+        self.tool_outputs.clear();
         let mut prompt = vec![json!({"type":"text","text":text})];
         for image in images {
             prompt.push(json!({
@@ -295,6 +336,7 @@ impl AcpAdapter {
             }
             if Some(id) == self.prompt_id {
                 self.prompt_active = false;
+                self.tool_outputs.clear();
                 return Ok(Step::update(Update::TurnFailed(format!(
                     "{} could not run the prompt: {text}",
                     self.vendor.id()
@@ -375,6 +417,7 @@ impl AcpAdapter {
         }
         if Some(id) == self.prompt_id {
             self.prompt_active = false;
+            self.tool_outputs.clear();
             let stop = res["stopReason"].as_str().unwrap_or("end_turn");
             return Ok(match stop {
                 "cancelled" => Step::update(Update::TurnCompleted {
@@ -408,7 +451,16 @@ impl AcpAdapter {
     }
     fn remember_tool(&mut self, update: &Value, initial: bool) -> Value {
         let Some(id) = update["toolCallId"].as_str().filter(|id| !id.is_empty()) else {
-            return update.clone();
+            let mut current = update.clone();
+            if let Some(object) = current.as_object_mut() {
+                object.remove("rawOutputTruncated");
+            }
+            if let Some(raw) = update.get("rawOutput").filter(|value| !value.is_null()) {
+                let output = RawToolOutput::capture(raw);
+                current["rawOutput"] = output.value;
+                current["rawOutputTruncated"] = json!(output.truncated);
+            }
+            return current;
         };
         let mut current = if initial {
             json!({"toolCallId":id})
@@ -441,6 +493,28 @@ impl AcpAdapter {
             // Oversize/new excess entries remain usable in the current frame
             // but cannot later recover an obsolete cached approval input.
             self.tool_metadata.remove(id);
+        }
+        if initial {
+            self.tool_outputs.remove(id);
+        }
+        // ACP rawOutput has the same omission/null semantics as rawInput.
+        // Keep its typed JSON when small enough, independently of content.
+        let output = update
+            .get("rawOutput")
+            .filter(|value| !value.is_null())
+            .map(RawToolOutput::capture)
+            .or_else(|| self.tool_outputs.get(id).cloned());
+        if let Some(output) = output {
+            if id.len() <= TOOL_METADATA_BYTES
+                && (self.tool_outputs.contains_key(id)
+                    || self.tool_outputs.len() < TOOL_METADATA_COUNT)
+            {
+                self.tool_outputs.insert(id.to_owned(), output.clone());
+            }
+            // Add only to this frame's merged view, after approval metadata
+            // has been cached, so output cannot change that cache's budget.
+            current["rawOutput"] = output.value;
+            current["rawOutputTruncated"] = json!(output.truncated);
         }
         current
     }
@@ -507,6 +581,7 @@ impl AcpAdapter {
     }
     fn tool_finished(&mut self, id: &str, name: &str, update: &Value) -> Step {
         self.tool_metadata.remove(id);
+        self.tool_outputs.remove(id);
         let success = update["status"].as_str() == Some("completed");
         let paths: Vec<String> = update["locations"]
             .as_array()
@@ -524,7 +599,7 @@ impl AcpAdapter {
                 }
             }
         }
-        let output = redact_value(json!({
+        let mut output = redact_value(json!({
             "status": update["status"],
             "input": update["rawInput"],
             "tool_kind": update["kind"],
@@ -532,6 +607,25 @@ impl AcpAdapter {
             "locations": paths,
             "content": content,
         }));
+        if let Some(raw) = update.get("rawOutput").filter(|value| !value.is_null()) {
+            // All output reaching the merged view is already redacted and
+            // bounded. The missing-ID path skips caching, so bound it here.
+            let captured = if update.get("rawOutputTruncated").is_some() {
+                RawToolOutput {
+                    value: raw.clone(),
+                    truncated: update["rawOutputTruncated"] == true,
+                }
+            } else {
+                RawToolOutput::capture(raw)
+            };
+            output["raw_output"] = captured.value;
+            output["raw_output_truncated"] = json!(captured.truncated);
+            output["raw_output_format"] = json!(if captured.truncated {
+                "json_text_preview"
+            } else {
+                "json"
+            });
+        }
         let mut step = Step::update(Update::ToolCompleted {
             id: id.to_owned(),
             name: name.to_owned(),
@@ -792,6 +886,170 @@ impl CliAdapter for AcpAdapter {
 #[cfg(test)]
 mod metadata_tests {
     use super::*;
+
+    fn finished_output(adapter: &mut AcpAdapter, update: Value) -> Value {
+        adapter
+            .session_update(&update)
+            .updates
+            .into_iter()
+            .find_map(|update| match update {
+                Update::ToolCompleted { output, .. } => Some(output),
+                _ => None,
+            })
+            .expect("completed tool output")
+    }
+
+    #[test]
+    fn acp_raw_output_merges_partial_updates_and_preserves_content_independently() {
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        adapter.session_update(&json!({"sessionUpdate":"tool_call","toolCallId":"output-1",
+            "kind":"execute","rawOutput":{"stdout":"first"},
+            "content":[{"type":"content","content":{"type":"text","text":"display content"}}]}));
+        adapter.session_update(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"output-1",
+            "rawOutput":{"stdout":"replacement","exitCode":0}}),
+        );
+        adapter.session_update(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"output-1","rawOutput":null}),
+        );
+        let output = finished_output(
+            &mut adapter,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"output-1","status":"completed"}),
+        );
+        assert_eq!(
+            output["raw_output"],
+            json!({"stdout":"replacement","exitCode":0})
+        );
+        assert_eq!(output["raw_output_truncated"], false);
+        assert_eq!(output["raw_output_format"], "json");
+        assert_eq!(output["content"], json!(["display content"]));
+        assert!(adapter.tool_outputs.is_empty());
+
+        for replacement in [json!({}), json!([]), json!(""), json!(false), json!(0)] {
+            adapter.session_update(
+                &json!({"sessionUpdate":"tool_call","toolCallId":"output-1","rawOutput":"old"}),
+            );
+            // Permission toolCall is also a partial update of the same tool.
+            permission(
+                &mut adapter,
+                json!({"toolCallId":"output-1","rawOutput":replacement}),
+            );
+            let output = finished_output(
+                &mut adapter,
+                json!({"sessionUpdate":"tool_call_update","toolCallId":"output-1","status":"completed","rawOutput":null}),
+            );
+            assert_eq!(output["raw_output"], replacement);
+        }
+        let output = finished_output(
+            &mut adapter,
+            json!({"sessionUpdate":"tool_call","toolCallId":"no-output","status":"completed","rawOutput":null}),
+        );
+        assert!(output.get("raw_output").is_none());
+    }
+
+    #[test]
+    fn acp_raw_output_redacts_before_bounding_without_evicting_approval_input() {
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        let secret = "sk-proj-fixtureABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+        let initial = json!({"sessionUpdate":"tool_call","toolCallId":"output-1","kind":"execute",
+            "rawInput":{"command":"keep-this-input"},"rawOutput":{"access_token":"local-secret","stdout":format!("key={secret}")}});
+        adapter.session_update(&initial);
+        let output = finished_output(
+            &mut adapter,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"output-1","status":"failed"}),
+        );
+        assert_eq!(
+            output["raw_output"]["access_token"],
+            crate::redaction::placeholder()
+        );
+        assert!(!output.to_string().contains(secret));
+        assert!(!output.to_string().contains("local-secret"));
+
+        adapter.session_update(&initial);
+        adapter.session_update(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"output-1",
+            "rawOutput":format!("key={secret}\n{}", "\n\\\"é".repeat(RAW_OUTPUT_BYTES))}),
+        );
+        assert_eq!(
+            permission(&mut adapter, json!({"toolCallId":"output-1"})).arguments["input"]
+                ["command"],
+            "keep-this-input"
+        );
+        let output = finished_output(
+            &mut adapter,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"output-1","status":"completed"}),
+        );
+        assert_eq!(output["raw_output_truncated"], true);
+        assert_eq!(output["raw_output_format"], "json_text_preview");
+        assert!(output["raw_output"].is_string());
+        assert!(output["raw_output"].to_string().len() <= RAW_OUTPUT_BYTES);
+        assert!(!output.to_string().contains(secret));
+        assert!(output["raw_output"]
+            .as_str()
+            .unwrap()
+            .contains(crate::redaction::placeholder()));
+
+        // A peer cannot spoof our internal truncation flag to bypass bounds,
+        // including malformed tool notifications without an ID.
+        let output = finished_output(
+            &mut adapter,
+            json!({"sessionUpdate":"tool_call","status":"completed",
+            "rawOutput":secret.repeat(RAW_OUTPUT_BYTES),"rawOutputTruncated":false}),
+        );
+        assert!(output["raw_output"].to_string().len() <= RAW_OUTPUT_BYTES);
+        assert!(!output.to_string().contains(secret));
+    }
+
+    #[test]
+    fn acp_raw_output_cache_is_bounded_and_does_not_leak_across_tool_lifecycles() {
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        let initial =
+            json!({"sessionUpdate":"tool_call","toolCallId":"output-1","rawOutput":"old"});
+        adapter.session_update(&initial);
+        adapter.session_update(&json!({"sessionUpdate":"tool_call","toolCallId":"output-1"}));
+        let output = finished_output(
+            &mut adapter,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"output-1","status":"completed"}),
+        );
+        assert!(output.get("raw_output").is_none());
+        adapter.session_update(&initial);
+        adapter.session_id = Some("current".into());
+        adapter.start_prompt("fresh prompt", &[]).unwrap();
+        assert!(adapter.tool_outputs.is_empty());
+        adapter.session_update(&initial);
+        adapter.on_line(&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"foreign","update":{
+            "sessionUpdate":"tool_call_update","toolCallId":"output-1","rawOutput":"foreign"}}}).to_string()).unwrap();
+        let output = finished_output(
+            &mut adapter,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"output-1","status":"completed"}),
+        );
+        assert_eq!(output["raw_output"], "old");
+
+        for i in 0..TOOL_METADATA_COUNT + 5 {
+            adapter.session_update(&json!({"sessionUpdate":"tool_call","toolCallId":format!("output-{i}"),"rawOutput":"x".repeat(RAW_OUTPUT_BYTES * 2)}));
+        }
+        assert_eq!(adapter.tool_outputs.len(), TOOL_METADATA_COUNT);
+        assert!(adapter
+            .tool_outputs
+            .values()
+            .all(|output| output.value.to_string().len() <= RAW_OUTPUT_BYTES));
+        // A terminal frame's own output still works when retention is full.
+        let output = finished_output(
+            &mut adapter,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"excess","status":"completed","rawOutput":{"stdout":"current"}}),
+        );
+        assert_eq!(output["raw_output"]["stdout"], "current");
+        let output = finished_output(
+            &mut adapter,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"output-132","status":"completed"}),
+        );
+        assert!(output.get("raw_output").is_none());
+        let prompt_id = adapter.prompt_id.unwrap();
+        adapter
+            .handle_response(prompt_id, &json!({"result":{"stopReason":"end_turn"}}))
+            .unwrap();
+        assert!(adapter.tool_outputs.is_empty());
+    }
 
     fn permission(adapter: &mut AcpAdapter, tool: Value) -> ApprovalPrompt {
         adapter.permission_request(&json!(1), &json!({

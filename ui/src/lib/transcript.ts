@@ -790,7 +790,7 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
         completedArgs?.command ??
         completedArgs?.cmd ??
         (tool.startsWith("antigravity.")
-          ? completedArgs?.CommandLine
+          ? (completedArgs?.command_line ?? completedArgs?.CommandLine)
           : undefined);
       const command = completedArgs
         ? Array.isArray(value)

@@ -378,30 +378,36 @@ describe("durable transcript", () => {
       live: false,
     });
   });
-  it("uses Antigravity's typed CommandLine only for Antigravity tools", () => {
-    for (const vendor of ["antigravity", "grok"]) {
-      const state = replay([
-        event(1, "tool.started", { tool: `${vendor}.tool`, call_id: "check" }),
-        event(2, "tool.completed", {
+  it.each(["CommandLine", "command_line"])(
+    "uses Antigravity's typed %s only for Antigravity tools",
+    (field) => {
+      for (const vendor of ["antigravity", "grok"]) {
+        const state = replay([
+          event(1, "tool.started", {
+            tool: `${vendor}.tool`,
+            call_id: "check",
+          }),
+          event(2, "tool.completed", {
+            tool: `${vendor}.execute`,
+            call_id: "check",
+            success: true,
+            output: {
+              input: { [field]: "python3 -m unittest -q" },
+              title: "A descriptive title",
+            },
+          }),
+        ]);
+        expect(state.activity.one.calls).toHaveLength(1);
+        expect(state.activity.one.calls[0]).toMatchObject({
           tool: `${vendor}.execute`,
-          call_id: "check",
-          success: true,
-          output: {
-            input: { CommandLine: "python3 -m unittest -q" },
-            title: "A descriptive title",
-          },
-        }),
-      ]);
-      expect(state.activity.one.calls).toHaveLength(1);
-      expect(state.activity.one.calls[0]).toMatchObject({
-        tool: `${vendor}.execute`,
-        command:
-          vendor === "antigravity" ? "python3 -m unittest -q" : undefined,
-        step: vendor === "antigravity" ? "testing" : "commands",
-        live: false,
-      });
-    }
-  });
+          command:
+            vendor === "antigravity" ? "python3 -m unittest -q" : undefined,
+          step: vendor === "antigravity" ? "testing" : "commands",
+          live: false,
+        });
+      }
+    },
+  );
   it("replays every task once when the event stream reconnects", () => {
     const rows = [
       event(1, "agent.started", { task: "Make it work" }),

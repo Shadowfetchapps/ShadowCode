@@ -95,12 +95,15 @@ fn fixture_path(project: &Path, candidate: &str, edit: bool) -> bool {
         && fs::symlink_metadata(project.join(relative)).is_ok_and(|m| m.is_file())
 }
 
-fn cwd_matches(arguments: &Value, project: &Path) -> bool {
+fn cwd_matches(arguments: &Value, tool: &str, project: &Path) -> bool {
     [
         arguments.get("cwd"),
         arguments.pointer("/input/cwd"),
         arguments.pointer("/input/Cwd"),
         arguments.pointer("/input/working_directory"),
+        (tool == "antigravity.execute")
+            .then(|| arguments.pointer("/input/working_dir"))
+            .flatten(),
     ]
     .into_iter()
     .flatten()
@@ -113,13 +116,17 @@ fn tool_command<'a>(arguments: &'a Value, tool: &str) -> Option<&'a str> {
         .or(arguments["input"]["command"].as_str())
         .or_else(|| {
             (tool == "antigravity.execute")
-                .then(|| arguments["input"]["CommandLine"].as_str())
+                .then(|| {
+                    arguments["input"]["CommandLine"]
+                        .as_str()
+                        .or(arguments["input"]["command_line"].as_str())
+                })
                 .flatten()
         })
 }
 
 fn approval_allowed(approval: &Approval, project: &Path) -> bool {
-    if !cwd_matches(&approval.arguments, project) {
+    if !cwd_matches(&approval.arguments, &approval.tool, project) {
         return false;
     }
     let tool = approval.tool.as_str();
@@ -251,7 +258,7 @@ fn test_receipt(events: &[Value], vendor: Vendor, project: &Path) -> Option<Valu
             let command_tool = tool.ends_with(".command_execution") || tool.ends_with(".Bash");
             if acp
                 || (command_tool
-                    && cwd_matches(&payload["arguments"], project)
+                    && cwd_matches(&payload["arguments"], tool, project)
                     && tool_command(&payload["arguments"], tool)
                         .is_some_and(|command| is_test_command(command, vendor)))
             {
@@ -271,7 +278,7 @@ fn test_receipt(events: &[Value], vendor: Vendor, project: &Path) -> Option<Valu
                 let latest = json!({"input":payload["output"]["input"]});
                 if tool != format!("{}.execute", vendor.id())
                     || payload["output"]["tool_kind"] != "execute"
-                    || !cwd_matches(&latest, project)
+                    || !cwd_matches(&latest, tool, project)
                     || tool_command(&latest, tool)
                         .is_none_or(|command| command.trim() != CHECK_COMMAND)
                 {
@@ -700,6 +707,49 @@ mod tests {
             );
             assert!(!approval_allowed(&pending, project));
         }
+    }
+
+    #[test]
+    fn antigravity_normalized_completion_fields_stay_vendor_specific() {
+        let project = Path::new("/fixture");
+        let arguments = json!({"input":{"command_line":CHECK_COMMAND,"working_dir":"/fixture"}});
+        assert!(approval_allowed(
+            &approval("antigravity.execute", arguments.clone()),
+            project
+        ));
+        for tool in [
+            "cursor.execute",
+            "grok.execute",
+            "claude.Bash",
+            "codex.command_execution",
+        ] {
+            assert!(tool_command(&arguments, tool).is_none(), "{tool}");
+            assert!(
+                !approval_allowed(&approval(tool, arguments.clone()), project),
+                "{tool}"
+            );
+        }
+        let start = json!({"type":"tool.started","payload":{"tool":"antigravity.execute","call_id":"test","arguments":{"input":{"CommandLine":CHECK_COMMAND,"Cwd":"/fixture"}}}});
+        let done = json!({"type":"tool.completed","payload":{"tool":"antigravity.execute","call_id":"test","success":true,"output":{
+            "tool_kind":"execute","input":arguments["input"],"content":["Ran 5 tests in 0.001s\n\nOK"]}}});
+        assert!(
+            test_receipt(&[start.clone(), done.clone()], Vendor::Antigravity, project).is_some()
+        );
+        let mut wrong_directory = arguments.clone();
+        wrong_directory["input"]["working_dir"] = json!("/elsewhere");
+        assert!(!approval_allowed(
+            &approval("antigravity.execute", wrong_directory.clone()),
+            project
+        ));
+        let mut bad = done.clone();
+        bad["payload"]["output"]["input"] = wrong_directory["input"].clone();
+        assert!(test_receipt(&[start.clone(), bad], Vendor::Antigravity, project).is_none());
+        // ACP capture now retains rawOutput, but no real provider shape has
+        // yet been validated for grading. A plausible field is not evidence.
+        let mut raw_only = done;
+        raw_only["payload"]["output"]["content"] = json!([]);
+        raw_only["payload"]["output"]["raw_output"] = json!({"stdout":"Ran 5 tests\nOK"});
+        assert!(test_receipt(&[start, raw_only], Vendor::Antigravity, project).is_none());
     }
 
     #[test]
