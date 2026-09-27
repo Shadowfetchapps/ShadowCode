@@ -34,13 +34,13 @@ fn main() {
             .as_ref()
             .and_then(|p| local_engine::header(p).ok());
         println!(
-            "{} arch={:?} ctx_train={:?} embd={:?} template={} tools={} thinking_switch={} projector={:?}",
+            "{} arch={:?} ctx_train={:?} embd={:?} template={} tools_template_hint={} thinking_switch={} projector={:?}",
             model.tag,
             header.architecture(),
             header.arch_u64("context_length"),
             header.arch_u64("embedding_length"),
             header.chat_template().map(str::len).unwrap_or(0),
-            header.template_supports_tools(),
+            header.template_mentions_tools(),
             header.template_has_thinking_switch(),
             projector.map(|p| (
                 p.architecture().map(str::to_owned),
