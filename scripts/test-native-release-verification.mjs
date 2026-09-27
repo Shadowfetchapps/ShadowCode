@@ -22,6 +22,118 @@ async function scratch(fn) {
   try { await fn(directory); } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function waitForFixture(label, read) {
+  const end = Date.now() + 5000;
+  while (Date.now() < end) {
+    if (await read()) return;
+    await pause(10);
+  }
+  assert.fail(`${label} did not reach its explicit barrier`);
+}
+async function fixtureAlive(pid) {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+    return !/^[ZX] /.test(stat.slice(stat.lastIndexOf(') ') + 2));
+  } catch (error) { if (['ENOENT', 'ESRCH'].includes(error.code)) return false; throw error; }
+}
+async function inheritedOutput(directory, mode) {
+  const child = path.join(directory, 'child.mjs');
+  const parent = path.join(directory, 'parent.mjs');
+  await writeFile(child, `import { existsSync, writeFileSync } from 'node:fs';
+const root = ${JSON.stringify(directory)};
+process.stdout.on('error', () => {}); process.stderr.on('error', () => {});
+writeFileSync(root + '/child.pid', String(process.pid));
+writeFileSync(root + '/ready', 'ready');
+const deadline = Date.now() + 15000;
+const timer = setInterval(() => {
+  if (existsSync(root + '/release') || Date.now() >= deadline) {
+    clearInterval(timer);
+    process.stdout.write('inherited stdout tail\\n');
+    process.stderr.write(${JSON.stringify(mode === 'skip' ? 'ok 1 - delayed required check # SKIP unavailable' : 'inherited stderr tail')});
+  } else if (${JSON.stringify(mode)} === 'continuous') process.stdout.write('inherited progress\\n');
+}, 30);
+`);
+  await writeFile(parent, `import { spawn } from 'node:child_process';
+import { existsSync, writeFileSync } from 'node:fs';
+const root = ${JSON.stringify(directory)};
+const child = spawn(process.execPath, [${JSON.stringify(child)}], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
+child.unref();
+const deadline = Date.now() + 5000;
+while (!existsSync(root + '/ready')) {
+  if (Date.now() >= deadline) throw new Error('inherited child did not start');
+  await new Promise(resolve => setTimeout(resolve, 10));
+}
+writeFileSync(root + '/parent.pid', String(process.pid));
+process.stdout.write('parent finished\\n');
+`);
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+  return {
+    script: `exec ${quote(process.execPath)} ${quote(parent)}`,
+    async parentExited() {
+      await waitForFixture('parent exit', async () => {
+        try { return !await fixtureAlive(Number(await readFile(path.join(directory, 'parent.pid'), 'utf8'))); }
+        catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+      });
+    },
+    async childAlive() { return fixtureAlive(Number(await readFile(path.join(directory, 'child.pid'), 'utf8'))); },
+    async release() {
+      await writeFile(path.join(directory, 'release'), 'release');
+      await waitForFixture('inherited child exit', async () => !await this.childAlive());
+    },
+  };
+}
+
+for (const mode of ['idle', 'continuous']) {
+  test(`post-exit ${mode} inherited output fails closed instead of hanging or certifying success`, () => scratch(async directory => {
+    const fixture = await inheritedOutput(directory, mode);
+    const args = { gate: 'interface', directory, commit, runId: '123', attempt: '2' };
+    await runGate({ ...args, execute: async () => 0 });
+    const observed = runGate({ ...args, execute: (_script, inspect) => executeScript(fixture.script, inspect) })
+      .then(value => ({ kind: 'resolved', value }), error => ({ kind: 'rejected', error }));
+    let result, watchdog;
+    try {
+      await fixture.parentExited();
+      result = await Promise.race([observed, new Promise(resolve => { watchdog = setTimeout(() => resolve({ kind: 'watchdog' }), 5000); })]);
+      assert(await fixture.childAlive(), 'recorder must not signal an independently running inherited-output child');
+    } finally {
+      clearTimeout(watchdog);
+      await fixture.release();
+      await observed;
+    }
+    assert.equal(result.kind, 'rejected', 'open diagnostic streams must finish as a bounded failure');
+    assert.match(result.error.message, /output streams.*after.*exit/i);
+    const receipt = JSON.parse(await readFile(path.join(directory, 'interface.json'), 'utf8'));
+    assert.equal(receipt.status, 'failed');
+    assert.equal(receipt.exit_code, null);
+    assert.match(receipt.error, /output streams.*after.*exit/i);
+  }));
+}
+test('post-exit short valid drain preserves late stderr skip and final unterminated line', () => scratch(async directory => {
+  const fixture = await inheritedOutput(directory, 'skip');
+  const lines = [];
+  const observed = runGate({ gate: 'interface', directory, commit, runId: '123', attempt: '2',
+    execute: (_script, inspect) => executeScript(fixture.script, line => { lines.push(line); inspect(line); }),
+  }).then(value => ({ kind: 'resolved', value }), error => ({ kind: 'rejected', error }));
+  try { await fixture.parentExited(); }
+  finally { await fixture.release(); }
+  const result = await observed;
+  assert.equal(result.kind, 'rejected');
+  assert.match(result.error.message, /skipped/);
+  assert(lines.includes('inherited stdout tail'));
+  assert(lines.includes('ok 1 - delayed required check # SKIP unavailable'));
+  const receipt = JSON.parse(await readFile(path.join(directory, 'interface.json'), 'utf8'));
+  assert.equal(receipt.status, 'skipped');
+  assert.equal(receipt.exit_code, 0);
+  assert.deepEqual(receipt.required_skips, ['ok 1 - delayed required check # SKIP unavailable']);
+}));
+test('post-exit completed output preserves nonzero exits and terminating signals', async () => {
+  const lines = [];
+  assert.equal(await executeScript("printf 'nonzero tail' >&2; exit 7", line => lines.push(line)), 7);
+  assert.deepEqual(lines, ['nonzero tail']);
+  await assert.rejects(executeScript('kill -TERM $$', () => {}), /Gate terminated by SIGTERM/);
+});
+
 async function sourceFixture(directory) {
   const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
   const git = (...args) => {

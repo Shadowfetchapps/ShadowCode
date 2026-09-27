@@ -188,20 +188,68 @@ export async function runGate({ gate, directory, commit, runId, attempt, execute
 export function executeScript(script, line) {
   return new Promise((resolve, reject) => {
     const child = spawn('bash', ['-euo', 'pipefail', '-c', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const readers = [];
+    let settled = false, drain;
+    const finish = (error, code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(drain);
+      child.removeListener('error', onError);
+      child.removeListener('exit', onExit);
+      child.removeListener('close', onClose);
+      for (const { stream, data, end, failure } of readers) {
+        stream.removeListener('data', data);
+        stream.removeListener('end', end);
+        // Retire only the recorder's handles. An inherited writer is not
+        // authority to signal an otherwise independently running process.
+        if (error && !stream.closed) {
+          // A pending socket error may arrive during destruction. Keep its
+          // handler until close, then release every recorder listener.
+          stream.once('close', () => stream.removeListener('error', failure));
+          stream.destroy();
+        } else stream.removeListener('error', failure);
+      }
+      if (error) reject(error); else resolve(code);
+    };
+    const onError = error => finish(error);
+    const onClose = (code, signal) => {
+      if (signal) finish(new Error(`Gate terminated by ${signal}`));
+      else if (!readers.every(({ stream }) => stream.readableEnded)) finish(new Error('Gate output streams closed without complete output after process exit'));
+      else finish(null, code);
+    };
+    const onExit = () => {
+      if (readers.every(({ stream }) => stream.readableEnded)) return;
+      // ChildProcess "close" waits for inherited stdout/stderr too. A
+      // detached helper can retain those forever after the command exits.
+      // This is one absolute drain window; continued output cannot extend it.
+      drain = setTimeout(() => finish(new Error('Gate output streams remained open 1000ms after process exit; verification output is incomplete')), 1000);
+    };
     for (const [stream, output] of [[child.stdout, process.stdout], [child.stderr, process.stderr]]) {
       let pending = '';
       stream.setEncoding('utf8');
-      stream.on('data', text => {
-        output.write(text);
-        pending += text;
-        let boundary;
-        while ((boundary = pending.indexOf('\n')) >= 0) { line(pending.slice(0, boundary)); pending = pending.slice(boundary + 1); }
-        if (pending.length > 65536) { line(pending); pending = ''; }
-      });
-      stream.on('end', () => { if (pending) line(pending); });
+      const data = text => {
+        try {
+          output.write(text);
+          pending += text;
+          let boundary;
+          while ((boundary = pending.indexOf('\n')) >= 0) { line(pending.slice(0, boundary)); pending = pending.slice(boundary + 1); }
+          if (pending.length > 65536) { line(pending); pending = ''; }
+        } catch (error) { finish(error); }
+      };
+      const end = () => {
+        try { if (pending) line(pending); pending = ''; }
+        catch (error) { finish(error); }
+        if (readers.every(({ stream }) => stream.readableEnded)) clearTimeout(drain);
+      };
+      const failure = error => finish(new Error('Gate output stream failed', { cause: error }));
+      readers.push({ stream, data, end, failure });
+      stream.on('data', data);
+      stream.on('end', end);
+      stream.on('error', failure);
     }
-    child.once('error', reject);
-    child.once('close', (code, signal) => signal ? reject(new Error(`Gate terminated by ${signal}`)) : resolve(code));
+    child.once('error', onError);
+    child.once('exit', onExit);
+    child.once('close', onClose);
   });
 }
 async function main() {
