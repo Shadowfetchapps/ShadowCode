@@ -193,6 +193,27 @@ async function wd(method, endpoint, body) {
   return data.value;
 }
 const execute = (script, args = []) => wd("POST", `/session/${session}/execute/sync`, { script, args });
+async function composerControlsFit(label) {
+  const problems = await execute(`
+    const panel = document.querySelector('form.composer').getBoundingClientRect();
+    const controls = [...document.querySelectorAll('.composer-footer button, .composer-footer select')]
+      .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden')
+      .map(el => ({name: el.getAttribute('aria-label') || el.textContent.trim(), box: el.getBoundingClientRect()}));
+    const problems = controls.length < 4 ? ['missing composer controls'] : [];
+    for (const [index, control] of controls.entries()) {
+      const r = control.box;
+      if (r.left < panel.left - 1 || r.right > panel.right + 1 || r.top < panel.top - 1 || r.bottom > panel.bottom + 1)
+        problems.push('outside composer: ' + control.name);
+      for (const other of controls.slice(index + 1)) {
+        const b = other.box;
+        if (Math.min(r.right, b.right) - Math.max(r.left, b.left) > 1 && Math.min(r.bottom, b.bottom) - Math.max(r.top, b.top) > 1)
+          problems.push('overlap: ' + control.name + ' / ' + other.name);
+      }
+    }
+    return problems;
+  `);
+  assert.deepEqual(problems, [], label);
+}
 async function native(command, args = {}) {
   const response = await wd("POST", `/session/${session}/execute/async`, {
     script: "const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke(arguments[0],arguments[1]).then(value=>done({value}),error=>done({error:String(error)}));",
@@ -467,6 +488,7 @@ try {
   await execute("document.querySelector('.unified-picker-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
   await until("Picker closed", async () => !(await visible(".unified-picker-menu")));
   note(`selected local row "${localTarget.name}"`);
+  await composerControlsFit("Desktop composer controls fit after selecting a model");
 
   // ------------------------------------------------------------ local task
   await send("Create hello.txt with a greeting, then check it.");
@@ -597,6 +619,7 @@ try {
   await send("stop-probe: look around the project.");
   await until("Local task streaming", async () => (await modelRequests()).some((r) => r.request.includes("stop-probe")), 20000);
   await until("Stop button", () => visible('button[aria-label="Stop task"]'));
+  await composerControlsFit("Desktop Stop and follow-up controls fit while running");
   await screenshot("running");
   await accessibility("running");
   await click('button[aria-label="Stop task"]');
@@ -609,6 +632,7 @@ try {
   // ------------------------------------------------------------ compact
   await setWindow({ width: 520, height: 860 });
   assert.equal(await horizontalOverflow(), false, "No horizontal scroll at 520 px");
+  await composerControlsFit("Compact composer controls fit without overlaps");
   await screenshot("compact");
   await accessibility("compact");
   await setTheme("dark");

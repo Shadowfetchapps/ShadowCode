@@ -76,17 +76,19 @@ button.link {
   border-color: var(--accent);
   border-style: dashed;
 }
-/* One row at every width: the picker shrinks and the hint and chip labels
-   give way when the composer is narrow (small window or open drawer). */
+/* Provider names and available controls vary. Wrap at the actual available
+   width so Send and Compare remain reachable even between breakpoints. */
 .composer {
   container-type: inline-size;
 }
 .composer-footer {
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  row-gap: 6px;
   min-width: 0;
 }
 .composer-footer > .unified-picker {
   flex: 0 1 auto;
+  max-width: 100%;
 }
 .composer-footer > * {
   flex-shrink: 0;
@@ -95,8 +97,18 @@ button.link {
 .composer-footer > .grow {
   flex-shrink: 1;
 }
+.composer-footer > .submit-btn {
+  margin-left: auto;
+}
+.composer-footer > .submit-btn + .submit-btn {
+  margin-left: 0;
+}
+@container (max-width: 1000px) {
+  .composer-hint {
+    display: none;
+  }
+}
 @container (max-width: 620px) {
-  .composer-hint,
   .composer-chip span {
     display: none;
   }
@@ -108,10 +120,6 @@ button.link {
  * picker, effort, the mode switch and the buttons on one line: the picker
  * takes its own row above them and the controls wrap. */
 @container (max-width: 700px) {
-  .composer-footer {
-    flex-wrap: wrap;
-    row-gap: 6px;
-  }
   .composer-footer > .unified-picker {
     order: -1;
     flex: 1 1 100%;
@@ -123,12 +131,6 @@ button.link {
   /* Controls pack onto as few rows as fit; Send stays at the right. */
   .composer-footer > .grow {
     flex: 0 0 0;
-  }
-  .composer-footer > .submit-btn {
-    margin-left: auto;
-  }
-  .composer-footer > .submit-btn + .submit-btn {
-    margin-left: 0;
   }
 }
 .composer .chips {
