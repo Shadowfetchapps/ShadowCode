@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_LOGIN_LINES: usize = 200;
+const LOGIN_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 
 #[derive(Default)]
 struct LoginSession {
@@ -230,6 +231,7 @@ pub async fn connect_with_timeout(
     let config = config.clone();
     tokio::spawn(async move {
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<String>(64);
+        let mut readers = tokio::task::JoinSet::new();
         for stream in [
             child
                 .stdout
@@ -244,7 +246,7 @@ pub async fn connect_with_timeout(
         .flatten()
         {
             let sender = sender.clone();
-            tokio::spawn(async move {
+            readers.spawn(async move {
                 let mut lines = BufReader::new(stream).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     if sender.send(line).await.is_err() {
@@ -266,23 +268,9 @@ pub async fn connect_with_timeout(
             catalog.logins().push(vendor, payload.clone());
             catalog.broadcast("account.login", payload);
         };
-        let outcome = loop {
+        let outcome = 'login: loop {
             tokio::select! {
-                Some(line) = receiver.recv() => relay(line),
-                status = child.wait() => {
-                    // A browser started by the CLI may keep the pipes open;
-                    // take what is already buffered, briefly, then finish.
-                    while let Ok(Some(line)) =
-                        tokio::time::timeout(Duration::from_millis(300), receiver.recv()).await
-                    {
-                        relay(line);
-                    }
-                    break match status {
-                        Ok(status) if status.success() => (true, format!("`{command_line}` finished")),
-                        Ok(status) => (false, format!("`{command_line}` exited with status {}", status.code().unwrap_or(-1))),
-                        Err(error) => (false, format!("`{command_line}` failed: {error}")),
-                    };
-                }
+                biased;
                 _ = cancel.cancelled() => {
                     let _ = child.kill().await;
                     break (false, "Sign-in cancelled".to_owned());
@@ -291,8 +279,38 @@ pub async fn connect_with_timeout(
                     let _ = child.kill().await;
                     break (false, format!("Sign-in timed out after {} seconds", timeout.as_secs()));
                 }
+                status = child.wait() => {
+                    // A browser started by the CLI may keep the pipes open;
+                    // allow one bounded tail interval, not a fresh timeout per
+                    // line. Stop and the original login deadline still apply.
+                    let drain_deadline = tokio::time::sleep(LOGIN_DRAIN_TIMEOUT);
+                    tokio::pin!(drain_deadline);
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => break 'login (false, "Sign-in cancelled".to_owned()),
+                            _ = &mut deadline => break 'login (false, format!("Sign-in timed out after {} seconds", timeout.as_secs())),
+                            _ = &mut drain_deadline => break,
+                            line = receiver.recv() => match line {
+                                Some(line) => relay(line),
+                                None => break,
+                            },
+                        }
+                    }
+                    break match status {
+                        Ok(status) if status.success() => (true, format!("`{command_line}` finished")),
+                        Ok(status) => (false, format!("`{command_line}` exited with status {}", status.code().unwrap_or(-1))),
+                        Err(error) => (false, format!("`{command_line}` failed: {error}")),
+                    };
+                }
+                Some(line) = receiver.recv() => relay(line),
             }
         };
+        // Readers belong to this login, unlike an independently opened browser.
+        // Close our pipe ends without signalling that browser or leaving a
+        // detached reader waiting indefinitely for its next line.
+        readers.shutdown().await;
+        drop(receiver);
         // Re-probe: the login state and the account (and thus usage) may
         // have changed.
         catalog.forget_status(vendor).await;
