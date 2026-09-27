@@ -99,6 +99,8 @@ jobs:
         run: node scripts/native-release-verification.mjs run managed-runtime
       - name: Build and inspect release packages
         run: node scripts/native-release-verification.mjs run packages
+      - name: Install both release packages in an offline clean host
+        run: node scripts/native-release-verification.mjs run clean-host-packages
       - name: Exercise the packaged application
         run: node scripts/native-release-verification.mjs run packaged-behavior
       - name: Create release checksums

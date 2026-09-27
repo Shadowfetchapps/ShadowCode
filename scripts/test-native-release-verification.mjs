@@ -53,6 +53,21 @@ test('GLib backport verification is a required release gate with no optional ski
   assert.equal(skips.size, 1);
   assert.equal(optional.size, 0);
 });
+test('clean-host package qualification is required and bound to the verified artifacts', () => {
+  const gate = 'clean-host-packages';
+  assert(REQUIRED_GATES.includes(gate));
+  assert.match(GATES[gate].scope, /First GUI launch.*remain separate/);
+  assert.match(GATES[gate].script, /docker build -f scripts\/clean-host-runtime\.Dockerfile/);
+  assert.match(GATES[gate].script, /test-clean-host-packages\.mjs.*SHA256SUMS/);
+  const missing = complete(); delete missing.gates[gate];
+  assert.throws(() => validateVerification(missing, commit, artifacts), /gate set mismatch/);
+  for (const status of ['failed', 'skipped']) {
+    const value = complete(); value.gates[gate].status = status;
+    assert.throws(() => validateVerification(value, commit, artifacts), /did not pass: clean-host-packages/);
+  }
+  const changed = complete(); changed.gates[gate].artifacts['test.deb'] = 'f'.repeat(64);
+  assert.throws(() => validateVerification(changed, commit, artifacts), /artifact mismatch: clean-host-packages/);
+});
 test('receipts are bound to commit, workflow attempt, exact command and artifact bytes', () => {
   for (const [field, changed, error] of [
     ['commit', 'e'.repeat(40), /Stale/], ['run_id', '999', /Wrong workflow run/],

@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths: ['native/**', 'vendor/**', 'scripts/fixtures/native-glib-variant.rs', 'src-tauri/**', 'ui/**', 'licenses/native/**', 'packaging/native-runtime/**', 'packaging/native-app-run.sh', 'packaging/llama.cpp/**', 'packaging/shadow-agent.desktop', 'tools/llama.cpp.pin', 'tools/glslc-flatpak.sh', 'scripts/build-llama.cpp.sh', 'scripts/*llama*.mjs', 'scripts/install-appimage.sh', 'scripts/install-release-state.sh', 'scripts/installer-auth-fixtures.mjs', 'scripts/test-install-auth.mjs', 'release/**', 'scripts/test-install-appimage.sh', 'scripts/*native*.mjs', 'scripts/publisher-fixtures.mjs', 'scripts/test-publisher-auth.mjs', 'scripts/native-packaging-env.sh', 'scripts/native-release-auth-lib.sh', 'scripts/verify-native-release.sh', 'scripts/check-secrets.mjs', 'scripts/test-check-secrets.mjs', 'scripts/native-mcp-peer/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/native.yml', '.github/workflows/release.yml']
+    paths: ['native/**', 'vendor/**', 'scripts/fixtures/native-glib-variant.rs', 'src-tauri/**', 'ui/**', 'licenses/native/**', 'packaging/native-runtime/**', 'packaging/native-app-run.sh', 'packaging/llama.cpp/**', 'packaging/shadow-agent.desktop', 'tools/llama.cpp.pin', 'tools/glslc-flatpak.sh', 'scripts/build-llama.cpp.sh', 'scripts/*llama*.mjs', 'scripts/install-appimage.sh', 'scripts/install-release-state.sh', 'scripts/installer-auth-fixtures.mjs', 'scripts/test-install-auth.mjs', 'release/**', 'scripts/test-install-appimage.sh', 'scripts/test-clean-host-packages.mjs', 'scripts/clean-host-runtime.Dockerfile', 'scripts/*native*.mjs', 'scripts/publisher-fixtures.mjs', 'scripts/test-publisher-auth.mjs', 'scripts/native-packaging-env.sh', 'scripts/native-release-auth-lib.sh', 'scripts/verify-native-release.sh', 'scripts/check-secrets.mjs', 'scripts/test-check-secrets.mjs', 'scripts/native-mcp-peer/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/native.yml', '.github/workflows/release.yml']
 permissions:
   contents: read
 jobs:
@@ -116,6 +116,10 @@ jobs:
         run: node scripts/build-native.mjs
       - name: Inspect both packages
         run: node scripts/check-native-package.mjs "target/release/bundle/appimage/ShadowCode_${VERSION}_amd64.AppImage" "target/release/bundle/deb/ShadowCode_${VERSION}_amd64.deb"
+      - name: Build runtime-only clean-host qualification image
+        run: docker build -f scripts/clean-host-runtime.Dockerfile -t shadowcode-clean-runtime:ci scripts
+      - name: Install both packages in an offline clean host
+        run: node scripts/test-clean-host-packages.mjs "target/release/bundle/appimage/ShadowCode_${VERSION}_amd64.AppImage" "target/release/bundle/deb/ShadowCode_${VERSION}_amd64.deb" artifacts/native-package/SHA256SUMS
       - name: Rebuild the shipped runtime sources without network access
         run: node scripts/test-native-runtime-sources.mjs
       - name: Exercise concurrent AppImage extraction and shutdown

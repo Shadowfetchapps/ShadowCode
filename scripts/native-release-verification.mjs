@@ -30,6 +30,8 @@ node --test --test-reporter=tap scripts/test-native-packaging-env.mjs
 node scripts/check-native-package.mjs "target/release/bundle/appimage/ShadowCode_${'${VERSION}'}_amd64.AppImage" "target/release/bundle/deb/ShadowCode_${'${VERSION}'}_amd64.deb"
 node scripts/test-native-runtime-sources.mjs
 node scripts/test-native-runtime.mjs` },
+  'clean-host-packages': { artifacts: true, unchanged: true, scope: 'Both packages installed or extracted in a network-disabled Debian 13 runtime-only container; offline CLI status and Debian launcher/icon metadata. First GUI launch, local inference, model downloads and installer rollback remain separate.', script: `${version}\n` + String.raw`docker build -f scripts/clean-host-runtime.Dockerfile -t shadowcode-clean-runtime:ci scripts
+node scripts/test-clean-host-packages.mjs "target/release/bundle/appimage/ShadowCode_${'${VERSION}'}_amd64.AppImage" "target/release/bundle/deb/ShadowCode_${'${VERSION}'}_amd64.deb" artifacts/native-package/SHA256SUMS` },
   'packaged-behavior': { artifacts: true, unchanged: true, scope: 'Packaged fixture behavior on the CI build host; authenticated cloud-consent check is optional and reported separately.', script: `${packaged}\n` + String.raw`SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_CLI_ARGS='["--appimage-extract-and-run"]' node scripts/test-native-cli.mjs
 SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_CLI_ARGS='["--appimage-extract-and-run"]' node scripts/test-native-tui.mjs
 SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_DESKTOP_ARGS='["--appimage-extract-and-run","ui"]' SHADOW_NATIVE_DEFAULT_PROFILE=1 xvfb-run -a -s '-screen 0 1440x1100x24' dbus-run-session -- node scripts/test-native-desktop.mjs
@@ -107,7 +109,7 @@ export function validateVerification(verification, commit, assets) {
     if (GATES[gate].artifacts) assert.deepEqual(receipt.artifacts, verification.artifacts, `Verification artifact mismatch: ${gate}`);
     gates[gate] = { status: 'passed', script_sha256: receipt.script_sha256, scope: GATES[gate].scope || 'All checks in this required gate.', optional_checks: receipt.optional_checks };
   }
-  return { schema: 1, status: 'required_gates_passed', scope: 'Declared Linux CI gates only; excluded checks are not verified. This is not publisher authentication or fresh minimal-host qualification.', gates };
+  return { schema: 1, status: 'required_gates_passed', scope: 'Declared Linux CI gates only; excluded checks are not verified. This does not establish publisher authentication, first GUI launch, local-model operation or complete clean-host usability.', gates };
 }
 
 export async function readVerification(directory, commit, runId, attempt, artifacts) {
