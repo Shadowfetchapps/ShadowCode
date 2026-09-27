@@ -1,12 +1,14 @@
 //! Claude Code headless adapter.
 //!
 //! Spawns `claude -p --output-format stream-json --input-format stream-json
-//! --verbose --include-partial-messages --permission-prompts host`
+//! --verbose --include-partial-messages --permission-prompts host
+//! --permission-prompt-tool stdio`
 //! (https://code.claude.com/docs/en/headless). stdout is NDJSON:
 //! `system/init`, `stream_event` (Anthropic streaming events, text deltas in
 //! `content_block_delta`), `assistant` (complete message with `text` and
 //! `tool_use` blocks), `user` (`tool_result` blocks), and a final `result`.
-//! With `--permission-prompts host` the CLI asks the host to answer
+//! `--permission-prompts host` selects host prompts; registering the `stdio`
+//! permission tool makes the CLI ask this process to answer
 //! permission prompts as `control_request` / `can_use_tool` frames, answered
 //! with `control_response` (`behavior: allow|deny`). Interrupts are a
 //! client→CLI `control_request` with subtype `interrupt`.
@@ -21,7 +23,7 @@ use super::{
 };
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const OUTPUT_PREVIEW: usize = 8000;
 
@@ -43,7 +45,9 @@ pub struct ClaudeAdapter {
     streamed_text: bool,
     turn_text_emitted: bool,
     pending_prompt: Option<(String, Vec<PromptImage>)>,
-    pending_permissions: HashSet<String>,
+    // Keep the original input private: allow replies must echo the exact
+    // requested input, while the approval card receives only its redacted copy.
+    pending_permissions: HashMap<String, Value>,
     tool_names: HashMap<String, String>,
     tool_paths: HashMap<String, String>,
     turn_active: bool,
@@ -176,7 +180,8 @@ impl ClaudeAdapter {
                         "Claude permission request had no request_id; ignored".into(),
                     ));
                 }
-                self.pending_permissions.insert(request_id.clone());
+                self.pending_permissions
+                    .insert(request_id.clone(), input.clone());
                 Step::update(Update::Approval(ApprovalPrompt {
                     request_id,
                     kind: kind.into(),
@@ -219,6 +224,10 @@ impl CliAdapter for ClaudeAdapter {
             "--include-partial-messages",
             "--permission-prompts",
             "host",
+            // Anthropic's SDK registers this handler for can_use_tool. The
+            // host selector alone leaves prompts without a stdio responder.
+            "--permission-prompt-tool",
+            "stdio",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -411,11 +420,13 @@ impl CliAdapter for ClaudeAdapter {
     /// task" is kept by ShadowCode (it answers later matching prompts), so
     /// no permission rule is written into Claude's settings.
     fn answer(&mut self, request_id: &str, answer: &VendorAnswer) -> Result<Vec<String>> {
-        if !self.pending_permissions.remove(request_id) {
+        let Some(input) = self.pending_permissions.remove(request_id) else {
             bail!("Unknown Claude permission request {request_id}")
-        }
+        };
         let response = if answer.allow {
-            json!({"behavior":"allow"})
+            // Match the SDK permission result, without updatedPermissions:
+            // this answer authorizes only the requested tool invocation.
+            json!({"behavior":"allow","updatedInput":input})
         } else {
             let message = match answer.note.as_deref() {
                 Some(note) => format!("The user denied this action in ShadowCode and said: {note}"),

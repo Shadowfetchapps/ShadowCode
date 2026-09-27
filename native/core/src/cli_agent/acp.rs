@@ -19,6 +19,8 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 const OUTPUT_PREVIEW: usize = 8000;
+const TOOL_METADATA_COUNT: usize = 128;
+const TOOL_METADATA_BYTES: usize = 64_000;
 
 /// Shown when the Antigravity server has no valid Google sign-in.
 pub const ANTIGRAVITY_SIGN_IN: &str = "Antigravity isn't signed in, or its sign-in expired. Choose Connect for Antigravity in Settings › Accounts.";
@@ -63,6 +65,10 @@ pub struct AcpAdapter {
     pending_prompt: Option<(String, Vec<PromptImage>)>,
     pending_permissions: HashMap<String, PendingPermission>,
     tool_names: HashMap<String, String>,
+    // ACP permission requests are partial tool updates. Keep a bounded view
+    // of current pending tools so omitted input cannot erase the operation
+    // the user is being asked to approve.
+    tool_metadata: HashMap<String, Value>,
     options: Option<LaunchOptions>,
     prompt_active: bool,
     /// A model switch was sent and not yet answered. Prompts wait for it:
@@ -90,6 +96,7 @@ impl AcpAdapter {
             pending_prompt: None,
             pending_permissions: HashMap::new(),
             tool_names: HashMap::new(),
+            tool_metadata: HashMap::new(),
             options: None,
             prompt_active: false,
             switching: false,
@@ -127,6 +134,7 @@ impl AcpAdapter {
         let id = self.id();
         self.prompt_id = Some(id);
         self.prompt_active = true;
+        self.tool_metadata.clear();
         let mut prompt = vec![json!({"type":"text","text":text})];
         for image in images {
             prompt.push(json!({
@@ -398,6 +406,44 @@ impl AcpAdapter {
         }
         Ok(Step::default())
     }
+    fn remember_tool(&mut self, update: &Value, initial: bool) -> Value {
+        let Some(id) = update["toolCallId"].as_str().filter(|id| !id.is_empty()) else {
+            return update.clone();
+        };
+        let mut current = if initial {
+            json!({"toolCallId":id})
+        } else {
+            self.tool_metadata
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| json!({"toolCallId":id}))
+        };
+        // ToolCallUpdate omission/null leaves previously reported metadata
+        // unchanged (ACP v1). An explicit empty object/array does replace it.
+        for key in [
+            "kind",
+            "title",
+            "rawInput",
+            "locations",
+            "content",
+            "status",
+        ] {
+            if let Some(value) = update.get(key).filter(|v| !v.is_null()) {
+                current[key] = value.clone();
+            }
+        }
+        if serde_json::to_vec(&current).is_ok_and(|bytes| bytes.len() <= TOOL_METADATA_BYTES)
+            && (self.tool_metadata.contains_key(id)
+                || self.tool_metadata.len() < TOOL_METADATA_COUNT)
+        {
+            self.tool_metadata.insert(id.to_owned(), current.clone());
+        } else {
+            // Oversize/new excess entries remain usable in the current frame
+            // but cannot later recover an obsolete cached approval input.
+            self.tool_metadata.remove(id);
+        }
+        current
+    }
     fn session_update(&mut self, update: &Value) -> Step {
         match update["sessionUpdate"].as_str().unwrap_or("") {
             "agent_message_chunk" => match update["content"]["text"].as_str() {
@@ -405,6 +451,7 @@ impl AcpAdapter {
                 _ => Step::default(),
             },
             "tool_call" => {
+                let update = self.remember_tool(update, true);
                 let id = update["toolCallId"].as_str().unwrap_or("").to_owned();
                 let name = format!(
                     "{}.{}",
@@ -425,19 +472,20 @@ impl AcpAdapter {
                     update["status"].as_str(),
                     Some("completed") | Some("failed")
                 ) {
-                    step = step.merge(self.tool_finished(&id, &name, update));
+                    step = step.merge(self.tool_finished(&id, &name, &update));
                 }
                 step
             }
             "tool_call_update" => {
+                let update = self.remember_tool(update, false);
                 let id = update["toolCallId"].as_str().unwrap_or("").to_owned();
-                let name = self
-                    .tool_names
-                    .get(&id)
-                    .cloned()
+                let name = update["kind"]
+                    .as_str()
+                    .map(|kind| format!("{}.{kind}", self.vendor.id()))
+                    .or_else(|| self.tool_names.get(&id).cloned())
                     .unwrap_or_else(|| format!("{}.tool", self.vendor.id()));
                 match update["status"].as_str() {
-                    Some("completed") | Some("failed") => self.tool_finished(&id, &name, update),
+                    Some("completed") | Some("failed") => self.tool_finished(&id, &name, &update),
                     _ => Step::default(),
                 }
             }
@@ -458,6 +506,7 @@ impl AcpAdapter {
         }
     }
     fn tool_finished(&mut self, id: &str, name: &str, update: &Value) -> Step {
+        self.tool_metadata.remove(id);
         let success = update["status"].as_str() == Some("completed");
         let paths: Vec<String> = update["locations"]
             .as_array()
@@ -477,6 +526,8 @@ impl AcpAdapter {
         }
         let output = redact_value(json!({
             "status": update["status"],
+            "input": update["rawInput"],
+            "tool_kind": update["kind"],
             "title": update["title"],
             "locations": paths,
             "content": content,
@@ -541,7 +592,7 @@ impl AcpAdapter {
         }
         self.pending_permissions
             .insert(key.clone(), PendingPermission { allow, reject });
-        let tool = &params["toolCall"];
+        let tool = self.remember_tool(&params["toolCall"], false);
         let title = tool["title"].as_str().unwrap_or("tool call");
         let kind = tool["kind"].as_str().unwrap_or("tool");
         let command = tool["rawInput"]["command"]
@@ -649,6 +700,24 @@ impl CliAdapter for AcpAdapter {
         }
         let method = message["method"].as_str();
         let id = message.get("id").filter(|id| !id.is_null());
+        if matches!(
+            method,
+            Some("session/update" | "session/request_permission")
+        ) && self
+            .session_id
+            .as_deref()
+            .zip(message["params"]["sessionId"].as_str())
+            .is_some_and(|(expected, received)| expected != received)
+        {
+            return Ok(Step {
+                send: id
+                    .map(|id| vec![error(id, -32602, "Unexpected ACP session")])
+                    .unwrap_or_default(),
+                updates: vec![Update::Warning(
+                    "Ignored a tool/permission update for a different ACP session".into(),
+                )],
+            });
+        }
         match (method, id) {
             (Some("session/request_permission"), Some(id)) => {
                 Ok(self.permission_request(id, &message["params"]))
@@ -717,5 +786,171 @@ impl CliAdapter for AcpAdapter {
             }
             _ => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    fn permission(adapter: &mut AcpAdapter, tool: Value) -> ApprovalPrompt {
+        adapter.permission_request(&json!(1), &json!({
+            "toolCall":tool,
+            "options":[{"optionId":"yes","kind":"allow_once"},{"optionId":"no","kind":"reject_once"}]
+        })).updates.into_iter().find_map(|u| match u {
+            Update::Approval(prompt) => Some(prompt), _ => None,
+        }).unwrap()
+    }
+
+    #[test]
+    fn acp_partial_permission_uses_latest_typed_input_not_initial_command_or_title() {
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        adapter.session_update(&json!({"sessionUpdate":"tool_call","toolCallId":"call-1",
+            "kind":"execute","title":"Run original","rawInput":{"command":"original","cwd":"/old"}}));
+        adapter.session_update(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"call-1",
+            "rawInput":{"command":"replacement","cwd":"/new"}}),
+        );
+        let prompt = permission(
+            &mut adapter,
+            json!({"toolCallId":"call-1","title":"Just a display label","rawInput":null}),
+        );
+        assert_eq!(prompt.tool, "cursor.execute");
+        assert_eq!(prompt.command, "replacement");
+        assert_eq!(
+            prompt.arguments["input"],
+            json!({"command":"replacement","cwd":"/new"})
+        );
+        assert_eq!(prompt.arguments["title"], "Just a display label");
+        let override_prompt = permission(
+            &mut adapter,
+            json!({"toolCallId":"call-1","rawInput":{"command":"third"}}),
+        );
+        assert_eq!(
+            override_prompt.arguments["input"],
+            json!({"command":"third"})
+        );
+        let empty = permission(&mut adapter, json!({"toolCallId":"call-1","rawInput":{}}));
+        assert_eq!(empty.arguments["input"], json!({}));
+        assert_ne!(empty.command, "third");
+    }
+
+    #[test]
+    fn acp_metadata_does_not_survive_completion_new_prompt_or_duplicate_initial_call() {
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        let initial = json!({"sessionUpdate":"tool_call","toolCallId":"call-1","kind":"execute","rawInput":{"command":"old"}});
+        adapter.session_update(&initial);
+        adapter.session_update(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed"}),
+        );
+        assert!(
+            permission(&mut adapter, json!({"toolCallId":"call-1"})).arguments["input"].is_null()
+        );
+        adapter.session_update(&initial);
+        adapter.session_id = Some("session".into());
+        adapter.start_prompt("new task", &[]).unwrap();
+        assert!(
+            permission(&mut adapter, json!({"toolCallId":"call-1"})).arguments["input"].is_null()
+        );
+        adapter.session_update(&initial);
+        adapter.session_update(
+            &json!({"sessionUpdate":"tool_call","toolCallId":"call-1","kind":"execute"}),
+        );
+        assert!(
+            permission(&mut adapter, json!({"toolCallId":"call-1"})).arguments["input"].is_null()
+        );
+        assert!(
+            permission(&mut adapter, json!({"toolCallId":"unknown"})).arguments["input"].is_null()
+        );
+    }
+
+    #[test]
+    fn acp_metadata_is_bounded_and_drops_old_input_after_oversize_replacement() {
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        adapter.remember_tool(
+            &json!({"toolCallId":"kept","rawInput":{"command":"old"}}),
+            true,
+        );
+        adapter.remember_tool(
+            &json!({"toolCallId":"kept","rawInput":{"command":"x".repeat(TOOL_METADATA_BYTES)}}),
+            false,
+        );
+        assert!(
+            permission(&mut adapter, json!({"toolCallId":"kept"})).arguments["input"].is_null()
+        );
+        for i in 0..TOOL_METADATA_COUNT + 5 {
+            adapter.remember_tool(
+                &json!({"toolCallId":format!("call-{i}"),"rawInput":{"command":"test"}}),
+                true,
+            );
+        }
+        assert_eq!(adapter.tool_metadata.len(), TOOL_METADATA_COUNT);
+        assert!(
+            permission(&mut adapter, json!({"toolCallId":"call-132"})).arguments["input"].is_null()
+        );
+        assert!(adapter
+            .tool_metadata
+            .values()
+            .all(|v| serde_json::to_vec(v).unwrap().len() <= TOOL_METADATA_BYTES));
+    }
+
+    #[test]
+    fn acp_cached_permission_input_is_still_redacted_before_display() {
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        let secret = "sk-proj-fixtureABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+        adapter.session_update(
+            &json!({"sessionUpdate":"tool_call","toolCallId":"secret-check",
+            "kind":"execute","rawInput":{"command":format!("echo {secret}")}}),
+        );
+        let prompt = permission(&mut adapter, json!({"toolCallId":"secret-check"}));
+        assert!(!prompt.command.contains(secret));
+        assert!(!prompt.arguments.to_string().contains(secret));
+        assert!(prompt.arguments["input"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("[redacted secret]"));
+    }
+
+    #[test]
+    fn acp_completion_retains_latest_input_and_permission_kind() {
+        let mut adapter = AcpAdapter::new(Vendor::Grok);
+        adapter.session_update(&json!({"sessionUpdate":"tool_call","toolCallId":"call-1","rawInput":{"command":"old"}}));
+        permission(
+            &mut adapter,
+            json!({"toolCallId":"call-1","kind":"execute","rawInput":{"command":"actual","cwd":"/project"}}),
+        );
+        let completed = adapter.session_update(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed"}),
+        );
+        assert!(
+            matches!(&completed.updates[0], Update::ToolCompleted { id, name, output, .. }
+            if id == "call-1" && name == "grok.execute" && output["input"] == json!({"command":"actual","cwd":"/project"}) && output["tool_kind"] == "execute")
+        );
+    }
+
+    #[test]
+    fn acp_foreign_session_cannot_change_or_borrow_current_tool_metadata() {
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        adapter.session_id = Some("current".into());
+        adapter.session_update(&json!({"sessionUpdate":"tool_call","toolCallId":"same-id","kind":"execute","rawInput":{"command":"current-command"}}));
+        let foreign = adapter.on_line(&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"foreign","update":{"sessionUpdate":"tool_call_update","toolCallId":"same-id","rawInput":{"command":"foreign-command"}}}}).to_string()).unwrap();
+        assert!(foreign
+            .updates
+            .iter()
+            .all(|u| matches!(u, Update::Warning(_))));
+        let denied = adapter.on_line(&json!({"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"sessionId":"foreign","toolCall":{"toolCallId":"same-id"},"options":[{"optionId":"yes","kind":"allow_once"}]}}).to_string()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&denied.send[0]).unwrap()["error"]["code"],
+            -32602
+        );
+        assert!(denied
+            .updates
+            .iter()
+            .all(|u| matches!(u, Update::Warning(_))));
+        assert!(adapter.approve("42", true).is_err());
+        assert_eq!(
+            permission(&mut adapter, json!({"toolCallId":"same-id"})).arguments["input"]["command"],
+            "current-command"
+        );
     }
 }
