@@ -268,6 +268,9 @@ test("keeps an unsaved file draft and reviews an agent edit before saving", asyn
   const editor = drawer.getByRole("textbox", { name: "Edit README.md" });
   await expect(editor).toHaveValue("# Demo\n");
   await editor.fill("# My draft\n");
+  await editor.press("Escape");
+  await expect(drawer.getByRole("button", { name: "Diff" })).toBeFocused();
+  await expect(drawer).toBeVisible();
   await tab("Changes").click();
   await tab("Files").click();
   await expect(editor).toHaveValue("# My draft\n");

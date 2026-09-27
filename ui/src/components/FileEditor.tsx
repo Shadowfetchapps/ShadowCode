@@ -221,6 +221,7 @@ export function FileEditor({
   function editKey(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Escape") {
       event.preventDefault();
+      event.stopPropagation();
       exitEditor.current?.focus();
     } else if (
       (event.ctrlKey || event.metaKey) &&
