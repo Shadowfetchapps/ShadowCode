@@ -22,14 +22,9 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Test release staging and immutable retry behavior
-        run: node --test scripts/test-native-release.mjs
+        run: node scripts/native-release-verification.mjs run release-tests
       - name: Validate native release tag
-        run: |
-          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          test "$GITHUB_REF_NAME" = "v$VERSION"
-          test "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)" = "$VERSION"
-          test "$(node -p "require('./ui/package.json').version")" = "$VERSION"
-          grep -Fxq "X-ShadowCode-Version=$VERSION" packaging/shadow-agent.desktop
+        run: node scripts/native-release-verification.mjs run release-tag
       - name: Native package dependencies
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libasound2-dev patchelf webkit2gtk-driver xvfb
       - name: Managed llama.cpp build dependencies
@@ -37,50 +32,29 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
       - name: Build and test the embedded interface
-        run: npm --prefix ui ci && npm --prefix ui run build && npm --prefix ui test
+        run: node scripts/native-release-verification.mjs run interface
       - name: Verify native source
-        run: |
-          cargo +1.95.0 fmt --all --check
-          cargo +1.95.0 clippy --workspace --all-targets --locked -- -D warnings
-          cargo +1.95.0 build -p shadowcode-desktop --locked
-          cargo +1.95.0 test --workspace --locked
+        run: node scripts/native-release-verification.mjs run native-source
       - name: Exercise native application behavior
-        run: |
-          node scripts/test-native-cli.mjs
-          node scripts/test-native-stress.mjs
-          node scripts/test-native-tui.mjs
-          node scripts/test-native-mcp-server.mjs
-          SHADOW_MCP_TRANSPORT=http node scripts/test-native-mcp-server.mjs
+        run: node scripts/native-release-verification.mjs run native-behavior
       - name: Exercise the native desktop window
-        run: |
-          cargo +1.95.0 install tauri-driver --version 2.0.6 --locked
-          xvfb-run -a -s '-screen 0 1440x1100x24' dbus-run-session -- node scripts/test-native-desktop.mjs
+        run: node scripts/native-release-verification.mjs run native-window
       - name: Build the managed llama.cpp runtime (Vulkan + all CPU variants)
-        run: |
-          bash scripts/build-llama.cpp.sh --no-user-install
-          node --test scripts/test-llama-runtime.mjs
+        run: node scripts/native-release-verification.mjs run managed-runtime
       - name: Build and inspect release packages
-        run: |
-          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          node --test scripts/test-native-packaging-env.mjs
-          node scripts/build-native.mjs
-          node scripts/check-native-package.mjs "target/release/bundle/appimage/ShadowCode_${VERSION}_amd64.AppImage" "target/release/bundle/deb/ShadowCode_${VERSION}_amd64.deb"
-          node scripts/test-native-runtime-sources.mjs
-          node scripts/test-native-runtime.mjs
+        run: node scripts/native-release-verification.mjs run packages
       - name: Exercise the packaged application
-        run: |
-          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          BINARY="$GITHUB_WORKSPACE/target/release/bundle/appimage/ShadowCode_${VERSION}_amd64.AppImage"
-          SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_CLI_ARGS='["--appimage-extract-and-run"]' node scripts/test-native-cli.mjs
-          SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_CLI_ARGS='["--appimage-extract-and-run"]' node scripts/test-native-tui.mjs
-          SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_DESKTOP_ARGS='["--appimage-extract-and-run","ui"]' SHADOW_NATIVE_DEFAULT_PROFILE=1 xvfb-run -a -s '-screen 0 1440x1100x24' dbus-run-session -- node scripts/test-native-desktop.mjs
-          SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_CLI_ARGS='["--appimage-extract-and-run"]' SHADOW_MCP_TRANSPORT=http node scripts/test-native-mcp-server.mjs
-          npm --prefix scripts/native-mcp-peer ci --ignore-scripts --no-audit --no-fund
-          SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_CLI_ARGS='["--appimage-extract-and-run"]' node scripts/test-native-mcp-peer.mjs
+        run: node scripts/native-release-verification.mjs run packaged-behavior
       - name: Create release checksums
         run: cp artifacts/native-package/SHA256SUMS target/release/bundle/SHA256SUMS
       - name: Verify installer replacement and checksum refusal
-        run: bash scripts/test-install-appimage.sh
+        run: node scripts/native-release-verification.mjs run installer
+      - name: Preserve exact release verification receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-release-verification
+          path: artifacts/release-verification
       - name: Publish checked native artifacts
         env:
           GH_TOKEN: ${{ github.token }}

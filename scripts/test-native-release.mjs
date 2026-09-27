@@ -5,11 +5,16 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { publish } from './publish-native-release.mjs';
+import { digest, GATES, REQUIRED_GATES, scriptDigest } from './native-release-verification.mjs';
 
 async function fixture(run) {
   const root = await mkdtemp(path.join(tmpdir(), 'release-test-'));
   const files = ['app.AppImage', 'app.deb', 'sources.tar.gz', 'SHA256SUMS', 'RELEASE-MANIFEST.json'].map(name => path.join(root, name));
   for (const file of files) await writeFile(file, `fixture ${path.basename(file)}`);
+  const artifacts = Object.fromEntries(await Promise.all(files.slice(0, 3).map(async file => [path.basename(file), await digest(file)])));
+  const verification = { schema: 1, commit: 'a'.repeat(40), run_id: '1', run_attempt: '1', artifacts, gates: Object.fromEntries(REQUIRED_GATES.map(gate => [gate, {
+    schema: 1, gate, commit: 'a'.repeat(40), run_id: '1', run_attempt: '1', script_sha256: scriptDigest(gate), status: 'passed', exit_code: 0, required_skips: [], optional_checks: [], ...(GATES[gate].artifacts ? { artifacts } : {}),
+  }])) };
   const state = { release: null, assets: new Map(), calls: [], failUpload: false, apiFailure: false };
   const gh = args => {
     state.calls.push(args);
@@ -32,8 +37,8 @@ async function fixture(run) {
     }
     return '';
   };
-  const execute = () => publish({ repo: 'owner/repo', tag: 'v1.0.0', commit: 'a'.repeat(40), files, gh });
-  try { await run({ state, execute, files }); } finally { await rm(root, { recursive: true, force: true }); }
+  const execute = (overrides = {}) => publish({ repo: 'owner/repo', tag: 'v1.0.0', commit: 'a'.repeat(40), files, verification, gh, ...overrides });
+  try { await run({ state, execute, files, verification }); } finally { await rm(root, { recursive: true, force: true }); }
 }
 
 test('uploads to a draft, verifies all bytes, then publishes', () => fixture(async ({ state, execute }) => {
@@ -56,9 +61,10 @@ test('published retry verifies bytes without mutations', () => fixture(async ({ 
   assert.equal((await execute()).status, 'already-published');
   assert(state.calls.every(args => args[0] === 'api' || args[1] === 'download'));
 }));
-test('same version with changed local content is refused', () => fixture(async ({ state, execute, files }) => {
+test('same version with changed local content is refused', () => fixture(async ({ state, execute, files, verification }) => {
   await execute(); state.calls = [];
   await writeFile(files[0], 'different binary');
+  verification.artifacts['app.AppImage'] = await digest(files[0]);
   await assert.rejects(execute, /Content mismatch/);
   assert(state.calls.every(args => args[0] === 'api' || args[1] === 'download'));
 }));
@@ -87,3 +93,16 @@ test('uploaded bytes must verify before draft becomes public', () => fixture(asy
   assert(state.release.draft);
   assert(!state.calls.some(args => args[1] === 'edit'));
 }));
+
+test('missing required verification cannot create or publish a release', () => fixture(async ({ state, execute }) => {
+  await assert.rejects(execute({ verification: null }), /verification/i);
+  assert.equal(state.calls.length, 0);
+}));
+
+for (const status of ['failed', 'skipped', 'running']) {
+  test(`required ${status} verification cannot create or publish a release`, () => fixture(async ({ state, execute, verification }) => {
+    verification.gates['native-behavior'].status = status;
+    await assert.rejects(execute, /Required verification gate did not pass/);
+    assert.equal(state.calls.length, 0);
+  }));
+}

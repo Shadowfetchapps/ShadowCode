@@ -1,21 +1,16 @@
 // Draft staging with byte verification; never replace a versioned asset.
-import { createReadStream } from 'node:fs';
 import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
+import { digest, readVerification, validateVerification } from './native-release-verification.mjs';
 
-export async function digest(file) {
-  const hash = createHash('sha256');
-  for await (const chunk of createReadStream(file)) hash.update(chunk);
-  return hash.digest('hex');
-}
+export { digest } from './native-release-verification.mjs';
 const command = (args) => execFileSync('gh', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 
-export async function publish({ repo, tag, commit, files, gh = command }) {
+export async function publish({ repo, tag, commit, files, verification, gh = command }) {
   assert.match(repo, /^[\w.-]+\/[\w.-]+$/);
   assert.match(tag, /^v\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/);
   assert.match(commit, /^[a-f0-9]{40}$/);
@@ -27,6 +22,8 @@ export async function publish({ repo, tag, commit, files, gh = command }) {
     expected.set(name, { file, hash: await digest(file) });
   }
   assert(expected.size >= 4, 'Required release assets missing');
+  const packages = Object.fromEntries([...expected].filter(([name]) => !['SHA256SUMS', 'RELEASE-MANIFEST.json'].includes(name)).map(([name, asset]) => [name, asset.hash]));
+  validateVerification(verification, commit, packages);
   // Listing includes authenticated drafts; the tag endpoint describes
   // published releases and must not be used to infer draft absence.
   const inspect = () => {
@@ -92,17 +89,19 @@ async function main() {
   }));
   assert.equal(listed.size, files.length);
   for (const file of files) assert.equal(await digest(file), listed.get(path.basename(file)), `Package checksum mismatch: ${file}`);
+  const verification = await readVerification('artifacts/release-verification', commit,
+    process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT, Object.fromEntries(listed));
   const manifest = {
     schema: 1, tag, commit, target: 'x86_64-unknown-linux-gnu',
     cargo_lock_sha256: await digest('Cargo.lock'),
     ui_lock_sha256: await digest('ui/package-lock.json'),
     runtime_pin: (await readFile('tools/llama.cpp.pin', 'utf8')).trim(),
-    verification: 'Required release workflow checks completed before this publication step',
+    verification: validateVerification(verification, commit, Object.fromEntries(listed)),
     assets: Object.fromEntries(listed),
   };
   const manifestPath = `${bundle}/RELEASE-MANIFEST.json`;
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   console.log(await publish({ repo: process.env.GITHUB_REPOSITORY, tag, commit,
-    files: [...files, `${bundle}/SHA256SUMS`, manifestPath] }));
+    files: [...files, `${bundle}/SHA256SUMS`, manifestPath], verification }));
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main();
