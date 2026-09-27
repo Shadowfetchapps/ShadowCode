@@ -6,15 +6,16 @@
 //! accepted on the wire), available modes, and the model catalog. No prompt is
 //! sent, so no plan allowance is consumed. The agent keeps its own login; the
 //! probe never reads a credential.
+use super::{
+    lines::{BoundedLines, Line, MAX_DIAGNOSTIC_BYTES},
+    MAX_LINE_BYTES,
+};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::{ffi::OsStr, path::Path, process::Stdio, time::Duration};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
-};
+use tokio::{io::AsyncWriteExt, process::Command};
 
-const MAX_LINE: usize = 4_000_000;
+use tokio_util::task::AbortOnDropHandle;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AcpModel {
@@ -218,22 +219,26 @@ async fn probe_inner(
     // Antigravity prints a Google sign-in link on stderr when it has no
     // valid sign-in, then waits; that answer is "not signed in".
     let (sign_in_tx, mut sign_in_rx) = tokio::sync::oneshot::channel::<()>();
-    if let Some(stderr) = child.stderr.take() {
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
+    let _stderr_drain = child.stderr.take().map(|stderr| {
+        AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut lines = BoundedLines::new(stderr, MAX_DIAGNOSTIC_BYTES);
             let mut tx = Some(sign_in_tx);
             while let Ok(Some(line)) = lines.next_line().await {
+                let Line::Text(line) = line else {
+                    continue;
+                };
                 if super::antigravity_server::is_sign_in_prompt(&line) {
                     if let Some(tx) = tx.take() {
                         let _ = tx.send(());
                     }
                 }
             }
-        });
-    }
+        }))
+    });
+    let mut sign_in_waiting = _stderr_drain.is_some();
     let mut stdin = child.stdin.take().context("ACP stdin missing")?;
     let stdout = child.stdout.take().context("ACP stdout missing")?;
-    let mut reader = BufReader::new(stdout);
+    let mut reader = BoundedLines::new(stdout, MAX_LINE_BYTES);
     let mut probe = AcpProbe::default();
     let init = rpc(
         1,
@@ -248,28 +253,29 @@ async fn probe_inner(
     stdin.write_all(b"\n").await?;
     stdin.flush().await?;
     let mut pending = std::collections::HashSet::from([1u64]);
-    let mut buf = Vec::new();
     let cwd = workspace.display().to_string();
     loop {
-        buf.clear();
-        let read = tokio::select! {
-            read = reader.read_until(b'\n', &mut buf) => read?,
-            Ok(()) = &mut sign_in_rx => {
-                probe.authenticated = Some(false);
-                probe.session_error = Some("Google sign-in required".into());
-                break;
+        let line = tokio::select! {
+            line = reader.next_protocol_line() => line?,
+            signal = &mut sign_in_rx, if sign_in_waiting => {
+                // A oneshot cannot be polled again after either delivery or
+                // sender closure (for example stderr reached EOF).
+                sign_in_waiting = false;
+                if signal.is_ok() {
+                    probe.authenticated = Some(false);
+                    probe.session_error = Some("Google sign-in required".into());
+                    break;
+                }
+                continue;
             }
         };
-        if read == 0 {
+        let Some(line) = line else {
             if pending.is_empty() {
                 break;
             }
             bail!("{} exited during the ACP handshake", binary.display());
-        }
-        if buf.len() > MAX_LINE {
-            continue;
-        }
-        let Ok(message) = serde_json::from_slice::<Value>(&buf) else {
+        };
+        let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         let Some(id) = message.get("id").and_then(Value::as_u64) else {

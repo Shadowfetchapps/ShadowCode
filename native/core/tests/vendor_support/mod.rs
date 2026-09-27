@@ -110,6 +110,18 @@ for raw in sys.stdin:
             continue
         if mode == "slow":
             time.sleep(float(C.get("slow", 2)))
+        if mode == "fragmented":
+            frame = json.dumps({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"complete fragmented reply"}})
+            sys.stdout.write(frame[:45]); sys.stdout.flush()
+            time.sleep(0.7)  # crosses the runner's 250 ms cancellation poll
+            sys.stdout.write(frame[45:] + "\n"); sys.stdout.flush()
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}})
+            continue
+        if mode == "oversized_stdout":
+            mark("transport.pid", str(os.getpid()))
+            sys.stdout.write("x" * 4_000_001); sys.stdout.flush()
+            time.sleep(120)  # deliberately never terminates the line
+            continue
         if mode == "edit":
             # Write and delete project files with the CLI's own tools, as a
             # real vendor would, relative to the working directory.

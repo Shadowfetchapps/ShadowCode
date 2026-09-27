@@ -13,16 +13,11 @@
 //! `usedPercent`, `windowDurationMins`, `resetsAt`, plus `limitId`,
 //! `limitName`, `normalModelSlug`, `planType`, `credits`, and
 //! `rateLimitsByLimitId` groups snapshots per quota pool.
+use super::{lines::BoundedLines, MAX_LINE_BYTES};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::{ffi::OsStr, path::Path, process::Stdio, time::Duration};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
-};
-
-/// Longest accepted line from the app-server during a probe.
-const MAX_LINE: usize = 4_000_000;
+use tokio::{io::AsyncWriteExt, process::Command};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CodexProbe {
@@ -135,7 +130,7 @@ async fn probe_inner(binary: &Path, path_env: Option<&OsStr>) -> Result<CodexPro
         .with_context(|| format!("Could not start {} app-server", binary.display()))?;
     let mut stdin = child.stdin.take().context("app-server stdin missing")?;
     let stdout = child.stdout.take().context("app-server stdout missing")?;
-    let mut reader = BufReader::new(stdout);
+    let mut reader = BoundedLines::new(stdout, MAX_LINE_BYTES);
     let init = rpc(
         1,
         "initialize",
@@ -147,20 +142,14 @@ async fn probe_inner(binary: &Path, path_env: Option<&OsStr>) -> Result<CodexPro
     let mut probe = CodexProbe::default();
     let mut pending = std::collections::HashSet::from([1u64]);
     let mut sent_reads = false;
-    let mut buf = Vec::new();
     loop {
-        buf.clear();
-        let read = reader.read_until(b'\n', &mut buf).await?;
-        if read == 0 {
+        let Some(line) = reader.next_protocol_line().await? else {
             if pending.is_empty() {
                 break;
             }
             bail!("codex app-server exited during the probe");
-        }
-        if buf.len() > MAX_LINE {
-            continue;
-        }
-        let Ok(message) = serde_json::from_slice::<Value>(&buf) else {
+        };
+        let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         let Some(id) = message.get("id").and_then(Value::as_u64) else {

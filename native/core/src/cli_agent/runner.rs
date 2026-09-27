@@ -4,8 +4,10 @@
 //! read its own credentials. ShadowCode never opens those files, never injects
 //! its tools or bubblewrap, and kills the process group on cancel.
 use super::{
-    adapter_for, clip, redact, resolve_binary, ApprovalPrompt, CliAdapter, CliAgentsConfig,
-    LaunchOptions, Update, Vendor, VendorAnswer, MAX_LINE_BYTES, MAX_MALFORMED_LINES,
+    adapter_for, clip,
+    lines::{BoundedLines, Line, MAX_DIAGNOSTIC_BYTES},
+    redact, resolve_binary, ApprovalPrompt, CliAdapter, CliAgentsConfig, LaunchOptions, Update,
+    Vendor, VendorAnswer, MAX_LINE_BYTES, MAX_MALFORMED_LINES,
 };
 use crate::{
     approvals::{Answer, Approval, ApprovalHub, Grant},
@@ -21,10 +23,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::AsyncWriteExt,
     process::{Child, ChildStdin, Command},
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 struct ProcessGroup(u32);
 impl ProcessGroup {
@@ -228,13 +230,13 @@ async fn run_once(
     let mut stdin = Some(child.stdin.take().context("Vendor CLI stdin missing")?);
     let stdout = child.stdout.take().context("Vendor CLI stdout missing")?;
     let stderr = child.stderr.take().context("Vendor CLI stderr missing")?;
-    let mut reader = BufReader::new(stdout);
+    let mut reader = BoundedLines::new(stdout, MAX_LINE_BYTES);
     let sign_in_needed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    tokio::spawn(drain_stderr(
+    let _stderr_drain = AbortOnDropHandle::new(tokio::spawn(drain_stderr(
         stderr,
         request.events.clone(),
         sign_in_needed.clone(),
-    ));
+    )));
     let mut outgoing = adapter.on_start(&request.options);
     outgoing.extend(adapter.prompt(&request.prompt, &request.images)?);
     send_lines(&mut stdin, &outgoing).await?;
@@ -276,7 +278,7 @@ async fn run_once(
         let remaining = stall.saturating_sub(last_line.elapsed());
         let read = tokio::time::timeout(
             remaining.min(Duration::from_millis(250)),
-            read_line(&mut reader),
+            reader.next_protocol_line(),
         );
         match read.await {
             Ok(Ok(None)) => {
@@ -297,19 +299,6 @@ async fn run_once(
             }
             Ok(Ok(Some(line))) => {
                 last_line = Instant::now();
-                if line.len() > MAX_LINE_BYTES {
-                    malformed += 1;
-                    request.events.emit(
-                        "agent.warning",
-                        json!({"text":format!("Ignored an oversized line from {}", vendor.id())}),
-                    )?;
-                    ensure!(
-                        malformed <= MAX_MALFORMED_LINES,
-                        "{} sent too many malformed lines",
-                        vendor.label()
-                    );
-                    continue;
-                }
                 let step = adapter.on_line(&line)?;
                 send_lines(&mut stdin, &step.send).await?;
                 *reached_ready |= adapter.ready();
@@ -514,31 +503,21 @@ async fn send_lines(stdin: &mut Option<ChildStdin>, lines: &[String]) -> Result<
     Ok(())
 }
 
-async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<String>> {
-    let mut buf = Vec::new();
-    let count = reader.read_until(b'\n', &mut buf).await?;
-    if count == 0 {
-        return Ok(None);
-    }
-    if buf.ends_with(b"\n") {
-        buf.pop();
-        if buf.ends_with(b"\r") {
-            buf.pop();
-        }
-    }
-    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
-}
-
 async fn drain_stderr<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     stderr: R,
     events: TaskEvents,
     sign_in_needed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let mut reader = BufReader::new(stderr);
-    let mut buf = String::new();
-    while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
-        let line = redact(buf.trim());
-        buf.clear();
+    let mut reader = BoundedLines::new(stderr, MAX_DIAGNOSTIC_BYTES);
+    while let Ok(Some(line)) = reader.next_line().await {
+        let Line::Text(line) = line else {
+            let _ = events.emit(
+                "agent.warning",
+                json!({"text":"vendor stderr: omitted oversized diagnostic line"}),
+            );
+            continue;
+        };
+        let line = redact(line.trim());
         if line.is_empty() {
             continue;
         }
@@ -897,4 +876,49 @@ pub fn resolve_launch_binary(configured: &str) -> Option<PathBuf> {
         let path = PathBuf::from(configured);
         path.is_file().then_some(path)
     })
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn oversized_stderr_is_omitted_and_later_diagnostics_still_arrive() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::AppPaths::isolated(root.path()).unwrap();
+        let store = std::sync::Arc::new(crate::store::Store::open(&paths.database()).unwrap());
+        let session = store.create_session(root.path(), "cli:claude", "").unwrap();
+        let session_id = session["id"].as_str().unwrap().to_owned();
+        let task_id = store.create_task(&session_id, "diagnostics").unwrap();
+        let (sender, _) = tokio::sync::broadcast::channel(8);
+        let events = TaskEvents {
+            store: store.clone(),
+            session_id: session_id.clone(),
+            task_id,
+            sender,
+        };
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let writing = tokio::spawn(async move {
+            let text = format!(
+                "DO_NOT_RETAIN_THIS_DIAGNOSTIC_SECRET {}\nordinary diagnostic\n",
+                "x".repeat(MAX_DIAGNOSTIC_BYTES)
+            );
+            writer.write_all(text.as_bytes()).await.unwrap();
+        });
+        drain_stderr(reader, events, Default::default()).await;
+        writing.await.unwrap();
+        let saved = store.events_after(&session_id, 0, None, 100).unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(
+            saved[0]["payload"]["text"],
+            "vendor stderr: omitted oversized diagnostic line"
+        );
+        assert_eq!(
+            saved[1]["payload"]["text"],
+            "vendor stderr: ordinary diagnostic"
+        );
+        assert!(!serde_json::to_string(&saved)
+            .unwrap()
+            .contains("DIAGNOSTIC_SECRET"));
+    }
 }

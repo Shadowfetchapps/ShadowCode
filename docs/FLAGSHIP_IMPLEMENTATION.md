@@ -105,6 +105,14 @@ The real Claude run initially returned `ALPHAALPHA` twice. Its per-message strea
 
 All 19 adapter tests and core all-target Clippy with warnings denied pass. These live tests establish basic text and resume behavior, not full provider conformance or coding-quality acceptance. No tool action, image, quota exhaustion or auth-expiry case was exercised live in this increment. The installed app and billing settings were not changed. Codex subscription authentication was cross-checked with [official OpenAI documentation](https://learn.chatgpt.com/docs/auth).
 
+## Bounded provider transport and split-frame correctness
+
+A native subprocess reproduction confirmed that the runner's 250 ms polling timeout discarded bytes already consumed into a temporary line buffer. A frame split across that boundary completed with missing reply text. A second reproduction sent more than 4,000,000 bytes without a newline; the old size check could not run until line completion, and the job failed the five-second acceptance deadline. Both regressions failed before the fix and passed afterwards. No actual out-of-memory incident is claimed.
+
+A shared bounded line reader retains partial bytes across cancelled polls and enforces the protocol limit while reading. Oversized protocol frames now fail the run or discovery probe immediately, rather than silently dropping a possibly essential event. Codex and ACP discovery use the same reader. Diagnostic lines have a separate 64 KiB bound; an oversized line is omitted entirely, then reading resumes at the following line. Stderr tasks are tied to the owning run/probe through abort-on-drop handles.
+
+Tests cover fragmented UTF-8, CRLF/EOF and exact size boundaries, cancellation of pending reads, oversized-line resynchronization, whole-line diagnostic omission, native job/terminal persistence and overflowing process reaping. A live readiness check caught a closed oneshot being polled again in the revised ACP probe; the corrected code disables that branch after channel closure, and a normal ACP handshake now has a regression test. Final validation: 24 provider unit tests plus 39 integration tests pass, with one opt-in live installer test ignored; all-target Clippy with warnings denied passes. Read-only discovery against all five installed provider versions reports Ready after the fix. No model turn was sent in this increment. This does not complete all transport conformance: stdin backpressure, aggregate retained output, absolute deadlines amid continuous irrelevant output, request-queue limits and the full shutdown/permission matrix remain to be qualified.
+
 ## Full acceptance register
 
 Initial state below is **mapping pending**, not an assertion that existing functionality is missing. Each ID needs an exact test reference and qualified result before completion. Existing successful broad suites do not automatically prove each invariant.
@@ -137,7 +145,7 @@ Initial state below is **mapping pending**, not an assertion that existing funct
 - **PRF-04 — Required check cancelled/skipped**: typed-state unit tests prevent passing; failed/cancelled task aggregation and goal gating are implemented. Complete cancellation-boundary native matrix remains open.
 - **PRF-05 — Provider self-reports an external result**: Provenance differs from locally observed evidence. Status: mapping pending.
 - **PRV-01 — Expired auth or unavailable quota**: Clear status; no fabricated usage or fallback billing. Status: mapping pending.
-- **PRV-02 — Malformed/out-of-order protocol data**: Bounded failure/recovery; no mixed sessions. Status: mapping pending.
+- **PRV-02 — Malformed/out-of-order protocol data**: split-frame byte loss and unbounded unterminated-line buffering reproduced and fixed. Shared framing tests cover the runner, Codex/ACP probes and stderr omission; broader request ordering, session isolation and aggregate output bounds remain open.
 - **PRV-03 — Unsupported image/tool capability**: Explicit rejection or supported alternative with consent. Status: mapping pending.
 - **PRV-04 — Vendor runtime updates capabilities**: Capability record refreshes; stale affordance removed. Status: mapping pending.
 - **SEC-01 — Strict sandbox unavailable**: Operation refused, not silently downgraded. Status: mapping pending.

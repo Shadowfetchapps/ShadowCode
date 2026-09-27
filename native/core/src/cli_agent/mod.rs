@@ -33,6 +33,7 @@ pub mod codex_probe;
 pub mod discovery;
 pub mod doctor;
 pub mod handoff;
+mod lines;
 pub mod picker;
 #[cfg(unix)]
 pub mod runner;
@@ -41,7 +42,7 @@ pub mod usage;
 /// Provider prefix used in `ModelConfig.provider` for vendor CLI backends.
 pub const PROVIDER_PREFIX: &str = "cli:";
 /// Longest accepted NDJSON line from a vendor process. Longer lines are
-/// dropped as malformed rather than buffered without bound.
+/// rejected immediately rather than buffered without bound.
 pub const MAX_LINE_BYTES: usize = 4_000_000;
 /// Consecutive malformed lines tolerated before the run is failed.
 pub const MAX_MALFORMED_LINES: usize = 32;
