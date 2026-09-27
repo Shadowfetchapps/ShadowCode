@@ -97,6 +97,19 @@ it("disables Send until a ready row is chosen and remembers it per conversation"
   );
 });
 
+it("forces a provider reprobe from an already-open model picker", async () => {
+  await boot();
+  fireEvent.click(trigger());
+  expect(screen.getByRole("listbox")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+  await waitFor(() =>
+    expect(
+      fake.log.some((request) => request.path === "/api/picker?refresh=1"),
+    ).toBe(true),
+  );
+  expect(screen.getByRole("listbox")).toBeTruthy();
+});
+
 it("runs a task and shows the event-derived timeline and summary", async () => {
   await boot();
   await choose(/qwen3:14b · This computer/);
