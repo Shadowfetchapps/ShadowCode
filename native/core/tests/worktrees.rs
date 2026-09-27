@@ -1145,3 +1145,370 @@ async fn repair_refuses_relocated_checkout_without_guessing_a_path() {
     assert_eq!(advice["auto_recover"], false);
     assert_eq!(advice["guess_paths"], false);
 }
+
+#[cfg(target_os = "linux")]
+mod cleanup_failure {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::path::PathBuf;
+
+    struct Fixture {
+        // Drop restores permissions before TempDir removes fixture evidence.
+        root: tempfile::TempDir,
+        project: PathBuf,
+        paths: AppPaths,
+        record: worktrees::Record,
+        mode: u32,
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            for path in [
+                self.record.path.join("blocked"),
+                retained(self).join("blocked"),
+            ] {
+                if fs::symlink_metadata(&path)
+                    .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+                {
+                    let _ = fs::set_permissions(&path, fs::Permissions::from_mode(self.mode));
+                }
+            }
+        }
+    }
+    async fn failed() -> Fixture {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        repository(&project);
+        let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+        let record = worktrees::create(&paths, &project, "HEAD", CancellationToken::new())
+            .await
+            .unwrap();
+        fs::create_dir(record.path.join("blocked")).unwrap();
+        fs::write(
+            record.path.join("blocked/new.txt"),
+            "recoverable new data\n",
+        )
+        .unwrap();
+        let mode = fs::metadata(record.path.join("blocked"))
+            .unwrap()
+            .permissions()
+            .mode();
+        let f = Fixture {
+            root,
+            project,
+            paths,
+            record,
+            mode,
+        };
+        fs::set_permissions(
+            f.record.path.join("blocked"),
+            fs::Permissions::from_mode(mode & !0o222),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::remove_file(f.record.path.join("blocked/new.txt"))
+                .expect_err("Run without root/DAC override")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let error =
+            worktrees::dispose(&f.paths, &f.project, &f.record.id, CancellationToken::new())
+                .await
+                .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Git worktree operation failed"),
+            "{error:#}"
+        );
+        fs::set_permissions(
+            retained(&f).join("blocked"),
+            fs::Permissions::from_mode(mode),
+        )
+        .unwrap();
+        assert!(journal(&f).is_file());
+        assert_eq!(git(&f.project, &["worktree", "list"]).lines().count(), 1);
+        f
+    }
+    fn retained(f: &Fixture) -> PathBuf {
+        f.record
+            .path
+            .parent()
+            .unwrap()
+            .join(".cleanup")
+            .join(&f.record.id)
+            .join("checkout")
+    }
+    fn journal(f: &Fixture) -> PathBuf {
+        f.paths
+            .data
+            .join("managed-worktrees/records/cleanup")
+            .join(format!("{}.json", f.record.id))
+    }
+    async fn refused(f: &Fixture, reason: &str) {
+        let before = fs::read(journal(f)).unwrap();
+        let source = fs::read(f.project.join("tracked.txt")).unwrap();
+        let error =
+            worktrees::dispose(&f.paths, &f.project, &f.record.id, CancellationToken::new())
+                .await
+                .unwrap_err();
+        assert!(format!("{error:#}").contains(reason), "{error:#}");
+        assert_eq!(fs::read(journal(f)).unwrap(), before);
+        assert_eq!(fs::read(f.project.join("tracked.txt")).unwrap(), source);
+        assert_eq!(
+            git(&f.project, &["rev-parse", &f.record.branch]),
+            f.record.base_commit
+        );
+        assert_eq!(
+            worktrees::list(&f.paths, &f.project).unwrap()[0].state,
+            "removing"
+        );
+    }
+    #[tokio::test]
+    async fn changed_survivors_and_foreign_git_pointer_are_preserved() {
+        for variant in [
+            "new",
+            "changed",
+            "replacement",
+            "foreign",
+            "symlink",
+            "foreign_git",
+        ] {
+            let f = failed().await;
+            let file = if variant == "new" {
+                retained(&f).join("later.txt")
+            } else if variant == "changed" {
+                retained(&f).join("blocked/new.txt")
+            } else if variant == "foreign_git" {
+                retained(&f).join(".git")
+            } else {
+                retained(&f).join("blocked/new.txt")
+            };
+            match variant {
+                "replacement" => {
+                    let bytes = fs::read(&file).unwrap();
+                    fs::rename(&file, f.root.path().join("old-pointer")).unwrap();
+                    fs::write(&file, bytes).unwrap();
+                }
+                "symlink" => {
+                    fs::remove_file(&file).unwrap();
+                    symlink(f.project.join("tracked.txt"), &file).unwrap();
+                }
+                _ => fs::write(&file, "later user data\n").unwrap(),
+            }
+            refused(&f, "new or changed data").await;
+            assert!(fs::symlink_metadata(&file).is_ok());
+        }
+    }
+    #[tokio::test]
+    async fn replacement_directory_and_symlink_lane_are_preserved() {
+        for link in [false, true] {
+            let f = failed().await;
+            let original = f.root.path().join("original-lane");
+            fs::rename(retained(&f), &original).unwrap();
+            if link {
+                symlink(&f.project, retained(&f)).unwrap();
+            } else {
+                fs::create_dir(retained(&f)).unwrap();
+                fs::write(retained(&f).join("foreign.txt"), "foreign user data\n").unwrap();
+            }
+            refused(
+                &f,
+                if link {
+                    "real directory"
+                } else {
+                    "checkout was replaced"
+                },
+            )
+            .await;
+            assert_eq!(
+                fs::read_to_string(original.join("blocked/new.txt")).unwrap(),
+                "recoverable new data\n"
+            );
+            if !link {
+                assert_eq!(
+                    fs::read_to_string(retained(&f).join("foreign.txt")).unwrap(),
+                    "foreign user data\n"
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn foreign_admin_and_changed_branch_are_preserved() {
+        for branch in [false, true] {
+            let f = failed().await;
+            if branch {
+                let tree = git(&f.project, &["rev-parse", "HEAD^{tree}"]);
+                let commit = git(
+                    &f.project,
+                    &["commit-tree", &tree, "-p", "HEAD", "-m", "New branch work"],
+                );
+                git(
+                    &f.project,
+                    &[
+                        "update-ref",
+                        &format!("refs/heads/{}", f.record.branch),
+                        &commit,
+                    ],
+                );
+                let before = fs::read(journal(&f)).unwrap();
+                let error = worktrees::dispose(
+                    &f.paths,
+                    &f.project,
+                    &f.record.id,
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains("Managed branch changed"),
+                    "{error:#}"
+                );
+                assert_eq!(git(&f.project, &["rev-parse", &f.record.branch]), commit);
+                assert_eq!(fs::read(journal(&f)).unwrap(), before);
+            } else {
+                let admin = f
+                    .record
+                    .common_directory
+                    .join("worktrees")
+                    .join(&f.record.id);
+                fs::create_dir_all(&admin).unwrap();
+                fs::write(admin.join("foreign.txt"), "foreign registration data\n").unwrap();
+                refused(&f, "administration parent changed around an occupied ID").await;
+                assert_eq!(
+                    fs::read_to_string(admin.join("foreign.txt")).unwrap(),
+                    "foreign registration data\n"
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn old_unjournaled_failure_and_budget_overflow_stay_pending() {
+        let f = failed().await;
+        let backup = fs::read(journal(&f)).unwrap();
+        fs::remove_file(journal(&f)).unwrap();
+        let error =
+            worktrees::dispose(&f.paths, &f.project, &f.record.id, CancellationToken::new())
+                .await
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("no ownership journal"),
+            "{error:#}"
+        );
+        assert!(retained(&f).join("blocked/new.txt").is_file());
+        fs::write(journal(&f), backup).unwrap();
+        let huge = retained(&f).join("large-build-output");
+        fs::File::create(&huge)
+            .unwrap()
+            .set_len(8_u64 * 1024 * 1024 * 1024 + 1)
+            .unwrap();
+        refused(&f, "byte budget").await;
+        assert_eq!(
+            fs::metadata(huge).unwrap().len(),
+            8_u64 * 1024 * 1024 * 1024 + 1
+        );
+    }
+    #[tokio::test]
+    async fn later_worktree_from_another_profile_survives_cleanup_parent_rebind() {
+        let f = failed().await;
+        git(&f.project, &["worktree", "prune", "--expire", "now"]);
+        let other_paths = AppPaths::isolated(&f.root.path().join("other-profile")).unwrap();
+        let other = worktrees::create(&other_paths, &f.project, "HEAD", CancellationToken::new())
+            .await
+            .unwrap();
+        let admin = other.common_directory.join("worktrees").join(&other.id);
+        let index = fs::read(admin.join("index")).unwrap();
+        worktrees::dispose(&f.paths, &f.project, &f.record.id, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!retained(&f).exists());
+        assert!(other.path.join("tracked.txt").is_file());
+        assert_eq!(fs::read(admin.join("index")).unwrap(), index);
+        assert_eq!(
+            git(&f.project, &["rev-parse", &other.branch]),
+            other.base_commit
+        );
+        assert_eq!(
+            worktrees::list(&other_paths, &f.project).unwrap()[0].state,
+            "ready"
+        );
+    }
+    #[tokio::test]
+    async fn symlinked_admin_parent_never_receives_restored_metadata() {
+        let f = failed().await;
+        let outside = f.root.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("user.txt"), "foreign data\n").unwrap();
+        symlink(&outside, f.record.common_directory.join("worktrees")).unwrap();
+        refused(&f, "real directory").await;
+        assert_eq!(
+            fs::read_to_string(outside.join("user.txt")).unwrap(),
+            "foreign data\n"
+        );
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    }
+    #[test]
+    fn cross_process_disposal_child() {
+        let Some(root) = std::env::var_os("SHADOWCODE_DISPOSAL_LOCK_FIXTURE") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let paths = AppPaths::isolated(&root.join("profile")).unwrap();
+        let project = root.join("project");
+        let record = worktrees::list(&paths, &project).unwrap().pop().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime
+            .block_on(worktrees::dispose(
+                &paths,
+                &project,
+                &record.id,
+                CancellationToken::new(),
+            ))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Another process owns worktree cleanup"),
+            "{error:#}"
+        );
+        assert!(record
+            .path
+            .parent()
+            .unwrap()
+            .join(".cleanup")
+            .join(&record.id)
+            .join("checkout/blocked/new.txt")
+            .is_file());
+    }
+    #[tokio::test]
+    async fn non_compare_cleanup_obeys_cross_process_disposal_lock() {
+        use fs2::FileExt;
+        let f = failed().await;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(f.record.common_directory.join("shadowcode-disposal.lock"))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+        let before = fs::read(journal(&f)).unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cleanup_failure::cross_process_disposal_child",
+                "--nocapture",
+            ])
+            .env("SHADOWCODE_DISPOSAL_LOCK_FIXTURE", f.root.path())
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+        assert_eq!(fs::read(journal(&f)).unwrap(), before);
+        drop(lock);
+        worktrees::dispose(&f.paths, &f.project, &f.record.id, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!f.record.path.exists());
+    }
+}

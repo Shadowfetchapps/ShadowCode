@@ -584,6 +584,9 @@ async fn a_lane_deleted_outside_shadowcode_does_not_block_keeping_another() {
     let id = record["id"].as_str().unwrap().to_owned();
     let record = finished(&f, &id).await;
     let beta = Path::new(lane(&record, "lane-beta")["worktree"].as_str().unwrap()).to_owned();
+    let beta_id = lane(&record, "lane-beta")["worktree_id"].as_str().unwrap();
+    let admin = project.join(".git/worktrees").join(beta_id);
+    let original_index = fs::read(admin.join("index")).unwrap();
     fs::remove_dir_all(&beta).unwrap();
     let error = call(
         &f.service,
@@ -610,8 +613,14 @@ async fn a_lane_deleted_outside_shadowcode_does_not_block_keeping_another() {
         fs::read_to_string(project.join("answer.txt")).unwrap(),
         "alpha\n"
     );
-    assert_eq!(managed_branches(project), "");
-    assert_eq!(git(project, &["worktree", "list"]).lines().count(), 1);
+    assert_eq!(kept["cleanup_pending"], true);
+    assert!(
+        notes.contains("absent without cleanup ownership evidence"),
+        "{notes}"
+    );
+    assert_eq!(fs::read(admin.join("index")).unwrap(), original_index);
+    assert!(managed_branches(project).contains(beta_id));
+    assert_eq!(git(project, &["worktree", "list"]).lines().count(), 2);
     f.service.engine.shutdown().await.unwrap();
 }
 
@@ -1240,7 +1249,63 @@ exec {git} "$@"
         }
 
         for lane in recovered["lanes"].as_array().unwrap() {
-            assert!(Path::new(lane["worktree"].as_str().unwrap()).exists());
+            let original = Path::new(lane["worktree"].as_str().unwrap());
+            if phase == "cleanup" && !original.exists() {
+                let journal: Value = serde_json::from_slice(
+                    &fs::read(
+                        location
+                            .join("profile/data/managed-worktrees/records/cleanup")
+                            .join(format!("{}.json", lane["worktree_id"].as_str().unwrap())),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(journal["path"], lane["worktree"]);
+                assert_eq!(journal["relocated"], true);
+                assert_eq!(journal["removed"], false);
+                let retained = Path::new(journal["quarantine"].as_str().unwrap());
+                assert!(retained.is_dir());
+                use std::os::unix::fs::MetadataExt;
+                let identity = fs::metadata(retained).unwrap();
+                assert_eq!(
+                    identity.dev(),
+                    journal["lane"]["root"]["dev"].as_u64().unwrap()
+                );
+                assert_eq!(
+                    identity.ino(),
+                    journal["lane"]["root"]["ino"].as_u64().unwrap()
+                );
+                assert_eq!(
+                    fs::read(retained.join("binary.dat")).unwrap(),
+                    [0, 1, 255, 0, 42]
+                );
+            } else {
+                assert!(original.exists());
+            }
+        }
+        if phase == "cleanup" {
+            let cleaned = call(
+                &service,
+                "POST",
+                &format!("/api/compare/{id}/discard"),
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            assert_eq!(cleaned["state"], "applied");
+            assert_eq!(cleaned["winner"], "lane-alpha");
+            assert_eq!(cleaned["cleanup_pending"], false);
+            assert_eq!(fs::read(project.join("lib.txt")).unwrap(), source);
+            assert_eq!(
+                fs::read(project.join("binary.dat")).unwrap(),
+                [0, 1, 255, 0, 42]
+            );
+            let score = call(&service, "GET", "/api/compare/scoreboard", Value::Null)
+                .await
+                .unwrap();
+            assert_eq!(score["rows"][0]["wins"], 1);
+            assert_eq!(score["rows"][0]["runs"], 1);
+            assert_eq!(score["rows"][1]["runs"], 1);
         }
         service.engine.shutdown().await.unwrap();
     }
@@ -2000,4 +2065,239 @@ exec {git} "$@"
             json!({"case":"CMP-11","service":"shared","process_scope":"owned fallback shell; isolated failed bubblewrap probe","timing":timing,"a_still_stopping_after_b":still_waiting})
         );
     }
+}
+
+// Linux mode-bit failure is checked with a real unlink before qualification.
+// Privileged/DAC-bypassing runs must fail rather than claim an exercised fault.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn filesystem_deletion_failure_preserves_applied_winner_and_retries_after_restart() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct RestoreMode {
+        paths: [PathBuf; 2],
+        mode: u32,
+    }
+    impl RestoreMode {
+        fn restore(&self) {
+            for path in &self.paths {
+                if path.exists() {
+                    fs::set_permissions(path, fs::Permissions::from_mode(self.mode)).unwrap();
+                }
+            }
+        }
+    }
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            for path in &self.paths {
+                if path.exists() {
+                    let _ = fs::set_permissions(path, fs::Permissions::from_mode(self.mode));
+                }
+            }
+        }
+    }
+    async fn assert_score(service: &Service) {
+        let board = call(service, "GET", "/api/compare/scoreboard", Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(
+            board["rows"],
+            json!([
+                {"model":"lane-alpha","name":"alpha","wins":1,"runs":1},
+                {"model":"lane-beta","name":"beta","wins":0,"runs":1},
+            ])
+        );
+    }
+
+    let f = fixture().await;
+    let project = f.project.clone();
+    fs::write(project.join("tracked.txt"), "staged user contents\n").unwrap();
+    git(&project, &["add", "tracked.txt"]);
+    fs::write(project.join("tracked.txt"), "unstaged user contents\n").unwrap();
+    fs::write(project.join("notes.txt"), "untracked user contents\n").unwrap();
+    fs::write(project.join("ignored.log"), "ignored user contents\n").unwrap();
+    let head = git(&project, &["rev-parse", "HEAD"]);
+    let index = git(&project, &["write-tree"]);
+    let assert_source = |answer: &str| {
+        assert_eq!(git(&project, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(&project, &["write-tree"]), index);
+        assert_eq!(
+            git(&project, &["show", ":tracked.txt"]),
+            "staged user contents"
+        );
+        for (path, expected) in [
+            ("tracked.txt", "unstaged user contents\n"),
+            ("notes.txt", "untracked user contents\n"),
+            ("ignored.log", "ignored user contents\n"),
+            ("lib.txt", "value = 2 (alpha)\n"),
+            ("answer.txt", answer),
+        ] {
+            assert_eq!(fs::read_to_string(project.join(path)).unwrap(), expected);
+        }
+        assert!(!project.join("beta.txt").exists());
+    };
+
+    let started = start(&f).await;
+    let id = started["id"].as_str().unwrap().to_owned();
+    let ready = finished(&f, &id).await;
+    assert!(ready["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["status"] == "completed"));
+    let alpha = PathBuf::from(lane(&ready, "lane-alpha")["worktree"].as_str().unwrap());
+    let beta = PathBuf::from(lane(&ready, "lane-beta")["worktree"].as_str().unwrap());
+    let beta_id = lane(&ready, "lane-beta")["worktree_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let retained = beta
+        .parent()
+        .unwrap()
+        .join(".cleanup")
+        .join(&beta_id)
+        .join("checkout");
+    let protected = beta.join("blocked");
+    fs::create_dir(&protected).unwrap();
+    let probe = protected.join("recoverable.txt");
+    fs::write(&probe, "recoverable losing lane data\n").unwrap();
+    let restore = RestoreMode {
+        paths: [protected.clone(), retained.join("blocked")],
+        mode: fs::metadata(&protected).unwrap().permissions().mode(),
+    };
+    // A nested permission fault permits root relocation, then makes real Git
+    // deletion fail after it has already removed some other lane files.
+    fs::set_permissions(
+        &protected,
+        fs::Permissions::from_mode(restore.mode & !0o222),
+    )
+    .unwrap();
+    let denied = fs::remove_file(&probe).expect_err(
+        "The OS bypassed the mode-bit deletion fault; run this qualification without root/DAC override",
+    );
+    assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(probe.is_file());
+
+    let kept = call(
+        &f.service,
+        "POST",
+        &format!("/api/compare/{id}/keep"),
+        json!({"model":"lane-alpha"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(kept["state"], "applied");
+    assert_eq!(kept["winner"], "lane-alpha");
+    assert_eq!(kept["cleanup_pending"], true);
+    let recovery = kept["recovery"].clone();
+    assert_eq!(recovery["phase"], "applied");
+    assert!(!recovery["operation_id"].as_str().unwrap().is_empty());
+    let applied_files = kept["applied_files"].clone();
+    assert_eq!(lane(&kept, "lane-alpha")["removed"], true);
+    assert_eq!(lane(&kept, "lane-beta")["removed"], false);
+    assert!(!alpha.exists());
+    assert!(!beta.exists(), "{kept}");
+    assert!(retained.is_dir(), "{kept}");
+    assert_eq!(
+        fs::read_to_string(retained.join("blocked/recoverable.txt")).unwrap(),
+        "recoverable losing lane data\n"
+    );
+    let cleanup_journal: Value = serde_json::from_slice(
+        &fs::read(
+            f.paths
+                .data
+                .join("managed-worktrees/records/cleanup")
+                .join(format!("{beta_id}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cleanup_journal["relocated"], true);
+    assert!(cleanup_journal["admin"]["entries"]["index"]["data"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    assert!(
+        kept["notes"].as_array().unwrap().iter().any(|note| {
+            let note = note.as_str().unwrap();
+            note.contains("Git worktree operation failed") && note.contains(beta.to_str().unwrap())
+        }),
+        "Expected actual Git deletion failure, not an ownership refusal: {kept}"
+    );
+    let records = worktrees::list(&f.paths, &project).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, beta_id);
+    assert_eq!(records[0].state, "removing");
+    assert_source("alpha\n");
+    assert_score(&f.service).await;
+    eprintln!(
+        "{}",
+        json!({"case":"CMP-04","phase":"filesystem_error","unlink_errno":denied.raw_os_error(),"notes":kept["notes"],"remaining_git_registration":git(&project, &["worktree", "list", "--porcelain"])})
+    );
+
+    f.service.engine.shutdown().await.unwrap();
+    drop(f.service);
+    let reopened = Service::open(f.paths.clone(), Some(project.clone())).unwrap();
+    let restored = call(&reopened, "GET", &format!("/api/compare/{id}"), Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(restored["state"], "applied");
+    assert_eq!(restored["winner"], "lane-alpha");
+    assert_eq!(restored["cleanup_pending"], true);
+    assert_eq!(restored["recovery"], recovery);
+    assert_eq!(restored["applied_files"], applied_files);
+    // Cleanup must never reapply the winner over later user edits.
+    fs::write(project.join("answer.txt"), "user edited after Keep\n").unwrap();
+    let pending = call(
+        &reopened,
+        "POST",
+        &format!("/api/compare/{id}/discard"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert_eq!(pending["state"], "applied");
+    assert_eq!(pending["winner"], "lane-alpha");
+    assert_eq!(pending["cleanup_pending"], true);
+    assert_eq!(pending["recovery"], recovery);
+    assert_eq!(pending["applied_files"], applied_files);
+    assert_source("user edited after Keep\n");
+    assert_score(&reopened).await;
+
+    restore.restore();
+    for retry in 0..2 {
+        let cleaned = call(
+            &reopened,
+            "POST",
+            &format!("/api/compare/{id}/discard"),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        // Preserve diagnostics even if this intended recovery assertion fails.
+        eprintln!(
+            "{}",
+            json!({"case":"CMP-04","phase":"permission_restored","retry":retry,"cleanup_pending":cleaned["cleanup_pending"],"notes":cleaned["notes"]})
+        );
+        assert_eq!(cleaned["state"], "applied");
+        assert_eq!(cleaned["winner"], "lane-alpha");
+        assert_eq!(cleaned["recovery"], recovery);
+        assert_eq!(cleaned["applied_files"], applied_files);
+        assert_source("user edited after Keep\n");
+        assert_score(&reopened).await;
+        assert_eq!(
+            cleaned["cleanup_pending"], false,
+            "Owned deletion failure must be retryable after permission repair: {cleaned}"
+        );
+        assert!(cleaned["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["removed"] == true));
+    }
+    assert!(!beta.exists());
+    assert!(!retained.exists());
+    assert!(worktrees::list(&f.paths, &project).unwrap().is_empty());
+    assert_eq!(managed_branches(&project), "");
+    assert_eq!(git(&project, &["worktree", "list"]).lines().count(), 1);
+    reopened.engine.shutdown().await.unwrap();
 }

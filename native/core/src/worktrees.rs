@@ -1,5 +1,7 @@
 //! Managed Git worktrees. The source checkout is never reset or stashed.
 pub mod changes;
+#[cfg(target_os = "linux")]
+mod cleanup;
 pub mod repair;
 use crate::{
     paths::{self, AppPaths},
@@ -211,12 +213,20 @@ pub struct Inspection {
     pub hash: String,
 }
 fn read_record_identity(paths: &AppPaths, id: &str) -> Result<Record> {
+    read_record_identity_at(paths, id, false)
+}
+fn read_record_identity_at(paths: &AppPaths, id: &str, archived: bool) -> Result<Record> {
     ensure!(
         id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()),
         "Use the full managed worktree ID"
     );
     let (records, checkouts) = roots(paths)?;
-    let path = records.join(format!("{id}.json"));
+    let path = if archived {
+        records.join("archive")
+    } else {
+        records
+    }
+    .join(format!("{id}.json"));
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -426,8 +436,10 @@ pub async fn remove(
 /// `shadowcode/<id>` branch. Compare uses this for lanes whose result the
 /// user kept elsewhere or explicitly discarded, and worktree tasks once their
 /// result was applied or discarded. Unlike `remove`, build
-/// outputs and other ignored files do not block removal, and a checkout that
-/// was already deleted outside ShadowCode has its registration cleaned up.
+/// outputs and other ignored files are included in bounded ownership evidence.
+/// On Linux disposal moves the owned tree to private quarantine before Git
+/// deletion. Absent unjournaled checkouts retain their Git recovery material;
+/// large or changed trees remain pending with an explicit review reason.
 /// The source checkout, its index and every other branch are never touched.
 /// Returns a note when something was left behind or already missing.
 pub async fn dispose(
@@ -451,6 +463,24 @@ pub async fn release(
 }
 
 async fn dispose_checkout(
+    paths: &AppPaths,
+    source: &Path,
+    id: &str,
+    delete_branch: bool,
+    cancel: CancellationToken,
+) -> Result<Option<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        cleanup::dispose(paths, source, id, delete_branch, cancel).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        dispose_checkout_legacy(paths, source, id, delete_branch, cancel).await
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn dispose_checkout_legacy(
     paths: &AppPaths,
     source: &Path,
     id: &str,
