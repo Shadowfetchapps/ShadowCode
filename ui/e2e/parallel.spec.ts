@@ -42,6 +42,43 @@ async function chooseLocal(page: Page) {
   await expect(page.getByRole("listbox")).toHaveCount(0);
 }
 
+test("a paused task keeps new conversations in the same checkout queued", async ({
+  page,
+}) => {
+  await fake(page, () => {
+    (window as any).__SHADOW_FAKE__.state.held = ["s1"];
+  });
+  await chooseLocal(page);
+  await prompt(page).fill("Hold this task in the main checkout");
+  await page.getByRole("button", { name: "Send task" }).click();
+  await expect(
+    page.getByRole("button", { name: "Pause task", exact: true }),
+  ).toBeVisible();
+  // Inject a saved paused snapshot; the ordinary reader must discover it.
+  await fake(page, () => {
+    const job = (window as any).__SHADOW_FAKE__.state.jobs.find(
+      (j: any) => j.session_id === "s1",
+    );
+    job.status = "paused";
+  });
+  await expect(
+    page.getByRole("button", { name: "Resume task", exact: true }),
+  ).toBeVisible();
+  await page.locator(".new-task").click();
+  await expect(page.getByRole("button", { name: "Stop task" })).toHaveCount(0);
+  await prompt(page).fill("Run after the paused task");
+  await page
+    .getByRole("button", { name: "Queue follow-up", exact: true })
+    .click();
+  const submissions = (await fakeLog(page)).filter(
+    (r) => r.path === "/api/jobs" && r.method === "POST",
+  );
+  expect(submissions.at(-1)?.body).toMatchObject({
+    task: "Run after the paused task",
+    queue: true,
+  });
+});
+
 test("runs a second task in a new worktree beside a running one and applies it", async ({
   page,
 }) => {

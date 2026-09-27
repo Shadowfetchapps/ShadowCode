@@ -19,9 +19,8 @@ import {
   type Transcript,
 } from "../lib/transcript";
 import { jobEvents } from "../lib/jobEvents";
-
-export const isActive = (job: Job | null) =>
-  !!job && ["queued", "running", "paused", "cancelling"].includes(job.status);
+import { isActive } from "../lib/jobs";
+export { isActive } from "../lib/jobs";
 
 const outcomeLabel = (status: string) =>
   status === "completed"
@@ -124,8 +123,21 @@ export function useConversation(onComplete: (done?: Job) => void) {
     let polling = false;
     let recovering = false;
     const source = jobEvents(id, cursor.current);
+    function matches(next: Job) {
+      return (
+        next.id === id &&
+        next.session_id === job!.session_id &&
+        (!job!.task_id || next.task_id === job!.task_id)
+      );
+    }
     function finish(done: Job) {
-      if (closed || current !== generation.current) return;
+      if (
+        closed ||
+        current !== generation.current ||
+        !matches(done) ||
+        isActive(done)
+      )
+        return;
       closed = true;
       source.close();
       setJob(done);
@@ -163,6 +175,11 @@ export function useConversation(onComplete: (done?: Job) => void) {
       if (closed || current !== generation.current) return;
       try {
         const row = JSON.parse(event.data) as EventRow;
+        if (row.type === "job.state") {
+          const next = row.payload as Job;
+          if (matches(next) && isActive(next)) setJob(next);
+          return;
+        }
         if (row.type === "job.done") {
           finish(row.payload as Job);
           return;

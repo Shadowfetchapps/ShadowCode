@@ -615,13 +615,26 @@ try {
     await pickRow(localTarget.name);
   } else note("no Ready cloud row on this machine: consent step skipped");
 
-  // ------------------------------------------------------------ stop
+  // ------------------------------------------------------------ pause/resume/stop
   await send("stop-probe: look around the project.");
   await until("Local task streaming", async () => (await modelRequests()).some((r) => r.request.includes("stop-probe")), 20000);
   await until("Stop button", () => visible('button[aria-label="Stop task"]'));
   await composerControlsFit("Desktop Stop and follow-up controls fit while running");
   await screenshot("running");
   await accessibility("running");
+  const steeringButton = (label) => execute("return [...document.querySelectorAll('.steer-bar button')].some(b => b.textContent.trim() === arguments[0] && b.getClientRects().length > 0)", [label]);
+  await clickButton("Pause task");
+  await until("Resume control reflects paused job", () => steeringButton("Resume task"));
+  assert.ok(await visible('button[aria-label="Stop task"]'), "Paused task remains active");
+  const paused = (await jobsFor(sessionId)).find((j) => /stop-probe/.test(j.task || ""));
+  assert.equal(paused?.status, "paused", "Pause saved by the native engine");
+  await screenshot("paused");
+  await clickButton("Resume task");
+  await until("Pause control returns after resume", () => steeringButton("Pause task"));
+  assert.ok(await visible('button[aria-label="Stop task"]'), "Resumed task remains active");
+  const resumed = (await jobsFor(sessionId)).find((j) => j.id === paused.id);
+  assert.equal(resumed?.status, "running", "Resume saved by the native engine");
+  note("Pause and Resume update live controls without completing the task");
   await click('button[aria-label="Stop task"]');
   await until("Task stopped", async () => !(await visible('button[aria-label="Stop task"]')) && /Stopped|cancelled|Cancelled/.test(await text()), 20000);
   const stopped = (await jobsFor(sessionId)).find((j) => /stop-probe/.test(j.task || ""));

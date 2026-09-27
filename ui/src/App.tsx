@@ -53,6 +53,7 @@ import {
 import { sameWorkspacePath } from "./lib/trust";
 import { closingPr, issueFollowUp } from "./lib/issues";
 import { exportSession as saveExport } from "./lib/transport";
+import { isActive } from "./lib/jobs";
 
 /** The window. Behaviour lives in `hooks/` (navigation, the approvals and
  * jobs feed, the conversation stream, sending, Compare, shortcuts, theme);
@@ -171,12 +172,7 @@ export default function App() {
   });
 
   const queueing =
-    busy ||
-    jobs.some(
-      (item) =>
-        item.workspace === workspace &&
-        ["queued", "running", "cancelling"].includes(item.status),
-    );
+    busy || jobs.some((item) => item.workspace === workspace && isActive(item));
   const composerLocked = submitting || switching || Boolean(shutdown);
   // A task the conversation already shows as started is not queued any more,
   // even before the next feed read says so.

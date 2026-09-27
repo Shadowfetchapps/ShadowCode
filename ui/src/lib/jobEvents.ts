@@ -1,4 +1,5 @@
 import type { EventRow, Job } from "../api";
+import { isActive } from "./jobs";
 import { listen, request } from "./transport";
 
 export interface JobStream {
@@ -54,13 +55,15 @@ export function compactStreamRows(
   return result;
 }
 
-/** Notifications wake the reader; only ordered, durable rows update the UI. */
+/** Notifications only wake the reader. State comes from the saved job snapshot
+ * and transcript content comes from ordered, durable rows. */
 export function nativeJobStream(after: number, deps: Dependencies): JobStream {
   let closed = false;
   let reading = false;
   let again = false;
   let connected = false;
   let cursor = after;
+  let status = "";
   let unsubscribe: (() => void) | undefined;
   let scheduled: ReturnType<typeof setTimeout> | undefined;
   const source: JobStream = {
@@ -91,6 +94,15 @@ export function nativeJobStream(after: number, deps: Dependencies): JobStream {
           connected = true;
           source.onopen?.();
         }
+        const active = isActive(page.job);
+        if (active && status !== page.job.status) {
+          status = page.job.status;
+          // Deliver before rows, so a start event in this page can promote a
+          // queued snapshot. Snapshot cursors must never skip transcript rows.
+          source.onmessage?.({
+            data: JSON.stringify({ type: "job.state", payload: page.job }),
+          });
+        }
         for (const event of compactStreamRows(page.events, cursor)) {
           if (closed) return;
           if (event.id && event.id > cursor) {
@@ -98,9 +110,6 @@ export function nativeJobStream(after: number, deps: Dependencies): JobStream {
             cursor = event.id;
           }
         }
-        const active = ["queued", "running", "cancelling"].includes(
-          page.job.status,
-        );
         if (!active && cursor >= (page.job.event_cursor || 0)) {
           source.onmessage?.({
             data: JSON.stringify({ type: "job.done", payload: page.job }),

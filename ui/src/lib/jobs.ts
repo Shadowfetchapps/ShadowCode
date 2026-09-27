@@ -1,5 +1,8 @@
 import type { Job } from "../api";
 
+export const isActive = (job: Job | null) =>
+  !!job && ["queued", "running", "paused", "cancelling"].includes(job.status);
+
 /** Jobs arrive newest submission first. Follow execution order, and prefer the
  * last actual completion over a newer submission cancelled while still queued. */
 export function conversationJob(

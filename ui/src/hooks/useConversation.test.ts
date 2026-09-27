@@ -57,6 +57,68 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
+it("tracks pause and resume without completing or losing resumed output", () => {
+  const complete = vi.fn();
+  const { result } = renderHook(() => useConversation(complete));
+  act(() => result.current.load(detail(), job));
+  const send = (type: string, payload: Job) => {
+    const stream = vi.mocked(jobEvents).mock.results.at(-1)!.value as JobStream;
+    act(() => stream.onmessage?.({ data: JSON.stringify({ type, payload }) }));
+  };
+  send("job.state", { ...job, status: "paused" });
+  expect(result.current.job?.status).toBe("paused");
+  expect(result.current.busy).toBe(true);
+  expect(complete).not.toHaveBeenCalled();
+  send("job.state", { ...job, status: "running" });
+  expect(result.current.job?.status).toBe("running");
+  const stream = vi.mocked(jobEvents).mock.results.at(-1)!.value as JobStream;
+  act(() =>
+    stream.onmessage?.({ data: JSON.stringify(event(201, "Resumed output")) }),
+  );
+  expect(result.current.transcript.items.at(-1)?.text).toBe("Resumed output");
+  const done = { ...job, status: "completed", event_cursor: 201 };
+  send("job.done", done);
+  expect(result.current.busy).toBe(false);
+  expect(complete).toHaveBeenCalledExactlyOnceWith(done);
+  act(() =>
+    stream.onmessage?.({
+      data: JSON.stringify({ type: "job.done", payload: done }),
+    }),
+  );
+  expect(complete).toHaveBeenCalledTimes(1);
+});
+
+it("ignores active completion messages and snapshots belonging to other tasks", () => {
+  const complete = vi.fn();
+  const { result } = renderHook(() => useConversation(complete));
+  act(() => result.current.load(detail(), job));
+  const stream = vi.mocked(jobEvents).mock.results.at(-1)!.value as JobStream;
+  for (const payload of [
+    { ...job, status: "paused" },
+    { ...job, status: "completed", id: "other-job" },
+    { ...job, status: "completed", session_id: "other-session" },
+    { ...job, status: "completed", task_id: "other-task" },
+  ]) {
+    act(() =>
+      stream.onmessage?.({
+        data: JSON.stringify({ type: "job.done", payload }),
+      }),
+    );
+  }
+  act(() =>
+    stream.onmessage?.({
+      data: JSON.stringify({
+        type: "job.state",
+        payload: { ...job, id: "other-job", status: "paused" },
+      }),
+    }),
+  );
+  expect(result.current.job).toEqual(job);
+  expect(result.current.busy).toBe(true);
+  expect(complete).not.toHaveBeenCalled();
+  expect(stream.close).not.toHaveBeenCalled();
+});
+
 it("promotes a queued local task on preparation without waiting for agent.started", () => {
   const { result } = renderHook(() => useConversation(vi.fn()));
   act(() => result.current.load(detail(), { ...job, status: "queued" }));

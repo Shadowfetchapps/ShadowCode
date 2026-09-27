@@ -15,6 +15,52 @@ const rows = (start: number, count: number): EventRow[] =>
   }));
 
 describe("native event replay", () => {
+  it("keeps paused tasks live and replays resumed output before completing", async () => {
+    vi.useFakeTimers();
+    const stop = vi.fn();
+    let wake!: () => void;
+    let page = { events: rows(21, 1), job: job("paused", 21) };
+    const read = vi.fn(async () => page);
+    const stream = nativeJobStream(20, {
+      read,
+      subscribe: async (notify) => {
+        wake = notify;
+        return stop;
+      },
+    });
+    const received: EventRow[] = [];
+    stream.onmessage = (event) => received.push(JSON.parse(event.data));
+    await vi.advanceTimersByTimeAsync(30);
+    expect(received.map((event) => event.type)).toEqual([
+      "job.state",
+      "model.stream",
+    ]);
+    expect(received[0].payload.status).toBe("paused");
+    expect(stop).not.toHaveBeenCalled();
+
+    // Polling must still work while paused, even without a notification.
+    page = { events: [], job: job("paused", 21) };
+    await vi.advanceTimersByTimeAsync(2530);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(stop).not.toHaveBeenCalled();
+    page = { events: rows(22, 1), job: job("running", 22) };
+    wake();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(received.at(-2)?.payload.status).toBe("running");
+    expect(received.at(-1)?.id).toBe(22);
+    page = { events: rows(23, 1), job: job("completed", 23) };
+    wake();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(received.slice(-2).map((event) => event.type)).toEqual([
+      "model.stream",
+      "job.done",
+    ]);
+    expect(received.filter((event) => event.type === "job.done")).toHaveLength(
+      1,
+    );
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
   it("compacts response fragments without changing replay or durable completion", async () => {
     vi.useFakeTimers();
     const fragments = rows(1, 512).map((row) => ({
