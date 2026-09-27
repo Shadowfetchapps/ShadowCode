@@ -819,3 +819,108 @@ fn ollama_and_openai_request_bodies_carry_vision_payloads() {
     let plain = client.request_body(&[json!({"role":"user","content":"hi"})], &[], 64);
     assert_eq!(plain["messages"][0]["content"], "hi");
 }
+
+#[test]
+fn duplicate_tool_ids_in_distinct_slots_reject_the_whole_response() {
+    let private_id = "sk-testAbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    let calls = json!([
+        {"index":0,"id":private_id,"function":{"name":"write_file","arguments":"{\"path\":\"first.txt\",\"content\":\"first\"}"}},
+        {"index":1,"id":private_id,"function":{"name":"write_file","arguments":"{\"path\":\"second.txt\",\"content\":\"second\"}"}}
+    ]);
+    for ollama in [false, true] {
+        let wire = if ollama {
+            format!(
+                "{}\n",
+                json!({"message":{"tool_calls":calls},"done":true,"done_reason":"stop","prompt_eval_count":41,"eval_count":7})
+            )
+        } else {
+            [sse(json!({"choices":[{"delta":{"tool_calls":calls},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":41,"completion_tokens":7,"total_tokens":48}})), "data: [DONE]\n\n".to_owned()].concat()
+        };
+        for chunk_size in [1, 7, 4096] {
+            let mut decoder = StreamDecoder::new(ollama);
+            for chunk in wire.as_bytes().chunks(chunk_size) {
+                assert!(decoder.push(chunk).unwrap().is_empty());
+            }
+            decoder.flush().unwrap();
+            let metadata = decoder.metadata(Some(200), wire.len());
+            assert_eq!(metadata.tool_call_slots, 2);
+            assert_eq!(metadata.reported_usage().unwrap().total_tokens, 48);
+            assert!(!serde_json::to_string(&metadata)
+                .unwrap()
+                .contains(private_id));
+            let error = decoder.finish().unwrap_err();
+            assert!(
+                error.to_string().contains("duplicate tool call IDs"),
+                "{error}"
+            );
+            assert!(!error.to_string().contains(private_id));
+            assert!(
+                shadowcode_core::retry::classify(&error).is_none(),
+                "Malformed call identity must not become a transport retry"
+            );
+        }
+    }
+}
+
+#[test]
+fn tool_id_uniqueness_is_response_scoped_and_missing_ids_still_work() {
+    for _ in 0..2 {
+        let mut decoder = StreamDecoder::new(false);
+        decoder.push(sse(json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":"valid-reused-id","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}},
+            {"index":1,"function":{"name":"read_file","arguments":"{\"path\":\"b.txt\"}"}},
+            {"index":2,"id":"","function":{"name":"read_file","arguments":"{\"path\":\"c.txt\"}"}}
+        ]},"finish_reason":"tool_calls"}]})).as_bytes()).unwrap();
+        let response = decoder.finish().unwrap();
+        assert_eq!(response.tool_calls.len(), 3);
+        assert_eq!(response.tool_calls[0].id, "valid-reused-id");
+        let ids: std::collections::BTreeSet<_> =
+            response.tool_calls.iter().map(|c| &c.id).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.iter().all(|id| !id.is_empty()));
+    }
+}
+
+#[test]
+fn unindexed_duplicate_object_calls_are_refused_without_losing_later_usage() {
+    let private_id = "sk-testAbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    let calls = json!([
+        {"id":private_id,"function":{"name":"write_file","arguments":{"path":"first.txt","content":"first"}}},
+        {"id":private_id,"function":{"name":"write_file","arguments":{"path":"second.txt","content":"second"}}}
+    ]);
+    for ollama in [false, true] {
+        let wire = if ollama {
+            [json!({"message":{"tool_calls":calls},"done":false}),
+             json!({"message":{},"done":true,"done_reason":"stop","prompt_eval_count":41,"eval_count":7})]
+                .iter().map(|value| format!("{value}\n")).collect::<String>()
+        } else {
+            [sse(json!({"choices":[{"delta":{"tool_calls":calls}}]})),
+             sse(json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})),
+             sse(json!({"choices":[],"usage":{"prompt_tokens":41,"completion_tokens":7,"total_tokens":48}})),
+             "data: [DONE]\n\n".to_owned()].concat()
+        };
+        for chunk_size in [1, 7, 4096] {
+            let mut decoder = StreamDecoder::new(ollama);
+            for chunk in wire.as_bytes().chunks(chunk_size) {
+                assert!(decoder.push(chunk).unwrap().is_empty());
+            }
+            decoder.flush().unwrap();
+            let metadata = decoder.metadata(Some(200), wire.len());
+            assert_eq!(
+                metadata.reported_usage().unwrap().total_tokens,
+                48,
+                "Late reported tokens survive malformed identity refusal"
+            );
+            assert!(!serde_json::to_string(&metadata)
+                .unwrap()
+                .contains(private_id));
+            let error = decoder.finish().unwrap_err();
+            assert!(
+                error.to_string().contains("duplicate tool call IDs"),
+                "{error}"
+            );
+            assert!(!error.to_string().contains(private_id));
+            assert!(shadowcode_core::retry::classify(&error).is_none());
+        }
+    }
+}

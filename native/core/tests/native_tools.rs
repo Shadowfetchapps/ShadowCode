@@ -624,3 +624,308 @@ async fn strict_sandbox_refuses_execution_and_never_replays_after_launch_failure
         "once"
     );
 }
+
+// Synthetic tokens only; never use real credentials in these fixtures.
+#[tokio::test]
+async fn durable_tool_identity_is_owned_unique_and_keeps_protocol_reply_id() {
+    let (_root, tools) = fixture(Config::default());
+    let fake_secret = "sk-testAbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    fs::write(
+        tools.workspace.path.join("a.txt"),
+        format!("fixture {fake_secret}"),
+    )
+    .unwrap();
+    let supplied = [
+        "call_AbCdEfGh0123456789IjKlMnOpQrStUvWx",
+        "call_ZyXwVuTs9876543210RqPoNmLkJiHgFeDc",
+        fake_secret,
+        "reused-provider-id",
+        "reused-provider-id",
+    ];
+    for id in supplied {
+        let result = tools
+            .execute(ToolCall {
+                id: id.into(),
+                name: "read_file".into(),
+                arguments: json!({"path":"a.txt"}),
+            })
+            .await
+            .unwrap();
+        assert!(result.success, "{}", result.error);
+        assert_eq!(
+            result.message("read_file", 100_000)["tool_call_id"],
+            id,
+            "protocol replies must retain the provider ID"
+        );
+    }
+    let events = tools
+        .events
+        .store
+        .recent_events(&tools.events.session_id, 100)
+        .unwrap();
+    let starts: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "tool.started")
+        .collect();
+    let ends: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "tool.completed")
+        .collect();
+    assert_eq!((starts.len(), ends.len()), (5, 5));
+    let mut owned = std::collections::BTreeSet::new();
+    for start in starts {
+        let id = start["payload"]["call_id"].as_str().unwrap();
+        assert_ne!(
+            id, "[redacted secret]",
+            "a placeholder is not a correlation identity"
+        );
+        assert!(
+            !supplied.contains(&id),
+            "durable identity is not supplied by a model"
+        );
+        assert!(
+            owned.insert(id),
+            "even repeated supplied IDs need separate execution identity"
+        );
+        assert_eq!(
+            ends.iter()
+                .filter(|e| e["payload"]["call_id"] == id)
+                .count(),
+            1
+        );
+    }
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains(fake_secret),
+        "credentials in IDs and file content remain absent from durable events"
+    );
+}
+
+#[tokio::test]
+async fn command_receipt_joins_exact_owned_completion_and_redacts_supplied_id() {
+    let mut config = Config::default();
+    config.permissions.approve_shell = false;
+    let (_root, tools) = fixture(config);
+    let fake_id = "sk-testAbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    let result = shadowcode_core::verification::execute(
+        &tools,
+        ToolCall {
+            id: fake_id.into(),
+            name: "exec".into(),
+            arguments: json!({"command":"printf fixture","cwd":"."}),
+        },
+        "synthetic-attempt",
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "{}", result.error);
+    assert_eq!(result.message("exec", 100_000)["tool_call_id"], fake_id);
+    let events = tools
+        .events
+        .store
+        .recent_events(&tools.events.session_id, 100)
+        .unwrap();
+    let complete = events
+        .iter()
+        .find(|e| e["type"] == "tool.completed")
+        .unwrap();
+    let receipt = &result.output["verification_receipt"];
+    assert_ne!(receipt["tool_call_id"], "[redacted secret]");
+    assert_eq!(receipt["tool_call_id"], complete["payload"]["call_id"]);
+    assert_eq!(receipt["output_ref"], format!("event:{}", complete["id"]));
+    assert!(!serde_json::to_string(&events).unwrap().contains(fake_id));
+}
+
+#[tokio::test]
+async fn concurrent_reused_provider_ids_keep_distinct_durable_completions_after_reopen() {
+    let (root, tools) = fixture(Config::default());
+    fs::write(tools.workspace.path.join("a.txt"), "file A").unwrap();
+    fs::write(tools.workspace.path.join("b.txt"), "file B").unwrap();
+    let make_call = |path: &str| ToolCall {
+        id: "same-protocol-id".into(),
+        name: "read_file".into(),
+        arguments: json!({"path":path}),
+    };
+    let (a, b) = tokio::join!(
+        tools.execute(make_call("a.txt")),
+        tools.execute(make_call("b.txt"))
+    );
+    let results = [a.unwrap(), b.unwrap()];
+    let reopened = Store::open(&root.path().join("db")).unwrap();
+    let events = reopened
+        .recent_events(&tools.events.session_id, 100)
+        .unwrap();
+    let mut ids = std::collections::BTreeSet::new();
+    for (result, expected) in results.iter().zip(["file A", "file B"]) {
+        assert!(result.success, "{}", result.error);
+        assert_eq!(result.id, "same-protocol-id");
+        let execution = result.execution.as_ref().unwrap();
+        assert!(ids.insert(&execution.call_id));
+        let event = events
+            .iter()
+            .find(|e| e["id"] == execution.completed_event_id)
+            .unwrap();
+        assert_eq!(event["type"], "tool.completed");
+        assert_eq!(event["task_id"], tools.events.task_id);
+        assert_eq!(event["payload"]["call_id"], execution.call_id);
+        assert!(event["payload"]["output"].to_string().contains(expected));
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |e| e["type"] == "tool.started" && e["payload"]["call_id"] == execution.call_id
+                )
+                .count(),
+            1
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rewritten_alias_manual_and_automatic_approval_use_execution_identity() {
+    use shadowcode_core::{approvals::Answer, mcp::registry};
+    let (root, previous) = fixture(Config::default());
+    let mut config = previous.config.clone();
+    config
+        .trusted_workspaces
+        .push(previous.workspace.path.to_string_lossy().into_owned());
+    registry::save_server(&mut config, json!({
+        "name":"fixture",
+        "command":["node",std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-server.mjs"),"normal"],
+        "timeout_sec":3,
+        "env":{"MCP_PID_FILE":root.path().join("pids.json"),"MCP_REQUEST_FILE":root.path().join("requests.jsonl")}
+    }), "").unwrap();
+    let entry = registry::read(&previous.workspace, &config, "config:fixture").unwrap();
+    registry::activate(
+        &previous.workspace,
+        &mut config,
+        &entry.id,
+        &entry.hash,
+        true,
+    )
+    .unwrap();
+    let tools = ToolExecutor::new(
+        previous.workspace.clone(),
+        config,
+        previous.approvals.clone(),
+        previous.events.clone(),
+        previous.cancel.clone(),
+    )
+    .unwrap();
+    let schemas = tools.mcp_schemas().await;
+    if !schemas
+        .iter()
+        .any(|s| s["function"]["name"] == "mcp__fixture__echo")
+    {
+        tools.close_integrations().await.unwrap();
+        panic!("fixture alias was not offered");
+    }
+    let fake_id = "sk-testAbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    let worker = tools.clone();
+    let pending = tokio::spawn(async move {
+        worker
+            .execute(ToolCall {
+                id: fake_id.into(),
+                name: "mcp__fixture__echo".into(),
+                arguments: json!({"marker":"first"}),
+            })
+            .await
+    });
+    let approval = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(record) = tools.approvals.list(None).pop() {
+                break record;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    let approval = match approval {
+        Ok(value) => value,
+        Err(error) => {
+            tools.cancel.cancel();
+            let _ = pending.await;
+            tools.close_integrations().await.unwrap();
+            panic!("no fixture approval: {error}");
+        }
+    };
+    let approval_tool = approval.tool.clone();
+    tools
+        .approvals
+        .answer(
+            &approval.id,
+            &approval.session_id,
+            Answer {
+                allow: true,
+                for_task: true,
+                ..Answer::default()
+            },
+        )
+        .unwrap();
+    let first = pending.await.unwrap().unwrap();
+    let second = tokio::time::timeout(
+        Duration::from_secs(3),
+        tools.execute(ToolCall {
+            id: fake_id.into(),
+            name: "mcp__fixture__echo".into(),
+            arguments: json!({"marker":"second"}),
+        }),
+    )
+    .await;
+    tools.cancel.cancel();
+    tools.close_integrations().await.unwrap();
+    let second = second
+        .expect("task grant must avoid another approval wait")
+        .unwrap();
+    assert_eq!(
+        approval_tool, "mcp_call",
+        "permission applies to the rewritten operation"
+    );
+    assert!(first.success, "{}", first.error);
+    assert!(second.success, "{}", second.error);
+    assert_eq!(first.id, fake_id);
+    assert_eq!(second.id, fake_id);
+    let first_execution = first.execution.as_ref().unwrap();
+    let second_execution = second.execution.as_ref().unwrap();
+    assert_ne!(first_execution.call_id, second_execution.call_id);
+    let events = tools
+        .events
+        .store
+        .recent_events(&tools.events.session_id, 100)
+        .unwrap();
+    for (result, execution, approval_type) in [
+        (&first, first_execution, "approval.resolved"),
+        (&second, second_execution, "approval.granted"),
+    ] {
+        let started = events
+            .iter()
+            .find(|e| e["type"] == "tool.started" && e["payload"]["call_id"] == execution.call_id)
+            .unwrap();
+        assert_eq!(started["payload"]["tool"], "mcp__fixture__echo");
+        let completed = events
+            .iter()
+            .find(|e| e["id"] == execution.completed_event_id)
+            .unwrap();
+        assert_eq!(completed["task_id"], tools.events.task_id);
+        assert_eq!(completed["payload"]["call_id"], execution.call_id);
+        assert_eq!(completed["payload"]["tool"], "mcp__fixture__echo");
+        let decision = events.iter().find(|e| e["type"] == approval_type).unwrap();
+        assert_eq!(decision["payload"]["tool"], "mcp_call");
+        assert_eq!(decision["payload"]["call_id"], execution.call_id);
+        assert_eq!(
+            result.message("mcp__fixture__echo", 100_000)["tool_call_id"],
+            fake_id
+        );
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "approval.requested")
+            .count(),
+        1
+    );
+    assert!(!serde_json::to_string(&events).unwrap().contains(fake_id));
+}

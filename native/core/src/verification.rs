@@ -6,7 +6,7 @@ use crate::{
     tools::{ToolExecutor, ToolResult},
     workspace::Workspace,
 };
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -218,15 +218,14 @@ pub async fn execute(
     } else {
         State::Passed
     };
-    let output_ref = tools
-        .events
-        .store
-        .last_task_event(&tools.events.task_id, "tool.completed")?
-        .and_then(|event| event["id"].as_i64().map(|id| format!("event:{id}")))
-        .unwrap_or_else(|| format!("tool.completed:{}", call.id));
+    let execution = result
+        .execution
+        .as_ref()
+        .context("Executed tool has no durable identity")?;
+    let output_ref = format!("event:{}", execution.completed_event_id);
     let receipt = Receipt {
         schema_version: 1, task_id: tools.events.task_id.clone(), attempt_id: attempt.into(),
-        tool_call_id: call.id.clone(), workspace: tools.workspace.path.to_string_lossy().into_owned(),
+        tool_call_id: execution.call_id.clone(), workspace: tools.workspace.path.to_string_lossy().into_owned(),
         cwd: cwd.unwrap_or_else(|| tools.workspace.path.clone()).to_string_lossy().into_owned(),
         check_id: crate::workspace::hash(&serde_json::to_vec(&json!([cwd_arg,command])).unwrap_or_default()),
         command, kind: if check { Kind::ConfiguredCheck } else { Kind::Command },
@@ -240,6 +239,9 @@ pub async fn execute(
     };
     let mut value = serde_json::to_value(receipt)?;
     crate::redaction::redact_value(&mut value);
+    // Only this executor-generated identity is trusted metadata. Commands,
+    // paths, outputs and provider-supplied strings remain redacted.
+    value["tool_call_id"] = json!(execution.call_id);
     tools.events.emit("verification.receipt", value.clone())?;
     if !result.output.is_object() {
         result.output = json!({});

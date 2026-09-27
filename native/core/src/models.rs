@@ -7,7 +7,10 @@ use anyhow::{bail, ensure, Context, Result};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 
 const MAX_WIRE_BYTES: usize = 16_000_000;
@@ -746,6 +749,7 @@ pub struct StreamDecoder {
     calls: BTreeMap<usize, PartialCall>,
     pub done: bool,
     seen_finish: bool,
+    duplicate_call_ids: bool,
     observed_usage: ObservedUsage,
     runtime_timings: RuntimeTimings,
 }
@@ -759,6 +763,7 @@ impl StreamDecoder {
             calls: BTreeMap::new(),
             done: false,
             seen_finish: false,
+            duplicate_call_ids: false,
             observed_usage: ObservedUsage::default(),
             runtime_timings: RuntimeTimings::default(),
         }
@@ -930,6 +935,15 @@ impl StreamDecoder {
             "Model output exceeded the text limit"
         );
         if let Some(calls) = message["tool_calls"].as_array() {
+            // Separate entries in one array must not coalesce through the
+            // unindexed continuation heuristic. Record the malformed group
+            // until finish so later reported usage still reaches accounting.
+            // Repeated identity in a later frame remains valid continuation.
+            let mut frame_ids = BTreeSet::new();
+            self.duplicate_call_ids |= calls
+                .iter()
+                .filter_map(|call| call["id"].as_str().filter(|id| !id.is_empty()))
+                .any(|id| !frame_ids.insert(id));
             for (position, call) in calls.iter().enumerate() {
                 let index = self.resolve_call_index(call, position, calls.len());
                 ensure!(index < 128, "Too many tool calls in one response");
@@ -1073,6 +1087,15 @@ impl StreamDecoder {
             "Model response was cut short ({}); no partial tools were executed",
             self.response.finish_reason
         );
+        ensure!(
+            !self.duplicate_call_ids,
+            "Model returned duplicate tool call IDs in one response; no calls from that response were executed"
+        );
+        // Provider IDs belong to one response's protocol group. Reuse in a
+        // later response is valid, but two slots with one ID cannot be paired
+        // with their results or recovered safely. Refuse the entire response
+        // before the engine can execute any call; do not echo untrusted IDs.
+        let mut ids = BTreeSet::new();
         for (_, part) in self.calls {
             ensure!(!part.name.is_empty(), "Tool call has no name");
             let arguments: Value = serde_json::from_str(if part.args.is_empty() {
@@ -1082,12 +1105,17 @@ impl StreamDecoder {
             })
             .context("Model returned incomplete or invalid tool arguments")?;
             ensure!(arguments.is_object(), "Tool arguments must be an object");
+            let id = if part.id.is_empty() {
+                format!("call_{}", crate::id())
+            } else {
+                part.id
+            };
+            ensure!(
+                ids.insert(id.clone()),
+                "Model returned duplicate tool call IDs in one response; no calls from that response were executed"
+            );
             self.response.tool_calls.push(ToolCall {
-                id: if part.id.is_empty() {
-                    format!("call_{}", crate::id())
-                } else {
-                    part.id
-                },
+                id,
                 name: part.name,
                 arguments,
             });

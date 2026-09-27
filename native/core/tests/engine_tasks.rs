@@ -20,6 +20,33 @@ fn response(text: &str, calls: Value) -> Value {
     json!({"choices":[{"message":{"role":"assistant","content":text,"tool_calls":calls},"finish_reason":reason}],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}})
 }
 
+fn assert_owned_command_receipt(
+    receipt: &Value,
+    events: &[Value],
+    task_id: &str,
+    protocol_id: &str,
+) {
+    assert_ne!(receipt["tool_call_id"], protocol_id);
+    assert_ne!(receipt["tool_call_id"], "[redacted secret]");
+    let reference = receipt["output_ref"].as_str().unwrap();
+    let event_id: i64 = reference.strip_prefix("event:").unwrap().parse().unwrap();
+    let completed = events.iter().find(|e| e["id"] == event_id).unwrap();
+    assert_eq!(completed["task_id"], task_id);
+    assert_eq!(completed["type"], "tool.completed");
+    assert_eq!(completed["payload"]["tool"], "exec");
+    assert_eq!(completed["payload"]["call_id"], receipt["tool_call_id"]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["task_id"] == task_id
+                && e["type"] == "tool.started"
+                && e["payload"]["tool"] == "exec"
+                && e["payload"]["call_id"] == receipt["tool_call_id"])
+            .count(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn failed_attempt_usage_length_keeps_receipts_after_reopen_and_never_runs_tools() {
     let server = support::server(|_, _| {
@@ -1898,7 +1925,7 @@ async fn completion_failed_check_receipt_survives_bounded_promise_failure() {
         assert_eq!(commands.len(), 1, "{verification}");
         assert_eq!(commands[0]["command"], "sh check.sh");
         assert_eq!(commands[0]["state"], "failed");
-        assert_eq!(commands[0]["tool_call_id"], "failed-check");
+        assert_owned_command_receipt(&commands[0], &events, &job.task_id, "failed-check");
         assert_eq!(commands[0]["task_id"], job.task_id);
         assert_eq!(commands[0]["attempt_id"], job.id);
         assert_eq!(commands[0]["provenance"], "locally_observed");
@@ -2080,7 +2107,7 @@ async fn completion_mixed_edit_and_command_promises_share_one_retry_budget_and_k
         .expect("the unified refusal retains the failed receipt");
     assert_eq!(commands.len(), 1, "{verification}");
     assert_eq!(commands[0]["state"], "failed");
-    assert_eq!(commands[0]["tool_call_id"], "failed-check");
+    assert_owned_command_receipt(&commands[0], &events, &job.task_id, "failed-check");
     assert_eq!(commands[0]["task_id"], job.task_id);
     assert_eq!(commands[0]["attempt_id"], job.id);
     assert_eq!(commands[0]["provenance"], "locally_observed");
@@ -2386,7 +2413,8 @@ async fn command_names_do_not_verify_and_configured_receipts_go_stale_after_edit
         let receipt = &evidence["commands"][0];
         assert_eq!(receipt["task_id"], job.task_id);
         assert_eq!(receipt["attempt_id"], job.id);
-        assert_eq!(receipt["tool_call_id"], "check");
+        let events = engine.store().recent_events(&job.session_id, 200).unwrap();
+        assert_owned_command_receipt(receipt, &events, &job.task_id, "check");
         assert_eq!(receipt["exit_code"], 0);
         assert_eq!(receipt["provenance"], "locally_observed");
         assert!(receipt["output_ref"]
@@ -2932,4 +2960,279 @@ async fn inspection_host_evidence_survives_model_error_without_leaking_to_next_t
             1
         );
     }
+}
+
+#[tokio::test]
+async fn duplicate_provider_ids_fail_before_mutation_and_keep_failed_attempt_accounting() {
+    let private_id = "sk-testAbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    let server = support::server(move |_, _| {
+        let mut first = tool(
+            private_id,
+            "write_file",
+            json!({"path":"first.txt","content":"first"}),
+        );
+        let mut second = tool(
+            private_id,
+            "write_file",
+            json!({"path":"second.txt","content":"second"}),
+        );
+        // Explicit distinct slots reproduce the protocol ambiguity without
+        // relying on the decoder's permissive unindexed-delta heuristics.
+        first["index"] = json!(0);
+        second["index"] = json!(1);
+        let mut value = response("", json!([first, second]));
+        value["usage"] = json!({"prompt_tokens":41,"completion_tokens":7,"total_tokens":48});
+        (value, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    Config::patch(
+        engine.paths(),
+        json!({
+            "permissions":{"mode":"allow_edits"},
+            "agent":{"retry_attempts":0},
+            "checkpoints":{"enabled":false}
+        }),
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("project/unrelated.txt"),
+        b"keep this user work",
+    )
+    .unwrap();
+    let job = engine
+        .start(request(
+            root.path(),
+            "Create the requested fixture files",
+            None,
+        ))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    let files =
+        ["first.txt", "second.txt"].map(|name| root.path().join("project").join(name).exists());
+    let (saved, events) = reopen_terminal_job(engine, result).await;
+    assert_eq!(
+        files,
+        [false, false],
+        "Malformed duplicate group must be refused before ANY write; status={} summary={}",
+        saved.status,
+        saved.summary
+    );
+    assert_eq!(
+        fs::read(root.path().join("project/unrelated.txt")).unwrap(),
+        b"keep this user work"
+    );
+    assert_eq!(saved.status, "failed");
+    assert!(
+        saved.summary.contains("duplicate tool call IDs"),
+        "{}",
+        saved.summary
+    );
+    assert!(!saved.summary.contains(private_id));
+    assert_eq!(
+        (
+            saved.steps,
+            saved.usage.prompt_tokens,
+            saved.usage.completion_tokens,
+            saved.usage.total_tokens,
+            saved.usage.turns
+        ),
+        (0, 41, 7, 48, 1)
+    );
+    assert!(!saved.usage_is_estimated);
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    assert!(!events.iter().any(|event| matches!(
+        event["type"].as_str(),
+        Some("tool.started" | "tool.completed" | "approval.requested")
+    )));
+    let received: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "model.response_metadata")
+        .collect();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0]["payload"]["accepted"], false);
+    assert_eq!(received[0]["payload"]["failure_kind"], "invalid_response");
+    assert_eq!(received[0]["payload"]["tool_call_slots"], 2);
+    assert_eq!(received[0]["payload"]["usage"]["reported_total_tokens"], 48);
+    assert!(!received[0].to_string().contains(private_id));
+    let usage: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "usage.updated")
+        .collect();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0]["payload"]["purpose"], "failed_attempt");
+}
+
+#[tokio::test]
+async fn provider_id_reuse_across_turns_keeps_protocol_results_and_recovery() {
+    let server = support::server(|index, body| {
+        context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+        let value = match index {
+            0 | 1 => response(
+                "",
+                json!([tool(
+                    "reused-provider-id",
+                    "read_file",
+                    json!({"path":if index == 0 {"a.txt"} else {"b.txt"}})
+                )]),
+            ),
+            2 => response("Observed both fixture contents.", json!([])),
+            _ => panic!("Unexpected extra model request"),
+        };
+        (value, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    fs::write(
+        root.path().join("project/a.txt"),
+        b"first independent observation",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("project/b.txt"),
+        b"second independent observation",
+    )
+    .unwrap();
+    let job = engine
+        .start(request(root.path(), "Inspect the fixture contents", None))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    let paths = engine.paths().clone();
+    let (saved, events) = reopen_terminal_job(engine, result).await;
+    assert_eq!(saved.status, "completed", "{}", saved.summary);
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "tool.completed")
+            .count(),
+        2
+    );
+    let reopened = Engine::open(paths).unwrap();
+    let mut tape = reopened.store().messages(&saved.id).unwrap();
+    reopened.shutdown().await.unwrap();
+    context::validate_pairs(&tape).unwrap();
+    let original = tape.clone();
+    context::repair_incomplete(&mut tape);
+    assert_eq!(
+        tape, original,
+        "Recovery must retain complete separate response groups"
+    );
+    let replies: Vec<_> = tape
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect();
+    assert_eq!(replies.len(), 2);
+    for (reply, expected) in replies.iter().zip([
+        "first independent observation",
+        "second independent observation",
+    ]) {
+        assert_eq!(reply["tool_call_id"], "reused-provider-id");
+        assert!(reply["content"].as_str().unwrap().contains(expected));
+    }
+}
+
+#[tokio::test]
+async fn unindexed_duplicate_provider_ids_cannot_overwrite_first_call_arguments() {
+    let private_id = "sk-testAbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    let server = support::server(move |_, _| {
+        let mut first = tool(
+            private_id,
+            "write_file",
+            json!({"path":"first.txt","content":"first"}),
+        );
+        let mut second = tool(
+            private_id,
+            "write_file",
+            json!({"path":"second.txt","content":"second"}),
+        );
+        // Compatible JSON and native providers can return object arguments.
+        // Previously the second unindexed same-ID entry replaced the first
+        // slot's arguments and only second.txt was executed.
+        first["function"]["arguments"] = json!({"path":"first.txt","content":"first"});
+        second["function"]["arguments"] = json!({"path":"second.txt","content":"second"});
+        let mut value = response("", json!([first, second]));
+        value["usage"] = json!({"prompt_tokens":41,"completion_tokens":7,"total_tokens":48});
+        (value, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    Config::patch(
+        engine.paths(),
+        json!({
+            "permissions":{"mode":"allow_edits"},
+            "agent":{"retry_attempts":0},
+            "checkpoints":{"enabled":false}
+        }),
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("project/unrelated.txt"),
+        b"keep this user work",
+    )
+    .unwrap();
+    let job = engine
+        .start(request(
+            root.path(),
+            "Create the requested fixture files",
+            None,
+        ))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    let files =
+        ["first.txt", "second.txt"].map(|name| root.path().join("project").join(name).exists());
+    let (saved, events) = reopen_terminal_job(engine, result).await;
+    assert_eq!(
+        files,
+        [false, false],
+        "Malformed duplicate group must be refused before ANY write; status={} summary={}",
+        saved.status,
+        saved.summary
+    );
+    assert_eq!(
+        fs::read(root.path().join("project/unrelated.txt")).unwrap(),
+        b"keep this user work"
+    );
+    assert_eq!(saved.status, "failed");
+    assert!(
+        saved.summary.contains("duplicate tool call IDs"),
+        "{}",
+        saved.summary
+    );
+    assert!(!saved.summary.contains(private_id));
+    assert_eq!(
+        (
+            saved.steps,
+            saved.usage.prompt_tokens,
+            saved.usage.completion_tokens,
+            saved.usage.total_tokens,
+            saved.usage.turns
+        ),
+        (0, 41, 7, 48, 1)
+    );
+    assert!(!saved.usage_is_estimated);
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    assert!(!events.iter().any(|event| matches!(
+        event["type"].as_str(),
+        Some("tool.started" | "tool.completed" | "approval.requested")
+    )));
+    let received: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "model.response_metadata")
+        .collect();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0]["payload"]["accepted"], false);
+    assert_eq!(received[0]["payload"]["failure_kind"], "invalid_response");
+    assert_eq!(received[0]["payload"]["tool_call_slots"], 1);
+    assert_eq!(received[0]["payload"]["usage"]["reported_total_tokens"], 48);
+    assert!(!received[0].to_string().contains(private_id));
+    let usage: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "usage.updated")
+        .collect();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0]["payload"]["purpose"], "failed_attempt");
 }

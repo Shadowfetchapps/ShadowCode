@@ -1745,6 +1745,7 @@ impl Engine {
                 messages.push(
                     tools::ToolResult {
                         id: call.id.clone(),
+                        execution: None,
                         success: false,
                         output: json!({"execution_status":"not_run","reason":"superseded_by_steering"}),
                         error: "This proposed call was not executed because a newer user steering instruction superseded the response. Replan using that instruction.".into(),
