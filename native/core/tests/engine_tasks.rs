@@ -49,6 +49,69 @@ async fn wait(engine: &Engine, id: &str) -> Job {
         .unwrap()
 }
 
+async fn reopen_terminal_job(engine: Engine, result: Job) -> (Job, Vec<Value>) {
+    let paths = engine.paths().clone();
+    engine.shutdown().await.unwrap();
+    drop(engine);
+    let reopened = Engine::open(paths).unwrap();
+    let saved = reopened.job(&result.id).unwrap().unwrap();
+    let events = reopened
+        .store()
+        .recent_events(&result.session_id, 300)
+        .unwrap();
+    reopened.shutdown().await.unwrap();
+    assert_eq!(saved.status, result.status);
+    // Timing sums can change by a final floating-point digit when their JSON
+    // representation is parsed. Compare the same representation the store reads.
+    let persisted_result: Option<Value> =
+        serde_json::from_str(&serde_json::to_string(&result.result).unwrap()).unwrap();
+    assert_eq!(
+        saved.result, persisted_result,
+        "the terminal result must survive reopening the profile"
+    );
+    let terminal: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "agent.completed" && e["task_id"] == result.task_id)
+        .collect();
+    assert_eq!(
+        terminal.len(),
+        1,
+        "one durable terminal event for this task before and after reopen"
+    );
+    assert_eq!(&terminal[0]["payload"], saved.result.as_ref().unwrap());
+    (saved, events)
+}
+
+fn assert_terminal_receipt(result: &Job, events: &[Value], state: &str) {
+    let receipts: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "verification.receipt" && e["task_id"] == result.task_id)
+        .collect();
+    assert_eq!(
+        receipts.len(),
+        1,
+        "the actual command emitted one durable receipt"
+    );
+    let raw = &receipts[0]["payload"];
+    assert_eq!(raw["state"], state);
+    assert_eq!(raw["kind"], "configured_check");
+    assert_eq!(raw["task_id"], result.task_id);
+    assert_eq!(raw["attempt_id"], result.id);
+    let verification = &result.result.as_ref().unwrap()["verification"];
+    assert_eq!(
+        verification["verified"], false,
+        "a non-successful task must not inherit overall verification from one command"
+    );
+    assert_eq!(verification["status"], result.status);
+    assert_eq!(verification["final_assessment"], "not_completed");
+    assert_eq!(verification["claim"], "observed");
+    assert_eq!(
+        verification["commands"],
+        json!([raw]),
+        "observed command evidence was lost or changed at terminal failure: {verification}"
+    );
+}
+
 fn approve_completion_counter(engine: &Engine, project: &Path, counter: &Path) {
     let path = ".shadowcode/hooks/completion.yaml";
     fs::create_dir_all(project.join(".shadowcode/hooks")).unwrap();
@@ -399,6 +462,376 @@ async fn plan_mode_blocks_a_model_that_requests_a_write_anyway() {
     assert_eq!(wait(&engine, &job.id).await.status, "completed");
     assert!(!root.path().join("project/forbidden").exists());
     engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_receipts_survive_failed_check_then_token_budget_exhaustion() {
+    let server = support::server(|index, body| {
+        context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+        let answer = if index == 0 {
+            response(
+                "Checking",
+                json!([tool(
+                    "observed-check",
+                    "exec",
+                    json!({"command":"sh check.sh"})
+                )]),
+            )
+        } else {
+            response(
+                "The command failed; the next step needs investigation.",
+                json!([]),
+            )
+        };
+        (answer, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    fs::write(root.path().join("project/check.sh"), "exit 7\n").unwrap();
+    Config::patch(engine.paths(), json!({"verification":{"commands":["sh check.sh"]},"agent":{"max_task_tokens":40,"model_retries":0}})).unwrap();
+    let job = engine
+        .start(request(
+            root.path(),
+            "Run the configured check and explain its result",
+            None,
+        ))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    assert_eq!(result.status, "failed");
+    assert!(
+        result.summary.contains("token budget"),
+        "{}",
+        result.summary
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+    let (saved, events) = reopen_terminal_job(engine, result).await;
+    assert_terminal_receipt(&saved, &events, "failed");
+}
+
+#[tokio::test]
+async fn terminal_receipts_survive_passing_check_then_provider_response_failure() {
+    let server = support::server(|index, body| {
+        context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+        let answer = if index == 0 {
+            response(
+                "Checking",
+                json!([tool(
+                    "observed-check",
+                    "exec",
+                    json!({"command":"sh check.sh"})
+                )]),
+            )
+        } else {
+            // A malformed provider response fails in ModelClient, before the
+            // native agent's normal verification-summary completion path.
+            json!({"error":{"message":"fixture provider response failure"}})
+        };
+        (answer, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    fs::write(root.path().join("project/check.sh"), "exit 0\n").unwrap();
+    Config::patch(
+        engine.paths(),
+        json!({"verification":{"commands":["sh check.sh"]},"agent":{"model_retries":0}}),
+    )
+    .unwrap();
+    let job = engine
+        .start(request(
+            root.path(),
+            "Run the configured check and explain its result",
+            None,
+        ))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    assert_eq!(result.status, "failed");
+    assert!(
+        result
+            .summary
+            .contains("Provider returned no completion choices"),
+        "{}",
+        result.summary
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+    let (saved, events) = reopen_terminal_job(engine, result).await;
+    assert_terminal_receipt(&saved, &events, "passed");
+}
+
+#[tokio::test]
+async fn terminal_receipts_survive_passing_check_then_cancellation() {
+    let server = support::server(|index, body| {
+        context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+        if index == 0 {
+            (
+                response(
+                    "Checking",
+                    json!([tool(
+                        "observed-check",
+                        "exec",
+                        json!({"command":"sh check.sh"})
+                    )]),
+                ),
+                Duration::ZERO,
+            )
+        } else {
+            (
+                response("This response is held until cancellation", json!([])),
+                Duration::from_secs(30),
+            )
+        }
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    fs::write(root.path().join("project/check.sh"), "exit 0\n").unwrap();
+    Config::patch(
+        engine.paths(),
+        json!({"verification":{"commands":["sh check.sh"]},"agent":{"model_retries":0}}),
+    )
+    .unwrap();
+    let job = engine
+        .start(request(
+            root.path(),
+            "Run the configured check and explain its result",
+            None,
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while server.requests.lock().unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let observed = engine
+        .store()
+        .last_task_event(&job.task_id, "verification.receipt")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        observed["payload"]["state"], "passed",
+        "the check completed before cancellation"
+    );
+    engine.cancel(&job.id).await.unwrap();
+    let result = wait(&engine, &job.id).await;
+    assert_eq!(result.status, "cancelled");
+    let (saved, events) = reopen_terminal_job(engine, result).await;
+    assert_terminal_receipt(&saved, &events, "passed");
+}
+
+#[tokio::test]
+async fn terminal_receipts_do_not_import_another_task_or_sessions_checks() {
+    let server = support::server(|index, body| {
+        context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+        let answer = match index {
+            0 => response(
+                "Checking prior task",
+                json!([tool(
+                    "prior-check",
+                    "exec",
+                    json!({"command":"sh check.sh"})
+                )]),
+            ),
+            1 => response("The configured check passed.", json!([])),
+            _ => json!({"error":{"message":"fixture provider response failure"}}),
+        };
+        (answer, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    fs::write(root.path().join("project/check.sh"), "exit 0\n").unwrap();
+    Config::patch(
+        engine.paths(),
+        json!({"verification":{"commands":["sh check.sh"]},"agent":{"model_retries":0}}),
+    )
+    .unwrap();
+    let prior = engine
+        .start(request(root.path(), "Run the configured check", None))
+        .await
+        .unwrap();
+    let prior_done = wait(&engine, &prior.id).await;
+    assert_eq!(prior_done.status, "completed");
+    assert_eq!(
+        prior_done.result.as_ref().unwrap()["verification"]["commands"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let followup = engine
+        .start(request(
+            root.path(),
+            "Explain the next step",
+            Some(prior.session_id.clone()),
+        ))
+        .await
+        .unwrap();
+    let same_session = wait(&engine, &followup.id).await;
+    let separate = engine
+        .start(request(root.path(), "Explain another task", None))
+        .await
+        .unwrap();
+    let other_session = wait(&engine, &separate.id).await;
+    assert_eq!(same_session.session_id, prior.session_id);
+    assert_ne!(other_session.session_id, prior.session_id);
+    let paths = engine.paths().clone();
+    engine.shutdown().await.unwrap();
+    drop(engine);
+    let reopened = Engine::open(paths).unwrap();
+    for original in [same_session, other_session] {
+        let result = reopened.job(&original.id).unwrap().unwrap();
+        assert_eq!(result.status, "failed");
+        let persisted_result: Option<Value> =
+            serde_json::from_str(&serde_json::to_string(&original.result).unwrap()).unwrap();
+        assert_eq!(result.result, persisted_result);
+        let verification = &result.result.as_ref().unwrap()["verification"];
+        assert_eq!(verification["verified"], false);
+        assert_eq!(
+            verification["commands"],
+            json!([]),
+            "prior checks cannot supply evidence for task {}",
+            result.task_id
+        );
+        let events = reopened
+            .store()
+            .recent_events(&result.session_id, 300)
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["type"] == "agent.completed" && e["task_id"] == result.task_id)
+                .count(),
+            1
+        );
+        assert!(!events
+            .iter()
+            .any(|e| e["type"] == "verification.receipt" && e["task_id"] == result.task_id));
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_receipts_survive_seeded_interrupted_store_recovery_without_cross_task_leakage() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let store = shadowcode_core::store::Store::open(&paths.database()).unwrap();
+    let first_session = store
+        .create_session(&project, "fixture", "Seeded interrupted session")
+        .unwrap();
+    let other_session = store
+        .create_session(&project, "fixture", "Other seeded interrupted session")
+        .unwrap();
+    let first_sid = first_session["id"].as_str().unwrap();
+    let other_sid = other_session["id"].as_str().unwrap();
+    let mut jobs = Vec::new();
+    for (id, sid) in [
+        ("seeded-with-receipts", first_sid),
+        ("seeded-same-session-no-receipts", first_sid),
+        ("seeded-other-session-no-receipts", other_sid),
+    ] {
+        let job = Job {
+            id: id.into(),
+            workspace: project.clone(),
+            session_id: sid.into(),
+            task_id: format!("{id}-task"),
+            task: "Seeded interrupted recovery fixture".into(),
+            status: "running".into(),
+            mode: "code".into(),
+            model: "fixture".into(),
+            ..Default::default()
+        };
+        store
+            .create_job(&serde_json::to_value(&job).unwrap())
+            .unwrap();
+        jobs.push(job);
+    }
+    // Seed the persisted state that recovery consumes. No command or SIGKILL
+    // runs in this fixture; the integration tests above observe real checks.
+    let receipt_job = &jobs[0];
+    let receipts: Vec<_> = ["failed", "passed"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, state)| {
+            let payload = json!({
+                "schema_version":1, "task_id":receipt_job.task_id,
+                "attempt_id":receipt_job.id, "tool_call_id":format!("seeded-check-{index}"),
+                "check_id":"seeded-check", "workspace":project, "cwd":project,
+                "command":"sh check.sh", "kind":"configured_check", "state":state,
+                "success":state == "passed", "provenance":"locally_observed",
+                "started_at":index, "finished_at":index + 1,
+                "exit_code":if state == "passed" { 0 } else { 7 },
+                "timed_out":false, "termination_reason":"exited",
+                "workspace_fingerprint":"seeded-fingerprint",
+                "output_ref":format!("event:seeded-output-{index}"),
+            });
+            store
+                .add_event(
+                    "verification.receipt",
+                    &payload,
+                    Some(first_sid),
+                    Some(&receipt_job.task_id),
+                )
+                .unwrap();
+            payload
+        })
+        .collect();
+    drop(store);
+
+    let recovered = Engine::open(paths.clone()).unwrap();
+    let results: Vec<_> = jobs
+        .iter()
+        .map(|job| recovered.job(&job.id).unwrap().unwrap())
+        .collect();
+    recovered.shutdown().await.unwrap();
+    drop(recovered);
+    let reopened = Engine::open(paths).unwrap();
+    for (index, result) in results.iter().enumerate() {
+        let saved = reopened.job(&result.id).unwrap().unwrap();
+        assert_eq!(saved.status, "interrupted");
+        assert_eq!(saved.result, result.result);
+        let payload = saved.result.as_ref().unwrap();
+        assert_eq!(payload["success"], false);
+        assert_eq!(payload["interrupted"], true);
+        assert_eq!(payload["verification"]["verified"], false);
+        assert_eq!(payload["verification"]["status"], "incomplete");
+        assert_eq!(payload["verification"]["final_assessment"], "interrupted");
+        assert_eq!(
+            payload["verification"]["claim"],
+            if index == 0 {
+                "observed"
+            } else {
+                "model_claim"
+            }
+        );
+        assert_eq!(
+            payload["verification"]["commands"],
+            if index == 0 {
+                json!(receipts)
+            } else {
+                json!([])
+            },
+            "recovery must retain this task's ordered evidence without importing other receipts"
+        );
+        let events = reopened
+            .store()
+            .recent_events(&result.session_id, 100)
+            .unwrap();
+        let terminal: Vec<_> = events
+            .iter()
+            .filter(|e| e["type"] == "agent.completed" && e["task_id"] == result.task_id)
+            .collect();
+        assert_eq!(
+            terminal.len(),
+            1,
+            "reopening cannot finish the same task twice"
+        );
+        assert_eq!(&terminal[0]["payload"], payload);
+    }
+    reopened.shutdown().await.unwrap();
 }
 
 #[tokio::test]

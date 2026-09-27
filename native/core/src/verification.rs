@@ -307,6 +307,10 @@ pub async fn current(engine: &crate::engine::Engine, job: &crate::engine::Job) -
     }
     if job.status != "completed" {
         summary["verified"] = json!(false);
+        if summary["claim"] == "verified" {
+            summary["claim"] = json!("observed");
+        }
+        summary["red_green"] = json!(false);
         summary["status"] = json!(match job.status.as_str() {
             "cancelled" => "cancelled",
             "failed" => "failed",
@@ -479,6 +483,94 @@ mod tests {
         receipt["workspace_fingerprint"] = Value::Null;
         assert_eq!(classify("Done", &[receipt], false)["verified"], false);
     }
+
+    #[tokio::test]
+    async fn reassessment_keeps_passing_checks_observed_when_the_task_did_not_complete() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("source.txt"), "unchanged").unwrap();
+        let paths = crate::paths::AppPaths::isolated(&root.path().join("profile")).unwrap();
+        let engine = crate::engine::Engine::open(paths).unwrap();
+        let workspace = Arc::new(Workspace::open(&project).unwrap());
+        let observed_fingerprint = fingerprint(workspace).await.unwrap();
+        // Seed retained receipts to exercise reassessment only. The engine
+        // integration fixtures separately cover actual command execution.
+        let receipt = |state| {
+            let mut receipt = check("check A", state);
+            receipt["workspace"] = json!(project);
+            receipt["cwd"] = json!(project);
+            receipt["workspace_fingerprint"] = json!(observed_fingerprint);
+            receipt
+        };
+        for prior_failure in [false, true] {
+            let mut commands = Vec::new();
+            if prior_failure {
+                commands.push(receipt(State::Failed));
+            }
+            commands.push(receipt(State::Passed));
+            let original = classify("Done", &commands, true);
+            assert_eq!(original["verified"], true);
+            assert_eq!(original["claim"], "verified");
+            assert_eq!(original["red_green"], prior_failure);
+            for status in [
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted",
+                "limit_reached",
+            ] {
+                let mut recorded = original.clone();
+                if status != "completed" {
+                    recorded["final_assessment"] = json!("not_completed");
+                }
+                let job = crate::engine::Job {
+                    id: "attempt".into(),
+                    task_id: "task".into(),
+                    workspace: project.clone(),
+                    status: status.into(),
+                    result: Some(json!({"verification":recorded})),
+                    ..Default::default()
+                };
+                let original_result = job.result.clone();
+                let current = current(&engine, &job).await.unwrap();
+                assert_eq!(current["commands"], json!(commands), "{status}");
+                assert_eq!(current["verified"], status == "completed", "{status}");
+                assert_eq!(
+                    current["claim"],
+                    if status == "completed" {
+                        "verified"
+                    } else {
+                        "observed"
+                    },
+                    "{status}"
+                );
+                assert_eq!(
+                    current["red_green"],
+                    status == "completed" && prior_failure,
+                    "{status}"
+                );
+                assert_eq!(
+                    current["status"],
+                    match status {
+                        "completed" => "passed",
+                        "failed" => "failed",
+                        "cancelled" => "cancelled",
+                        _ => "incomplete",
+                    }
+                );
+                if status != "completed" {
+                    assert_eq!(current["final_assessment"], "not_completed");
+                }
+                assert_eq!(
+                    job.result, original_result,
+                    "reassessment must not rewrite original receipts"
+                );
+            }
+        }
+        engine.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn fingerprint_observes_uncommitted_changes_renames_and_ignored_scope() {
         let dir = tempfile::tempdir().unwrap();

@@ -887,6 +887,12 @@ impl Store {
             )?
             .pop())
     }
+    /// Keep observed receipts in a terminal result even when the worker never
+    /// reached its final assessment. Reads only this task's verification data,
+    /// not its potentially large tool-output or streaming history.
+    pub(crate) fn task_verification(&self, tid: &str) -> Result<Value> {
+        task_verification_on(&*self.lock()?, tid)
+    }
     pub fn add_event(
         &self,
         kind: &str,
@@ -1090,11 +1096,23 @@ impl Store {
             job["status"] = json!("interrupted");
             job["finished_at"] = json!(now());
             job["summary"]=json!("The application stopped before this task finished. Review its changes, then continue.");
+            let mut verification = match job["task_id"].as_str() {
+                Some(tid) => task_verification_on(&tx, tid)?,
+                None => json!({"status":"incomplete","commands":[]}),
+            };
+            verification["verified"] = json!(false);
+            if verification["claim"] == "verified" {
+                verification["claim"] = json!("observed");
+            }
+            verification["status"] = json!("incomplete");
+            verification["red_green"] = json!(false);
+            verification["final_assessment"] = json!("interrupted");
             let result = json!({
                 "success": false,
                 "cancelled": false,
                 "interrupted": true,
                 "summary": job["summary"],
+                "verification": verification,
                 "usage": job.get("usage").cloned().unwrap_or(json!({}))
             });
             job["result"] = result.clone();
@@ -1194,6 +1212,66 @@ impl Store {
     }
 }
 
+/// Shared by ordinary finalization and startup recovery (inside its existing
+/// transaction). Preserve a completed assessment verbatim unless a newer
+/// observed receipt proves it was not the task's final evidence snapshot.
+fn task_verification_on(db: &Connection, tid: &str) -> Result<Value> {
+    let previous = query_rows(
+        db,
+        "SELECT id,payload FROM events WHERE task_id=? AND type='verification.summary' ORDER BY id DESC LIMIT 1",
+        [tid],
+    )?
+    .pop()
+    .filter(|event| event["payload"].is_object() && event["payload"]["commands"].is_array());
+    let after = previous
+        .as_ref()
+        .and_then(|event| event["id"].as_i64())
+        .unwrap_or(0);
+    let receipts: Vec<Value> = query_rows(
+        db,
+        "SELECT payload FROM events WHERE task_id=? AND type='verification.receipt' AND id>? ORDER BY id",
+        params![tid, after],
+    )?
+    .into_iter()
+    .map(|event| event["payload"].clone())
+    .filter(|receipt| receipt.is_object() && receipt["task_id"] == tid)
+    .collect();
+    let needs_assessment = previous.is_none() || !receipts.is_empty();
+    let mut summary = previous
+        .map(|event| event["payload"].clone())
+        .unwrap_or_else(|| json!({"commands":[]}));
+    if needs_assessment {
+        let mut commands = summary["commands"].as_array().cloned().unwrap_or_default();
+        commands.extend(receipts);
+        let assessed =
+            crate::verification::classify("", &commands, summary["inspected_workspace"] == true);
+        summary
+            .as_object_mut()
+            .expect("verification summary is an object")
+            .extend(
+                assessed
+                    .as_object()
+                    .expect("classification is an object")
+                    .clone(),
+            );
+        // Successful individual commands describe their observed snapshots;
+        // they cannot substitute for the final assessment that did not run.
+        summary["verified"] = json!(false);
+        summary["claim"] = json!(
+            if !commands.is_empty() || summary["inspected_workspace"] == true {
+                "observed"
+            } else {
+                "model_claim"
+            }
+        );
+        summary["status"] = json!("incomplete");
+        summary["red_green"] = json!(false);
+        summary["final_assessment"] = json!("not_completed");
+        summary["note"] = json!("Recorded command receipts are retained, but final verification assessment did not complete. Current file freshness has not been reassessed.");
+    }
+    Ok(summary)
+}
+
 fn query_rows(db: &Connection, sql: &str, args: impl Params) -> Result<Vec<Value>> {
     let mut statement = db.prepare(sql)?;
     let columns: Vec<String> = statement
@@ -1259,4 +1337,110 @@ fn finish_task_on(
         params![now(), total.to_string(), sid],
     )?;
     Ok(sid)
+}
+
+#[cfg(test)]
+mod verification_tests {
+    use super::*;
+
+    fn receipt(task: &str, call: &str) -> Value {
+        json!({
+            "schema_version":1,"task_id":task,"attempt_id":"attempt",
+            "tool_call_id":call,"check_id":"check","workspace":"/project",
+            "cwd":"/project","command":"test-command","kind":"configured_check",
+            "state":"passed","provenance":"locally_observed","scope":"fixture",
+            "started_at":1.0,"finished_at":2.0,"process_seconds":1.0,
+            "exit_code":0,"termination_reason":"exited","workspace_fingerprint":"hash",
+            "output_ref":format!("tool.completed:{call}"),"success":true,"timed_out":false
+        })
+    }
+
+    #[test]
+    fn terminal_verification_preserves_an_assessed_stale_summary() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        let raw = receipt("task", "call-1");
+        store
+            .add_event("verification.receipt", &raw, None, Some("task"))
+            .unwrap();
+        let mut stale = raw;
+        stale["state"] = json!("stale");
+        stale["success"] = json!(false);
+        let mut summary = crate::verification::classify("Done", &[stale], true);
+        summary["hooks"] = json!({"on_complete":"observed"});
+        store
+            .add_event("verification.summary", &summary, None, Some("task"))
+            .unwrap();
+        assert_eq!(store.task_verification("task").unwrap(), summary);
+        drop(store);
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .task_verification("task")
+                .unwrap(),
+            summary
+        );
+    }
+
+    #[test]
+    fn terminal_verification_appends_only_new_receipts_without_reviving_stale_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("store.sqlite")).unwrap();
+        let raw = receipt("task", "call-1");
+        store
+            .add_event("verification.receipt", &raw, None, Some("task"))
+            .unwrap();
+        let mut stale = raw;
+        stale["state"] = json!("stale");
+        stale["success"] = json!(false);
+        let mut summary = crate::verification::classify("Done", &[stale.clone()], true);
+        summary["hooks"] = json!({"on_complete":"observed"});
+        store
+            .add_event("verification.summary", &summary, None, Some("task"))
+            .unwrap();
+        let latest = receipt("task", "call-2");
+        store
+            .add_event("verification.receipt", &latest, None, Some("task"))
+            .unwrap();
+        let result = store.task_verification("task").unwrap();
+        assert_eq!(result["commands"], json!([stale, latest]));
+        assert_eq!(result["hooks"], summary["hooks"]);
+        assert_eq!(result["verified"], false);
+        assert_eq!(result["red_green"], false);
+        assert_eq!(result["claim"], "observed");
+        assert_eq!(result["status"], "incomplete");
+        assert_eq!(result["final_assessment"], "not_completed");
+        // Finalization is read-only and repeated snapshots cannot duplicate receipts.
+        assert_eq!(store.task_verification("task").unwrap(), result);
+    }
+
+    #[test]
+    fn terminal_verification_ignores_misfiled_receipts_and_unrelated_task_events() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("store.sqlite")).unwrap();
+        for event_task in ["task", "other"] {
+            store
+                .add_event(
+                    "verification.receipt",
+                    &receipt("other", "foreign"),
+                    None,
+                    Some(event_task),
+                )
+                .unwrap();
+        }
+        store
+            .add_event(
+                "tool.completed",
+                &receipt("task", "untyped"),
+                None,
+                Some("task"),
+            )
+            .unwrap();
+        let result = store.task_verification("task").unwrap();
+        assert_eq!(result["commands"], json!([]));
+        assert_eq!(result["verified"], false);
+        assert_eq!(result["claim"], "model_claim");
+        assert_eq!(result["final_assessment"], "not_completed");
+    }
 }

@@ -40,6 +40,10 @@ Remaining integration work: efficiently share change-index fingerprints, continu
 
 ## Compatibility and evidence
 
+Finalization preserves task-specific command receipts even if a token limit, provider error, cancellation or interrupted-process recovery prevents a final assessment. An existing assessment is retained, including stale states; only newer receipt events are appended. The aggregate is unverified, with `final_assessment=not_completed` (or `interrupted` on recovery). Individual states and output references still describe what actually ran. The UI reports that final verification did not finish instead of claiming a previously successful check failed. Historical reassessment cannot promote a failed, cancelled or interrupted task to a verified claim or red-green success.
+
+This fallback reads only typed verification events and performs no workspace hashing, commands or automatic replay. It does not establish current file freshness. Startup tests seed persisted active jobs and reopen twice; they are recovery-state coverage, not an OS-crash injection demonstration.
+
 Receipt events and summary fields are additive to existing persisted events. Legacy command-only rows remain readable but cannot establish verification. Vendor-owned verification retains its distinct provenance and is not promoted into local evidence. A cancelled or failed task cannot publish an aggregate verified result.
 
 Regression coverage includes the original `printf test` false-positive, no-command model claims, explicit configuration, edits after a check, exact-command recovery, unrelated failures, cancellation/skipped/stale states, missing fingerprints, uncommitted content, rename behavior, ignored scope, goal acceptance, and UI labels. See `engine_tasks`, `goals`, `verification::tests`, `autonomy::tests`, and `ui/src/lib/activity.test.ts` for executable cases.

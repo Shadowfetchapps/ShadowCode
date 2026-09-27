@@ -339,6 +339,7 @@ it("labels typed verification states without promoting ordinary commands", () =>
     ["stale", "Checks are stale — files changed"],
     ["cancelled", "Verification cancelled"],
     ["skipped", "Verification incomplete"],
+    ["incomplete", "Verification incomplete"],
   ]) {
     expect(
       verificationLine(
@@ -358,4 +359,53 @@ it("labels typed verification states without promoting ordinary commands", () =>
       ),
     ).toBe(label);
   }
+});
+
+it("retains passing command evidence when final verification was interrupted", () => {
+  for (const [status, final_assessment] of [
+    ["failed", "not_completed"],
+    ["cancelled", "not_completed"],
+    ["incomplete", "interrupted"],
+  ]) {
+    const verification = parseVerification({
+      status,
+      final_assessment,
+      verified: false,
+      commands: [
+        {
+          command: "npm test",
+          kind: "configured_check",
+          state: "passed",
+          success: true,
+          exit_code: 0,
+          tool_call_id: "observed-check",
+        },
+      ],
+    });
+    expect(verification?.finalAssessment).toBe(final_assessment);
+    expect(verification?.commands[0]).toMatchObject({
+      state: "passed",
+      success: true,
+      exit_code: 0,
+      callId: "observed-check",
+    });
+    expect(verificationLine(verification)).toBe(
+      "Final verification did not finish",
+    );
+  }
+});
+
+it("keeps not-run and freshness-refresh labels ahead of an incomplete assessment", () => {
+  const verification = parseVerification({
+    status: "incomplete",
+    final_assessment: "not_completed",
+    commands: [],
+  })!;
+  expect(verificationLine(verification)).toBe("Verification not run");
+  expect(verificationLine({ ...verification, status: "checking" })).toBe(
+    "Assessing current files…",
+  );
+  expect(verificationLine({ ...verification, status: "unavailable" })).toBe(
+    "Current verification unavailable",
+  );
 });

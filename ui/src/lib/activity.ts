@@ -51,6 +51,7 @@ export type Verification = {
   status: string;
   commands: VerificationCommand[];
   presentedAs?: string;
+  finalAssessment?: string;
   note?: string;
   vendor?: string;
 };
@@ -383,10 +384,16 @@ export function verificationLine(
     (c) => c.kind === "configured_check",
   );
   if (!checks.length) return "Verification not run";
+  if (
+    verification.finalAssessment === "not_completed" ||
+    verification.finalAssessment === "interrupted"
+  )
+    return "Final verification did not finish";
   if (verification.status === "stale")
     return "Checks are stale — files changed";
   if (verification.status === "cancelled") return "Verification cancelled";
-  if (verification.status === "skipped") return "Verification incomplete";
+  if (verification.status === "skipped" || verification.status === "incomplete")
+    return "Verification incomplete";
   if (verification.status === "passed") return "Configured checks passed";
   return "Configured checks did not pass";
 }
@@ -432,6 +439,8 @@ export function parseVerification(value: unknown): Verification | undefined {
     commands,
     presentedAs:
       typeof v.presented_as === "string" ? v.presented_as : undefined,
+    finalAssessment:
+      typeof v.final_assessment === "string" ? v.final_assessment : undefined,
     note: typeof v.note === "string" ? v.note : undefined,
     vendor: typeof v.vendor_agent === "string" ? v.vendor_agent : undefined,
   };

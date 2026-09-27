@@ -1334,14 +1334,13 @@ impl Engine {
         } else {
             plan
         };
-        let mut verification = self
-            .0
-            .store
-            .last_task_event(&job.task_id, "verification.summary")?
-            .map(|e| e["payload"].clone())
-            .unwrap_or_else(|| json!({"status":"incomplete","commands":[]}));
+        let mut verification = self.0.store.task_verification(&job.task_id)?;
         if !success {
             verification["verified"] = json!(false);
+            verification["red_green"] = json!(false);
+            if verification["claim"] == "verified" {
+                verification["claim"] = json!("observed");
+            }
             verification["status"] = json!(if cancelled { "cancelled" } else { "failed" });
         }
         if success && verification["unverified_claim"] == true && verification["verified"] != true {
