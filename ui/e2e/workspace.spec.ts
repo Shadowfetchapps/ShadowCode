@@ -61,7 +61,7 @@ test("picks a subscription row with the keyboard", async ({ page }) => {
   await expect(trigger(page)).toContainText("Choose a model");
   await prompt(page).fill("Explain the build");
   await expect(send(page)).toBeDisabled();
-  await trigger(page).click();
+  await page.getByRole("button", { name: "Choose a model" }).click();
   await expect(
     page.getByRole("group", { name: "Subscriptions" }),
   ).toBeVisible();

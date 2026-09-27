@@ -94,6 +94,8 @@ export function ChatView({
   onNewer,
   onLatest,
   onSuggestion,
+  needsModel,
+  onChooseModel,
   rows,
   commandCards,
   approvals,
@@ -122,6 +124,8 @@ export function ChatView({
   onNewer: () => void;
   onLatest: () => void;
   onSuggestion: (prompt: string) => void;
+  needsModel: boolean;
+  onChooseModel: () => void;
   rows: ReactNode;
   commandCards: CommandResult[];
   approvals: Approval[];
@@ -196,7 +200,11 @@ export function ChatView({
             Opening task…
           </div>
         ) : empty && !history.viewing ? (
-          <WelcomeBanner onSelect={onSuggestion} />
+          <WelcomeBanner
+            onSelect={onSuggestion}
+            needsModel={needsModel}
+            onChooseModel={onChooseModel}
+          />
         ) : (
           <>
             {rows}

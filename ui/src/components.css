@@ -36,6 +36,17 @@ button.link {
   font-size: clamp(22px, 2.6vw, 30px);
   letter-spacing: -0.6px;
 }
+.welcome-model-setup p {
+  color: var(--text-2);
+  font-size: 14px;
+  margin: 0 0 12px;
+}
+.welcome-model-setup .primary {
+  border: 0;
+  border-radius: var(--pill);
+  padding: 9px 16px;
+  cursor: pointer;
+}
 .welcome-suggestions {
   display: flex;
   flex-wrap: wrap;

@@ -235,6 +235,8 @@ export function Stage({
           scroll.pin();
         }}
         onSuggestion={focusWith}
+        needsModel={pickerLoaded && !selectedTarget}
+        onChooseModel={() => setPickerOpen(true)}
         rows={
           <TranscriptRows
             items={transcript.items}

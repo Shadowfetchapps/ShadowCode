@@ -78,7 +78,7 @@ it("disables Send until a ready row is chosen and remembers it per conversation"
   fireEvent.change(prompt(), { target: { value: "Fix the add function" } });
   expect(send()).toHaveProperty("disabled", true);
   expect(screen.getByText("Choose a model to send.")).toBeTruthy();
-  fireEvent.click(trigger());
+  fireEvent.click(screen.getByRole("button", { name: "Choose a model" }));
   const local = screen.getByRole("group", { name: "On this computer" });
   expect(
     within(local).getByRole("option", { name: /qwen3:14b · This computer/ }),
