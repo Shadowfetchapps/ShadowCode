@@ -49,6 +49,28 @@ async fn wait(engine: &Engine, id: &str) -> Job {
         .unwrap()
 }
 
+fn approve_completion_counter(engine: &Engine, project: &Path, counter: &Path) {
+    let path = ".shadowcode/hooks/completion.yaml";
+    fs::create_dir_all(project.join(".shadowcode/hooks")).unwrap();
+    // The counter is under this test's temporary root but outside the
+    // project, so observing hook execution cannot stale the passing check.
+    let quoted = counter.to_string_lossy().replace('\'', "'\\''");
+    fs::write(
+        project.join(path),
+        serde_json::to_vec(&json!({
+            "name":"completion", "events":["on_complete"],
+            "command":format!("printf x >> '{quoted}'"), "timeout_sec":3,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let workspace = Workspace::open(project).unwrap();
+    let hash = workspace.read(path).unwrap().hash;
+    let mut config = Config::load(engine.paths(), None).unwrap();
+    shadowcode_core::hooks::activate(&workspace, &mut config, path, &hash, true).unwrap();
+    Config::patch(engine.paths(), json!({"hooks":config.hooks})).unwrap();
+}
+
 #[tokio::test]
 async fn host_inspection_uses_real_tool_results_and_respects_read_only_mode() {
     let server = support::server(|index, body| {
@@ -937,9 +959,18 @@ async fn prose_command_without_tool_is_nudged_then_pauses() {
     let result = wait(&engine, &job.id).await;
     assert_eq!(result.status, "failed", "{}", result.summary);
     assert!(
-        result.summary.contains("never called a tool") || result.summary.contains("paused"),
+        result.summary.contains("never called a tool")
+            || result.summary.contains("paused")
+            || result
+                .summary
+                .contains("promised further work without performing it"),
         "{}",
         result.summary
+    );
+    assert_eq!(
+        server.requests.lock().unwrap().len(),
+        2,
+        "a command promise respects max_fix_retries=1"
     );
     let events = engine.store().recent_events(&job.session_id, 200).unwrap();
     assert!(
@@ -969,6 +1000,670 @@ async fn short_normal_answer_still_completes() {
     assert_eq!(result.status, "completed", "{}", result.summary);
     assert!(result.summary.contains("Updated README"));
     engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn completion_promise_after_failed_check_follows_through_without_automatic_shell_replay() {
+    let server = support::server(|index, body| {
+        let messages = body["messages"].as_array().unwrap();
+        context::validate_pairs(messages).unwrap();
+        let answer = match index {
+            0 => response("Inspecting and checking the current implementation", json!([
+                tool("read", "read_file", json!({"path":"sum.sh"})),
+                tool("check-before", "exec", json!({"command":"sh check.sh"})),
+            ])),
+            1 => {
+                let result: Value = serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
+                assert_eq!(result["success"], false, "the model must receive the actual failed check");
+                response("I will make the necessary changes to the implementation, then run tests again.", json!([]))
+            }
+            2 => {
+                assert_eq!(messages.last().unwrap()["role"], "system", "an explicit completion reminder must ask the model to continue");
+                response("Applying the correction and checking it", json!([
+                    tool("fix", "edit_file", json!({"path":"sum.sh","old_string":"a - b","new_string":"a + b"})),
+                    tool("check-after", "exec", json!({"command":"sh check.sh"})),
+                ]))
+            }
+            _ => {
+                let result: Value = serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
+                assert_eq!(result["success"], true);
+                response("Fixed addition. The configured shell assertion passed.", json!([]))
+            }
+        };
+        (answer, Duration::ZERO)
+    }).await;
+    let (root, engine) = setup(&server.endpoint);
+    let project = root.path().join("project");
+    // Record execution count as generated output, not as a checked source
+    // input: a check that changes its own input must correctly go stale.
+    fs::create_dir(project.join("target")).unwrap();
+    fs::write(project.join("sum.sh"), "a=$1; b=$2; echo $((a - b))\n").unwrap();
+    fs::write(
+        project.join("check.sh"),
+        "printf 'run\\n' >> target/check-runs\ntest \"$(sh sum.sh 2 3)\" = 5\n",
+    )
+    .unwrap();
+    let hook_counter = root.path().join("completion-hook-count");
+    approve_completion_counter(&engine, &project, &hook_counter);
+    Config::patch(
+        engine.paths(),
+        json!({"verification":{"commands":["sh check.sh"]},"agent":{"max_fix_retries":2}}),
+    )
+    .unwrap();
+    let job = engine
+        .start(request(
+            root.path(),
+            "Fix sum.sh so it adds its two arguments, then run sh check.sh",
+            None,
+        ))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    let events = engine.store().recent_events(&job.session_id, 200).unwrap();
+    engine.shutdown().await.unwrap();
+    assert_eq!(result.status, "completed", "{}", result.summary);
+    assert!(
+        fs::read_to_string(project.join("sum.sh"))
+            .unwrap()
+            .contains("a + b"),
+        "the task ended before performing the promised repair: {}",
+        result.summary
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("target/check-runs"))
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "each check must run only when the model explicitly calls it"
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 4);
+    assert_eq!(
+        fs::read_to_string(hook_counter).unwrap(),
+        "x",
+        "completion hook runs only after the real final answer"
+    );
+    let retries: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "completion.retry")
+        .collect();
+    assert_eq!(retries.len(), 1, "{events:?}");
+    assert_eq!(retries[0]["payload"]["reason"], "unperformed_action");
+    let checks: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "tool.completed" && e["payload"]["tool"] == "exec")
+        .collect();
+    assert_eq!(
+        checks.len(),
+        2,
+        "no completion path silently repeats the failed command"
+    );
+    let verification = &result.result.as_ref().unwrap()["verification"];
+    assert_eq!(verification["status"], "passed", "{verification}");
+    assert_eq!(verification["red_green"], true, "{verification}");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "agent.completed")
+            .count(),
+        1
+    );
+    context::validate_pairs(&engine.store().messages(&job.id).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn completion_promise_to_edit_continues_until_the_file_is_written() {
+    let server = support::server(|index, body| {
+        let messages = body["messages"].as_array().unwrap();
+        context::validate_pairs(messages).unwrap();
+        let answer = match index {
+            0 => response(
+                "I'll make the necessary changes to the requested file.",
+                json!([]),
+            ),
+            1 => response(
+                "Creating the requested greeting",
+                json!([tool(
+                    "write",
+                    "write_file",
+                    json!({"path":"greeting.txt","content":"hello\n","expected_hash":"missing"})
+                ),]),
+            ),
+            _ => response("Created greeting.txt containing hello.", json!([])),
+        };
+        (answer, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    Config::patch(engine.paths(), json!({"agent":{"max_fix_retries":2}})).unwrap();
+    let job = engine
+        .start(request(
+            root.path(),
+            "Create greeting.txt containing hello",
+            None,
+        ))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    let events = engine.store().recent_events(&job.session_id, 100).unwrap();
+    engine.shutdown().await.unwrap();
+    assert_eq!(result.status, "completed", "{}", result.summary);
+    assert!(
+        root.path().join("project/greeting.txt").is_file(),
+        "a prose edit promise was accepted as completion: {}",
+        result.summary
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("project/greeting.txt")).unwrap(),
+        "hello\n"
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "completion.retry"
+                && e["payload"]["reason"] == "unperformed_action")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "tool.completed"
+                && e["payload"]["tool"] == "write_file"
+                && e["payload"]["success"] == true)
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "agent.completed")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn completion_persistent_edit_promise_fails_at_max_fix_retries_once() {
+    let server = support::server(|_, body| {
+        context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+        (
+            response(
+                "I will make the necessary changes to the requested file.",
+                json!([]),
+            ),
+            Duration::ZERO,
+        )
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    Config::patch(
+        engine.paths(),
+        json!({"agent":{"max_steps":10,"max_fix_retries":2}}),
+    )
+    .unwrap();
+    let job = engine
+        .start(request(
+            root.path(),
+            "Create greeting.txt containing hello",
+            None,
+        ))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    let events = engine.store().recent_events(&job.session_id, 100).unwrap();
+    engine.shutdown().await.unwrap();
+    assert_eq!(
+        result.status, "failed",
+        "an unperformed promise must not finish successfully: {}",
+        result.summary
+    );
+    assert_eq!(
+        server.requests.lock().unwrap().len(),
+        3,
+        "initial response plus two bounded repair requests"
+    );
+    assert_eq!(result.steps, 3);
+    let retries: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "completion.retry")
+        .collect();
+    assert_eq!(retries.len(), 2, "{events:?}");
+    for (index, event) in retries.iter().enumerate() {
+        assert_eq!(event["payload"]["reason"], "unperformed_action");
+        assert_eq!(event["payload"]["attempt"], index + 1);
+    }
+    let terminal: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "agent.completed")
+        .collect();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0]["payload"]["success"], false);
+    assert!(!root.path().join("project/greeting.txt").exists());
+    assert!(!events.iter().any(|e| e["type"] == "tool.started"));
+}
+
+#[tokio::test]
+async fn completion_failed_check_receipt_survives_bounded_promise_failure() {
+    for max_fix_retries in [0usize, 2] {
+        let server = support::server(|index, body| {
+            context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+            let answer = if index == 0 {
+                response("Checking the current implementation", json!([
+                    tool("failed-check", "exec", json!({"command":"sh check.sh"})),
+                ]))
+            } else {
+                response("I will make the necessary changes to the implementation, then run tests again.", json!([]))
+            };
+            (answer, Duration::ZERO)
+        }).await;
+        let (root, engine) = setup(&server.endpoint);
+        let project = root.path().join("project");
+        fs::write(
+            project.join("check.sh"),
+            "printf 'run\\n' >> check-runs\nexit 1\n",
+        )
+        .unwrap();
+        let hook_counter = root.path().join("completion-hook-count");
+        approve_completion_counter(&engine, &project, &hook_counter);
+        Config::patch(engine.paths(), json!({"verification":{"commands":["sh check.sh"]},"agent":{"max_steps":10,"max_fix_retries":max_fix_retries}})).unwrap();
+        let job = engine
+            .start(request(
+                root.path(),
+                "Fix the failing implementation and rerun sh check.sh",
+                None,
+            ))
+            .await
+            .unwrap();
+        let result = wait(&engine, &job.id).await;
+        let events = engine.store().recent_events(&job.session_id, 200).unwrap();
+        engine.shutdown().await.unwrap();
+        assert_eq!(
+            result.status, "failed",
+            "retry bound {max_fix_retries}: {}",
+            result.summary
+        );
+        assert!(
+            !hook_counter.exists(),
+            "completion hooks do not run for promise retries or refusal"
+        );
+        assert_eq!(
+            server.requests.lock().unwrap().len(),
+            max_fix_retries + 2,
+            "one tool response, one promise and the allowed repair attempts"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("check-runs"))
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "completion must not replay the check"
+        );
+        let verification = &result.result.as_ref().unwrap()["verification"];
+        assert_eq!(verification["status"], "failed");
+        assert_eq!(verification["verified"], false);
+        let commands = verification["commands"]
+            .as_array()
+            .expect("recorded failure must survive the completion error");
+        assert_eq!(commands.len(), 1, "{verification}");
+        assert_eq!(commands[0]["command"], "sh check.sh");
+        assert_eq!(commands[0]["state"], "failed");
+        assert_eq!(commands[0]["tool_call_id"], "failed-check");
+        assert_eq!(commands[0]["task_id"], job.task_id);
+        assert_eq!(commands[0]["attempt_id"], job.id);
+        assert_eq!(commands[0]["provenance"], "locally_observed");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["type"] == "completion.retry"
+                    && e["payload"]["reason"] == "unperformed_action")
+                .count(),
+            max_fix_retries
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["type"] == "tool.started" && e["payload"]["tool"] == "exec")
+                .count(),
+            1
+        );
+        let terminals: Vec<_> = events
+            .iter()
+            .filter(|e| e["type"] == "agent.completed")
+            .collect();
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0]["payload"]["success"], false);
+        let saved = engine
+            .store()
+            .last_task_event(&job.task_id, "verification.summary")
+            .unwrap()
+            .expect("the failed completion retains its typed evidence event");
+        assert_eq!(saved["payload"]["commands"][0], commands[0]);
+    }
+}
+
+#[tokio::test]
+async fn completion_retry_budget_is_not_reset_by_interleaved_read_only_tools() {
+    let server = support::server(|index, body| {
+        context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+        let answer = if index % 2 == 1 {
+            response(
+                "Reading the current value",
+                json!([tool(
+                    &format!("read-{index}"),
+                    "read_file",
+                    json!({"path":"source.txt"})
+                ),]),
+            )
+        } else {
+            response(
+                "I will make the necessary changes to the requested file.",
+                json!([]),
+            )
+        };
+        (answer, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    fs::write(root.path().join("project/source.txt"), "old\n").unwrap();
+    Config::patch(
+        engine.paths(),
+        json!({"agent":{"max_steps":12,"max_fix_retries":2}}),
+    )
+    .unwrap();
+    let job = engine
+        .start(request(
+            root.path(),
+            "Update source.txt to contain new",
+            None,
+        ))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    let events = engine.store().recent_events(&job.session_id, 200).unwrap();
+    engine.shutdown().await.unwrap();
+    assert_eq!(result.status, "failed", "{}", result.summary);
+    assert_eq!(
+        server.requests.lock().unwrap().len(),
+        5,
+        "three promises and two read-only tool responses exhaust two repair retries"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("project/source.txt")).unwrap(),
+        "old\n"
+    );
+    let retries: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "completion.retry")
+        .collect();
+    assert_eq!(retries.len(), 2);
+    assert_eq!(retries[0]["payload"]["attempt"], 1);
+    assert_eq!(retries[1]["payload"]["attempt"], 2);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "tool.completed" && e["payload"]["tool"] == "read_file")
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "agent.completed")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn completion_mixed_edit_and_command_promises_share_one_retry_budget_and_keep_receipts() {
+    let server = support::server(|index, body| {
+        context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+        let answer = match index {
+            0 => response(
+                "Checking the current implementation",
+                json!([tool(
+                    "failed-check",
+                    "exec",
+                    json!({"command":"sh check.sh"})
+                ),]),
+            ),
+            1 => response(
+                "I'll make the necessary changes to the implementation.",
+                json!([]),
+            ),
+            2 | 4 => response(
+                "Reading current source",
+                json!([tool(
+                    &format!("read-{index}"),
+                    "read_file",
+                    json!({"path":"source.txt"})
+                ),]),
+            ),
+            _ => response("I'll run tests now.", json!([])),
+        };
+        (answer, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    let project = root.path().join("project");
+    fs::write(project.join("source.txt"), "unchanged\n").unwrap();
+    fs::write(
+        project.join("check.sh"),
+        "printf 'run\\n' >> check-runs\nexit 1\n",
+    )
+    .unwrap();
+    Config::patch(engine.paths(), json!({"verification":{"commands":["sh check.sh"]},"agent":{"max_steps":12,"max_fix_retries":2}})).unwrap();
+    let job = engine
+        .start(request(
+            root.path(),
+            "Fix the implementation in source.txt and rerun sh check.sh",
+            None,
+        ))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    let events = engine.store().recent_events(&job.session_id, 200).unwrap();
+    engine.shutdown().await.unwrap();
+    assert_eq!(result.status, "failed", "{}", result.summary);
+    assert_eq!(
+        server.requests.lock().unwrap().len(),
+        6,
+        "switching to command promises or reading files must not reset or bypass the repair budget"
+    );
+    assert_eq!(result.steps, 6);
+    assert_eq!(
+        fs::read_to_string(project.join("check-runs"))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "a prose command promise cannot cause shell replay"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("source.txt")).unwrap(),
+        "unchanged\n"
+    );
+    let verification = &result.result.as_ref().unwrap()["verification"];
+    let commands = verification["commands"]
+        .as_array()
+        .expect("the unified refusal retains the failed receipt");
+    assert_eq!(commands.len(), 1, "{verification}");
+    assert_eq!(commands[0]["state"], "failed");
+    assert_eq!(commands[0]["tool_call_id"], "failed-check");
+    assert_eq!(commands[0]["task_id"], job.task_id);
+    assert_eq!(commands[0]["attempt_id"], job.id);
+    assert_eq!(commands[0]["provenance"], "locally_observed");
+    let retries: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "completion.retry")
+        .collect();
+    assert_eq!(retries.len(), 2);
+    for (index, event) in retries.iter().enumerate() {
+        assert_eq!(event["payload"]["reason"], "unperformed_action");
+        assert_eq!(event["payload"]["attempt"], index + 1);
+    }
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "runaway.warning" && e["payload"]["kind"] == "prose_command"),
+        "command promises retain the existing visible warning"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "tool.completed" && e["payload"]["tool"] == "read_file")
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "agent.completed")
+            .count(),
+        1
+    );
+    let saved = engine
+        .store()
+        .last_task_event(&job.task_id, "verification.summary")
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved["payload"]["commands"][0], commands[0]);
+}
+
+#[tokio::test]
+async fn completion_quoted_conditional_and_negative_commands_are_final_prose_in_code_and_review() {
+    let answers = [
+        "The example says \"I'll run tests now.\" It describes a future action, not observed execution.",
+        "```text\nI'll run tests now.\n```\nThis is quoted sample wording, not work performed.",
+        "If you approve, I'll run tests. No commands have been executed.",
+        "I'll run nothing. This answer only explains the wording.",
+    ];
+    for mode in ["code", "review"] {
+        for answer in answers {
+            let server = support::server(move |_, body| {
+                context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+                (response(answer, json!([])), Duration::ZERO)
+            })
+            .await;
+            let (root, engine) = setup(&server.endpoint);
+            Config::patch(engine.paths(), json!({"agent":{"max_fix_retries":1}})).unwrap();
+            let mut req = request(
+                root.path(),
+                "Explain this wording only; do not execute commands or modify files.",
+                None,
+            );
+            req.mode = mode.into();
+            let job = engine.start(req).await.unwrap();
+            let result = wait(&engine, &job.id).await;
+            let events = engine.store().recent_events(&job.session_id, 100).unwrap();
+            engine.shutdown().await.unwrap();
+            assert_eq!(
+                result.status, "completed",
+                "{mode}: {answer:?}: {}",
+                result.summary
+            );
+            assert_eq!(
+                server.requests.lock().unwrap().len(),
+                1,
+                "{mode}: {answer:?}"
+            );
+            assert!(
+                !events.iter().any(|e| e["type"] == "tool.started"
+                    || e["type"] == "completion.retry"
+                    || (e["type"] == "runaway.warning" && e["payload"]["kind"] == "prose_command")),
+                "{mode}: {answer:?}: {events:?}"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| e["type"] == "agent.completed")
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn completion_diagnosis_can_report_a_failed_check_without_repairing_or_replaying_it() {
+    let server = support::server(|index, body| {
+        context::validate_pairs(body["messages"].as_array().unwrap()).unwrap();
+        let answer = if index == 0 {
+            response("Running the requested diagnostic check", json!([
+                tool("diagnose", "exec", json!({"command":"sh check.sh"})),
+            ]))
+        } else {
+            response("The check failed because addition returned -1 instead of 5. The implementation needs addition rather than subtraction. I have not modified it.", json!([]))
+        };
+        (answer, Duration::ZERO)
+    }).await;
+    let (root, engine) = setup(&server.endpoint);
+    let project = root.path().join("project");
+    fs::write(project.join("sum.sh"), "a=$1; b=$2; echo $((a - b))\n").unwrap();
+    fs::write(
+        project.join("check.sh"),
+        "printf 'run\\n' >> check-runs\ntest \"$(sh sum.sh 2 3)\" = 5\n",
+    )
+    .unwrap();
+    Config::patch(
+        engine.paths(),
+        json!({"verification":{"commands":["sh check.sh"]},"agent":{"max_fix_retries":2}}),
+    )
+    .unwrap();
+    let job = engine
+        .start(request(
+            root.path(),
+            "Run sh check.sh and diagnose its failure. Do not repair or edit the implementation.",
+            None,
+        ))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    let events = engine.store().recent_events(&job.session_id, 100).unwrap();
+    engine.shutdown().await.unwrap();
+    assert_eq!(result.status, "completed", "{}", result.summary);
+    assert_eq!(
+        result.result.as_ref().unwrap()["verification"]["status"],
+        "failed"
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+    assert_eq!(
+        fs::read_to_string(project.join("check-runs"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert!(fs::read_to_string(project.join("sum.sh"))
+        .unwrap()
+        .contains("a - b"));
+    assert!(!events.iter().any(|e| e["type"] == "completion.retry"));
+}
+
+#[tokio::test]
+async fn completion_read_only_plan_accepts_prose_without_forcing_a_write() {
+    let server = support::server(|_, _| (
+        response("I will update input validation, then add unit tests for empty values. This is a proposed implementation plan; no files were changed.", json!([])), Duration::ZERO
+    )).await;
+    let (root, engine) = setup(&server.endpoint);
+    let mut req = request(
+        root.path(),
+        "Suggest a plan for improving input validation. Do not modify files.",
+        None,
+    );
+    req.mode = "review".into();
+    let job = engine.start(req).await.unwrap();
+    let result = wait(&engine, &job.id).await;
+    let events = engine.store().recent_events(&job.session_id, 100).unwrap();
+    engine.shutdown().await.unwrap();
+    assert_eq!(result.status, "completed", "{}", result.summary);
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    assert!(!events
+        .iter()
+        .any(|e| e["type"] == "completion.retry" || e["type"] == "tool.started"));
 }
 
 #[tokio::test]

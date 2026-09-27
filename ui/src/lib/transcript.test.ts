@@ -371,6 +371,21 @@ describe("durable transcript", () => {
       ),
     ).toBe(true);
   });
+  it("shows unfinished-action retries without inventing completion or tool evidence", () => {
+    const state = replay([
+      event(1, "completion.retry", {
+        reason: "unperformed_action",
+        attempt: 1,
+      }),
+    ]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({
+      kind: "note",
+      text: "Continuing: the previous response described work that still needs to be done.",
+    });
+    expect(state.items.some((item) => item.kind === "summary")).toBe(false);
+    expect(state.items.some((item) => item.kind === "tool")).toBe(false);
+  });
   it("replays 10000 stream events without dropping the last cursor", () => {
     const started = performance.now();
     let state = emptyTranscript();

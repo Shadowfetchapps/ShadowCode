@@ -283,6 +283,16 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
       },
     ];
   }
+  if (event.type === "completion.retry" && p.reason === "unperformed_action") {
+    items = [
+      ...items,
+      {
+        kind: "note",
+        taskId,
+        text: "Continuing: the previous response described work that still needs to be done.",
+      },
+    ];
+  }
   if (event.type === "files.changed") {
     const paths = Array.isArray(p.paths) ? p.paths.map(String) : [];
     touch((a) => ({

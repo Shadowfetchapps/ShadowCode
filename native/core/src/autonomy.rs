@@ -352,28 +352,226 @@ pub fn text_loop_stats(text: &str) -> Option<(String, usize)> {
     best
 }
 
-/// First-person claims that a shell/desktop command is being run in prose
-/// without a structured tool call. Advice directed at the user is ignored.
+/// Conservative command subset of `promises_tool_action`, sharing its quote,
+/// conditional and negative filters. This is a heuristic for replies without
+/// structured tool calls, never evidence that a command actually ran.
 pub fn claims_command_execution(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    let first_person = regex::Regex::new(
-        r"(?i)\b(?:i(?:'m| am)?(?:\s+\w+){0,3}\s+(?:going\s+to|about\s+to)|i(?:'ll| will)|let\s+me|now\s+i(?:'ll| will)?)\s+(?:run|execute|do|set|call|invoke|issue)\b",
-    )
-    .expect("prose claim regex");
-    if first_person.is_match(&lower) {
-        return true;
+    has_unperformed_action(text, true)
+}
+
+/// Conservative English-language signal for an unfinished, first-person
+/// commitment to use workspace/process tools. Call only for a reply with no
+/// structured tool calls. This is not an intent oracle, a success check, or
+/// permission to execute anything: callers must retain task mode, capability,
+/// approval and retry limits. Ambiguous wording and unfamiliar phrasing can be
+/// missed deliberately; quoted examples, advice and limitations are not work.
+/// A later unsupported success claim does not erase an earlier action promise.
+pub fn promises_tool_action(text: &str) -> bool {
+    has_unperformed_action(text, false)
+}
+
+fn has_unperformed_action(text: &str, commands_only: bool) -> bool {
+    use std::sync::LazyLock;
+    static SENTENCE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"[.!?](?:\s+|$)|\n\s*\n").expect("action sentence regex")
+    });
+    static FUTURE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\b(?:i(?:'ll| will)|i(?:'m| am) (?:going|about) to|let me)\s+(?:(?:first|now|next|then|also|just)\s+){0,2}(make|apply|edit|modify|patch|fix|repair|update|rewrite|implement|create|delete|remove|rename|run|execute|invoke|launch|rerun|do|set|call|issue|inspect|read|open|search|examine|check|verify|test)\b")
+            .expect("action promise regex")
+    });
+    static RUNNING_COMMAND: LazyLock<regex::Regex> = LazyLock::new(|| {
+        // A bare progressive phrase is often explanatory prose. Accept only
+        // an entire status sentence with an opaque inline command target.
+        regex::Regex::new(r"^(?:i(?:'m| am)\s+)?(?:running|executing|issuing)\s+__code__(?:\s+(?:now|next|again))?\s*[.!]?\s*$")
+            .expect("running command claim regex")
+    });
+    static INTRO: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"^(?:(?:okay|ok|sure|first|next|now|then|finally|so|also|actually)[,:]?\s*|(?:here(?:'s| is) (?:the |my )?plan|plan):\s*|to (?:fix|repair|update|implement|investigate|resolve|verify)[^;!?]{1,160},\s*)?$")
+            .expect("action introduction regex")
+    });
+    static EXCLUDED: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\b(?:if|unless|whether|would|could|might|can't|cannot|won't|unable|hypothetical|hypothetically|example|suppose|imagine|pretend|mentally|conceptually)\b|\b(?:do not|don't) have\b|\b(?:no access|not permitted|not allowed)\b|\b(?:after|once|when|until|upon|pending|with|subject to)[^.;!?]{0,64}\b(?:approv\w*|permission|confirm\w*|ask\w*|ready)\b")
+            .expect("conditional action regex")
+    });
+    static WORKSPACE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\b(?:file|files|function|functions|code|repository|repo|workspace|project|test|tests|implementation|bug|script|config|module|component|class|method)\b|__code__|\b[a-z0-9_/-]+\.[a-z0-9]{1,10}\b")
+            .expect("workspace action target regex")
+    });
+    static COMMAND: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\b(?:tests?|suite|checks?|commands?|build|scripts?|pytest|unittest|cargo|npm|pnpm|yarn|python3?|git|make|cmake|xset|xpaper|feh)\b|__code__")
+            .expect("command action target regex")
+    });
+    static SHELL_TARGET: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r"^\s*(?:[./~][a-z0-9_./~-]+(?:\s|$)|[a-z0-9_./-]+\s+--?[a-z][a-z0-9-]*\b)",
+        )
+        .expect("shell command target regex")
+    });
+    static CHANGES: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"^(?:\s+(?:the|these|those|necessary|required|requested|following|needed|appropriate|proposed)){0,5}\s+(?:changes?|patch|fix)\b")
+            .expect("promised changes regex")
+    });
+    static NO_ACTION_OBJECT: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r"^\s*(?:(?:exactly|absolutely|literally)\s+)?(?:no|none|nothing|neither|zero|not)\b",
+        )
+        .expect("negated action object regex")
+    });
+    static PROSE_OBJECT: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"^\s*(?:(?:the|this|my|your|our|an?)\s+)?(?:explanation|answer|response|wording|description|plan|summary|user|you|reader|example|analogy|idea|comparison)\b")
+            .expect("non-tool action target regex")
+    });
+
+    let prose = unquoted_action_prose(text).to_lowercase();
+    let mut start = 0;
+    for end in SENTENCE
+        .find_iter(&prose)
+        .map(|m| m.end())
+        .chain(std::iter::once(prose.len()))
+    {
+        let sentence = prose[start..end]
+            .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | '#' | '-'));
+        start = end;
+        if sentence.contains('?') || EXCLUDED.is_match(sentence) {
+            continue;
+        }
+        if RUNNING_COMMAND.is_match(sentence.trim()) {
+            return true;
+        }
+        let Some(action) = FUTURE.captures(sentence) else {
+            continue;
+        };
+        let found = action.get(0).expect("action match");
+        if !INTRO.is_match(sentence[..found.start()].trim()) {
+            continue;
+        }
+        // A nearby concrete target is required; an unrelated later sentence
+        // or lengthy narrative must not turn abstract prose into a tool action.
+        let raw_target = &sentence[found.end()..];
+        let target: String = raw_target
+            .trim_start_matches(|c: char| c.is_whitespace() || c == ':')
+            .chars()
+            .take(320)
+            .collect();
+        if NO_ACTION_OBJECT.is_match(&target) || PROSE_OBJECT.is_match(&target) {
+            continue;
+        }
+        let verb = action.get(1).expect("action verb").as_str();
+        let command_target = COMMAND.is_match(&target) || SHELL_TARGET.is_match(&target);
+        let command_action = match verb {
+            "run" | "execute" | "invoke" | "launch" | "rerun" | "call" | "issue" | "set" => {
+                command_target
+            }
+            // Retain the observed "Actually, I'll do: xpaper …" form without
+            // treating a generic promise to "do" something as a tool action.
+            "do" => raw_target.trim_start().starts_with(':') && command_target,
+            _ => false,
+        };
+        if command_action {
+            return true;
+        }
+        if commands_only {
+            continue;
+        }
+        let concrete = match verb {
+            "run" | "execute" | "invoke" | "launch" | "rerun" | "call" | "issue" | "set" | "do" => {
+                false
+            }
+            "make" | "apply" => CHANGES.is_match(raw_target) && WORKSPACE.is_match(&target),
+            "test" | "verify" | "check" => COMMAND.is_match(&target) || WORKSPACE.is_match(&target),
+            _ => WORKSPACE.is_match(&target),
+        };
+        if concrete {
+            return true;
+        }
     }
-    let running = regex::Regex::new(
-        r"(?i)\b(?:running|executing|issuing)\s+(?:`[^`]+`|[a-z0-9._/-]+(?:\s+-[a-z0-9-]+)*)",
-    )
-    .expect("running claim regex");
-    if running.is_match(&lower) {
-        return true;
+    false
+}
+
+/// Remove Markdown examples before looking for commitments. Inline code is
+/// kept as an opaque possible *target*, never interpreted as a promise itself.
+fn unquoted_action_prose(text: &str) -> String {
+    let mut visible = String::new();
+    let mut fence = None;
+    let mut quoted_block = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let delimiter = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'));
+        let run = delimiter.map(|c| trimmed.chars().take_while(|&x| x == c).count());
+        if let Some((kind, length)) = fence {
+            if delimiter == Some(kind) && run.is_some_and(|n| n >= length) {
+                fence = None;
+            }
+            visible.push('\n');
+            continue;
+        }
+        if let (Some(kind), Some(length)) = (delimiter, run) {
+            if length >= 3 {
+                fence = Some((kind, length));
+                visible.push('\n');
+                continue;
+            }
+        }
+        if trimmed.is_empty() {
+            quoted_block = false;
+        } else if trimmed.starts_with('>') {
+            quoted_block = true;
+        }
+        if !quoted_block && !line.starts_with("    ") && !line.starts_with('\t') {
+            visible.push_str(line);
+        }
+        visible.push('\n');
     }
-    // Bare "Actually, I'll do: cmd …" lines seen from abliterated local models.
-    let do_colon =
-        regex::Regex::new(r"(?i)\bi(?:'ll| will)\s+do\s*:").expect("do-colon claim regex");
-    do_colon.is_match(&lower)
+
+    let mut output = String::new();
+    let mut chars = visible.chars().peekable();
+    let mut previous = '\n';
+    while let Some(c) = chars.next() {
+        let quote = match c {
+            '"' => Some('"'),
+            '“' => Some('”'),
+            '‘' => Some('’'),
+            '\'' if !previous.is_alphanumeric() => Some('\''),
+            _ => None,
+        };
+        if let Some(close) = quote {
+            let mut escaped = false;
+            let mut inside_previous = '\n';
+            while let Some(next) = chars.next() {
+                if !escaped
+                    && next == close
+                    && !(close == '\''
+                        && inside_previous.is_alphanumeric()
+                        && chars.peek().is_some_and(|c| c.is_alphanumeric()))
+                {
+                    break;
+                }
+                escaped = next == '\\' && !escaped;
+                inside_previous = next;
+            }
+            output.push(' ');
+        } else if c == '`' {
+            let mut length = 1;
+            while chars.peek() == Some(&'`') {
+                chars.next();
+                length += 1;
+            }
+            let mut closing = 0;
+            for next in chars.by_ref() {
+                closing = if next == '`' { closing + 1 } else { 0 };
+                if closing == length {
+                    break;
+                }
+            }
+            if closing == length {
+                output.push_str(" __code__ ");
+            }
+        } else {
+            output.push(if c == '’' { '\'' } else { c });
+        }
+        previous = c;
+    }
+    output
 }
 
 pub fn capability_profile(provider: &str, context_limit: usize) -> CapabilityProfile {
@@ -889,6 +1087,96 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tool_action_promises_catch_observed_edit_stalls_and_concrete_next_actions() {
+        for text in [
+            "I will make the necessary changes to the unique function in helpers.py and then run the tests again to verify the fix.",
+            "To fix helpers.py, I'll make the necessary changes and test them using the provided unittest command. Here's the plan: update unique. All tests passed.",
+            "I'll edit helpers.py and run the tests.",
+            "I’ll inspect `helpers.py` first.",
+            "I am going to read the source file.",
+            "I'm about to run `python3 -m unittest -q`.",
+            "Let me apply the patch to the function.",
+            "Next, I will run the test suite.",
+            "I'll create regression tests for the function.",
+            "I'll verify the build.",
+            "**I'll update the config file.**",
+            "I will make the necessary\nchanges to the function and then run the tests.",
+            "> I cannot edit this file.\n\nI'll edit helpers.py now.",
+            "```text\nI cannot edit this file.\n```\nI'll edit helpers.py now.",
+        ] {
+            assert!(promises_tool_action(text), "missed action promise: {text}");
+        }
+    }
+
+    #[test]
+    fn tool_action_promises_exclude_suggestions_deferrals_and_limitations() {
+        for text in [
+            "If you want, I can edit helpers.py.",
+            "If you want, I will edit helpers.py.",
+            "I'll edit helpers.py if you ask.",
+            "I would edit helpers.py and run tests.",
+            "I will not edit anything.",
+            "I will edit no files.",
+            "I will delete nothing from the repository.",
+            "I'll edit none of the source files.",
+            "I'll run zero tests.",
+            "I will edit exactly no files.",
+            "I will make no changes to the function.",
+            "I won't edit helpers.py.",
+            "I cannot edit files or run commands here.",
+            "I will run tests, but I do not have access to your runtime.",
+            "I will edit helpers.py after you approve.",
+            "I'll edit the file once approval is granted.",
+            "I will run tests upon your confirmation.",
+            "I will edit the file with your permission.",
+            "I will edit the file subject to approval.",
+            "Should I edit helpers.py?",
+            "I'll edit helpers.py, okay?",
+            "You should edit helpers.py and run tests.",
+            "Please run python3 -m unittest -q.",
+            "I edited helpers.py and ran the tests.",
+            "I was going to edit helpers.py, but the file was unavailable.",
+            "Earlier I said I will edit helpers.py.",
+            "The user asked me to say I'll edit the file.",
+            "I'll explain how to edit helpers.py.",
+            "I will summarize the test results.",
+            "I'll update you about the test results.",
+            "I will read your question carefully.",
+            "I'll create a comparison of the available choices.",
+            "I'll run through the tests mentally.",
+            "I'll test the idea conceptually.",
+            "All tests passed.",
+        ] {
+            assert!(!promises_tool_action(text), "misclassified prose: {text}");
+        }
+    }
+
+    #[test]
+    fn tool_action_promises_do_not_read_quoted_or_fenced_examples_as_commitments() {
+        for text in [
+            "The model said: \"I'll edit helpers.py.\"",
+            "\"I will make the necessary changes to the function.\"",
+            "'I'll edit helpers.py and run the tests.'",
+            "“I’ll run the tests.”",
+            "‘I will edit helpers.py.’",
+            "An example reply:\n\"\nI will edit helpers.py and run tests.\n\"",
+            "`I'll edit helpers.py` is an example promise.",
+            "``I will run tests`` is example code.",
+            "```text\nI'll edit helpers.py and run tests.\n```",
+            "~~~text\nI will make the necessary changes to the function.\n~~~",
+            "````text\n```\nI'll edit helpers.py.\n```\n````",
+            "> I'll edit helpers.py and run tests.",
+            "> Example reply:\nI'll edit helpers.py and run tests.\n\nThis is quoted advice.",
+            "    I'll edit helpers.py and run tests.",
+            "\tI will run tests.",
+            "For example, I'll edit helpers.py and run tests.",
+            "Imagine I'll edit helpers.py and run tests.",
+        ] {
+            assert!(!promises_tool_action(text), "misclassified example: {text}");
+        }
+    }
+
+    #[test]
     fn never_auto_replays_mutations_or_destructive_git() {
         assert_eq!(replay_class("read_file"), ReplayClass::SafeToReplay);
         assert_eq!(replay_class("exec"), ReplayClass::RequiresConfirmation);
@@ -931,21 +1219,92 @@ mod tests {
 
     #[test]
     fn prose_command_claims_are_detected() {
-        assert!(claims_command_execution(
-            "Actually, I'll do: xpaper -bg green on each monitor"
-        ));
-        assert!(claims_command_execution(
-            "I'll run xset root solid green now."
-        ));
-        assert!(claims_command_execution(
-            "Running `feh --bg-fill green.png`."
-        ));
-        assert!(!claims_command_execution(
-            "You can run cargo test after reviewing the diff."
-        ));
-        assert!(!claims_command_execution(
-            "Updated README with install steps."
-        ));
+        for text in [
+            "Actually, I'll do: xpaper -bg green on each monitor",
+            "Actually, I'll do: xset root solid green",
+            "I'll run xset root solid green now.",
+            "I'll run custom-tool --check.",
+            "I'll execute ./scripts/check.sh now.",
+            "I am going to run cargo test.",
+            "Let me run the tests.",
+            "Running `feh --bg-fill green.png`.",
+            "I’m executing `cargo test` now.",
+            "Issuing `xset root solid green`.",
+        ] {
+            assert!(
+                claims_command_execution(text),
+                "missed command claim: {text}"
+            );
+            assert!(
+                promises_tool_action(text),
+                "command absent from shared action detector: {text}"
+            );
+        }
+        assert!(!claims_command_execution("I'll edit helpers.py now."));
+        assert!(promises_tool_action("I'll edit helpers.py now."));
+    }
+
+    #[test]
+    fn prose_commands_share_example_conditional_and_negative_exclusions() {
+        for text in [
+            "\"I'll run xset root solid green.\"",
+            "‘Actually, I’ll do: xset root solid green.’",
+            "The model said:\n\"Running `cargo test`.\"",
+            "`I'll run xset root solid green` is an example response.",
+            "```text\nRunning `xset root solid green`.\n```",
+            "> Actually, I'll do: xset root solid green",
+            "    I'll run xset root solid green.",
+            "For example, I'll run xset root solid green.",
+            "If you want, I'll run xset root solid green.",
+            "I'll run xset root solid green if you ask.",
+            "I'll execute `cargo test` after you approve.",
+            "I'll do: xset root solid green once approval is granted.",
+            "I will not run xset root solid green.",
+            "I won't execute `cargo test`.",
+            "I'll run no tests.",
+            "I'll issue zero commands.",
+            "I'll do: no commands.",
+            "I'll do: nothing with `xset root solid green`.",
+            "I will run tests, but I do not have access to your runtime.",
+            "Should I run `cargo test`?",
+            "I'll run xset root solid green, okay?",
+        ] {
+            assert!(
+                !claims_command_execution(text),
+                "misclassified command prose: {text}"
+            );
+            assert!(
+                !promises_tool_action(text),
+                "misclassified shared action prose: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn prose_commands_do_not_treat_general_advice_or_reports_as_running_tools() {
+        for text in [
+            "Running tests is useful.",
+            "Running `cargo test` is useful.",
+            "Executing commands requires care.",
+            "Running `xset root solid green` can change your desktop.",
+            "I recommend running `cargo test`.",
+            "You can run cargo test after reviewing the diff.",
+            "Earlier I said I'll run xset root solid green.",
+            "I ran `cargo test` successfully.",
+            "Updated README with install steps.",
+            "I'll run a marathon.",
+            "I'll run you through the test results.",
+            "I'll do: a summary of the test results.",
+        ] {
+            assert!(
+                !claims_command_execution(text),
+                "misclassified command prose: {text}"
+            );
+            assert!(
+                !promises_tool_action(text),
+                "misclassified shared action prose: {text}"
+            );
+        }
     }
 
     #[test]

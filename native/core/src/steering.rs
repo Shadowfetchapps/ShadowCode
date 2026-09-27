@@ -69,6 +69,19 @@ impl SteerControl {
         self.paused.load(Ordering::Acquire)
     }
 
+    /// Resume may arrive before the engine reaches a pause boundary. Keep its
+    /// note consumable even after the paused flag has already been cleared.
+    pub(crate) fn has_pending_resume(&self) -> anyhow::Result<bool> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Steer lock poisoned"))?;
+        Ok(state.instruction.is_some()
+            || !state.file_notes.is_empty()
+            || state.rewind_note.is_some()
+            || !state.pause_hashes.is_empty())
+    }
+
     pub fn pause(&self, hashes: BTreeMap<String, String>) -> anyhow::Result<()> {
         let mut state = self
             .state
