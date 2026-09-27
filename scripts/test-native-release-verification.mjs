@@ -117,8 +117,9 @@ test('package checks bind observed bytes and fail if they change during executio
 test('only explicitly scoped optional checks are excluded and their omissions are recorded', () => {
   const skips = new Set(), optional = new Set();
   inspectLine('native-source', 'test live_install_and_status_of_the_real_server ... ignored', skips, optional);
+  inspectLine('native-source', 'test live_three_model_compare_cancels_queued_models ... ignored', skips, optional);
   inspectLine('native-window', '  ok  no Ready cloud row on this machine: consent step skipped', skips, optional);
-  assert.equal(skips.size, 0); assert.equal(optional.size, 2);
+  assert.equal(skips.size, 0); assert.equal(optional.size, 3);
   inspectLine('managed-runtime', 'ok 1 - built runtime # SKIP not built', skips, optional);
   assert.equal(skips.size, 1);
   inspectLine('native-source', 'test required_cancellation_regression ... ignored', skips, optional);

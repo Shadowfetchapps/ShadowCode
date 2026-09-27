@@ -44,6 +44,7 @@ export const REQUIRED_GATES = Object.keys(GATES);
 const OPTIONAL_RUST_TESTS = new Set([
   'live_qwen3_agent_and_gemma4_vision_from_the_ollama_store',
   'live_local_acceptance_from_explicit_models',
+  'live_three_model_compare_cancels_queued_models',
   'live_install_and_status_of_the_real_server',
   'live_example_com_and_search', 'saved_results_page_parses',
   'live_managed_install_and_semantic_search', 'real_servers_smoke',
