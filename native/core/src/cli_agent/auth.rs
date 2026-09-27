@@ -12,7 +12,10 @@
 //! Disconnect runs the official logout command, which signs the CLI out for
 //! the whole user account (shared with terminal use), then forgets cached
 //! status, persisted usage, and stored native session ids for that vendor.
-use super::{catalog::VendorCatalog, clip, redact, resolve_binary, CliAgentsConfig, Vendor};
+use super::{
+    catalog::VendorCatalog, clip, probe_lifecycle::PublicationGate, redact, resolve_binary,
+    CliAgentsConfig, Vendor,
+};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::{
@@ -23,7 +26,10 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{
+    sync::CancellationToken,
+    task::{task_tracker::TaskTrackerToken, TaskTracker},
+};
 
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -32,39 +38,144 @@ const LOGIN_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 
 #[derive(Default)]
 struct LoginSession {
+    generation: u64,
     started_at: f64,
     lines: Vec<Value>,
     done: Option<Value>,
     cancel: CancellationToken,
+    publication: PublicationGate,
 }
 
-/// In-memory login sessions, one per vendor. Dropping it (engine shutdown)
-/// cancels every running login, which stops the login child.
+#[derive(Default)]
+struct LoginState {
+    sessions: HashMap<Vendor, LoginSession>,
+    closing: bool,
+    next_generation: u64,
+}
+
+/// One admitted login per vendor. Tracking starts atomically with admission,
+/// before a child is spawned, and ends only after its worker future returns.
 #[derive(Default)]
 pub struct Logins {
-    sessions: Mutex<HashMap<Vendor, LoginSession>>,
+    state: Mutex<LoginState>,
+    workers: TaskTracker,
+}
+
+struct LoginOperation {
+    catalog: Arc<VendorCatalog>,
+    vendor: Vendor,
+    generation: u64,
+    cancel: CancellationToken,
+    publication: PublicationGate,
+    deadline: tokio::time::Instant,
+    timeout: Duration,
+    tracking: Option<TaskTrackerToken>,
+    finished: bool,
+}
+
+impl LoginOperation {
+    fn finish(&mut self, mut done: Value) {
+        let published = if let Ok(mut state) = self.catalog.logins().state.lock() {
+            match state.sessions.get_mut(&self.vendor) {
+                Some(session)
+                    if session.generation == self.generation && session.done.is_none() =>
+                {
+                    // Cancel and terminal publication use the same mutex. A
+                    // cancel acknowledged before publication must win.
+                    if session.cancel.is_cancelled() {
+                        done["ok"] = json!(false);
+                        done["detail"] = json!("Sign-in cancelled");
+                    } else if tokio::time::Instant::now() >= self.deadline {
+                        done["ok"] = json!(false);
+                        done["detail"] = json!(format!(
+                            "Sign-in timed out after {} seconds",
+                            self.timeout.as_secs()
+                        ));
+                    }
+                    session.done = Some(done.clone());
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        self.finished = true;
+        if published {
+            self.catalog.broadcast("account.login.done", done);
+        }
+    }
+    fn fail(&mut self, detail: &str) {
+        self.finish(json!({"vendor":self.vendor.id(),"ok":false,"detail":detail,
+            "availability":"unavailable","availability_label":"Unavailable"}));
+    }
+}
+impl Drop for LoginOperation {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.fail("Sign-in interrupted before completion");
+        }
+    }
 }
 
 impl Logins {
-    fn begin(&self, vendor: Vendor) -> Option<CancellationToken> {
-        let mut sessions = self.sessions.lock().ok()?;
-        if sessions.get(&vendor).is_some_and(|s| s.done.is_none()) {
-            return None;
+    fn begin(
+        &self,
+        vendor: Vendor,
+        timeout: Duration,
+        catalog: &Arc<VendorCatalog>,
+    ) -> Result<Option<LoginOperation>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Login registry lock poisoned"))?;
+        if state.closing {
+            bail!("Login supervisor is shutting down");
+        }
+        if state
+            .sessions
+            .get(&vendor)
+            .is_some_and(|s| s.done.is_none())
+        {
+            return Ok(None);
         }
         let cancel = CancellationToken::new();
-        sessions.insert(
+        let publication = PublicationGate::default();
+        state.next_generation += 1;
+        let generation = state.next_generation;
+        // TaskTracker::close alone does not forbid new tasks. Both the closing
+        // flag and this reservation are therefore protected by this mutex.
+        let tracking = self.workers.token();
+        let deadline = tokio::time::Instant::now() + timeout;
+        state.sessions.insert(
             vendor,
             LoginSession {
+                generation,
                 started_at: crate::now(),
                 cancel: cancel.clone(),
+                publication: publication.clone(),
                 ..Default::default()
             },
         );
-        Some(cancel)
+        Ok(Some(LoginOperation {
+            catalog: catalog.clone(),
+            vendor,
+            generation,
+            cancel,
+            publication,
+            deadline,
+            timeout,
+            tracking: Some(tracking),
+            finished: false,
+        }))
     }
-    fn push(&self, vendor: Vendor, line: Value) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if let Some(session) = sessions.get_mut(&vendor) {
+    fn push(&self, vendor: Vendor, generation: u64, line: Value) {
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(session) = state
+                .sessions
+                .get_mut(&vendor)
+                .filter(|s| s.generation == generation && s.done.is_none())
+            {
                 if session.lines.len() >= MAX_LOGIN_LINES {
                     session.lines.remove(0);
                 }
@@ -72,61 +183,101 @@ impl Logins {
             }
         }
     }
-    fn finish(&self, vendor: Vendor, done: Value) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if let Some(session) = sessions.get_mut(&vendor) {
-                session.done = Some(done);
-            }
-        }
-    }
-    /// `{running, started_at, lines, done}` for the Accounts page.
     pub fn status(&self, vendor: Vendor) -> Value {
-        let Ok(sessions) = self.sessions.lock() else {
+        let Ok(state) = self.state.lock() else {
             return json!({"running":false});
         };
-        match sessions.get(&vendor) {
-            Some(session) => json!({
-                "vendor": vendor.id(),
-                "running": session.done.is_none(),
-                "started_at": session.started_at,
-                "lines": session.lines,
-                "done": session.done,
-            }),
+        match state.sessions.get(&vendor) {
+            Some(session) => json!({"vendor":vendor.id(),"running":session.done.is_none(),
+                "started_at":session.started_at,"lines":session.lines,"done":session.done}),
             None => json!({"vendor":vendor.id(),"running":false,"lines":[],"done":null}),
         }
     }
     pub fn running(&self, vendor: Vendor) -> bool {
-        self.sessions
+        self.state
             .lock()
-            .map(|s| s.get(&vendor).is_some_and(|s| s.done.is_none()))
+            .map(|s| s.sessions.get(&vendor).is_some_and(|s| s.done.is_none()))
             .unwrap_or(false)
     }
-    /// Cancel a running login. Returns false when none was running.
     pub fn cancel(&self, vendor: Vendor) -> bool {
-        let Ok(sessions) = self.sessions.lock() else {
+        let Ok(state) = self.state.lock() else {
             return false;
         };
-        match sessions.get(&vendor) {
+        match state.sessions.get(&vendor) {
             Some(session) if session.done.is_none() => {
-                session.cancel.cancel();
+                session.publication.cancel(&session.cancel);
                 true
             }
             _ => false,
         }
     }
     pub fn cancel_all(&self) {
-        if let Ok(sessions) = self.sessions.lock() {
-            for session in sessions.values() {
-                session.cancel.cancel();
+        if let Ok(state) = self.state.lock() {
+            for session in state.sessions.values() {
+                session.publication.cancel(&session.cancel);
             }
         }
     }
+    pub fn begin_shutdown(&self) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Login registry lock poisoned"))?;
+        state.closing = true;
+        for session in state.sessions.values() {
+            session.publication.cancel(&session.cancel);
+        }
+        self.workers.close();
+        Ok(())
+    }
+    /// Cancel-safe: a timed-out engine shutdown leaves every admitted worker
+    /// tracked. A later wait observes the same outstanding ownership.
+    pub async fn wait_shutdown(&self) {
+        self.workers.wait().await;
+    }
 }
-
 impl Drop for Logins {
     fn drop(&mut self) {
         self.cancel_all();
     }
+}
+
+/// The final account observation belongs to the original login operation, not
+/// a new uncancellable operation with a fresh discovery deadline.
+async fn complete_login(
+    mut operation: LoginOperation,
+    outcome: (bool, String),
+    config: &CliAgentsConfig,
+) {
+    let catalog = operation.catalog.clone();
+    let vendor = operation.vendor;
+    catalog.forget_status(vendor).await;
+    let status = if outcome.0 {
+        // The scoped discovery helpers observe this original control and
+        // explicitly kill + wait for owned children. Keep awaiting cleanup:
+        // selecting/dropping refresh here would discard reaping ownership.
+        Some(
+            catalog
+                .refresh_for_login(
+                    vendor,
+                    config,
+                    operation.cancel.clone(),
+                    operation.deadline,
+                    operation.publication.clone(),
+                )
+                .await,
+        )
+    } else {
+        None
+    };
+    let availability = status
+        .as_ref()
+        .map(|s| s.availability)
+        .unwrap_or(super::picker::Availability::Unavailable);
+    operation.finish(
+        json!({"vendor":vendor.id(),"ok":outcome.0,"detail":outcome.1,
+        "availability":availability,"availability_label":availability.label()}),
+    );
 }
 
 /// First https URL in a printed line, unless it carries a credential-looking
@@ -209,7 +360,7 @@ pub async fn connect_with_timeout(
     let configured = config.binary(vendor);
     let binary = resolve_binary(configured)
         .with_context(|| format!("`{configured}` was not found. {}", vendor.install_hint()))?;
-    let Some(cancel) = catalog.logins().begin(vendor) else {
+    let Some(mut operation) = catalog.logins().begin(vendor, timeout, catalog)? else {
         return Ok(json!({
             "ok": true,
             "state": "already_running",
@@ -220,110 +371,105 @@ pub async fn connect_with_timeout(
         Ok(child) => child,
         Err(error) => {
             let detail = format!("Could not start `{}`: {error}", binary.display());
-            catalog
-                .logins()
-                .finish(vendor, json!({"ok":false,"detail":detail}));
+            operation.fail(&detail);
             bail!(detail);
         }
     };
     let command_line = format!("{} {}", vendor.binary(), vendor.login_command().join(" "));
     let catalog = catalog.clone();
     let config = config.clone();
+    let tracking = operation
+        .tracking
+        .take()
+        .expect("admitted login owns tracking");
     tokio::spawn(async move {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel::<String>(64);
-        let mut readers = tokio::task::JoinSet::new();
-        for stream in [
-            child
-                .stdout
-                .take()
-                .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
-            child
-                .stderr
-                .take()
-                .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let sender = sender.clone();
-            readers.spawn(async move {
-                let mut lines = BufReader::new(stream).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if sender.send(line).await.is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(sender);
-        let deadline = tokio::time::sleep(timeout);
-        tokio::pin!(deadline);
-        let relay = |line: String| {
-            let raw = line.trim();
-            if raw.is_empty() {
-                return;
-            }
-            let text = clip(&redact(raw), 2000);
-            let payload = json!({"vendor":vendor.id(),"line":text,"url":login_url(raw)});
-            catalog.logins().push(vendor, payload.clone());
-            catalog.broadcast("account.login", payload);
-        };
-        let outcome = 'login: loop {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    let _ = child.kill().await;
-                    break (false, "Sign-in cancelled".to_owned());
-                }
-                _ = &mut deadline => {
-                    let _ = child.kill().await;
-                    break (false, format!("Sign-in timed out after {} seconds", timeout.as_secs()));
-                }
-                status = child.wait() => {
-                    // A browser started by the CLI may keep the pipes open;
-                    // allow one bounded tail interval, not a fresh timeout per
-                    // line. Stop and the original login deadline still apply.
-                    let drain_deadline = tokio::time::sleep(LOGIN_DRAIN_TIMEOUT);
-                    tokio::pin!(drain_deadline);
-                    loop {
-                        tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => break 'login (false, "Sign-in cancelled".to_owned()),
-                            _ = &mut deadline => break 'login (false, format!("Sign-in timed out after {} seconds", timeout.as_secs())),
-                            _ = &mut drain_deadline => break,
-                            line = receiver.recv() => match line {
-                                Some(line) => relay(line),
-                                None => break,
-                            },
+        let _tracking = tracking;
+        async move {
+            let cancel = operation.cancel.clone();
+            let generation = operation.generation;
+            let (sender, mut receiver) = tokio::sync::mpsc::channel::<String>(64);
+            let mut readers = tokio::task::JoinSet::new();
+            for stream in [
+                child
+                    .stdout
+                    .take()
+                    .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
+                child
+                    .stderr
+                    .take()
+                    .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let sender = sender.clone();
+                readers.spawn(async move {
+                    let mut lines = BufReader::new(stream).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if sender.send(line).await.is_err() {
+                            break;
                         }
                     }
-                    break match status {
-                        Ok(status) if status.success() => (true, format!("`{command_line}` finished")),
-                        Ok(status) => (false, format!("`{command_line}` exited with status {}", status.code().unwrap_or(-1))),
-                        Err(error) => (false, format!("`{command_line}` failed: {error}")),
-                    };
-                }
-                Some(line) = receiver.recv() => relay(line),
+                });
             }
-        };
-        // Readers belong to this login, unlike an independently opened browser.
-        // Close our pipe ends without signalling that browser or leaving a
-        // detached reader waiting indefinitely for its next line.
-        readers.shutdown().await;
-        drop(receiver);
-        // Re-probe: the login state and the account (and thus usage) may
-        // have changed.
-        catalog.forget_status(vendor).await;
-        let status = catalog.refresh(vendor, &config, true).await;
-        let done = json!({
-            "vendor": vendor.id(),
-            "ok": outcome.0,
-            "detail": outcome.1,
-            "availability": status.availability,
-            "availability_label": status.availability.label(),
-        });
-        catalog.logins().finish(vendor, done.clone());
-        catalog.broadcast("account.login.done", done);
+            drop(sender);
+            let deadline = tokio::time::sleep_until(operation.deadline);
+            tokio::pin!(deadline);
+            let relay = |line: String| {
+                let raw = line.trim();
+                if raw.is_empty() {
+                    return;
+                }
+                let text = clip(&redact(raw), 2000);
+                let payload = json!({"vendor":vendor.id(),"line":text,"url":login_url(raw)});
+                catalog.logins().push(vendor, generation, payload.clone());
+                catalog.broadcast("account.login", payload);
+            };
+            let outcome = 'login: loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        let _ = child.kill().await;
+                        break (false, "Sign-in cancelled".to_owned());
+                    }
+                    _ = &mut deadline => {
+                        let _ = child.kill().await;
+                        break (false, format!("Sign-in timed out after {} seconds", timeout.as_secs()));
+                    }
+                    status = child.wait() => {
+                        // A browser started by the CLI may keep the pipes open;
+                        // allow one bounded tail interval, not a fresh timeout per
+                        // line. Stop and the original login deadline still apply.
+                        let drain_deadline = tokio::time::sleep(LOGIN_DRAIN_TIMEOUT);
+                        tokio::pin!(drain_deadline);
+                        loop {
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => break 'login (false, "Sign-in cancelled".to_owned()),
+                                _ = &mut deadline => break 'login (false, format!("Sign-in timed out after {} seconds", timeout.as_secs())),
+                                _ = &mut drain_deadline => break,
+                                line = receiver.recv() => match line {
+                                    Some(line) => relay(line),
+                                    None => break,
+                                },
+                            }
+                        }
+                        break match status {
+                            Ok(status) if status.success() => (true, format!("`{command_line}` finished")),
+                            Ok(status) => (false, format!("`{command_line}` exited with status {}", status.code().unwrap_or(-1))),
+                            Err(error) => (false, format!("`{command_line}` failed: {error}")),
+                        };
+                    }
+                    Some(line) = receiver.recv() => relay(line),
+                }
+            };
+            // Readers belong to this login, unlike an independently opened browser.
+            // Close our pipe ends without signalling that browser or leaving a
+            // detached reader waiting indefinitely for its next line.
+            readers.shutdown().await;
+            drop(receiver);
+            complete_login(operation, outcome, &config).await;
+        }.await;
     });
     Ok(json!({
         "ok": true,
@@ -347,7 +493,7 @@ async fn connect_antigravity(
     }
     let installation = super::antigravity_server::installation(config.binary(vendor))
         .with_context(|| vendor.install_hint().to_owned())?;
-    let Some(cancel) = catalog.logins().begin(vendor) else {
+    let Some(mut operation) = catalog.logins().begin(vendor, timeout, catalog)? else {
         return Ok(json!({
             "ok": true,
             "state": "already_running",
@@ -366,9 +512,7 @@ async fn connect_antigravity(
     let run_dir = match super::antigravity_server::prepare(&mut command, &installation, true) {
         Ok(dir) => dir,
         Err(error) => {
-            catalog
-                .logins()
-                .finish(vendor, json!({"ok":false,"detail":format!("{error:#}")}));
+            operation.fail(&format!("{error:#}"));
             return Err(error);
         }
     };
@@ -385,85 +529,98 @@ async fn connect_antigravity(
         Ok(child) => child,
         Err(error) => {
             let detail = format!("Could not start the Antigravity agent: {error}");
-            catalog
-                .logins()
-                .finish(vendor, json!({"ok":false,"detail":detail}));
+            operation.fail(&detail);
             bail!(detail);
         }
     };
-    let mut stdin = child.stdin.take().context("Antigravity stdin missing")?;
-    let handshake = [
-        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-            "protocolVersion":1,
-            "clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},
-            "clientInfo":{"name":"shadowcode","title":"ShadowCode","version":crate::VERSION}}}),
-        json!({"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":super::antigravity_server::AUTH_METHOD}}),
-    ];
-    for line in handshake {
-        use tokio::io::AsyncWriteExt;
-        stdin.write_all(format!("{line}\n").as_bytes()).await?;
-    }
     let catalog = catalog.clone();
     let config = config.clone();
+    let tracking = operation
+        .tracking
+        .take()
+        .expect("admitted login owns tracking");
     tokio::spawn(async move {
-        let _run_dir = run_dir;
-        let _stdin = stdin;
-        let mut stdout = child.stdout.take().map(|s| BufReader::new(s).lines());
-        let mut stderr = child.stderr.take().map(|s| BufReader::new(s).lines());
-        let relay = |line: &str| {
-            let raw = line.trim();
-            // The server's own log lines (I0924 …) are noise here.
-            if raw.is_empty()
-                || raw.len() > 1
-                    && raw.as_bytes()[0].is_ascii_uppercase()
-                    && raw.as_bytes()[1].is_ascii_digit()
-            {
-                return;
-            }
-            let text = clip(&redact(raw), 2000);
-            let payload = json!({"vendor":vendor.id(),"line":text,"url":login_url(raw)});
-            catalog.logins().push(vendor, payload.clone());
-            catalog.broadcast("account.login", payload);
-        };
-        let deadline = tokio::time::sleep(timeout);
-        tokio::pin!(deadline);
-        let outcome = loop {
-            tokio::select! {
-                Some(Ok(Some(line))) = async { match stderr.as_mut() { Some(s) => Some(s.next_line().await), None => None } } => relay(&line),
-                Some(Ok(line)) = async { match stdout.as_mut() { Some(s) => Some(s.next_line().await), None => None } } => {
-                    let Some(line) = line else {
-                        break (false, "The Antigravity agent stopped before signing in".to_owned());
-                    };
-                    match serde_json::from_str::<Value>(&line) {
-                        Ok(message) if message["id"] == 2 => {
-                            break match message.get("error").filter(|e| !e.is_null()) {
-                                None => (true, "Signed in to Antigravity".to_owned()),
-                                Some(error) => (false, format!(
-                                    "Antigravity sign-in failed: {}",
-                                    error["data"]["message"].as_str().or_else(|| error["message"].as_str()).unwrap_or("unknown error")
-                                )),
-                            };
-                        }
-                        Ok(_) => {}
-                        Err(_) => relay(&line),
-                    }
+        let _tracking = tracking;
+        async move {
+            let cancel = operation.cancel.clone();
+            let generation = operation.generation;
+            let _run_dir = run_dir;
+            let mut stdout = child.stdout.take().map(|s| BufReader::new(s).lines());
+            let mut stderr = child.stderr.take().map(|s| BufReader::new(s).lines());
+            let relay = |line: &str| {
+                let raw = line.trim();
+                // The server's own log lines (I0924 …) are noise here.
+                if raw.is_empty()
+                    || raw.len() > 1
+                        && raw.as_bytes()[0].is_ascii_uppercase()
+                        && raw.as_bytes()[1].is_ascii_digit()
+                {
+                    return;
                 }
-                _ = cancel.cancelled() => break (false, "Sign-in cancelled".to_owned()),
-                _ = &mut deadline => break (false, format!("Sign-in timed out after {} seconds", timeout.as_secs())),
-            }
-        };
-        let _ = child.kill().await;
-        catalog.forget_status(vendor).await;
-        let status = catalog.refresh(vendor, &config, true).await;
-        let done = json!({
-            "vendor": vendor.id(),
-            "ok": outcome.0,
-            "detail": outcome.1,
-            "availability": status.availability,
-            "availability_label": status.availability.label(),
-        });
-        catalog.logins().finish(vendor, done.clone());
-        catalog.broadcast("account.login.done", done);
+                let text = clip(&redact(raw), 2000);
+                let payload = json!({"vendor":vendor.id(),"line":text,"url":login_url(raw)});
+                catalog.logins().push(vendor, generation, payload.clone());
+                catalog.broadcast("account.login", payload);
+            };
+            let deadline = tokio::time::sleep_until(operation.deadline);
+            tokio::pin!(deadline);
+            let exchange = async {
+                let mut stdin = child.stdin.take().context("Antigravity stdin missing")?;
+                let handshake = [
+                    json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                    "protocolVersion":1,
+                    "clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},
+                    "clientInfo":{"name":"shadowcode","title":"ShadowCode","version":crate::VERSION}}}),
+                    json!({"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":super::antigravity_server::AUTH_METHOD}}),
+                ];
+                for line in handshake {
+                    use tokio::io::AsyncWriteExt;
+                    stdin.write_all(format!("{line}\n").as_bytes()).await?;
+                }
+                Ok::<_, anyhow::Error>(loop {
+                    tokio::select! {
+                        result = async { stderr.as_mut().expect("guarded stderr").next_line().await }, if stderr.is_some() => {
+                            match result {
+                                Ok(Some(line)) => relay(&line),
+                                Ok(None) => stderr = None,
+                                Err(error) => break (false, format!("Could not read Antigravity sign-in diagnostics: {error}")),
+                            }
+                        }
+                        result = async { match stdout.as_mut() { Some(s) => s.next_line().await, None => Ok(None) } } => {
+                            let line = match result {
+                                Ok(Some(line)) => line,
+                                Ok(None) => break (false, "The Antigravity agent stopped before signing in".to_owned()),
+                                Err(error) => break (false, format!("Could not read Antigravity sign-in response: {error}")),
+                            };
+                            match serde_json::from_str::<Value>(&line) {
+                                Ok(message) if message["id"] == 2 => {
+                                    break match message.get("error").filter(|e| !e.is_null()) {
+                                        None => (true, "Signed in to Antigravity".to_owned()),
+                                        Some(error) => (false, format!(
+                                            "Antigravity sign-in failed: {}",
+                                            error["data"]["message"].as_str().or_else(|| error["message"].as_str()).unwrap_or("unknown error")
+                                        )),
+                                    };
+                                }
+                                Ok(_) => {}
+                                Err(_) => relay(&line),
+                            }
+                        }
+                    }
+                })
+            };
+            let outcome = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => (false, "Sign-in cancelled".to_owned()),
+                _ = &mut deadline => (false, format!("Sign-in timed out after {} seconds", timeout.as_secs())),
+                reply = exchange => match reply {
+                    Ok(outcome) => outcome,
+                    Err(error) => (false, format!("Antigravity sign-in failed: {error:#}")),
+                },
+            };
+            let _ = child.kill().await;
+            complete_login(operation, outcome, &config).await;
+        }.await;
     });
     Ok(json!({
         "ok": true,
@@ -551,5 +708,63 @@ mod tests {
         assert!(login_url("http://localhost:1455/callback?code=secret").is_none());
         assert!(login_url("https://localhost/cb?code=secret").is_none());
         assert!(login_url("no url here").is_none());
+    }
+    #[tokio::test]
+    async fn accepted_cancel_wins_publication_and_old_generation_cannot_write_retry() {
+        let catalog = Arc::new(VendorCatalog::new());
+        let mut first = catalog
+            .logins()
+            .begin(Vendor::Codex, Duration::from_secs(5), &catalog)
+            .unwrap()
+            .unwrap();
+        let old_generation = first.generation;
+        assert!(catalog.logins().cancel(Vendor::Codex));
+        first.finish(json!({"ok":true,"detail":"old CLI exited zero"}));
+        assert_eq!(catalog.logins().status(Vendor::Codex)["done"]["ok"], false);
+        let mut second = catalog
+            .logins()
+            .begin(Vendor::Codex, Duration::from_secs(5), &catalog)
+            .unwrap()
+            .unwrap();
+        catalog
+            .logins()
+            .push(Vendor::Codex, old_generation, json!({"line":"stale"}));
+        first.finish(json!({"ok":true,"detail":"stale final result"}));
+        let current = catalog.logins().status(Vendor::Codex);
+        assert_eq!(current["running"], true);
+        assert!(current["done"].is_null());
+        assert_eq!(current["lines"], json!([]));
+        second.fail("fixture finished");
+    }
+
+    #[tokio::test]
+    async fn shutdown_wait_retains_admitted_ownership_after_waiter_timeout() {
+        let catalog = Arc::new(VendorCatalog::new());
+        let mut operation = catalog
+            .logins()
+            .begin(Vendor::Codex, Duration::from_secs(5), &catalog)
+            .unwrap()
+            .unwrap();
+        catalog.logins().begin_shutdown().unwrap();
+        assert!(catalog
+            .logins()
+            .begin(Vendor::Claude, Duration::from_secs(5), &catalog)
+            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), catalog.logins().wait_shutdown())
+                .await
+                .is_err()
+        );
+        operation.fail("fixture finished");
+        // A terminal session is not a release of worker ownership.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), catalog.logins().wait_shutdown())
+                .await
+                .is_err()
+        );
+        drop(operation);
+        tokio::time::timeout(Duration::from_millis(100), catalog.logins().wait_shutdown())
+            .await
+            .unwrap();
     }
 }

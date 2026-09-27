@@ -201,9 +201,20 @@ pub async fn probe_vendor(
     deadline: Duration,
     antigravity: bool,
 ) -> Result<AcpProbe> {
+    if let Some(control) = super::probe_lifecycle::current() {
+        return probe_inner(
+            binary,
+            args,
+            workspace,
+            path_env,
+            antigravity,
+            Some((&control, deadline)),
+        )
+        .await;
+    }
     tokio::time::timeout(
         deadline,
-        probe_inner(binary, args, workspace, path_env, antigravity),
+        probe_inner(binary, args, workspace, path_env, antigravity, None),
     )
     .await
     .map_err(|_| {
@@ -221,7 +232,11 @@ async fn probe_inner(
     workspace: &Path,
     path_env: Option<&OsStr>,
     antigravity: bool,
+    control: Option<(&super::probe_lifecycle::ProbeControl, Duration)>,
 ) -> Result<AcpProbe> {
+    if let Some((control, _)) = control {
+        control.check()?;
+    }
     let mut command = sanitized(binary, args, workspace, path_env);
     let _run_dir = if antigravity {
         command.stderr(Stdio::piped());
@@ -237,13 +252,16 @@ async fn probe_inner(
     } else {
         None
     };
+    if let Some((control, _)) = control {
+        control.check()?;
+    }
     let mut child = command
         .spawn()
         .with_context(|| format!("Could not start {}", binary.display()))?;
     // Antigravity prints a Google sign-in link on stderr when it has no
     // valid sign-in, then waits; that answer is "not signed in".
     let (sign_in_tx, mut sign_in_rx) = tokio::sync::oneshot::channel::<()>();
-    let _stderr_drain = child.stderr.take().map(|stderr| {
+    let stderr_drain = child.stderr.take().map(|stderr| {
         AbortOnDropHandle::new(tokio::spawn(async move {
             let mut lines = BoundedLines::new(stderr, MAX_DIAGNOSTIC_BYTES);
             let mut tx = Some(sign_in_tx);
@@ -259,166 +277,184 @@ async fn probe_inner(
             }
         }))
     });
-    let mut sign_in_waiting = _stderr_drain.is_some();
-    let mut stdin = child.stdin.take().context("ACP stdin missing")?;
-    let stdout = child.stdout.take().context("ACP stdout missing")?;
-    let mut reader = BoundedLines::new(stdout, MAX_LINE_BYTES);
-    let mut probe = AcpProbe::default();
-    let init = rpc(
-        1,
-        "initialize",
-        json!({
-            "protocolVersion": 1,
-            "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false},
-            "clientInfo": {"name": "shadowcode", "title": "ShadowCode", "version": crate::VERSION}
-        }),
-    );
-    stdin.write_all(init.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await?;
-    let mut pending = std::collections::HashSet::from([1u64]);
-    let cwd = workspace.display().to_string();
-    loop {
-        let line = tokio::select! {
-            line = reader.next_protocol_line() => line?,
-            signal = &mut sign_in_rx, if sign_in_waiting => {
-                // A oneshot cannot be polled again after either delivery or
-                // sender closure (for example stderr reached EOF).
-                sign_in_waiting = false;
-                if signal.is_ok() {
-                    probe.authenticated = Some(false);
-                    probe.session_error = Some("Google sign-in required".into());
+    let exchange = async {
+        let mut sign_in_waiting = stderr_drain.is_some();
+        let mut stdin = child.stdin.take().context("ACP stdin missing")?;
+        let stdout = child.stdout.take().context("ACP stdout missing")?;
+        let mut reader = BoundedLines::new(stdout, MAX_LINE_BYTES);
+        let mut probe = AcpProbe::default();
+        let init = rpc(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false},
+                "clientInfo": {"name": "shadowcode", "title": "ShadowCode", "version": crate::VERSION}
+            }),
+        );
+        stdin.write_all(init.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
+        let mut pending = std::collections::HashSet::from([1u64]);
+        let cwd = workspace.display().to_string();
+        loop {
+            let line = tokio::select! {
+                line = reader.next_protocol_line() => line?,
+                signal = &mut sign_in_rx, if sign_in_waiting => {
+                    // A oneshot cannot be polled again after either delivery or
+                    // sender closure (for example stderr reached EOF).
+                    sign_in_waiting = false;
+                    if signal.is_ok() {
+                        probe.authenticated = Some(false);
+                        probe.session_error = Some("Google sign-in required".into());
+                        break;
+                    }
+                    continue;
+                }
+            };
+            let Some(line) = line else {
+                if pending.is_empty() {
                     break;
                 }
+                bail!("{} exited during the ACP handshake", binary.display());
+            };
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let Some(id) = message.get("id").and_then(Value::as_u64) else {
+                continue;
+            };
+            if message.get("method").is_some() {
+                let reply = json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"ShadowCode probe declared no client capabilities"}}).to_string();
+                stdin.write_all(reply.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+                stdin.flush().await?;
                 continue;
             }
-        };
-        let Some(line) = line else {
-            if pending.is_empty() {
-                break;
+            if !pending.remove(&id) {
+                continue;
             }
-            bail!("{} exited during the ACP handshake", binary.display());
-        };
-        let Ok(message) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let Some(id) = message.get("id").and_then(Value::as_u64) else {
-            continue;
-        };
-        if message.get("method").is_some() {
-            let reply = json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"ShadowCode probe declared no client capabilities"}}).to_string();
-            stdin.write_all(reply.as_bytes()).await?;
-            stdin.write_all(b"\n").await?;
-            stdin.flush().await?;
-            continue;
-        }
-        if !pending.remove(&id) {
-            continue;
-        }
-        let error = message.get("error").filter(|e| !e.is_null()).map(|e| {
-            e["data"]["message"]
-                .as_str()
-                .or_else(|| e["message"].as_str())
-                .unwrap_or("unknown error")
-                .to_owned()
-        });
-        let result = &message["result"];
-        match id {
-            1 => {
-                if let Some(error) = error {
-                    bail!("{} rejected initialize: {error}", binary.display());
-                }
-                // Validate before trusting capabilities or sending authenticate/session/new.
-                probe.protocol_version = Some(require_protocol_v1(result)?);
-                probe.agent_version = result["_meta"]["agentVersion"]
+            let error = message.get("error").filter(|e| !e.is_null()).map(|e| {
+                e["data"]["message"]
                     .as_str()
-                    .or_else(|| result["agentInfo"]["version"].as_str())
-                    .map(str::to_owned);
-                probe.accepts_images = result["agentCapabilities"]["promptCapabilities"]["image"]
-                    .as_bool()
-                    .unwrap_or(false);
-                probe.load_session = result["agentCapabilities"]["loadSession"]
-                    .as_bool()
-                    .unwrap_or(false);
-                probe.auth_methods = result["authMethods"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|m| m["id"].as_str().map(str::to_owned))
-                    .collect();
-                if let Some(state) = result["_meta"].get("modelState") {
-                    let (models, current) = models_from_state(state);
-                    if !models.is_empty() {
-                        probe.models = models;
-                        probe.current_model = current;
+                    .or_else(|| e["message"].as_str())
+                    .unwrap_or("unknown error")
+                    .to_owned()
+            });
+            let result = &message["result"];
+            match id {
+                1 => {
+                    if let Some(error) = error {
+                        bail!("{} rejected initialize: {error}", binary.display());
                     }
-                }
-                let next = if probe.auth_methods.is_empty() {
-                    rpc(3, "session/new", json!({"cwd": cwd, "mcpServers": []}))
-                } else {
-                    // Prefer the vendor's own login over a cached-token
-                    // method so an expired cache is reported, not assumed.
-                    let method = probe
-                        .auth_methods
-                        .iter()
-                        .find(|m| {
-                            m.as_str() == "cursor_login"
-                                || m.as_str() == "cached_token"
-                                || (antigravity
-                                    && m.as_str() == super::antigravity_server::AUTH_METHOD)
-                        })
-                        .cloned()
-                        .unwrap_or_else(|| probe.auth_methods[0].clone());
-                    rpc(2, "authenticate", json!({"methodId": method}))
-                };
-                pending.insert(if probe.auth_methods.is_empty() { 3 } else { 2 });
-                stdin.write_all(next.as_bytes()).await?;
-                stdin.write_all(b"\n").await?;
-                stdin.flush().await?;
-            }
-            2 => {
-                probe.authenticated = Some(error.is_none());
-                if let Some(error) = error {
-                    probe.session_error = Some(format!("authenticate failed: {error}"));
-                    break;
-                }
-                let next = rpc(3, "session/new", json!({"cwd": cwd, "mcpServers": []}));
-                pending.insert(3);
-                stdin.write_all(next.as_bytes()).await?;
-                stdin.write_all(b"\n").await?;
-                stdin.flush().await?;
-            }
-            3 => {
-                match error {
-                    Some(error) => probe.session_error = Some(error),
-                    None => {
-                        probe.session_started = result["sessionId"].as_str().is_some();
-                        probe.modes = result["modes"]["availableModes"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|m| m["id"].as_str().map(str::to_owned))
-                            .collect();
-                        let (mut models, mut current) = models_from_state(&result["models"]);
-                        if models.is_empty() {
-                            (models, current) =
-                                models_from_config_options(&result["configOptions"]);
-                        }
+                    // Validate before trusting capabilities or sending authenticate/session/new.
+                    probe.protocol_version = Some(require_protocol_v1(result)?);
+                    probe.agent_version = result["_meta"]["agentVersion"]
+                        .as_str()
+                        .or_else(|| result["agentInfo"]["version"].as_str())
+                        .map(str::to_owned);
+                    probe.accepts_images = result["agentCapabilities"]["promptCapabilities"]
+                        ["image"]
+                        .as_bool()
+                        .unwrap_or(false);
+                    probe.load_session = result["agentCapabilities"]["loadSession"]
+                        .as_bool()
+                        .unwrap_or(false);
+                    probe.auth_methods = result["authMethods"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|m| m["id"].as_str().map(str::to_owned))
+                        .collect();
+                    if let Some(state) = result["_meta"].get("modelState") {
+                        let (models, current) = models_from_state(state);
                         if !models.is_empty() {
                             probe.models = models;
                             probe.current_model = current;
                         }
                     }
+                    let next = if probe.auth_methods.is_empty() {
+                        rpc(3, "session/new", json!({"cwd": cwd, "mcpServers": []}))
+                    } else {
+                        // Prefer the vendor's own login over a cached-token
+                        // method so an expired cache is reported, not assumed.
+                        let method = probe
+                            .auth_methods
+                            .iter()
+                            .find(|m| {
+                                m.as_str() == "cursor_login"
+                                    || m.as_str() == "cached_token"
+                                    || (antigravity
+                                        && m.as_str() == super::antigravity_server::AUTH_METHOD)
+                            })
+                            .cloned()
+                            .unwrap_or_else(|| probe.auth_methods[0].clone());
+                        rpc(2, "authenticate", json!({"methodId": method}))
+                    };
+                    pending.insert(if probe.auth_methods.is_empty() { 3 } else { 2 });
+                    stdin.write_all(next.as_bytes()).await?;
+                    stdin.write_all(b"\n").await?;
+                    stdin.flush().await?;
                 }
-                break;
+                2 => {
+                    probe.authenticated = Some(error.is_none());
+                    if let Some(error) = error {
+                        probe.session_error = Some(format!("authenticate failed: {error}"));
+                        break;
+                    }
+                    let next = rpc(3, "session/new", json!({"cwd": cwd, "mcpServers": []}));
+                    pending.insert(3);
+                    stdin.write_all(next.as_bytes()).await?;
+                    stdin.write_all(b"\n").await?;
+                    stdin.flush().await?;
+                }
+                3 => {
+                    match error {
+                        Some(error) => probe.session_error = Some(error),
+                        None => {
+                            probe.session_started = result["sessionId"].as_str().is_some();
+                            probe.modes = result["modes"]["availableModes"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|m| m["id"].as_str().map(str::to_owned))
+                                .collect();
+                            let (mut models, mut current) = models_from_state(&result["models"]);
+                            if models.is_empty() {
+                                (models, current) =
+                                    models_from_config_options(&result["configOptions"]);
+                            }
+                            if !models.is_empty() {
+                                probe.models = models;
+                                probe.current_model = current;
+                            }
+                        }
+                    }
+                    break;
+                }
+                _ => {}
             }
-            _ => {}
         }
+        drop(stdin);
+        Ok(probe)
+    };
+    let result = match control {
+        Some((control, timeout)) => control.run(timeout, exchange).await,
+        None => exchange.await,
+    };
+    if control.is_some() {
+        // Retain the drainer handle through cancellation, then join its abort.
+        // Dropping it alone would only request abort and could outlive the login.
+        if let Some(drain) = stderr_drain {
+            drain.abort();
+            let _ = drain.await;
+        }
+        super::probe_lifecycle::reap(&mut child).await?;
+    } else if result.is_ok() {
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     }
-    drop(stdin);
-    let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-    Ok(probe)
+    result
 }
 
 /// `grok models` prints a login line and a bulleted model list.

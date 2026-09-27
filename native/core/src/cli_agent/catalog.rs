@@ -379,6 +379,8 @@ pub struct VendorCatalog {
     store: Option<Arc<Store>>,
     events: Option<broadcast::Sender<Value>>,
     logins: auth::Logins,
+    #[cfg(test)]
+    publication_signal: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl VendorCatalog {
@@ -588,6 +590,26 @@ impl VendorCatalog {
         }
     }
 
+    /// The post-login observation retains its owned children through cleanup.
+    /// The supervisor awaits this operation; it must not select/drop it during
+    /// cancellation because kill-on-drop alone does not await process reaping.
+    pub(super) async fn refresh_for_login(
+        &self,
+        vendor: Vendor,
+        config: &CliAgentsConfig,
+        cancel: tokio_util::sync::CancellationToken,
+        deadline: tokio::time::Instant,
+        publication: super::probe_lifecycle::PublicationGate,
+    ) -> VendorStatus {
+        super::probe_lifecycle::scope_with_gate(
+            cancel,
+            deadline,
+            publication,
+            self.refresh(vendor, config, true),
+        )
+        .await
+    }
+
     /// Refresh one vendor unless a recent probe exists. `force` skips the
     /// freshness window but never the failure backoff (connect/disconnect
     /// clear the entry first, so they always probe).
@@ -597,6 +619,9 @@ impl VendorCatalog {
         config: &CliAgentsConfig,
         force: bool,
     ) -> VendorStatus {
+        if login_probe_stopped() {
+            return interrupted_login_check(vendor);
+        }
         let now = crate::now();
         let identity = ProbeIdentity::new(vendor, config);
         let (previous, revision) = {
@@ -623,52 +648,75 @@ impl VendorCatalog {
             (previous, *revision)
         };
         let mut status = probe_vendor(vendor, config, now).await;
+        // Controlled helpers have already reaped their child before returning.
+        // A cancelled/expired observation cannot persist account or quota data.
+        if login_probe_stopped() {
+            return interrupted_login_check(vendor);
+        }
         // An executable replaced while its old process was probing is not a
         // current capability observation, even without another config read.
         let unchanged_binary = identity.binary == binary_stamp(vendor, config);
+        #[cfg(test)]
+        if let Some(signal) = self.publication_signal.lock().unwrap().take() {
+            let _ = signal.send(());
+        }
         let mut state = self.state.lock().unwrap();
-        if !unchanged_binary || state.identities.get(&vendor) != Some(&identity) {
-            return changed_configuration(vendor);
-        }
-        if state.offline || state.revisions.get(&vendor) != Some(&revision) {
-            return state.status(vendor);
-        }
-        if status.usage_raw.is_some() {
-            status.usage_at = now;
-        }
-        if status.error.is_some() {
-            let failures = previous.as_ref().map(|p| p.failures + 1).unwrap_or(1);
-            status.failures = failures;
-            status.next_allowed =
-                now + (30.0 * 2f64.powi(failures.min(7) as i32)).min(MAX_BACKOFF_SECS);
-            if status.usage_raw.is_none() {
-                if let Some(previous) = previous.as_ref().filter(|p| p.usage_raw.is_some()) {
-                    status.usage_raw = previous.usage_raw.clone();
-                    status.usage_at = previous.usage_at;
-                } else if let Some(row) = state.persisted.get(&vendor) {
-                    status.usage_raw = Some(row.payload.clone());
-                    status.usage_at = row.fetched_at;
-                }
+        // Lock order: catalog state -> per-login publication gate. Cancellation
+        // uses login registry -> gate; publication never takes the registry.
+        // No await occurs under either lock. An already published observation
+        // may precede a later cancellation; an accepted cancellation that wins
+        // the gate prevents any following account/quota commit.
+        let commit = || {
+            if !unchanged_binary || state.identities.get(&vendor) != Some(&identity) {
+                return changed_configuration(vendor);
             }
-            if let Some(previous) = previous {
-                if status.models.is_empty() {
-                    status.models = previous.models;
-                }
+            if state.offline || state.revisions.get(&vendor) != Some(&revision) {
+                return state.status(vendor);
             }
-        } else if let Some(raw) = status.usage_raw.clone() {
-            let row = UsageRow {
-                vendor: vendor.id().into(),
-                account: status.account_key(),
-                pool: PERSISTED_POOL.into(),
-                fetched_at: now,
-                payload: raw,
-            };
-            self.persist(&mut state, vendor, row);
-        } else if matches!(status.availability, Availability::SignIn) || status.api_key_login() {
-            self.drop_persisted(&mut state, vendor);
+            if status.usage_raw.is_some() {
+                status.usage_at = now;
+            }
+            if status.error.is_some() {
+                let failures = previous.as_ref().map(|p| p.failures + 1).unwrap_or(1);
+                status.failures = failures;
+                status.next_allowed =
+                    now + (30.0 * 2f64.powi(failures.min(7) as i32)).min(MAX_BACKOFF_SECS);
+                if status.usage_raw.is_none() {
+                    if let Some(previous) = previous.as_ref().filter(|p| p.usage_raw.is_some()) {
+                        status.usage_raw = previous.usage_raw.clone();
+                        status.usage_at = previous.usage_at;
+                    } else if let Some(row) = state.persisted.get(&vendor) {
+                        status.usage_raw = Some(row.payload.clone());
+                        status.usage_at = row.fetched_at;
+                    }
+                }
+                if let Some(previous) = previous {
+                    if status.models.is_empty() {
+                        status.models = previous.models;
+                    }
+                }
+            } else if let Some(raw) = status.usage_raw.clone() {
+                let row = UsageRow {
+                    vendor: vendor.id().into(),
+                    account: status.account_key(),
+                    pool: PERSISTED_POOL.into(),
+                    fetched_at: now,
+                    payload: raw,
+                };
+                self.persist(&mut state, vendor, row);
+            } else if matches!(status.availability, Availability::SignIn) || status.api_key_login()
+            {
+                self.drop_persisted(&mut state, vendor);
+            }
+            state.entries.insert(vendor, status.clone());
+            status
+        };
+        match super::probe_lifecycle::current() {
+            Some(control) => control
+                .publish(commit)
+                .unwrap_or_else(|_| interrupted_login_check(vendor)),
+            None => commit(),
         }
-        state.entries.insert(vendor, status.clone());
-        status
     }
     /// Refresh every enabled vendor concurrently.
     pub async fn refresh_all(&self, config: &CliAgentsConfig, force: bool) -> Vec<VendorStatus> {
@@ -691,6 +739,17 @@ impl VendorCatalog {
     pub async fn picker_rows(&self, config: &CliAgentsConfig, force: bool) -> Vec<PickerTarget> {
         picker_rows_from(&self.refresh_all(config, force).await, config)
     }
+}
+
+fn login_probe_stopped() -> bool {
+    super::probe_lifecycle::current().is_some_and(|control| control.is_stopped())
+}
+
+fn interrupted_login_check(vendor: Vendor) -> VendorStatus {
+    let mut status = VendorStatus::unchecked(vendor, None);
+    status.detail = "Account check cancelled or timed out; sign-in state is unconfirmed".into();
+    status.error = Some(status.detail.clone());
+    status
 }
 
 fn changed_configuration(vendor: Vendor) -> VendorStatus {
@@ -795,6 +854,9 @@ async fn probe_vendor(vendor: Vendor, config: &CliAgentsConfig, now: f64) -> Ven
     } else {
         version_of(&binary).await
     };
+    if login_probe_stopped() {
+        return interrupted_login_check(vendor);
+    }
     let mut status = VendorStatus {
         vendor,
         availability: Availability::Unavailable,
@@ -1137,6 +1199,112 @@ async fn cursor_email(vendor: Vendor, binary: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_login_waiting_to_publish_cannot_save_ready_or_usage() {
+        for expires_while_waiting in [false, true] {
+            use super::super::probe_lifecycle::{self, PublicationGate};
+            use std::os::unix::fs::PermissionsExt;
+            use tokio_util::sync::CancellationToken;
+            let root = tempfile::tempdir().unwrap();
+            let binary = root.path().join("codex");
+            fs::write(&binary, r#"#!/usr/bin/env python3
+import json, os, pathlib, sys, time
+root=pathlib.Path(__file__).parent
+if sys.argv[1:] == ['--version']:
+    print('codex-cli fixture'); sys.exit(0)
+for line in sys.stdin:
+    m=json.loads(line)
+    if 'id' not in m: continue
+    method=m.get('method')
+    if method=='initialize': result={}
+    elif method=='account/read': result={'account':{'type':'chatgpt','email':'fixture@example.invalid','planType':'pro'}}
+    elif method=='account/rateLimits/read': result={'rateLimits':{'primary':{'usedPercent':20}}}
+    elif method=='model/list':
+        (root/'probe-ready').write_text(str(os.getpid()))
+        until=time.monotonic()+8
+        while not (root/'release-probe').exists() and time.monotonic()<until: time.sleep(.005)
+        result={'data':[{'id':'fixture-model','displayName':'Fixture model'}]}
+    else: result={}
+    print(json.dumps({'id':m['id'],'result':result}),flush=True)
+"#).unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+            let config = CliAgentsConfig {
+                codex_binary: binary.display().to_string(),
+                ..Default::default()
+            };
+            let store = Arc::new(Store::open(&root.path().join("state.sqlite")).unwrap());
+            let (events, _) = broadcast::channel(16);
+            let catalog = Arc::new(VendorCatalog::with_store(store.clone(), events));
+            catalog.configure(&config, false);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            *catalog.publication_signal.lock().unwrap() = Some(sender);
+            let cancel = CancellationToken::new();
+            let gate = PublicationGate::default();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let worker = {
+                let catalog = catalog.clone();
+                let cancel = cancel.clone();
+                let gate = gate.clone();
+                tokio::spawn(async move {
+                    probe_lifecycle::scope_with_gate(
+                        cancel,
+                        deadline,
+                        gate,
+                        catalog.refresh(Vendor::Codex, &config, true),
+                    )
+                    .await
+                })
+            };
+            let probe_ready = tokio::time::timeout(Duration::from_secs(2), async {
+                while !root.path().join("probe-ready").exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .is_ok();
+            let passed_prelock_check = if probe_ready {
+                let state = catalog.state.lock().unwrap();
+                fs::write(root.path().join("release-probe"), b"").unwrap();
+                // Exact test-only signal: the real probe finished and passed the
+                // stopped check. Its cache commit now waits on the mutex we own.
+                let reached = receiver.recv_timeout(Duration::from_secs(2)).is_ok();
+                if expires_while_waiting && reached {
+                    std::thread::sleep(
+                        deadline.saturating_duration_since(tokio::time::Instant::now())
+                            + Duration::from_millis(1),
+                    );
+                } else {
+                    gate.cancel(&cancel);
+                }
+                drop(state);
+                reached
+            } else {
+                gate.cancel(&cancel);
+                false
+            };
+            fs::write(root.path().join("release-probe"), b"").unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(2), worker)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                probe_ready && passed_prelock_check,
+                "actual probe reached pre-publication barrier"
+            );
+            let cached = catalog.cached(Vendor::Codex).await;
+            let usage_rows = store.usage_snapshots().unwrap();
+            eprintln!(
+                "{}",
+                json!({"expired_while_waiting":expires_while_waiting,"publication_result":result.availability,
+                "cached_availability":cached.as_ref().map(|s|s.availability),"persisted_usage_rows":usage_rows.len()})
+            );
+            assert_eq!(result.availability, Availability::Unavailable);
+            assert!(cached.is_none(), "cancelled check saved Ready");
+            assert!(usage_rows.is_empty(), "cancelled check persisted quota");
+        }
+    }
 
     #[test]
     fn usage_for_codex_rows_uses_pools_and_others_stay_unavailable() {

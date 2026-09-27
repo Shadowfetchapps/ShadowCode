@@ -105,8 +105,10 @@ async fn connect_can_be_cancelled_and_times_out() {
         .unwrap()
         .contains("timed out"));
     assert!(started.elapsed() < Duration::from_secs(15));
-    // Still signed out: Sign in, never Ready.
-    assert_eq!(timed_out["done"]["availability"], "sign_in");
+    // Cancellation/expiry does not launch a fresh account probe, so the
+    // current login state is unconfirmed rather than known signed out.
+    assert_eq!(timed_out["done"]["availability"], "unavailable");
+    assert_eq!(cancelled["done"]["availability"], "unavailable");
 }
 
 #[tokio::test]

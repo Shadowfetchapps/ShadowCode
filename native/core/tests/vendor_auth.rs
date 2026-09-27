@@ -210,7 +210,14 @@ async fn exercise(case: Case) {
             .contains(expected),
         "{observed}"
     );
-    assert_eq!(observed["done"]["availability"], "sign_in");
+    assert_eq!(
+        observed["done"]["availability"],
+        if matches!(case, Case::Cancel | Case::Deadline) {
+            "unavailable"
+        } else {
+            "sign_in"
+        }
+    );
     if matches!(case, Case::Tail) {
         let text = observed["lines"].to_string();
         assert!(

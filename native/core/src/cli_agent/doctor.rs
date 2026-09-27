@@ -107,13 +107,49 @@ async fn run_short_in(
     path_env: Option<&OsStr>,
     home: Option<&Path>,
 ) -> Option<(bool, String)> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(8),
-        sanitized_command(binary, args, path_env, home).output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let output = if let Some(control) = super::probe_lifecycle::current() {
+        control.check().ok()?;
+        let mut child = sanitized_command(binary, args, path_env, home)
+            .spawn()
+            .ok()?;
+        // Keep the child outside the cancellable exchange. Pipes and buffers
+        // live inside it, so cancellation closes our pipe ends without tasks.
+        let exchange = async {
+            use anyhow::Context;
+            use tokio::io::AsyncReadExt;
+            let mut stdout = child
+                .stdout
+                .take()
+                .context("Account-check stdout missing")?;
+            let mut stderr = child
+                .stderr
+                .take()
+                .context("Account-check stderr missing")?;
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let (status, _, _) = tokio::try_join!(
+                child.wait(),
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err)
+            )?;
+            Ok(std::process::Output {
+                status,
+                stdout: out,
+                stderr: err,
+            })
+        };
+        let result = control.run(Duration::from_secs(8), exchange).await;
+        super::probe_lifecycle::reap(&mut child).await.ok()?;
+        result.ok()?
+    } else {
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            sanitized_command(binary, args, path_env, home).output(),
+        )
+        .await
+        .ok()?
+        .ok()?
+    };
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     if text.trim().is_empty() {
         text = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -384,4 +420,65 @@ pub async fn status(config: &CliAgentsConfig) -> Value {
         }
     }
     Value::Object(map)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod login_lifecycle_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn controlled_short_command_is_reaped_before_cancel_returns() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("version-fixture");
+        let pid_file = temp.path().join("entered");
+        std::fs::write(
+            &script,
+            b"#!/usr/bin/env python3\nimport os, pathlib, sys, time\npathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\ntime.sleep(30)\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cancel = CancellationToken::new();
+        let pid_arg = pid_file.to_str().unwrap();
+        let args = [pid_arg];
+        let command = super::super::probe_lifecycle::scope(
+            cancel.clone(),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            short_text(&script, &args, None),
+        );
+        let interrupt = async {
+            let entered = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                        if let Ok(pid) = text.parse::<u32>() {
+                            let identity =
+                                std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+                            if let Some(identity) = identity {
+                                break (pid, identity);
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await;
+            // Always cancel before asserting fixture readiness, so an early
+            // setup failure cannot leave a deliberately held child behind.
+            cancel.cancel();
+            entered
+        };
+        let (result, entered) = tokio::join!(command, interrupt);
+        let (pid, _identity) =
+            entered.expect("private version probe reached its live-child barrier");
+        assert!(
+            result.is_none(),
+            "cancelled read cannot publish version output"
+        );
+        // No grace period or sleep after return: a zombie also fails this.
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "owned short-command child was not reaped at return"
+        );
+    }
 }

@@ -35,6 +35,7 @@ pub mod doctor;
 pub mod handoff;
 mod lines;
 pub mod picker;
+mod probe_lifecycle;
 #[cfg(unix)]
 pub mod runner;
 pub mod usage;

@@ -1028,6 +1028,7 @@ impl Engine {
     }
     pub async fn shutdown(&self) -> Result<()> {
         self.0.closing.store(true, Ordering::Release);
+        self.0.vendors.logins().begin_shutdown()?;
         self.0.background.begin_shutdown()?;
         let goals: Vec<_> = self
             .0
@@ -1068,6 +1069,7 @@ impl Engine {
         }
         let drained = tokio::time::timeout(Duration::from_secs(15), async {
             self.0.background.wait_shutdown().await?;
+            self.0.vendors.logins().wait_shutdown().await;
             for goal in goals {
                 goal.wait().await;
             }

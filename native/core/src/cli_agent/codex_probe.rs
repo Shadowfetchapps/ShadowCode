@@ -114,7 +114,10 @@ pub async fn probe(
     path_env: Option<&OsStr>,
     deadline: Duration,
 ) -> Result<CodexProbe> {
-    tokio::time::timeout(deadline, probe_inner(binary, path_env))
+    if let Some(control) = super::probe_lifecycle::current() {
+        return probe_inner(binary, path_env, Some((&control, deadline))).await;
+    }
+    tokio::time::timeout(deadline, probe_inner(binary, path_env, None))
         .await
         .map_err(|_| {
             anyhow::anyhow!(
@@ -124,97 +127,116 @@ pub async fn probe(
         })?
 }
 
-async fn probe_inner(binary: &Path, path_env: Option<&OsStr>) -> Result<CodexProbe> {
+async fn probe_inner(
+    binary: &Path,
+    path_env: Option<&OsStr>,
+    control: Option<(&super::probe_lifecycle::ProbeControl, Duration)>,
+) -> Result<CodexProbe> {
+    if let Some((control, _)) = control {
+        control.check()?;
+    }
     let mut child = sanitized(binary, path_env)
         .spawn()
         .with_context(|| format!("Could not start {} app-server", binary.display()))?;
-    let mut stdin = child.stdin.take().context("app-server stdin missing")?;
-    let stdout = child.stdout.take().context("app-server stdout missing")?;
-    let mut reader = BoundedLines::new(stdout, MAX_LINE_BYTES);
-    let init = rpc(
-        1,
-        "initialize",
-        json!({"clientInfo":{"name":"shadowcode","title":"ShadowCode","version":crate::VERSION},"capabilities":{"experimentalApi":true}}),
-    );
-    stdin.write_all(init.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await?;
-    let mut probe = CodexProbe::default();
-    let mut pending = std::collections::HashSet::from([1u64]);
-    let mut sent_reads = false;
-    loop {
-        let Some(line) = reader.next_protocol_line().await? else {
-            if pending.is_empty() {
+    let exchange = async {
+        let mut stdin = child.stdin.take().context("app-server stdin missing")?;
+        let stdout = child.stdout.take().context("app-server stdout missing")?;
+        let mut reader = BoundedLines::new(stdout, MAX_LINE_BYTES);
+        let init = rpc(
+            1,
+            "initialize",
+            json!({"clientInfo":{"name":"shadowcode","title":"ShadowCode","version":crate::VERSION},"capabilities":{"experimentalApi":true}}),
+        );
+        stdin.write_all(init.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
+        let mut probe = CodexProbe::default();
+        let mut pending = std::collections::HashSet::from([1u64]);
+        let mut sent_reads = false;
+        loop {
+            let Some(line) = reader.next_protocol_line().await? else {
+                if pending.is_empty() {
+                    break;
+                }
+                bail!("codex app-server exited during the probe");
+            };
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let Some(id) = message.get("id").and_then(Value::as_u64) else {
+                continue; // notifications such as account/updated
+            };
+            if message.get("method").is_some() {
+                // Server-initiated request (e.g. token refresh). Decline: the
+                // probe never brokers credentials.
+                let reply = json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"ShadowCode probe does not handle server requests"}}).to_string();
+                stdin.write_all(reply.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+                stdin.flush().await?;
+                continue;
+            }
+            if !pending.remove(&id) {
+                continue;
+            }
+            let error = message
+                .get("error")
+                .filter(|e| !e.is_null())
+                .map(|e| e["message"].as_str().unwrap_or("unknown error").to_owned());
+            match id {
+                1 => {
+                    if let Some(error) = error {
+                        bail!("codex app-server rejected initialize: {error}");
+                    }
+                    let mut lines =
+                        vec![json!({"jsonrpc":"2.0","method":"initialized"}).to_string()];
+                    lines.push(rpc(2, "account/read", json!({})));
+                    lines.push(rpc(3, "account/rateLimits/read", json!({})));
+                    lines.push(rpc(4, "model/list", json!({})));
+                    for line in lines {
+                        stdin.write_all(line.as_bytes()).await?;
+                        stdin.write_all(b"\n").await?;
+                    }
+                    stdin.flush().await?;
+                    pending.extend([2, 3, 4]);
+                    sent_reads = true;
+                }
+                2 => match error {
+                    Some(error) => probe.errors.push(("account/read".into(), error)),
+                    None => probe.account = Some(message["result"].clone()),
+                },
+                3 => match error {
+                    Some(error) => probe.errors.push(("account/rateLimits/read".into(), error)),
+                    None => probe.rate_limits = Some(message["result"].clone()),
+                },
+                4 => match error {
+                    Some(error) => probe.errors.push(("model/list".into(), error)),
+                    None => {
+                        probe.models = message["result"]["data"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                    }
+                },
+                _ => {}
+            }
+            if sent_reads && pending.is_empty() {
                 break;
             }
-            bail!("codex app-server exited during the probe");
-        };
-        let Ok(message) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let Some(id) = message.get("id").and_then(Value::as_u64) else {
-            continue; // notifications such as account/updated
-        };
-        if message.get("method").is_some() {
-            // Server-initiated request (e.g. token refresh). Decline: the
-            // probe never brokers credentials.
-            let reply = json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"ShadowCode probe does not handle server requests"}}).to_string();
-            stdin.write_all(reply.as_bytes()).await?;
-            stdin.write_all(b"\n").await?;
-            stdin.flush().await?;
-            continue;
         }
-        if !pending.remove(&id) {
-            continue;
-        }
-        let error = message
-            .get("error")
-            .filter(|e| !e.is_null())
-            .map(|e| e["message"].as_str().unwrap_or("unknown error").to_owned());
-        match id {
-            1 => {
-                if let Some(error) = error {
-                    bail!("codex app-server rejected initialize: {error}");
-                }
-                let mut lines = vec![json!({"jsonrpc":"2.0","method":"initialized"}).to_string()];
-                lines.push(rpc(2, "account/read", json!({})));
-                lines.push(rpc(3, "account/rateLimits/read", json!({})));
-                lines.push(rpc(4, "model/list", json!({})));
-                for line in lines {
-                    stdin.write_all(line.as_bytes()).await?;
-                    stdin.write_all(b"\n").await?;
-                }
-                stdin.flush().await?;
-                pending.extend([2, 3, 4]);
-                sent_reads = true;
-            }
-            2 => match error {
-                Some(error) => probe.errors.push(("account/read".into(), error)),
-                None => probe.account = Some(message["result"].clone()),
-            },
-            3 => match error {
-                Some(error) => probe.errors.push(("account/rateLimits/read".into(), error)),
-                None => probe.rate_limits = Some(message["result"].clone()),
-            },
-            4 => match error {
-                Some(error) => probe.errors.push(("model/list".into(), error)),
-                None => {
-                    probe.models = message["result"]["data"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
-                }
-            },
-            _ => {}
-        }
-        if sent_reads && pending.is_empty() {
-            break;
-        }
+        drop(stdin);
+        Ok(probe)
+    };
+    let result = match control {
+        Some((control, timeout)) => control.run(timeout, exchange).await,
+        None => exchange.await,
+    };
+    if control.is_some() {
+        super::probe_lifecycle::reap(&mut child).await?;
+    } else if result.is_ok() {
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     }
-    drop(stdin);
-    let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-    Ok(probe)
+    result
 }
 
 /// Picker/model rows from `model/list`: id, display name, default flag, and
