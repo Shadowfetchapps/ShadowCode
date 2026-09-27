@@ -12,58 +12,38 @@
 #     stays as ~/.local/lib/shadowcode.previous until the install succeeds and
 #     is restored if a later step fails or a handled signal interrupts install.
 #   * Installers are serialized. Different bytes cannot replace an already
-#     installed version, and an interrupted runtime backup is never discarded.
+#     installed version. A recorded, unchanged pre-activation interruption is
+#     recovered on retry or with --recover; ambiguous backups are preserved.
 #   * Settings and task history are never touched. Previous ShadowCode
 #     AppImages are removed only after success.
 set -euo pipefail
 usage() {
-  echo 'Usage: install-appimage.sh [--unverified] /path/to/ShadowCode_VERSION_amd64.AppImage' >&2
+  echo 'Usage: install-appimage.sh [--unverified] /path/to/ShadowCode_VERSION_amd64.AppImage | --recover' >&2
   exit 2
 }
 fail() { echo "$*" >&2; exit 1; }
 UNVERIFIED=0
+RECOVER_ONLY=0
 SOURCE_ARG=""
 for arg in "$@"; do
   case "$arg" in
     --unverified) UNVERIFIED=1 ;;
+    --recover) RECOVER_ONLY=1 ;;
     -*) usage ;;
     *) [[ -z "$SOURCE_ARG" ]] || usage; SOURCE_ARG="$arg" ;;
   esac
 done
-[[ -n "$SOURCE_ARG" ]] || usage
-SOURCE="$(realpath -- "$SOURCE_ARG")"
-[[ -f "$SOURCE" ]] || fail 'AppImage not found.'
-SOURCE_DIR="$(dirname "$SOURCE")"
-SOURCE_NAME="$(basename "$SOURCE")"
-CHECKSUMS="${SHADOWCODE_SHA256SUMS:-$SOURCE_DIR/SHA256SUMS}"
-if [[ -f "$CHECKSUMS" ]]; then
-  EXPECTED="$(awk -v name="$SOURCE_NAME" '
-    {
-      file=$2
-      sub(/^\*/, "", file)
-      count=split(file, parts, "/")
-      if (parts[count] == name) { print $1; exit }
-    }
-  ' "$CHECKSUMS")"
-  [[ "$EXPECTED" =~ ^[[:xdigit:]]{64}$ ]] || fail "No SHA-256 entry for $SOURCE_NAME in $CHECKSUMS"
-  ACTUAL="$(sha256sum "$SOURCE" | awk '{print $1}')"
-  [[ "$ACTUAL" == "$EXPECTED" ]] || fail "Checksum mismatch for $SOURCE_NAME; refusing to install it."
-  printf 'Verified SHA-256 from %s\n' "$CHECKSUMS"
-elif [[ "$UNVERIFIED" == "1" ]]; then
-  printf 'No SHA256SUMS beside the AppImage; installing unverified as requested (--unverified).\n' >&2
+if [[ "$RECOVER_ONLY" == 1 ]]; then
+  [[ -z "$SOURCE_ARG" && "$UNVERIFIED" == 0 ]] || usage
 else
-  fail "No SHA256SUMS beside $SOURCE_NAME. Download SHA256SUMS from the same release, or pass --unverified to install without checking."
+  [[ -n "$SOURCE_ARG" ]] || usage
 fi
-chmod +x "$SOURCE"
-VERSION_LINE="$("$SOURCE" --appimage-extract-and-run --version)" || fail 'The AppImage did not start.'
-[[ "$VERSION_LINE" =~ ^ShadowCode\ ([0-9]+\.[0-9]+\.[0-9]+)$ ]] || fail 'Not a supported ShadowCode release.'
-VERSION="${BASH_REMATCH[1]}"
 
 APPS="$HOME/Applications"
 BIN="$HOME/.local/bin"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
-DEST="$APPS/ShadowCode-${VERSION}-x86_64.AppImage"
 LIB="$HOME/.local/lib/shadowcode"
+JOURNAL="$(dirname "$LIB")/.shadowcode-install-intent"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$APPS" "$BIN" "$(dirname "$LIB")" "$DATA/applications" "$DATA/icons/hicolor/scalable/apps"
 
@@ -73,8 +53,134 @@ LOCK="$(dirname "$LIB")/.shadowcode-install-lock"
 [[ ! -L "$LOCK" ]] || fail 'Installer lock must not be a symlink.'
 exec {INSTALL_LOCK}>"$LOCK"
 flock -n "$INSTALL_LOCK" || fail 'Another ShadowCode install is already running.'
+
+exists() { [[ -e "$1" || -L "$1" ]]; }
+file_hash() { [[ -f "$1" && ! -L "$1" ]] && sha256sum < "$1" | awk '{print $1}'; }
+# Bind names, entry types, modes, file bytes and symlink targets without
+# following symlinks. Timestamps are deliberately excluded: renames and reads
+# must not make the recorded runtime cease to match itself.
+runtime_hash() {
+  if [[ -L "$1" ]]; then
+    { printf 'symlink\0'; readlink -z -- "$1"; } | sha256sum | awk '{print $1}'
+  elif [[ -d "$1" ]]; then
+    (
+      cd -- "$1" || exit 1
+      find . -print0 | LC_ALL=C sort -z |
+      while IFS= read -r -d '' entry; do
+        mode="$(stat -c '%f' -- "$entry")" || exit 1
+        printf '%s\0%s\0' "$entry" "$mode" || exit 1
+        if [[ -L "$entry" ]]; then readlink -z -- "$entry" || exit 1
+        elif [[ -f "$entry" ]]; then sha256sum < "$entry" || exit 1
+        elif [[ ! -d "$entry" ]]; then exit 1
+        fi
+      done
+    ) | sha256sum | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+private_dir() { [[ -d "$1" && ! -L "$1" && "$(stat -c '%u:%a' -- "$1")" == "$(id -u):700" ]]; }
+recovery_refusal() { fail "Interrupted install needs manual review: $*. Preserve $JOURNAL and $LIB.previous."; }
+read_field() {
+  local field="$JOURNAL/$1"
+  [[ -f "$field" && ! -L "$field" && "$(stat -c '%u:%a:%h' -- "$field")" == "$(id -u):600:1" && "$(stat -c '%s' -- "$field")" -le 4096 ]] \
+    || recovery_refusal 'invalid intent record'
+  cat -- "$field"
+}
+recover_install() {
+  private_dir "$JOURNAL" || recovery_refusal 'intent directory is not private'
+  local schema phase prior prior_hash had old_hash candidate candidate_hash existed new_hash stage_name stage live_hash previous_hash runtime
+  schema="$(read_field schema)"; phase="$(read_field phase)"
+  [[ "$(read_field apps-root)" == "$(realpath -- "$APPS")" && "$(read_field library-root)" == "$(realpath -- "$(dirname "$LIB")")" ]] || recovery_refusal 'installation directory changed'
+  prior="$(read_field prior-link)"; prior_hash="$(read_field prior-app-sha256)"
+  had="$(read_field had-runtime)"; old_hash="$(read_field old-runtime-sha256)"
+  candidate="$(read_field candidate)"; candidate_hash="$(read_field candidate-sha256)"
+  existed="$(read_field candidate-existed)"; new_hash="$(read_field new-runtime-sha256)"
+  stage_name="$(read_field stage)"
+  [[ "$schema" == 1 && "$phase" == prepared ]] || recovery_refusal 'unsupported intent or activation already started'
+  [[ "$candidate" =~ ^ShadowCode-[0-9]+\.[0-9]+\.[0-9]+-x86_64\.AppImage$ && "$candidate_hash" =~ ^[a-f0-9]{64}$ && "$new_hash" =~ ^[a-f0-9]{64}$ ]] || recovery_refusal 'invalid candidate identity'
+  [[ "$had" =~ ^[01]$ && "$existed" =~ ^[01]$ && "$stage_name" =~ ^\.shadowcode-install\.[A-Za-z0-9]{6}$ ]] || recovery_refusal 'invalid transaction identity'
+  [[ ( "$had" == 1 && "$old_hash" =~ ^[a-f0-9]{64}$ ) || ( "$had" == 0 && "$old_hash" == - ) ]] || recovery_refusal 'invalid prior runtime identity'
+  if [[ "$prior" == - ]]; then
+    if [[ "$prior_hash" != - ]] || exists "$APPS/ShadowCode.AppImage"; then recovery_refusal 'active AppImage changed'; fi
+  else
+    [[ "$prior" =~ ^ShadowCode-[0-9]+\.[0-9]+\.[0-9]+-x86_64\.AppImage$ && "$prior_hash" =~ ^[a-f0-9]{64}$ ]] || recovery_refusal 'invalid prior AppImage identity'
+    [[ -L "$APPS/ShadowCode.AppImage" && "$(readlink -- "$APPS/ShadowCode.AppImage")" == "$prior" && "$(file_hash "$APPS/$prior")" == "$prior_hash" ]] || recovery_refusal 'prior AppImage changed'
+  fi
+  stage="$(dirname "$LIB")/$stage_name"
+  private_dir "$stage" || recovery_refusal 'staging directory changed or missing'
+  if exists "$APPS/$candidate"; then
+    [[ "$(file_hash "$APPS/$candidate")" == "$candidate_hash" ]] || recovery_refusal 'candidate AppImage changed'
+  else
+    [[ "$existed" == 0 ]] || recovery_refusal 'existing candidate AppImage disappeared'
+  fi
+  if exists "$APPS/$candidate.pending"; then
+    [[ "$(file_hash "$APPS/$candidate.pending")" == "$candidate_hash" ]] || recovery_refusal 'pending AppImage is incomplete or changed'
+  fi
+  for runtime in "$stage/squashfs-root/usr/lib/shadowcode" "$stage/recovery-runtime"; do
+    if exists "$runtime"; then
+      [[ "$(runtime_hash "$runtime")" == "$new_hash" ]] || recovery_refusal 'staged runtime changed'
+    fi
+  done
+  live_hash=-; previous_hash=-
+  if exists "$LIB"; then live_hash="$(runtime_hash "$LIB")" || recovery_refusal 'live runtime cannot be identified'; fi
+  if exists "$LIB.previous"; then previous_hash="$(runtime_hash "$LIB.previous")" || recovery_refusal 'backup runtime cannot be identified'; fi
+  if [[ "$had" == 1 ]]; then
+    if [[ "$previous_hash" == "$old_hash" ]]; then
+      [[ "$live_hash" == - || "$live_hash" == "$new_hash" ]] || recovery_refusal 'live runtime changed'
+    else
+      [[ "$previous_hash" == - && "$live_hash" == "$old_hash" ]] || recovery_refusal 'prior runtime changed or missing'
+    fi
+  else
+    [[ "$previous_hash" == - && ( "$live_hash" == - || "$live_hash" == "$new_hash" ) ]] || recovery_refusal 'unexpected runtime or backup'
+  fi
+  # All identities are checked before any recovery mutation. Preserve the
+  # candidate until restoration succeeds, including if recovery is killed.
+  if [[ "$live_hash" == "$new_hash" && ( "$had" == 0 || "$previous_hash" == "$old_hash" ) ]]; then
+    ! exists "$stage/recovery-runtime" || recovery_refusal 'two candidate runtime copies'
+    mv -T -- "$LIB" "$stage/recovery-runtime" || recovery_refusal 'could not retain candidate runtime'
+  fi
+  if [[ "$had" == 1 && "$previous_hash" == "$old_hash" ]]; then
+    mv -T -- "$LIB.previous" "$LIB" || recovery_refusal 'could not restore prior runtime'
+  fi
+  [[ "$existed" == 1 ]] || rm -f -- "$APPS/$candidate"
+  rm -f -- "$APPS/$candidate.pending"
+  sync -f "$(dirname "$LIB")"
+  # Retire the active record by rename, so interruption of recursive staging
+  # cleanup cannot leave a partially deleted active journal blocking recovery.
+  mv -T -- "$JOURNAL" "$stage/recovered-intent" || recovery_refusal 'could not retire completed recovery'
+  rm -rf -- "$stage"
+  printf 'Recovered the previous runtime and AppImage. Config and task history are preserved.\n'
+}
+if exists "$JOURNAL"; then recover_install; fi
 [[ ! -e "$LIB.previous" && ! -L "$LIB.previous" ]] \
   || fail "A previous install was interrupted; preserve and recover $LIB.previous before retrying."
+if [[ "$RECOVER_ONLY" == 1 ]]; then
+  printf 'No interrupted install remains.\n'
+  exit 0
+fi
+
+SOURCE="$(realpath -- "$SOURCE_ARG")"
+[[ -f "$SOURCE" ]] || fail 'AppImage not found.'
+SOURCE_DIR="$(dirname "$SOURCE")"
+SOURCE_NAME="$(basename "$SOURCE")"
+CHECKSUMS="${SHADOWCODE_SHA256SUMS:-$SOURCE_DIR/SHA256SUMS}"
+ACTUAL="$(file_hash "$SOURCE")" || fail 'AppImage must be a regular file.'
+if [[ -f "$CHECKSUMS" ]]; then
+  EXPECTED="$(awk -v name="$SOURCE_NAME" '{ file=$2; sub(/^\*/, "", file); count=split(file, parts, "/"); if (parts[count] == name) { print $1; exit } }' "$CHECKSUMS")"
+  [[ "$EXPECTED" =~ ^[[:xdigit:]]{64}$ ]] || fail "No SHA-256 entry for $SOURCE_NAME in $CHECKSUMS"
+  [[ "$ACTUAL" == "$EXPECTED" ]] || fail "Checksum mismatch for $SOURCE_NAME; refusing to install it."
+  printf 'Verified SHA-256 from %s\n' "$CHECKSUMS"
+elif [[ "$UNVERIFIED" == 1 ]]; then
+  printf 'No SHA256SUMS beside the AppImage; installing unverified as requested (--unverified).\n' >&2
+else
+  fail "No SHA256SUMS beside $SOURCE_NAME. Download SHA256SUMS from the same release, or pass --unverified to install without checking."
+fi
+chmod +x "$SOURCE"
+VERSION_LINE="$("$SOURCE" --appimage-extract-and-run --version)" || fail 'The AppImage did not start.'
+[[ "$VERSION_LINE" =~ ^ShadowCode\ ([0-9]+\.[0-9]+\.[0-9]+)$ ]] || fail 'Not a supported ShadowCode release.'
+VERSION="${BASH_REMATCH[1]}"
+DEST="$APPS/ShadowCode-${VERSION}-x86_64.AppImage"
 [[ ! -e "$APPS/ShadowCode.AppImage" || -L "$APPS/ShadowCode.AppImage" ]] \
   || fail 'ShadowCode.AppImage is not a symlink; refusing to replace it.'
 # A retry may reuse identical bytes, but must not destroy the only rollback
@@ -89,6 +195,8 @@ fi
 
 # Stage next to the destination so the final step is a rename.
 STAGE="$(mktemp -d "$(dirname "$LIB")/.shadowcode-install.XXXXXX")"
+JOURNAL_TEMP=""
+JOURNAL_CREATED=0
 RUNTIME_REPLACING=0
 HAD_RUNTIME=0
 [[ -e "$LIB" || -L "$LIB" ]] && HAD_RUNTIME=1
@@ -134,7 +242,11 @@ finish() {
     fi
   fi
   rm -f -- "$DEST.pending" "$APPS/.ShadowCode.AppImage.pending"
-  [[ "$restored" == 0 ]] || rm -rf -- "$STAGE"
+  if [[ "$restored" == 1 ]]; then
+    [[ "$JOURNAL_CREATED" == 0 ]] || rm -rf -- "$JOURNAL"
+    rm -rf -- "$STAGE"
+  fi
+  [[ -z "$JOURNAL_TEMP" ]] || rm -rf -- "$JOURNAL_TEMP"
   exit "$status"
 }
 trap finish EXIT
@@ -162,6 +274,39 @@ RUNTIME_VERSION="$(cd / && env -u LD_LIBRARY_PATH "$NEW_RUNTIME/llama-server" --
 [[ "$RUNTIME_VERSION" == *"commit ${RUNTIME_COMMIT:0:7}"* ]] \
   || fail "The bundled llama-server does not report commit ${RUNTIME_COMMIT:0:7}."
 
+# Persist exact recovery identities before the first destination mutation.
+# These are data files, never shell-sourced commands or arbitrary paths.
+PRIOR_HASH=-
+if [[ -n "$PREVIOUS_LINK" ]]; then
+  [[ "$PREVIOUS_LINK" =~ ^ShadowCode-[0-9]+\.[0-9]+\.[0-9]+-x86_64\.AppImage$ ]] \
+    || fail 'Active AppImage link is not a versioned ShadowCode basename; preserve it and review before installing.'
+  PRIOR_HASH="$(file_hash "$APPS/$PREVIOUS_LINK")" || fail 'Prior AppImage cannot be identified.'
+fi
+OLD_RUNTIME_HASH=-
+[[ "$HAD_RUNTIME" == 0 ]] || OLD_RUNTIME_HASH="$(runtime_hash "$LIB")" || fail 'Prior runtime cannot be identified.'
+NEW_RUNTIME_HASH="$(runtime_hash "$NEW_RUNTIME")" || fail 'Candidate runtime cannot be identified.'
+[[ "$(file_hash "$SOURCE")" == "$ACTUAL" ]] || fail 'AppImage changed during validation.'
+JOURNAL_TEMP="$(mktemp -d "$(dirname "$LIB")/.shadowcode-intent.XXXXXX")"
+write_field() { printf '%s\n' "$2" > "$JOURNAL_TEMP/$1"; chmod 600 "$JOURNAL_TEMP/$1"; }
+write_field schema 1
+write_field phase prepared
+write_field apps-root "$(realpath -- "$APPS")"
+write_field library-root "$(realpath -- "$(dirname "$LIB")")"
+write_field prior-link "${PREVIOUS_LINK:--}"
+write_field prior-app-sha256 "$PRIOR_HASH"
+write_field had-runtime "$HAD_RUNTIME"
+write_field old-runtime-sha256 "$OLD_RUNTIME_HASH"
+write_field candidate "$(basename "$DEST")"
+write_field candidate-sha256 "$ACTUAL"
+write_field candidate-existed "$DEST_EXISTED"
+write_field new-runtime-sha256 "$NEW_RUNTIME_HASH"
+write_field stage "$(basename "$STAGE")"
+sync -f "$JOURNAL_TEMP"
+JOURNAL_CREATED=1
+mv -T -- "$JOURNAL_TEMP" "$JOURNAL"
+JOURNAL_TEMP=""
+sync -f "$(dirname "$LIB")"
+
 # Everything verified: replace.
 if [[ "$DEST_EXISTED" == 0 ]]; then
   install -m 755 "$SOURCE" "$DEST.pending"
@@ -173,6 +318,12 @@ fi
 RUNTIME_REPLACING=1
 [[ "$HAD_RUNTIME" == 0 ]] || mv -T -- "$LIB" "$LIB.previous"
 mv -T -- "$NEW_RUNTIME" "$LIB"
+# From this boundary on, launcher/desktop integration may have started. Do not
+# infer a safe automatic rollback from runtime hashes alone after a crash.
+printf 'activation_started\n' > "$JOURNAL/phase.pending"
+chmod 600 "$JOURNAL/phase.pending"
+mv -f -- "$JOURNAL/phase.pending" "$JOURNAL/phase"
+sync -f "$JOURNAL"
 LINK_REPLACING=1
 ln -sfn "$(basename "$DEST")" "$APPS/.ShadowCode.AppImage.pending"
 mv -Tf "$APPS/.ShadowCode.AppImage.pending" "$APPS/ShadowCode.AppImage"
@@ -199,6 +350,8 @@ mv -f "$DATA/applications/shadow-agent.desktop.pending" "$DATA/applications/shad
 RUNTIME_REPLACING=0
 LINK_REPLACING=0
 DEST_CREATING=0
+rm -rf -- "$JOURNAL"
+JOURNAL_CREATED=0
 rm -rf -- "$LIB.previous"
 for old in "$APPS"/ShadowCode-*-x86_64.AppImage; do
   [[ "$old" == "$DEST" || ! -f "$old" ]] || rm -- "$old"

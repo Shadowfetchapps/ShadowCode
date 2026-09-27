@@ -75,6 +75,7 @@ assert_state_unchanged() {
   test ! -e "$LIB.previous"
   test "$(cat "$XDG_DATA_HOME/shadow-agent/profile.txt")" = 'keep this profile data'
   test -z "$(find "$HOME/.local/lib" -maxdepth 1 -name '.shadowcode-install.*' -print -quit)"
+  test ! -e "$HOME/.local/lib/.shadowcode-install-intent"
 }
 
 APPIMAGE="$SCRATCH/release/ShadowCode_0.28.0_amd64.AppImage"
@@ -213,15 +214,22 @@ case "$SHADOW_TEST_FAULT" in
       echo 'Injected rollback rename failure' >&2
       exit 75
     fi ;;
-  after-old-runtime-term|after-new-runtime-term|after-old-runtime-kill)
+  after-old-runtime-term|after-new-runtime-term|after-old-runtime-kill|after-new-runtime-kill|after-restore-kill|after-activation-kill)
     if [[ ( "$SHADOW_TEST_FAULT" == after-old-runtime-* && "$target_path" == "$HOME/.local/lib/shadowcode.previous" ) ||
-          ( "$SHADOW_TEST_FAULT" == after-new-runtime-term && "$source_path" == */squashfs-root/usr/lib/shadowcode ) ]]; then
+          ( "$SHADOW_TEST_FAULT" == after-new-runtime-* && "$source_path" == */squashfs-root/usr/lib/shadowcode ) ||
+          ( "$SHADOW_TEST_FAULT" == after-restore-kill && "$source_path" == "$HOME/.local/lib/shadowcode.previous" ) ||
+          ( "$SHADOW_TEST_FAULT" == after-activation-kill && "$source_path" == "$HOME/.local/lib/.shadowcode-install-intent/phase.pending" ) ]]; then
       "$SHADOW_TEST_REAL_MV" "$@"
       signal=TERM
-      [[ "$SHADOW_TEST_FAULT" == after-old-runtime-kill ]] && signal=KILL
+      [[ "$SHADOW_TEST_FAULT" == *-kill ]] && signal=KILL
       echo "Injected $signal after runtime rename" >&2
       kill -"$signal" "$PPID"
       exit 0
+    fi ;;
+  restore-runtime-failure)
+    if [[ "$source_path" == "$HOME/.local/lib/shadowcode.previous" ]]; then
+      echo 'Injected recovery rename failure' >&2
+      exit 76
     fi ;;
 esac
 exec "$SHADOW_TEST_REAL_MV" "$@"
@@ -259,34 +267,138 @@ exec {TEST_LOCK}>"$HOME/.local/lib/.shadowcode-install-lock"
 flock -n "$TEST_LOCK"
 expect_refusal 'concurrent installer' "$INSTALLER" "$NEXT"
 grep -Fq 'Another ShadowCode install is already running' "$SCRATCH/refused.txt"
+expect_refusal 'concurrent recovery' "$INSTALLER" --recover
+grep -Fq 'Another ShadowCode install is already running' "$SCRATCH/refused.txt"
 exec {TEST_LOCK}>&-
 assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
 
-# 11. A failed rollback retains its recovery copy. Retrying must never delete
-# that backup as the old installer did, nor claim restoration succeeded.
+# 11. A failed rollback retains its recovery copy and durable intent; a later
+# recovery can restore it without the original candidate or checksum file.
 expect_refusal 'rollback rename failure' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=rollback-failure "$INSTALLER" "$NEXT"
 grep -Fq 'rollback needs attention' "$SCRATCH/refused.txt"
 grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
 test -n "$(find "$HOME/.local/lib" -maxdepth 1 -type d -name '.shadowcode-install.*' -print -quit)"
-expect_refusal 'unresolved interrupted install' "$INSTALLER" "$NEXT"
-grep -Fq 'previous install was interrupted' "$SCRATCH/refused.txt"
-grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
+mv "$NEXT" "$NEXT.offline"
+"$INSTALLER" --recover > "$SCRATCH/recovered.txt"
+mv "$NEXT.offline" "$NEXT"
+assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
 test "$(sha256sum "$HOME/Applications/$PRIOR_LINK")" = "$PRIOR_HASH"
 test "$(cat "$XDG_DATA_HOME/shadow-agent/profile.txt")" = 'keep this profile data'
 
-# 12. SIGKILL cannot run shell traps. Keep the old runtime and refuse a retry
-# rather than silently deleting the recovery copy. This checks preservation,
-# not automatic crash recovery or power-loss durability.
-mv -T -- "$LIB.previous" "$LIB"
-find "$HOME/.local/lib" -maxdepth 1 -type d -name '.shadowcode-install.*' -exec rm -rf -- {} +
-rm -f "$HOME/Applications/ShadowCode-0.28.4-x86_64.AppImage"
+# 12. Actual SIGKILL between runtime renames is recovered from durable intent.
 expect_refusal 'killed between runtime renames' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=after-old-runtime-kill "$INSTALLER" "$NEXT"
 grep -Fq 'Injected KILL' "$SCRATCH/refused.txt"
 grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
 test ! -e "$LIB"
-expect_refusal 'retry after killed install' "$INSTALLER" "$NEXT"
+test "$(sha256sum "$HOME/Applications/$PRIOR_LINK")" = "$PRIOR_HASH"
+test "$(cat "$XDG_DATA_HOME/shadow-agent/profile.txt")" = 'keep this profile data'
+"$INSTALLER" --recover > "$SCRATCH/recovered.txt"
+assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
+grep -Fq 'Recovered the previous runtime and AppImage' "$SCRATCH/recovered.txt"
+"$INSTALLER" --recover > "$SCRATCH/recovered-again.txt"
+assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
+
+# 13. Recovery also survives its own failed or killed restore operation.
+expect_refusal 'killed after candidate runtime rename' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=after-new-runtime-kill "$INSTALLER" "$NEXT"
+expect_refusal 'recovery rename failure' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=restore-runtime-failure "$INSTALLER" --recover
+grep -Fq 'could not restore prior runtime' "$SCRATCH/refused.txt"
+test ! -e "$LIB"
+grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
+expect_refusal 'killed during recovery' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=after-restore-kill "$INSTALLER" --recover
+test -f "$LIB/COMMIT"
+test ! -e "$LIB.previous"
+"$INSTALLER" --recover > "$SCRATCH/recovered.txt"
+assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
+
+# 14. A normal retry recovers before installing the requested candidate.
+expect_refusal 'killed before retry' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=after-old-runtime-kill "$INSTALLER" "$NEXT"
+"$INSTALLER" "$NEXT" > "$SCRATCH/retried.txt"
+grep -Fq 'Recovered the previous runtime and AppImage' "$SCRATCH/retried.txt"
+assert_state_unchanged ShadowCode-0.28.4-x86_64.AppImage "$COMMIT_A"
+PRIOR_LINK=ShadowCode-0.28.4-x86_64.AppImage
+PRIOR_COMMIT="$COMMIT_A"
+# A same-version candidate existed before the transaction and must survive
+# recovery even when the old and candidate runtime fingerprints are identical.
+SAME_HASH="$(sha256sum "$HOME/Applications/$PRIOR_LINK")"
+expect_refusal 'killed reinstall of identical version' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=after-new-runtime-kill "$INSTALLER" "$NEXT"
+"$INSTALLER" --recover > /dev/null
+assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
+test "$(sha256sum "$HOME/Applications/$PRIOR_LINK")" = "$SAME_HASH"
+NEXT="$SCRATCH/release/ShadowCode_0.28.5_amd64.AppImage"
+fake_appimage "$NEXT" 0.28.5 "$COMMIT_B" good
+checksum "$NEXT"
+
+# 15. Edited bindings are never treated as known transaction state. Nothing
+# may be removed until every identity check has succeeded.
+expect_refusal 'killed before identity checks' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=after-new-runtime-kill "$INSTALLER" "$NEXT"
+JOURNAL="$HOME/.local/lib/.shadowcode-install-intent"
+STAGED="$(find "$HOME/.local/lib" -maxdepth 1 -type d -name '.shadowcode-install.*' -print -quit)"
+cp "$JOURNAL/stage" "$SCRATCH/stage-field"
+printf '../../elsewhere\n' > "$JOURNAL/stage"
+expect_refusal 'forged stage path' "$INSTALLER" --recover
+grep -Fq 'invalid transaction identity' "$SCRATCH/refused.txt"
+cp "$SCRATCH/stage-field" "$JOURNAL/stage"
+cp "$JOURNAL/candidate" "$SCRATCH/candidate-field"
+rm "$JOURNAL/candidate"
+ln -s "$SCRATCH/candidate-field" "$JOURNAL/candidate"
+expect_refusal 'symlink intent field' "$INSTALLER" --recover
+grep -Fq 'invalid intent record' "$SCRATCH/refused.txt"
+rm "$JOURNAL/candidate"
+cp "$SCRATCH/candidate-field" "$JOURNAL/candidate"
+chmod 600 "$JOURNAL/candidate"
+cp "$JOURNAL/apps-root" "$SCRATCH/apps-root-field"
+printf '/another/install\n' > "$JOURNAL/apps-root"
+expect_refusal 'changed install root' "$INSTALLER" --recover
+grep -Fq 'installation directory changed' "$SCRATCH/refused.txt"
+cp "$SCRATCH/apps-root-field" "$JOURNAL/apps-root"
+cp -p "$HOME/Applications/ShadowCode-0.28.5-x86_64.AppImage" "$SCRATCH/candidate-app"
+printf 'external bytes\n' >> "$HOME/Applications/ShadowCode-0.28.5-x86_64.AppImage"
+expect_refusal 'changed candidate AppImage' "$INSTALLER" --recover
+grep -Fq 'candidate AppImage changed' "$SCRATCH/refused.txt"
+mv "$SCRATCH/candidate-app" "$HOME/Applications/ShadowCode-0.28.5-x86_64.AppImage"
+printf 'external change' > "$LIB.previous/external.txt"
+expect_refusal 'edited old runtime' "$INSTALLER" --recover
+grep -Fq 'prior runtime changed or missing' "$SCRATCH/refused.txt"
+test -f "$LIB.previous/external.txt"
+test -d "$JOURNAL" && test -d "$STAGED"
+rm "$LIB.previous/external.txt"
+ln -sfn other.AppImage "$HOME/Applications/ShadowCode.AppImage"
+expect_refusal 'changed active link' "$INSTALLER" --recover
+grep -Fq 'prior AppImage changed' "$SCRATCH/refused.txt"
+ln -sfn "$PRIOR_LINK" "$HOME/Applications/ShadowCode.AppImage"
+printf 'external change' > "$LIB/external.txt"
+expect_refusal 'edited candidate runtime' "$INSTALLER" --recover
+grep -Fq 'live runtime changed' "$SCRATCH/refused.txt"
+rm "$LIB/external.txt"
+"$INSTALLER" --recover > /dev/null
+assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
+
+# 16. A legacy backup has no trustworthy journal; preserve it for review.
+mv "$LIB" "$LIB.previous"
+expect_refusal 'legacy backup' "$INSTALLER" --recover
 grep -Fq 'previous install was interrupted' "$SCRATCH/refused.txt"
 grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
-test "$(sha256sum "$HOME/Applications/$PRIOR_LINK")" = "$PRIOR_HASH"
+mv "$LIB.previous" "$LIB"
+
+# 17. A first-install interruption restores the recorded absence of runtime
+# and active link, without deleting unrelated older version files.
+mv "$LIB" "$SCRATCH/prior-runtime"
+mv "$HOME/Applications/ShadowCode.AppImage" "$SCRATCH/prior-active-link"
+expect_refusal 'killed first install' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=after-new-runtime-kill "$INSTALLER" "$NEXT"
+"$INSTALLER" --recover > /dev/null
+test ! -e "$LIB" && test ! -e "$LIB.previous"
+test ! -e "$HOME/Applications/ShadowCode.AppImage"
+test -f "$HOME/Applications/$PRIOR_LINK"
+test ! -e "$HOME/Applications/ShadowCode-0.28.5-x86_64.AppImage"
+mv "$SCRATCH/prior-runtime" "$LIB"
+mv "$SCRATCH/prior-active-link" "$HOME/Applications/ShadowCode.AppImage"
+
+# 18. Activation may touch desktop metadata. It is deliberately outside this
+# bounded automatic recovery claim, even if the old link still looks intact.
+expect_refusal 'killed at activation boundary' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=after-activation-kill "$INSTALLER" "$NEXT"
+expect_refusal 'activation needs manual review' "$INSTALLER" --recover
+grep -Fq 'activation already started' "$SCRATCH/refused.txt"
+test -d "$JOURNAL"
+grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
 test "$(cat "$XDG_DATA_HOME/shadow-agent/profile.txt")" = 'keep this profile data'
 printf 'AppImage installer checks passed.\n'
