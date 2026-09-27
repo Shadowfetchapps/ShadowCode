@@ -154,6 +154,9 @@ export const exportSession = (
   format: "md" | "json" = "md",
 ) => invoke<string | null>("export_session", { sessionId, format });
 
+export const exportDiagnostics = (snapshotId: string, expectedContent: string) =>
+  invoke<string | null>("export_diagnostics", { snapshotId, expectedContent });
+
 export async function openExternal(url: string) {
   const parsed = new URL(url);
   if (!["https:", "http:"].includes(parsed.protocol))

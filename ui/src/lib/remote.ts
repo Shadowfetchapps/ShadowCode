@@ -351,6 +351,28 @@ export function createRemoteBridge(options: RemoteOptions = {}): Bridge & {
     return link.download;
   }
 
+  async function exportDiagnostics(args?: Record<string, unknown>) {
+    const id = String(args?.snapshotId ?? "");
+    if (!/^[a-fA-F0-9]{32}$/.test(id))
+      throw new Error("Invalid diagnostic snapshot ID");
+    const result = (await request(`/api/diagnostic-exports/${id}`, "GET", null)) as {
+      content?: string;
+    };
+    const content = result.content;
+    if (typeof content !== "string" || content !== args?.expectedContent)
+      throw new Error("Diagnostic preview changed; run Doctor again before saving");
+    const blob = new Blob([content], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "shadowcode-diagnostics.json";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return link.download;
+  }
+
   return {
     request,
     async invoke(command, args) {
@@ -364,6 +386,8 @@ export function createRemoteBridge(options: RemoteOptions = {}): Bridge & {
         }
         case "export_session":
           return exportSession(args);
+        case "export_diagnostics":
+          return exportDiagnostics(args);
         // Native file pickers, the desktop's own focus tracking and quitting
         // the desktop app do not apply to a browser.
         case "pick_directory":

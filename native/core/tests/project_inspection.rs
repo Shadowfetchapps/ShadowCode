@@ -225,6 +225,37 @@ async fn native_doctor_reports_real_checks_without_implicit_model_or_shell_execu
         .unwrap()
         .iter()
         .any(|c| c["id"] == "python" || c["id"] == "port"));
+    let snapshot = &report["diagnostic_export"];
+    let content = snapshot["content"].as_str().unwrap();
+    let exported: Value = serde_json::from_str(content).unwrap();
+    assert_eq!(snapshot["byte_length"], content.len());
+    assert_eq!(exported["schema"], 1);
+    assert_eq!(
+        exported["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "model-response")
+            .unwrap()["status"],
+        "not_checked"
+    );
+    assert!(!content.contains(&service.workspace().unwrap().display().to_string()));
+    assert!(!content.contains(&model.endpoint));
+    assert!(!content.contains("fixture"));
+    assert!(exported.get("project_map").is_none());
+    let id = snapshot["id"].as_str().unwrap();
+    let retained = api(
+        &service,
+        "GET",
+        &format!("/api/diagnostic-exports/{id}"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert_eq!(retained["content"], snapshot["content"]);
+    let mut remote = retained.clone();
+    shadowcode_core::remote::policy::redact_response(&mut remote);
+    assert_eq!(remote["content"], snapshot["content"]);
     for id in ["cli-codex", "cli-grok", "cli-claude"] {
         assert!(
             report["checks"]

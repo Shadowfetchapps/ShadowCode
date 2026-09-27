@@ -747,6 +747,14 @@ export type RoutingDecision = {
 export type DoctorReport = {
   ok: boolean;
   version: string;
+  diagnostic_export?: {
+    id: string;
+    filename: string;
+    content: string;
+    mime: string;
+    captured_at: string;
+    byte_length: number;
+  };
   checks: {
     id: string;
     ok: boolean;

@@ -19,6 +19,9 @@ impl Service {
     pub(super) async fn settings_routes(&self, call: &Arc<Call>) -> Result<Value> {
         match (call.method.as_str(), call.path.as_str()) {
             ("GET", "/api/doctor") => self.doctor(call.q("test_model") == "true").await,
+            ("GET", path) if path.starts_with("/api/diagnostic-exports/") => self
+                .diagnostic_exports
+                .get(path.trim_start_matches("/api/diagnostic-exports/")),
             ("POST", "/api/guardian/run") => {
                 let cfg = crate::guardian::from_config_value(&self.config()?.guardian);
                 let workspace = self.workspace()?;

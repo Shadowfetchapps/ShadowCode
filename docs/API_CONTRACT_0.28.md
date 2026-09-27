@@ -6,6 +6,12 @@ This file is the contract the UI and backend are built against. It started
 with 0.28 and keeps its name as the app evolves. All shapes are JSON. Unknown
 values are `null`, never invented.
 
+## Previewable diagnostics export
+
+`GET /api/doctor` retains the full local Health display and includes `diagnostic_export: {id, filename, content, mime, captured_at, byte_length}`. `content` is the exact UTF-8 JSON preview. It contains only reviewed check IDs, fixed labels and their original status (`pass`, `warn`, `fail`, `info`, `not_checked`), plus app/runtime metadata, scope, exclusions and an omitted-check count. Project maps, full paths, configured model names, detail/fix text, prompts and raw logs are excluded. Unknown check IDs do not enter the export. The projection accepts at most 96 checks, reports the rest as omitted, and is capped at 256 KiB.
+
+`GET /api/diagnostic-exports/{id}` retrieves the same immutable snapshot for ten minutes, with at most four retained per engine. Expired or unknown IDs fail; Doctor is not rerun. The native `export_diagnostics` command receives only the snapshot ID, then opens a JSON save dialog and writes the retained bytes as a private file. The remote browser retrieves the same snapshot and refuses download if its content differs from the preview. Previewing or closing the preview does not write or upload anything. This is a Doctor status export, not a crash report or a guarantee that all secret patterns are detectable.
+
 ## Local editor recovery drafts
 
 The desktop keeps acknowledged unsaved file drafts in its private profile database, separate from the project and its Git index. These routes are refused over remote access. Every request names the canonical selected workspace; a request queued across a project switch fails instead of writing under the new selection.

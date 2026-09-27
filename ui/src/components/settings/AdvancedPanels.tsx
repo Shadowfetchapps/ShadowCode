@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type BackgroundTask,
@@ -7,7 +7,7 @@ import {
   type Health,
   type ProjectSkill,
 } from "../../api";
-import { isNative } from "../../lib/transport";
+import { exportDiagnostics, isNative } from "../../lib/transport";
 import { Empty } from "../cards";
 
 /* Project tools: skills and health sit under Settings › Advanced; goals and
@@ -423,21 +423,49 @@ function HealthTab({ health }: { health: Health | null }) {
   const [report, setReport] = useState<DoctorReport | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [saved, setSaved] = useState(false);
+  const requestNumber = useRef(0);
   const load = useCallback(async () => {
+    const number = ++requestNumber.current;
     setLoading(true);
     setError("");
+    setSaveError("");
+    setSaved(false);
+    setSaving(false);
+    setPreviewOpen(false);
+    setReport(null);
     try {
-      setReport(await api.doctor());
+      const next = await api.doctor();
+      if (requestNumber.current === number) setReport(next);
     } catch (e) {
-      setError(String(e));
-      setReport(null);
+      if (requestNumber.current === number) setError(String(e));
     } finally {
-      setLoading(false);
+      if (requestNumber.current === number) setLoading(false);
     }
   }, []);
   useEffect(() => {
     void load();
+    return () => { requestNumber.current += 1; };
   }, [load]);
+  const snapshot = report?.diagnostic_export;
+  const save = async () => {
+    if (!snapshot || saving) return;
+    const number = requestNumber.current;
+    setSaving(true);
+    setSaveError("");
+    setSaved(false);
+    try {
+      const result = await exportDiagnostics(snapshot.id, snapshot.content);
+      if (requestNumber.current === number && result) setSaved(true);
+    } catch (e) {
+      if (requestNumber.current === number) setSaveError(String(e));
+    } finally {
+      if (requestNumber.current === number) setSaving(false);
+    }
+  };
   return (
     <>
       <div className="kv">
@@ -491,6 +519,24 @@ function HealthTab({ health }: { health: Health | null }) {
               </div>
             );
           })}
+        </div>
+      )}
+      {snapshot && (
+        <div className="diagnostic-export">
+          <button type="button" className="mini" onClick={() => setPreviewOpen((open) => !open)}>
+            {previewOpen ? "Hide export preview" : "Preview diagnostics export"}
+          </button>
+          {previewOpen && (
+            <div>
+              <p>Review these local Doctor check statuses before saving. The export excludes paths, project content, credentials, prompts and raw logs. It is not a full system or model qualification.</p>
+              <pre aria-label="Diagnostics export preview">{snapshot.content}</pre>
+              {saveError && <p className="health-bad" role="alert">{saveError}</p>}
+              {saved && <p role="status">Diagnostics saved.</p>}
+              <button type="button" className="mini" disabled={saving || loading} onClick={() => void save()}>
+                {saving ? "Saving…" : "Save diagnostics…"}
+              </button>
+            </div>
+          )}
         </div>
       )}
       <div className="row">

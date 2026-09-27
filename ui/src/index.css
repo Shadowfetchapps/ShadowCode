@@ -1063,6 +1063,19 @@ button.mini.primary-mini {
   overflow-wrap: anywhere;
   color: var(--text-2);
 }
+.diagnostic-export {
+  margin: 12px 0;
+}
+.diagnostic-export pre {
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 12px;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+}
 .goal {
   padding: 10px 12px;
   border-radius: var(--radius-sm);

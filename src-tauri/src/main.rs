@@ -169,6 +169,50 @@ async fn export_session(
 }
 
 #[tauri::command]
+async fn export_diagnostics(
+    app: tauri::AppHandle,
+    service: tauri::State<'_, Backend>,
+    snapshot_id: String,
+) -> std::result::Result<Option<String>, String> {
+    if snapshot_id.len() != 32 || !snapshot_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Invalid diagnostic snapshot ID".into());
+    }
+    // Retrieve the retained, reviewed snapshot. Renderer-supplied content is
+    // never accepted for a native diagnostic export.
+    let export = service
+        .dispatch(Request {
+            method: "GET".into(),
+            path: format!("/api/diagnostic-exports/{snapshot_id}"),
+            body: Value::Null,
+        })
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    tauri::async_runtime::spawn_blocking(move || -> std::result::Result<_, String> {
+        let content = export["content"]
+            .as_str()
+            .ok_or("Diagnostic content missing")?;
+        let mut picker = app
+            .dialog()
+            .file()
+            .set_title("Save reviewed diagnostics")
+            .set_file_name("shadowcode-diagnostics.json")
+            .add_filter("JSON diagnostics", &["json"]);
+        if let Some(window) = app.get_webview_window("main") {
+            picker = picker.set_parent(&window);
+        }
+        let Some(file) = picker.blocking_save_file() else {
+            return Ok(None);
+        };
+        let path = file.into_path().map_err(|e| e.to_string())?;
+        paths::atomic_write(&path, content.as_bytes(), true)
+            .map_err(|e| format!("Could not save diagnostics: {e:#}"))?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn open_external(app: tauri::AppHandle, url: String) -> std::result::Result<(), String> {
     let parsed = tauri::Url::parse(&url).map_err(|e| e.to_string())?;
     if !matches!(parsed.scheme(), "http" | "https")
@@ -313,6 +357,7 @@ fn run() -> Result<()> {
             pick_directory,
             pick_local_model,
             export_session,
+            export_diagnostics,
             open_external,
             desktop_quit,
             notices::set_visible_session

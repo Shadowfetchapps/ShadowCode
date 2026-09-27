@@ -55,6 +55,7 @@ mod code_intel;
 mod commands;
 mod compare;
 mod composer;
+mod diagnostic_export;
 mod extensions;
 mod feed;
 mod forge;
@@ -104,6 +105,7 @@ pub struct Service {
     pub engine: Engine,
     selection: Arc<RwLock<Selection>>,
     detection: DetectionCache,
+    diagnostic_exports: Arc<diagnostic_export::DiagnosticExports>,
     guardian: Arc<crate::guardian::Guardian>,
     remember_selection: bool,
     job_owner: Option<JobOwner>,
@@ -141,6 +143,7 @@ impl Service {
                 session: None,
             })),
             detection: Arc::new(tokio::sync::Mutex::new(None)),
+            diagnostic_exports: Arc::default(),
             guardian: Arc::new(crate::guardian::Guardian::default()),
             remember_selection: true,
             job_owner: None,
@@ -174,6 +177,7 @@ impl Service {
                 generation: 0,
             })),
             detection: self.detection.clone(),
+            diagnostic_exports: self.diagnostic_exports.clone(),
             guardian: self.guardian.clone(),
             remember_selection: false,
             job_owner: None,
@@ -296,9 +300,8 @@ impl Service {
             "code-intel" => self.code_intel_routes(&call).await,
             "voice" => self.voice_routes(&call).await,
             "workspace" => self.workspace_routes(&call).await,
-            "config" | "routing" | "onboarding" | "health" | "version" | "doctor" | "guardian" => {
-                self.settings_routes(&call).await
-            }
+            "config" | "routing" | "onboarding" | "health" | "version" | "doctor"
+            | "diagnostic-exports" | "guardian" => self.settings_routes(&call).await,
             "accounts" | "cli-agents" | "openrouter" | "allowance" => {
                 self.account_routes(&call).await
             }

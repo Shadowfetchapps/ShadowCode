@@ -116,6 +116,40 @@ describe("pairing links", () => {
 });
 
 describe("remote bridge", () => {
+  it("downloads only the snapshot whose bytes match the reviewed preview", async () => {
+    const content = '{"schema":1,"checks":[]}\n';
+    const id = "a".repeat(32);
+    const { fetcher, calls } = fakeFetch(() =>
+      json(200, { id, filename: "shadowcode-diagnostics.json", content }),
+    );
+    const bridge = createRemoteBridge({
+      fetcher,
+      token: () => TOKEN,
+      view: "tab-0123456789",
+      location: { hash: "" },
+    });
+    const create = vi.fn((_blob: Blob) => "blob:diagnostics");
+    const revoke = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: create });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revoke });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    expect(calls).toHaveLength(0);
+    await expect(
+      bridge.invoke("export_diagnostics", { snapshotId: id, expectedContent: "old" }),
+    ).rejects.toThrow("preview changed");
+    expect(create).not.toHaveBeenCalled();
+    await expect(
+      bridge.invoke("export_diagnostics", { snapshotId: id, expectedContent: content }),
+    ).resolves.toBe("shadowcode-diagnostics.json");
+    expect(calls).toHaveLength(2);
+    expect(calls[1].url).toBe(`/api/diagnostic-exports/${id}`);
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(await (create.mock.calls[0][0] as Blob).text()).toBe(content);
+    await vi.waitFor(() => expect(revoke).toHaveBeenCalledWith("blob:diagnostics"), { timeout: 2500 });
+    click.mockRestore();
+    bridge.close();
+  });
+
   it("sends the token, the tab's view and JSON bodies", async () => {
     const { fetcher, calls } = fakeFetch(() => json(200, { ok: true }));
     const bridge = createRemoteBridge({

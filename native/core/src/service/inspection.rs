@@ -315,8 +315,8 @@ impl Service {
             }
         }
         let failures = checks.iter().filter(|c| c["status"] == "fail").count();
-        Ok(
-            json!({"ok":failures==0,"version":crate::VERSION,"runtime":"rust","checks":checks,"failures":failures,"project_map":map,"suggestions":checks.iter().filter(|c|c["status"]!="pass"&&c["fix"]!="").map(|c|c["fix"].clone()).collect::<Vec<_>>(),"telemetry":false}),
-        )
+        let mut report = json!({"ok":failures==0,"version":crate::VERSION,"runtime":"rust","checks":checks,"failures":failures,"project_map":map,"suggestions":checks.iter().filter(|c|c["status"]!="pass"&&c["fix"]!="").map(|c|c["fix"].clone()).collect::<Vec<_>>(),"telemetry":false});
+        report["diagnostic_export"] = self.diagnostic_exports.prepare(&report)?;
+        Ok(report)
     }
 }
