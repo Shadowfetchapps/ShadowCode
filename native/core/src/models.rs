@@ -97,6 +97,180 @@ pub struct ChatResponse {
     pub finish_reason: String,
 }
 
+/// Content-free observations for one HTTP attempt. Unknown counters remain
+/// absent; a failed or rejected response is never executable through this API.
+#[derive(Clone, Debug, Serialize)]
+pub struct RequestMetadata {
+    pub schema_version: u8,
+    pub configured_context_tokens: usize,
+    pub requested_max_output_tokens: usize,
+    pub request_limit_field: &'static str,
+    pub request_bytes: usize,
+    pub message_count: usize,
+    pub tool_count: usize,
+    pub tool_choice: Option<&'static str>,
+    pub stream_requested: bool,
+    pub usage_requested: bool,
+    pub estimated_input_tokens: usize,
+    pub estimate_method: &'static str,
+    pub safety_margin_tokens: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ObservedUsage {
+    pub object_seen: bool,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub reported_total_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
+    /// Describes the latest non-null usage report, not an accounting outcome.
+    pub status: &'static str,
+    /// Exact complete report retained for failed-attempt accounting. Later
+    /// partial or invalid reports cannot erase these already observed tokens.
+    #[serde(
+        rename = "retained_complete_report",
+        serialize_with = "serialize_reported_usage"
+    )]
+    complete: Option<Usage>,
+}
+
+fn serialize_reported_usage<S>(usage: &Option<Usage>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    #[derive(Serialize)]
+    struct Counts {
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        total_tokens: u64,
+    }
+    usage
+        .as_ref()
+        .map(|usage| Counts {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+        })
+        .serialize(serializer)
+}
+
+impl Default for ObservedUsage {
+    fn default() -> Self {
+        Self {
+            object_seen: false,
+            prompt_tokens: None,
+            completion_tokens: None,
+            reported_total_tokens: None,
+            cached_tokens: None,
+            status: "unavailable",
+            complete: None,
+        }
+    }
+}
+
+impl ObservedUsage {
+    fn read(&mut self, value: &Value) {
+        if value.is_null() {
+            return;
+        }
+        self.object_seen |= value.is_object();
+        if !value.is_object() {
+            self.status = "invalid";
+            return;
+        }
+        let prompt = value["prompt_tokens"].as_u64();
+        let completion = value["completion_tokens"].as_u64();
+        let total = value["total_tokens"].as_u64();
+        // Retain each observed counter, but never synthesize a complete
+        // accounting report by joining fields from separate frames.
+        self.prompt_tokens = prompt.or(self.prompt_tokens);
+        self.completion_tokens = completion.or(self.completion_tokens);
+        self.reported_total_tokens = total.or(self.reported_total_tokens);
+        self.cached_tokens = value["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .or_else(|| value["prompt_cache_hit_tokens"].as_u64())
+            .or(self.cached_tokens);
+        if ["prompt_tokens", "completion_tokens", "total_tokens"]
+            .iter()
+            .any(|key| {
+                value
+                    .get(key)
+                    .is_some_and(|v| !v.is_null() && v.as_u64().is_none())
+            })
+        {
+            self.status = "invalid";
+            return;
+        }
+        let (Some(prompt_tokens), Some(completion_tokens)) = (prompt, completion) else {
+            self.status = "incomplete";
+            return;
+        };
+        let Some(total_tokens) = prompt_tokens.checked_add(completion_tokens) else {
+            self.status = "inconsistent";
+            return;
+        };
+        if total.is_some_and(|reported| reported != total_tokens) {
+            self.status = "inconsistent";
+            return;
+        }
+        if self.complete.as_ref().is_some_and(|prior| {
+            prompt_tokens < prior.prompt_tokens || completion_tokens < prior.completion_tokens
+        }) {
+            self.status = "inconsistent";
+            return;
+        }
+        let mut usage = Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            ..Usage::default()
+        };
+        read_cache_and_cost(value, &mut usage);
+        usage.cost_usd = usage.cost_usd.filter(|v| v.is_finite() && *v >= 0.0);
+        self.status = "complete";
+        self.complete = Some(usage);
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RuntimeTimings {
+    /// Runtime-processed tokens, excluding cached prompt tokens.
+    pub prompt_n: Option<u64>,
+    pub predicted_n: Option<u64>,
+    pub prompt_ms: Option<f64>,
+    pub predicted_ms: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ResponseMetadata {
+    pub schema_version: u8,
+    pub accepted: bool,
+    pub outcome: &'static str,
+    pub failure_kind: Option<&'static str>,
+    pub http_status: Option<u16>,
+    pub wire_bytes: usize,
+    pub content_bytes: usize,
+    pub tool_call_slots: usize,
+    pub tool_argument_bytes: usize,
+    pub finish_reason: Option<&'static str>,
+    pub finish_marker_seen: bool,
+    pub stream_done_seen: bool,
+    pub usage: ObservedUsage,
+    pub runtime_timings: RuntimeTimings,
+}
+impl ResponseMetadata {
+    /// Only a complete, internally consistent provider report can enter token
+    /// accounting. This never estimates absent output or accepts partial tools.
+    pub fn reported_usage(&self) -> Option<Usage> {
+        self.usage.complete.clone()
+    }
+}
+
+pub enum ModelObservation {
+    Request(RequestMetadata),
+    Response(Box<ResponseMetadata>),
+}
+
 #[derive(Clone)]
 pub struct ModelClient {
     client: reqwest::Client,
@@ -320,10 +494,44 @@ impl ModelClient {
         tools: &[Value],
         cancel: CancellationToken,
         max_tokens: Option<usize>,
-        mut text: F,
+        text: F,
     ) -> Result<ChatResponse>
     where
         F: FnMut(&str) + Send,
+    {
+        self.chat_bounded_observed(messages, tools, cancel, max_tokens, text, |_| {})
+            .await
+    }
+    /// Like chat, with bounded content-free receipts even for rejected output.
+    pub async fn chat_observed<F, O>(
+        &self,
+        messages: &[Value],
+        tools: &[Value],
+        cancel: CancellationToken,
+        text: F,
+        observe: O,
+    ) -> Result<ChatResponse>
+    where
+        F: FnMut(&str) + Send,
+        O: FnMut(ModelObservation) + Send,
+    {
+        self.chat_bounded_observed(messages, tools, cancel, None, text, observe)
+            .await
+    }
+    /// Existing wrappers retain their result/error semantics. Observations do
+    /// not contain prompts, output, arguments, credentials, or provider URLs.
+    pub async fn chat_bounded_observed<F, O>(
+        &self,
+        messages: &[Value],
+        tools: &[Value],
+        cancel: CancellationToken,
+        max_tokens: Option<usize>,
+        mut text: F,
+        mut observe: O,
+    ) -> Result<ChatResponse>
+    where
+        F: FnMut(&str) + Send,
+        O: FnMut(ModelObservation) + Send,
     {
         ensure!(
             self.config.provider != "mock",
@@ -347,6 +555,27 @@ impl ModelClient {
             crate::context::response_budget(messages, tools, self.config.context_limit)?
                 .min(max_tokens.unwrap_or(usize::MAX).max(1));
         let body = self.request_body(messages, tools, response_tokens);
+        observe(ModelObservation::Request(RequestMetadata {
+            schema_version: 1,
+            configured_context_tokens: self.config.context_limit,
+            requested_max_output_tokens: response_tokens,
+            request_limit_field: if ollama { "num_predict" } else { "max_tokens" },
+            request_bytes: serde_json::to_vec(&body)?.len(),
+            message_count: body["messages"].as_array().map_or(0, Vec::len),
+            tool_count: body["tools"].as_array().map_or(0, Vec::len),
+            tool_choice: body.get("tool_choice").map(|choice| match choice.as_str() {
+                Some("auto") => "auto",
+                Some("none") => "none",
+                Some("required") => "required",
+                _ => "other",
+            }),
+            stream_requested: body["stream"] == true,
+            usage_requested: !ollama && body["stream_options"]["include_usage"] == true,
+            estimated_input_tokens: crate::context::estimate_tokens(&json!(messages))
+                + crate::context::estimate_tokens(&json!(tools)),
+            estimate_method: "deterministic_char_div3_before_runtime_template",
+            safety_margin_tokens: 256,
+        }));
         let mut request = self.client.post(&url).json(&body);
         if self.config.provider == crate::openrouter::PROVIDER {
             // Optional app attribution OpenRouter documents for its rankings.
@@ -360,84 +589,125 @@ impl ModelClient {
         if let Some(key) = &self.key {
             request = request.bearer_auth(key);
         }
-        let response = tokio::select! {_=cancel.cancelled()=>bail!("Model request cancelled"),response=request.send()=>response.context("Could not connect to the model provider")?};
-        let status = response.status();
-        if !status.is_success() {
-            let code = status.as_u16();
-            let retry_after = crate::retry::retry_after(response.headers());
-            // Local runtimes explain rejections (for example a prompt larger
-            // than the context window); show a bounded excerpt.
-            let detail = if is_loopback_endpoint(&url) {
-                let bytes = tokio::time::timeout(Duration::from_secs(5), response.bytes())
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .unwrap_or_default();
-                let text = String::from_utf8_lossy(&bytes[..bytes.len().min(600)]).into_owned();
-                if text.trim().is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", text.trim())
-                }
-            } else {
-                String::new()
-            };
-            return Err(anyhow::Error::new(crate::retry::ModelFailure::Http {
-                status: code,
-                retry_after,
-                local: is_loopback_endpoint(&url),
-                message: format!(
-                    "Model provider returned HTTP {code}{}{detail}",
-                    match code {
-                        401 | 403 => "; check the API key",
-                        404 => "; check the endpoint and model name",
-                        429 => "; provider rate limit reached",
-                        503 | 529 => "; provider overloaded",
-                        _ => "",
-                    }
-                ),
-            }));
-        }
-        let json_response = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|h| h.to_str().ok())
-            .is_some_and(|h| h.starts_with("application/json"));
-        let mut stream = response.bytes_stream();
         let mut decoder = StreamDecoder::new(ollama);
-        let mut raw = Vec::new();
         let mut bytes = 0;
-        loop {
-            let next = tokio::select! {_=cancel.cancelled()=>bail!("Model request cancelled"),next=tokio::time::timeout(Duration::from_secs(120),stream.next())=>next.map_err(|_| crate::retry::ModelFailure::Stalled{message:"Model response stalled for 120 seconds".into()})?};
-            let Some(chunk) = next else { break };
-            let chunk = chunk.context("Model stream disconnected before completion")?;
-            bytes += chunk.len();
-            ensure!(
-                bytes <= MAX_WIRE_BYTES,
-                "Model response exceeded the 16 MB limit"
-            );
+        let mut http_status = None;
+        let transport: Result<()> = async {
+            ensure!(!cancel.is_cancelled(), "Model request cancelled");
+            let response = tokio::select! {_=cancel.cancelled()=>bail!("Model request cancelled"),response=request.send()=>response.context("Could not connect to the model provider")?};
+            let status = response.status();
+            http_status = Some(status.as_u16());
+            if !status.is_success() {
+                let code = status.as_u16();
+                let retry_after = crate::retry::retry_after(response.headers());
+                // Local runtimes explain rejections (for example a prompt larger
+                // than the context window); show a bounded excerpt.
+                let detail = if is_loopback_endpoint(&url) {
+                    let diagnostic_bytes = tokio::time::timeout(Duration::from_secs(5), response.bytes())
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .unwrap_or_default();
+                    bytes = diagnostic_bytes.len();
+                    let text = String::from_utf8_lossy(&diagnostic_bytes[..diagnostic_bytes.len().min(600)]).into_owned();
+                    if text.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", text.trim())
+                    }
+                } else {
+                    String::new()
+                };
+                return Err(anyhow::Error::new(crate::retry::ModelFailure::Http {
+                    status: code,
+                    retry_after,
+                    local: is_loopback_endpoint(&url),
+                    message: format!(
+                        "Model provider returned HTTP {code}{}{detail}",
+                        match code {
+                            401 | 403 => "; check the API key",
+                            404 => "; check the endpoint and model name",
+                            429 => "; provider rate limit reached",
+                            503 | 529 => "; provider overloaded",
+                            _ => "",
+                        }
+                    ),
+                }));
+            }
+            let json_response = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|h| h.to_str().ok())
+                .is_some_and(|h| h.starts_with("application/json"));
+            let mut stream = response.bytes_stream();
+            let mut raw = Vec::new();
+            loop {
+                let next = tokio::select! {_=cancel.cancelled()=>bail!("Model request cancelled"),next=tokio::time::timeout(Duration::from_secs(120),stream.next())=>next.map_err(|_| crate::retry::ModelFailure::Stalled{message:"Model response stalled for 120 seconds".into()})?};
+                let Some(chunk) = next else { break };
+                let chunk = chunk.context("Model stream disconnected before completion")?;
+                bytes += chunk.len();
+                ensure!(
+                    bytes <= MAX_WIRE_BYTES,
+                    "Model response exceeded the 16 MB limit"
+                );
+                if json_response {
+                    raw.extend_from_slice(&chunk);
+                } else {
+                    for delta in decoder.push(&chunk)? {
+                        text(&delta);
+                    }
+                    if decoder.done {
+                        break;
+                    }
+                }
+            }
             if json_response {
-                raw.extend_from_slice(&chunk);
+                let value: Value =
+                    serde_json::from_slice(&raw).context("Provider returned invalid JSON")?;
+                decoder.full_response(value)?;
+                text(&decoder.response.text);
             } else {
-                for delta in decoder.push(&chunk)? {
+                for delta in decoder.flush()? {
                     text(&delta);
                 }
-                if decoder.done {
-                    break;
-                }
             }
-        }
-        if json_response {
-            let value: Value =
-                serde_json::from_slice(&raw).context("Provider returned invalid JSON")?;
-            decoder.full_response(value)?;
-            text(&decoder.response.text);
+            Ok(())
+        }.await;
+        // Snapshot before finish consumes the decoder and rejects cut-short
+        // responses. Also retain observations from transport/parser failures.
+        let mut metadata = decoder.metadata(http_status, bytes);
+        let transport_failed = transport.is_err();
+        let result = transport.and_then(|()| decoder.finish());
+        let completion_rejected = !transport_failed
+            && matches!(
+                metadata.finish_reason,
+                Some("length" | "max_tokens" | "content_filter")
+            );
+        metadata.accepted = result.is_ok();
+        metadata.failure_kind = result.as_ref().err().map(|error| {
+            if let Some(reason) = crate::retry::classify(error) {
+                reason.kind
+            } else if cancel.is_cancelled() {
+                "cancelled"
+            } else if completion_rejected {
+                "completion_rejected"
+            } else {
+                "invalid_response"
+            }
+        });
+        metadata.outcome = if result.is_ok() {
+            "accepted"
+        } else if cancel.is_cancelled() {
+            "cancelled"
+        } else if http_status.is_some_and(|status| !(200..300).contains(&status)) {
+            "http_rejected"
+        } else if completion_rejected {
+            "completion_rejected"
         } else {
-            for delta in decoder.flush()? {
-                text(&delta);
-            }
-        }
-        decoder.finish()
+            "transport_or_protocol_error"
+        };
+        observe(ModelObservation::Response(Box::new(metadata)));
+        result
     }
     pub async fn test(&self, cancel: CancellationToken) -> Result<Value> {
         let start = std::time::Instant::now();
@@ -476,6 +746,8 @@ pub struct StreamDecoder {
     calls: BTreeMap<usize, PartialCall>,
     pub done: bool,
     seen_finish: bool,
+    observed_usage: ObservedUsage,
+    runtime_timings: RuntimeTimings,
 }
 impl StreamDecoder {
     pub fn new(ollama: bool) -> Self {
@@ -487,6 +759,39 @@ impl StreamDecoder {
             calls: BTreeMap::new(),
             done: false,
             seen_finish: false,
+            observed_usage: ObservedUsage::default(),
+            runtime_timings: RuntimeTimings::default(),
+        }
+    }
+    pub fn metadata(&self, http_status: Option<u16>, wire_bytes: usize) -> ResponseMetadata {
+        let finish_reason = if !self.seen_finish {
+            None
+        } else {
+            Some(match self.response.finish_reason.as_str() {
+                "stop" => "stop",
+                "tool_calls" => "tool_calls",
+                "function_call" => "function_call",
+                "length" => "length",
+                "max_tokens" => "max_tokens",
+                "content_filter" => "content_filter",
+                _ => "other",
+            })
+        };
+        ResponseMetadata {
+            schema_version: 1,
+            accepted: false,
+            outcome: "pending",
+            failure_kind: None,
+            http_status,
+            wire_bytes,
+            content_bytes: self.response.text.len(),
+            tool_call_slots: self.calls.len(),
+            tool_argument_bytes: self.calls.values().map(|call| call.args.len()).sum(),
+            finish_reason,
+            finish_marker_seen: self.seen_finish,
+            stream_done_seen: self.done,
+            usage: self.observed_usage.clone(),
+            runtime_timings: self.runtime_timings.clone(),
         }
     }
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>> {
@@ -564,7 +869,36 @@ impl StreamDecoder {
         }
         Ok(out)
     }
+    fn observe_fields(&mut self, value: &Value) {
+        if self.ollama {
+            if value.get("prompt_eval_count").is_some() || value.get("eval_count").is_some() {
+                self.observed_usage.read(&json!({
+                    "prompt_tokens": value["prompt_eval_count"],
+                    "completion_tokens": value["eval_count"],
+                }));
+            }
+        } else if let Some(usage) = value.get("usage") {
+            self.observed_usage.read(usage);
+        }
+        if let Some(timings) = value.get("timings").filter(|v| v.is_object()) {
+            self.runtime_timings.prompt_n = timings["prompt_n"]
+                .as_u64()
+                .or(self.runtime_timings.prompt_n);
+            self.runtime_timings.predicted_n = timings["predicted_n"]
+                .as_u64()
+                .or(self.runtime_timings.predicted_n);
+            for (key, slot) in [
+                ("prompt_ms", &mut self.runtime_timings.prompt_ms),
+                ("predicted_ms", &mut self.runtime_timings.predicted_ms),
+            ] {
+                if let Some(value) = timings[key].as_f64().filter(|v| v.is_finite() && *v >= 0.0) {
+                    *slot = Some(value);
+                }
+            }
+        }
+    }
     fn chunk(&mut self, value: Value, out: &mut Vec<String>) -> Result<()> {
+        self.observe_fields(&value);
         if let Some(error) = value.get("error").filter(|e| !e.is_null()) {
             let code = error["code"]
                 .as_u64()
@@ -705,6 +1039,7 @@ impl StreamDecoder {
             .unwrap_or(position)
     }
     fn full_response(&mut self, value: Value) -> Result<()> {
+        self.observe_fields(&value);
         if self.ollama {
             self.chunk(value, &mut Vec::new())?;
         } else {
@@ -716,7 +1051,7 @@ impl StreamDecoder {
                 choice["message"].is_object(),
                 "Provider returned no assistant message"
             );
-            let chunk = json!({"choices":[{"delta":choice["message"],"finish_reason":choice["finish_reason"]}],"usage":value["usage"]});
+            let chunk = json!({"choices":[{"delta":choice["message"],"finish_reason":choice["finish_reason"]}],"usage":value["usage"],"timings":value["timings"]});
             self.chunk(chunk, &mut Vec::new())?;
         }
         Ok(())

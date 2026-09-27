@@ -36,6 +36,151 @@ enum Reply {
     SseDrop(Vec<Value>),
 }
 
+#[tokio::test]
+async fn failed_attempt_usage_is_counted_once_before_retry_or_budget_refusal() {
+    for exhausted in [false, true] {
+        let server = raw_server(|index, _| {
+            if index == 0 {
+                Reply::SseDrop(vec![
+                    json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"partial","function":{"name":"write_file","arguments":"{\"path\":\"forbidden"}}]}}]}),
+                    json!({"choices":[],"usage":{"prompt_tokens":41,"completion_tokens":7,"total_tokens":48}}),
+                ])
+            } else {
+                Reply::Json(response("Hello.", json!([])))
+            }
+        }).await;
+        let (root, engine) = setup(
+            &server.endpoint,
+            16_384,
+            json!({"model_retries":2,"retry_backoff_sec":0.001,"max_task_tokens":if exhausted {48} else {1000}}),
+        );
+        let job = engine
+            .start(request(root.path(), "Hello", None))
+            .await
+            .unwrap();
+        let done = wait(&engine, &job.id).await;
+        assert_eq!(done.status, if exhausted { "failed" } else { "completed" });
+        assert_eq!(done.steps, if exhausted { 0 } else { 1 });
+        assert_eq!(done.usage.total_tokens, if exhausted { 48 } else { 78 });
+        assert_eq!(done.usage.turns, if exhausted { 1 } else { 2 });
+        assert!(!root.path().join("project/forbidden").exists());
+        assert!(events(&engine, &done, "tool.started").is_empty());
+        assert_eq!(
+            server.requests.lock().unwrap().len(),
+            if exhausted { 1 } else { 2 }
+        );
+        let replies = events(&engine, &done, "model.response_metadata");
+        let requests = events(&engine, &done, "model.request_metadata");
+        assert_eq!(replies.len(), if exhausted { 1 } else { 2 });
+        assert_eq!(requests.len(), replies.len());
+        assert_eq!(replies[0]["usage"]["completion_tokens"], 7);
+        assert_eq!(replies[0]["finish_reason"], Value::Null);
+        assert_eq!(replies[0]["accepted"], false);
+        assert_eq!(replies[0]["failure_kind"], "disconnected");
+        if exhausted {
+            assert!(done.summary.contains("token budget"));
+            assert!(events(&engine, &done, "model.retry").is_empty());
+        } else {
+            assert_eq!(
+                events(&engine, &done, "model.retry")[0]["reason"],
+                "disconnected"
+            );
+            assert_ne!(replies[0]["message_id"], replies[1]["message_id"]);
+            assert_eq!(replies[1]["accepted"], true);
+        }
+        let usage = events(&engine, &done, "usage.updated");
+        assert_eq!(usage.len(), replies.len());
+        assert_eq!(usage[0]["purpose"], "failed_attempt");
+        let paths = engine.paths().clone();
+        engine.shutdown().await.unwrap();
+        drop(engine);
+        let reopened = Engine::open(paths).unwrap();
+        assert_eq!(reopened.job(&done.id).unwrap().unwrap().usage, done.usage);
+        assert_eq!(events(&reopened, &done, "agent.completed").len(), 1);
+        assert_eq!(
+            events(&reopened, &done, "model.response_metadata").len(),
+            replies.len()
+        );
+        let session = reopened.store().session(&done.session_id).unwrap().unwrap();
+        assert_eq!(
+            shadowcode_core::usage::parse(&session["usage_json"]).total_tokens,
+            done.usage.total_tokens
+        );
+        reopened.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn failed_attempt_usage_keeps_known_cost_when_later_reports_degrade_at_cap() {
+    for (later, status, stream_error) in [
+        (json!({}), "incomplete", false),
+        (json!({"prompt_tokens":42}), "incomplete", false),
+        (
+            json!({"prompt_tokens":"invalid","completion_tokens":8}),
+            "invalid",
+            false,
+        ),
+        (
+            json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}),
+            "inconsistent",
+            false,
+        ),
+        (json!({"prompt_tokens":42}), "incomplete", true),
+    ] {
+        let server = raw_server(move |index, _| {
+            if index > 0 { return Reply::Json(response("Unexpected retry.",json!([]))); }
+            let mut frames = vec![
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"partial","function":{"name":"write_file","arguments":"{\"path\":\"forbidden"}}]}}]}),
+                json!({"choices":[],"usage":{"prompt_tokens":41,"completion_tokens":7,"total_tokens":48}}),
+                json!({"choices":[],"usage":later}),
+            ];
+            if stream_error { frames.push(json!({"error":{"code":503,"message":"fixture overload"}})); }
+            Reply::SseDrop(frames)
+        }).await;
+        let (root, engine) = setup(
+            &server.endpoint,
+            16_384,
+            json!({"model_retries":2,"retry_backoff_sec":0.001,"max_task_tokens":48}),
+        );
+        let job = engine
+            .start(request(root.path(), "Hello", None))
+            .await
+            .unwrap();
+        let done = wait(&engine, &job.id).await;
+        assert_eq!(done.status, "failed");
+        assert!(done.summary.contains("token budget"));
+        assert_eq!(
+            (done.steps, done.usage.total_tokens, done.usage.turns),
+            (0, 48, 1)
+        );
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+        assert!(events(&engine, &done, "model.retry").is_empty());
+        assert!(events(&engine, &done, "tool.started").is_empty());
+        assert!(!root.path().join("project/forbidden").exists());
+        let receipts = events(&engine, &done, "model.response_metadata");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0]["usage"]["status"], status);
+        assert_eq!(
+            receipts[0]["usage"]["retained_complete_report"],
+            json!({"prompt_tokens":41,"completion_tokens":7,"total_tokens":48})
+        );
+        assert_eq!(
+            receipts[0]["failure_kind"],
+            if stream_error {
+                "overloaded"
+            } else {
+                "disconnected"
+            }
+        );
+        let accounting = events(&engine, &done, "usage.updated");
+        assert_eq!(accounting.len(), 1);
+        assert_eq!(accounting[0]["purpose"], "failed_attempt");
+        assert_eq!(accounting[0]["turn"]["total_tokens"], 48);
+        assert_eq!(events(&engine, &done, "agent.completed").len(), 1);
+        engine.shutdown().await.unwrap();
+    }
+}
+
 struct Raw {
     endpoint: String,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -140,7 +285,7 @@ fn setup(endpoint: &str, context_limit: usize, agent: Value) -> (tempfile::TempD
     Config::patch(
         &paths,
         json!({
-            "model":{"provider":"local","endpoint":endpoint,"name":"fixture","context_limit":context_limit},
+            "model":{"provider":"local","endpoint":endpoint,"name":"fixture","api_key_env":"SHADOWCODE_TEST_UNUSED_API_KEY","context_limit":context_limit},
             "trusted_workspaces":[root.path().join("project")],
             "permissions":{"approve_shell":false,"mode":"allow_edits"},
             "cli_agents":{"enabled":false},
@@ -214,6 +359,15 @@ async fn rate_limit_is_retried_after_the_providers_retry_after() {
     assert_eq!(retries[0]["delay_ms"], 1000);
     assert_eq!(retries[0]["attempt"], 1);
     assert_eq!(retries[0]["max_attempts"], 3);
+    let metadata = events(&engine, &done, "model.response_metadata");
+    assert_eq!(metadata.len(), 2);
+    assert_eq!(metadata[0]["http_status"], 429);
+    assert_eq!(metadata[0]["outcome"], "http_rejected");
+    assert_eq!(metadata[0]["failure_kind"], "rate_limited");
+    assert_eq!(metadata[0]["usage"]["status"], "unavailable");
+    assert!(metadata[0]["usage"]["completion_tokens"].is_null());
+    assert!(!metadata[0].to_string().contains("fake failure"));
+    assert_eq!(metadata[1]["accepted"], true);
     engine.shutdown().await.unwrap();
 }
 

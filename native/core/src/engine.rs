@@ -2110,6 +2110,8 @@ impl Engine {
                 let mut visible_emitted = String::new();
                 let mut flushed = Instant::now();
                 let mut event_error = None;
+                let mut observation_error = None;
+                let mut reported_attempt_usage = None;
                 let mut text_loop_hit = false;
                 let request_messages = crate::vision::hydrate_for_provider(
                     &messages,
@@ -2118,7 +2120,7 @@ impl Engine {
                 )?;
                 let request_timing = running.clock.span(crate::timing::Section::ModelRequest);
                 let response = model
-                    .chat(
+                    .chat_observed(
                         &request_messages,
                         &schemas,
                         running.cancel.clone(),
@@ -2168,6 +2170,22 @@ impl Engine {
                                 flushed = Instant::now();
                             }
                         },
+                        |observation| {
+                            let (kind, mut payload) = match observation {
+                                crate::models::ModelObservation::Request(metadata) => {
+                                    ("model.request_metadata", json!(metadata))
+                                }
+                                crate::models::ModelObservation::Response(metadata) => {
+                                    reported_attempt_usage = metadata.reported_usage();
+                                    ("model.response_metadata", json!(metadata))
+                                }
+                            };
+                            payload["message_id"] = json!(message_id);
+                            if let Err(error) = events.emit(kind, payload) {
+                                observation_error = Some(error);
+                                running.cancel.cancel();
+                            }
+                        },
                     )
                     .await;
                 let request_receipt = json!({
@@ -2179,7 +2197,7 @@ impl Engine {
                 });
                 drop(request_timing);
                 events.emit("model.request_timing", request_receipt)?;
-                if let Some(error) = event_error {
+                if let Some(error) = event_error.or(observation_error) {
                     return Err(error);
                 }
                 if !pending.is_empty() {
@@ -2221,6 +2239,30 @@ impl Engine {
                             "model.stream_end",
                             json!({"message_id":message_id,"complete":false}),
                         )?;
+                        if let Some(usage) = reported_attempt_usage.take() {
+                            // Failed generation can still consume reported tokens.
+                            // Never estimate missing output or increment steps; a
+                            // successful response is counted only below as before.
+                            self.record_usage(running, &events, &job, usage, "failed_attempt")?;
+                            let record = running
+                                .record
+                                .lock()
+                                .map_err(|_| anyhow!("Job lock poisoned"))?;
+                            let caps = autonomy::effective_caps(
+                                &running.config.agent.autonomy_profile,
+                                running.config.agent.max_steps,
+                                running.config.agent.max_task_tokens,
+                            );
+                            let budget = autonomy::budget_status(
+                                record.steps,
+                                record.usage.total_tokens,
+                                caps,
+                            );
+                            ensure!(
+                                budget["exhausted"] != true && record.usage.total_tokens <= running.config.agent.max_task_tokens,
+                                "Task token budget reached; completed changes are retained for review"
+                            );
+                        }
                         // Tools run only after a complete response, so no tool of
                         // this step has run: re-sending the request cannot
                         // repeat one. The failed attempt's partial text and

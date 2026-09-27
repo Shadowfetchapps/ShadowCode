@@ -1,3 +1,4 @@
+mod support;
 use serde_json::json;
 use shadowcode_core::{
     config::ModelConfig,
@@ -13,6 +14,401 @@ use tokio_util::sync::CancellationToken;
 
 fn sse(value: serde_json::Value) -> String {
     format!("data: {value}\n\n")
+}
+
+#[test]
+fn attempt_metadata_retains_cut_short_usage_without_exposing_or_accepting_tools() {
+    let wire = [
+        sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"private-id","function":{"name":"exec","arguments":"{\"command\":\"SECRET-COMMAND\"}"}}]}}]})),
+        sse(json!({"choices":[{"delta":{},"finish_reason":"length"}]})),
+        sse(json!({"choices":[],"usage":{"prompt_tokens":41,"completion_tokens":7,"total_tokens":48},"timings":{"prompt_n":39,"predicted_n":7,"prompt_ms":12.5,"predicted_ms":6.0,"private":"SECRET-TIMING"}})),
+        "data: [DONE]\n\n".to_owned(),
+    ].concat();
+    for size in [1, 7, 4096] {
+        let mut decoder = StreamDecoder::new(false);
+        for chunk in wire.as_bytes().chunks(size) {
+            assert!(decoder.push(chunk).unwrap().is_empty());
+        }
+        decoder.flush().unwrap();
+        let receipt = decoder.metadata(Some(200), wire.len());
+        assert_eq!(receipt.finish_reason, Some("length"));
+        assert!(receipt.finish_marker_seen && receipt.stream_done_seen);
+        assert_eq!(receipt.tool_call_slots, 1);
+        assert!(receipt.tool_argument_bytes > 0);
+        assert_eq!(receipt.content_bytes, 0);
+        assert_eq!(receipt.reported_usage().unwrap().total_tokens, 48);
+        assert_eq!(receipt.runtime_timings.prompt_n, Some(39));
+        let safe = serde_json::to_string(&receipt).unwrap();
+        for secret in ["SECRET", "private-id", "exec"] {
+            assert!(!safe.contains(secret));
+        }
+        assert!(decoder
+            .finish()
+            .unwrap_err()
+            .to_string()
+            .contains("cut short"));
+    }
+}
+
+#[test]
+fn attempt_metadata_distinguishes_missing_partial_invalid_and_reported_zero_usage() {
+    let cases = [
+        (serde_json::Value::Null, "unavailable", None),
+        (json!({}), "incomplete", None),
+        (json!({"prompt_tokens":9}), "incomplete", None),
+        (
+            json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}),
+            "complete",
+            Some(0),
+        ),
+        (
+            json!({"prompt_tokens":11,"completion_tokens":7}),
+            "complete",
+            Some(18),
+        ),
+        (
+            json!({"prompt_tokens":-1,"completion_tokens":7}),
+            "invalid",
+            None,
+        ),
+        (
+            json!({"prompt_tokens":"11","completion_tokens":7}),
+            "invalid",
+            None,
+        ),
+        (
+            json!({"prompt_tokens":true,"completion_tokens":7}),
+            "invalid",
+            None,
+        ),
+        (
+            json!({"prompt_tokens":11,"completion_tokens":7,"total_tokens":99}),
+            "inconsistent",
+            None,
+        ),
+        (
+            json!({"prompt_tokens":u64::MAX,"completion_tokens":1}),
+            "inconsistent",
+            None,
+        ),
+    ];
+    for (usage, state, total) in cases {
+        let mut decoder = StreamDecoder::new(false);
+        decoder
+            .push(
+                sse(json!({"choices":[{"delta":{},"finish_reason":"length"}],"usage":usage}))
+                    .as_bytes(),
+            )
+            .unwrap();
+        let receipt = decoder.metadata(Some(200), 0);
+        assert_eq!(receipt.usage.status, state);
+        assert_eq!(receipt.reported_usage().map(|u| u.total_tokens), total);
+        if usage.is_null() || usage == json!({}) {
+            assert_eq!(receipt.usage.prompt_tokens, None);
+            assert_eq!(receipt.usage.completion_tokens, None);
+        }
+        assert!(decoder.finish().is_err());
+    }
+    let mut decoder = StreamDecoder::new(false);
+    for usage in [json!({"prompt_tokens":11}), json!({"completion_tokens":7})] {
+        decoder
+            .push(sse(json!({"choices":[],"usage":usage})).as_bytes())
+            .unwrap();
+    }
+    let receipt = decoder.metadata(Some(200), 0);
+    assert_eq!(receipt.usage.prompt_tokens, Some(11));
+    assert_eq!(receipt.usage.completion_tokens, Some(7));
+    assert_eq!(receipt.usage.status, "incomplete");
+    assert!(
+        receipt.reported_usage().is_none(),
+        "Do not merge partial usage reports into a complete accounting turn"
+    );
+    for _ in 0..2 {
+        decoder
+            .push(
+                sse(json!({"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7}}))
+                    .as_bytes(),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        decoder
+            .metadata(Some(200), 0)
+            .reported_usage()
+            .unwrap()
+            .total_tokens,
+        18
+    );
+}
+
+#[test]
+fn attempt_metadata_preserves_complete_usage_across_later_degraded_reports() {
+    for (later, status) in [
+        (json!({}), "incomplete"),
+        (json!({"prompt_tokens":42}), "incomplete"),
+        (
+            json!({"prompt_tokens":"invalid","completion_tokens":8}),
+            "invalid",
+        ),
+        (
+            json!({"prompt_tokens":41,"completion_tokens":8,"total_tokens":999}),
+            "inconsistent",
+        ),
+        (
+            json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}),
+            "inconsistent",
+        ),
+    ] {
+        let mut decoder = StreamDecoder::new(false);
+        for usage in [
+            json!({"prompt_tokens":41,"completion_tokens":7,"total_tokens":48}),
+            later,
+        ] {
+            decoder
+                .push(sse(json!({"choices":[],"usage":usage})).as_bytes())
+                .unwrap();
+        }
+        let receipt = decoder.metadata(Some(200), 0);
+        assert_eq!(receipt.usage.status, status);
+        let retained = receipt.reported_usage().unwrap();
+        assert_eq!(
+            (
+                retained.prompt_tokens,
+                retained.completion_tokens,
+                retained.total_tokens
+            ),
+            (41, 7, 48)
+        );
+        assert_eq!(
+            serde_json::to_value(&receipt).unwrap()["usage"]["retained_complete_report"],
+            json!({"prompt_tokens":41,"completion_tokens":7,"total_tokens":48})
+        );
+        assert_eq!(
+            shadowcode_core::retry::classify(&decoder.finish().unwrap_err())
+                .unwrap()
+                .kind,
+            "disconnected"
+        );
+    }
+}
+
+#[test]
+fn attempt_metadata_handles_native_usage_and_untrusted_finish_labels() {
+    let mut native = StreamDecoder::new(true);
+    native.push(format!("{}\n", json!({"message":{"content":""},"done":true,"done_reason":"length","prompt_eval_count":20,"eval_count":4})).as_bytes()).unwrap();
+    assert_eq!(
+        native
+            .metadata(Some(200), 0)
+            .reported_usage()
+            .unwrap()
+            .total_tokens,
+        24
+    );
+    assert!(native.finish().is_err());
+    let mut compatible = StreamDecoder::new(false);
+    compatible
+        .push(
+            sse(json!({"choices":[{"delta":{},"finish_reason":"SECRET-UNTRUSTED-LABEL"}]}))
+                .as_bytes(),
+        )
+        .unwrap();
+    let receipt = compatible.metadata(Some(200), 0);
+    assert_eq!(receipt.finish_reason, Some("other"));
+    assert!(!serde_json::to_string(&receipt).unwrap().contains("SECRET"));
+}
+
+#[tokio::test]
+async fn attempt_metadata_matches_final_sent_body_and_rejected_json_usage() {
+    use shadowcode_core::models::ModelObservation;
+    let server = support::server(|_, _| (json!({"choices":[{"message":{"content":""},"finish_reason":"length"}],"usage":{"prompt_tokens":41,"completion_tokens":7,"total_tokens":48}}), Duration::ZERO)).await;
+    let root = tempfile::tempdir().unwrap();
+    let paths = AppPaths::isolated(root.path()).unwrap();
+    let client = ModelClient::new(
+        ModelConfig {
+            provider: "llamacpp".into(),
+            endpoint: server.endpoint.clone(),
+            name: "fixture".into(),
+            api_key_env: "SHADOWCODE_TEST_UNUSED_API_KEY".into(),
+            context_limit: 8192,
+            ..Default::default()
+        },
+        &paths,
+    )
+    .unwrap();
+    let schemas = [
+        json!({"type":"function","function":{"name":"fixture","parameters":{"type":"object","properties":{"value":{"type":["string","null"]}}}}}),
+    ];
+    for cap in [None, Some(64)] {
+        let mut requests = Vec::new();
+        let mut responses = Vec::new();
+        let error = client
+            .chat_bounded_observed(
+                &[json!({"role":"user","content":"SECRET-REQUEST"})],
+                &schemas,
+                CancellationToken::new(),
+                cap,
+                |_| {},
+                |event| match event {
+                    ModelObservation::Request(r) => requests.push(r),
+                    ModelObservation::Response(r) => responses.push(r),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cut short"));
+        assert_eq!((requests.len(), responses.len()), (1, 1));
+        let bodies = server.requests.lock().unwrap();
+        let body = bodies.last().unwrap();
+        assert_eq!(requests[0].requested_max_output_tokens, cap.unwrap_or(2048));
+        assert_eq!(
+            requests[0].requested_max_output_tokens as u64,
+            body["max_tokens"].as_u64().unwrap()
+        );
+        assert_eq!(
+            requests[0].request_bytes,
+            serde_json::to_vec(body).unwrap().len()
+        );
+        assert_eq!(
+            requests[0].tool_count,
+            body["tools"].as_array().unwrap().len()
+        );
+        assert!(
+            body["tools"][0]["function"]["parameters"]["properties"]["value"]["anyOf"].is_array()
+        );
+        assert_eq!(responses[0].outcome, "completion_rejected");
+        assert!(!responses[0].accepted);
+        assert_eq!(responses[0].http_status, Some(200));
+        assert_eq!(responses[0].reported_usage().unwrap().total_tokens, 48);
+        assert!(!serde_json::to_string(&requests[0])
+            .unwrap()
+            .contains("SECRET"));
+    }
+}
+
+#[tokio::test]
+async fn attempt_metadata_survives_cancellation_without_inventing_usage() {
+    use shadowcode_core::models::ModelObservation;
+    let (endpoint, worker) = fixture(sse(json!({"choices":[]})), "text/event-stream", true).await;
+    let root = tempfile::tempdir().unwrap();
+    let paths = AppPaths::isolated(root.path()).unwrap();
+    let client = ModelClient::new(
+        ModelConfig {
+            provider: "local".into(),
+            endpoint,
+            name: "fixture".into(),
+            api_key_env: "SHADOWCODE_TEST_UNUSED_API_KEY".into(),
+            ..Default::default()
+        },
+        &paths,
+    )
+    .unwrap();
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let timer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        stop.cancel();
+    });
+    let mut terminal = Vec::new();
+    assert!(client
+        .chat_observed(
+            &[json!({"role":"user","content":"hello"})],
+            &[],
+            cancel,
+            |_| {},
+            |event| {
+                if let ModelObservation::Response(r) = event {
+                    terminal.push(r);
+                }
+            }
+        )
+        .await
+        .is_err());
+    timer.await.unwrap();
+    worker.abort();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0].outcome, "cancelled");
+    assert!(!terminal[0].accepted);
+    assert_eq!(terminal[0].usage.status, "unavailable");
+    assert!(terminal[0].reported_usage().is_none());
+}
+
+#[tokio::test]
+async fn attempt_metadata_survives_malformed_output_and_keeps_original_error_class() {
+    use shadowcode_core::models::ModelObservation;
+    let root = tempfile::tempdir().unwrap();
+    let paths = AppPaths::isolated(root.path()).unwrap();
+    for (content_type, wire, count, kind) in [
+        ("text/event-stream", "data: {SECRET-BROKEN-JSON}\n\n".to_owned(), None, "invalid_response"),
+        ("application/json", json!({"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3},"private":"SECRET-JSON"}).to_string(), Some(5), "invalid_response"),
+        ("text/event-stream", sse(json!({"error":{"code":503,"message":"SECRET-overloaded"},"usage":{"prompt_tokens":2,"completion_tokens":3}})), Some(5), "overloaded"),
+    ] {
+        let (endpoint, worker) = fixture(wire, content_type, false).await;
+        let client = ModelClient::new(ModelConfig { provider:"local".into(), endpoint, name:"fixture".into(), api_key_env:"SHADOWCODE_TEST_UNUSED_API_KEY".into(), ..Default::default() }, &paths).unwrap();
+        let mut terminal=Vec::new();
+        let error=client.chat_observed(&[json!({"role":"user","content":"hello"})],&[],CancellationToken::new(),|_|{},|event|{
+            if let ModelObservation::Response(r)=event {terminal.push(r);}
+        }).await.unwrap_err();
+        worker.await.unwrap();
+        assert_eq!(terminal.len(),1);
+        assert!(!terminal[0].accepted);
+        assert_eq!(terminal[0].failure_kind,Some(kind));
+        assert_eq!(terminal[0].reported_usage().map(|u|u.total_tokens),count);
+        assert!(!serde_json::to_string(&terminal[0]).unwrap().contains("SECRET"));
+        assert_eq!(shadowcode_core::retry::classify(&error).map(|r|r.kind), (kind=="overloaded").then_some("overloaded"));
+    }
+}
+
+#[tokio::test]
+async fn attempt_metadata_prioritizes_typed_stream_error_after_length_marker() {
+    use shadowcode_core::models::ModelObservation;
+    let wire = [
+        sse(json!({"choices":[{"delta":{},"finish_reason":"length"}]})),
+        sse(json!({"choices":[],"usage":{"prompt_tokens":41,"completion_tokens":7,"total_tokens":48}})),
+        sse(json!({"error":{"code":503,"message":"SECRET-overloaded"},"usage":{}})),
+    ].concat();
+    let (endpoint, worker) = fixture(wire, "text/event-stream", false).await;
+    let root = tempfile::tempdir().unwrap();
+    let paths = AppPaths::isolated(root.path()).unwrap();
+    let client = ModelClient::new(
+        ModelConfig {
+            provider: "local".into(),
+            endpoint,
+            name: "fixture".into(),
+            api_key_env: "SHADOWCODE_TEST_UNUSED_API_KEY".into(),
+            ..Default::default()
+        },
+        &paths,
+    )
+    .unwrap();
+    let mut terminal = Vec::new();
+    let error = client
+        .chat_observed(
+            &[json!({"role":"user","content":"hello"})],
+            &[],
+            CancellationToken::new(),
+            |_| {},
+            |event| {
+                if let ModelObservation::Response(r) = event {
+                    terminal.push(r);
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+    worker.await.unwrap();
+    assert_eq!(
+        shadowcode_core::retry::classify(&error).unwrap().kind,
+        "overloaded"
+    );
+    assert_eq!(terminal.len(), 1);
+    let receipt = &terminal[0];
+    assert_eq!(receipt.finish_reason, Some("length"));
+    assert_eq!(receipt.failure_kind, Some("overloaded"));
+    assert_eq!(receipt.outcome, "transport_or_protocol_error");
+    assert!(!receipt.accepted);
+    assert_eq!(receipt.usage.status, "incomplete");
+    assert_eq!(receipt.reported_usage().unwrap().total_tokens, 48);
+    assert!(!serde_json::to_string(receipt).unwrap().contains("SECRET"));
 }
 
 #[test]

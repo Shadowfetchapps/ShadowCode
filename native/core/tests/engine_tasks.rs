@@ -19,6 +19,161 @@ fn response(text: &str, calls: Value) -> Value {
     };
     json!({"choices":[{"message":{"role":"assistant","content":text,"tool_calls":calls},"finish_reason":reason}],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}})
 }
+
+#[tokio::test]
+async fn failed_attempt_usage_length_keeps_receipts_after_reopen_and_never_runs_tools() {
+    let server = support::server(|_, _| {
+        let mut value = response(
+            "",
+            json!([tool(
+                "private-call",
+                "exec",
+                json!({"command":"printf forbidden > should-not-exist"})
+            )]),
+        );
+        value["choices"][0]["finish_reason"] = json!("length");
+        value["usage"] = json!({"prompt_tokens":41,"completion_tokens":7,"total_tokens":48});
+        (value, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    let job = engine
+        .start(request(root.path(), "Fix the file using a tool", None))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    assert_eq!(result.status, "failed");
+    assert!(result.summary.contains("cut short"));
+    assert_eq!(
+        (
+            result.steps,
+            result.usage.prompt_tokens,
+            result.usage.completion_tokens,
+            result.usage.total_tokens,
+            result.usage.turns
+        ),
+        (0, 41, 7, 48, 1)
+    );
+    assert!(!result.usage_is_estimated);
+    assert!(!root.path().join("project/should-not-exist").exists());
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    let session = engine.store().session(&result.session_id).unwrap().unwrap();
+    assert_eq!(
+        shadowcode_core::usage::parse(&session["usage_json"]).total_tokens,
+        48
+    );
+    let (saved, events) = reopen_terminal_job(engine, result).await;
+    assert_eq!(saved.usage.total_tokens, 48);
+    assert!(!events.iter().any(|e| e["type"] == "tool.started"));
+    for kind in [
+        "model.request_metadata",
+        "model.response_metadata",
+        "usage.updated",
+    ] {
+        let found: Vec<_> = events
+            .iter()
+            .filter(|e| e["type"] == kind && e["task_id"] == saved.task_id)
+            .collect();
+        assert_eq!(found.len(), 1, "{kind}");
+    }
+    let sent = events
+        .iter()
+        .find(|e| e["type"] == "model.request_metadata")
+        .unwrap();
+    let received = events
+        .iter()
+        .find(|e| e["type"] == "model.response_metadata")
+        .unwrap();
+    assert_eq!(
+        sent["payload"]["message_id"],
+        received["payload"]["message_id"]
+    );
+    assert_eq!(
+        sent["payload"]["requested_max_output_tokens"],
+        server.requests.lock().unwrap()[0]["max_tokens"]
+    );
+    assert_eq!(received["payload"]["finish_reason"], "length");
+    assert_eq!(received["payload"]["accepted"], false);
+    assert_eq!(received["payload"]["usage"]["status"], "complete");
+    assert_eq!(received["payload"]["usage"]["completion_tokens"], 7);
+    assert!(!received["payload"].to_string().contains("should-not-exist"));
+    let usage = events
+        .iter()
+        .find(|e| e["type"] == "usage.updated")
+        .unwrap();
+    assert_eq!(usage["payload"]["purpose"], "failed_attempt");
+}
+
+#[tokio::test]
+async fn failed_attempt_usage_missing_partial_and_zero_stay_distinct_across_tasks() {
+    let server = support::server(|index, _| {
+        let mut value = response("", json!([]));
+        value["choices"][0]["finish_reason"] = json!("length");
+        value["usage"] = match index {
+            0 => Value::Null,
+            1 => json!({"prompt_tokens":31}),
+            2 => json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}),
+            _ => json!({"prompt_tokens":11,"completion_tokens":9,"total_tokens":20}),
+        };
+        (value, Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    let mut session_id = None;
+    let mut jobs = Vec::new();
+    for (status, tokens, turns) in [
+        ("unavailable", 0, 0),
+        ("incomplete", 0, 0),
+        ("complete", 0, 1),
+        ("complete", 20, 1),
+    ] {
+        let job = engine
+            .start(request(root.path(), "Hello", session_id.clone()))
+            .await
+            .unwrap();
+        let done = wait(&engine, &job.id).await;
+        assert_eq!(done.status, "failed");
+        assert_eq!((done.usage.total_tokens, done.usage.turns), (tokens, turns));
+        let events = engine.store().recent_events(&done.session_id, 300).unwrap();
+        let receipts: Vec<_> = events
+            .iter()
+            .filter(|e| e["type"] == "model.response_metadata" && e["task_id"] == done.task_id)
+            .collect();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0]["payload"]["usage"]["status"], status);
+        if status == "unavailable" {
+            assert!(receipts[0]["payload"]["usage"]["completion_tokens"].is_null());
+        }
+        if turns == 1 && tokens == 0 {
+            assert_eq!(receipts[0]["payload"]["usage"]["completion_tokens"], 0);
+        }
+        session_id = Some(done.session_id.clone());
+        jobs.push(done);
+    }
+    let paths = engine.paths().clone();
+    engine.shutdown().await.unwrap();
+    drop(engine);
+    let reopened = Engine::open(paths).unwrap();
+    for job in &jobs {
+        assert_eq!(reopened.job(&job.id).unwrap().unwrap().usage, job.usage);
+        let terminals: Vec<_> = reopened
+            .store()
+            .recent_events(&job.session_id, 300)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e["type"] == "agent.completed" && e["task_id"] == job.task_id)
+            .collect();
+        assert_eq!(terminals.len(), 1);
+    }
+    let session = reopened
+        .store()
+        .session(session_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    let total = shadowcode_core::usage::parse(&session["usage_json"]);
+    assert_eq!((total.total_tokens, total.turns), (20, 2));
+    reopened.shutdown().await.unwrap();
+}
 fn tool(id: &str, name: &str, args: Value) -> Value {
     json!({"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}})
 }
@@ -26,7 +181,7 @@ fn setup(endpoint: &str) -> (tempfile::TempDir, Engine) {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir(root.path().join("project")).unwrap();
     let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
-    Config::patch(&paths,json!({"model":{"provider":"local","endpoint":endpoint,"name":"fixture","context_limit":16384},"trusted_workspaces":[root.path().join("project")],"permissions":{"approve_shell":false},"agent":{"max_steps":12}})).unwrap();
+    Config::patch(&paths,json!({"model":{"provider":"local","endpoint":endpoint,"name":"fixture","api_key_env":"SHADOWCODE_TEST_UNUSED_API_KEY","context_limit":16384},"trusted_workspaces":[root.path().join("project")],"permissions":{"approve_shell":false},"agent":{"max_steps":12}})).unwrap();
     let engine = Engine::open(paths).unwrap();
     (root, engine)
 }
