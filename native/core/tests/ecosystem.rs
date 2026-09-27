@@ -345,7 +345,7 @@ fn acp_sessions_receive_the_enabled_mcp_servers() {
         ..options(root.path())
     });
     let step = adapter
-        .on_line(&json!({"jsonrpc":"2.0","id":1,"result":{}}).to_string())
+        .on_line(&json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}).to_string())
         .unwrap();
     let frame: Value = serde_json::from_str(step.send.last().unwrap()).unwrap();
     assert_eq!(frame["method"], "session/load");
@@ -357,7 +357,7 @@ fn acp_sessions_receive_the_enabled_mcp_servers() {
         ..options(root.path())
     });
     assert_eq!(
-        session_params(&mut *adapter, json!({}))["mcpServers"],
+        session_params(&mut *adapter, json!({"protocolVersion":1}))["mcpServers"],
         json!([])
     );
 }
