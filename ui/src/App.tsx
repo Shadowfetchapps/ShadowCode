@@ -130,7 +130,6 @@ export default function App() {
     clearComposer: () => {
       files.setAttachments([]);
       setCommandCards([]);
-      feed.clearApprovals();
     },
     submittingRef,
     submitting,

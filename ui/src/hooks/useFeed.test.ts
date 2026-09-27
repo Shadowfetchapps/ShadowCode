@@ -151,12 +151,34 @@ it("reads the new conversation's approvals and drops a stale answer", async () =
   );
   engine.wake({ type: "approval.requested" });
   await settle();
-  act(() => result.current.clearApprovals());
   rerender({ session: "s2" });
+  // Old cards must disappear in the first render of the new conversation,
+  // even while the old request is held and no new feed result can arrive.
+  expect(result.current.approvals).toEqual([]);
+  const waiting = result.current.approvals;
+  rerender({ session: "s2" });
+  expect(result.current.approvals).toBe(waiting);
   await act(async () => release());
   await settle();
   expect(result.current.approvals.map((a) => a.id)).toEqual(["b1"]);
   expect(engine.read).toHaveBeenLastCalledWith("s2");
+});
+
+it("shows approvals only for the selected conversation", async () => {
+  const engine = fakeEngine();
+  const mixed = { approvals: [approval("a1"), approval("b1", "s2")], jobs: [] };
+  engine.pages.s1 = mixed;
+  engine.pages[""] = mixed;
+  const { result, rerender } = renderHook(
+    ({ session }) => useFeed(session, engine.deps),
+    { initialProps: { session: "s1" } },
+  );
+  await settle();
+  expect(result.current.approvals.map((a) => a.id)).toEqual(["a1"]);
+  rerender({ session: "" });
+  expect(result.current.approvals).toEqual([]);
+  await settle();
+  expect(result.current.approvals).toEqual([]);
 });
 
 it("unsubscribes and stops the backstop on unmount", async () => {

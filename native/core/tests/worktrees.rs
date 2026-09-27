@@ -1370,6 +1370,25 @@ mod cleanup_failure {
                     .join("worktrees")
                     .join(&f.record.id);
                 fs::create_dir_all(&admin).unwrap();
+                // Git removed the empty parent. Its inode can be immediately
+                // reused, which exercises the different admin-content guard.
+                // Keep that allocation alive if necessary so this fixture
+                // deterministically reaches the replaced-parent boundary.
+                use std::os::unix::fs::MetadataExt;
+                let intent: Value =
+                    serde_json::from_slice(&fs::read(journal(&f)).unwrap()).unwrap();
+                let expected_parent = (
+                    intent["admin_parent_identity"]["dev"].as_u64().unwrap(),
+                    intent["admin_parent_identity"]["ino"].as_u64().unwrap(),
+                );
+                let parent = admin.parent().unwrap();
+                let metadata = fs::metadata(parent).unwrap();
+                if (metadata.dev(), metadata.ino()) == expected_parent {
+                    fs::rename(parent, f.root.path().join("retained-parent-allocation")).unwrap();
+                    fs::create_dir_all(&admin).unwrap();
+                }
+                let metadata = fs::metadata(parent).unwrap();
+                assert_ne!((metadata.dev(), metadata.ino()), expected_parent);
                 fs::write(admin.join("foreign.txt"), "foreign registration data\n").unwrap();
                 refused(&f, "administration parent changed around an occupied ID").await;
                 assert_eq!(

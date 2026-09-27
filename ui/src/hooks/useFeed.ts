@@ -42,6 +42,7 @@ export function isFeedEvent(payload: unknown, kinds: ReadonlySet<string>) {
 
 const same = (a: unknown, b: unknown) =>
   a === b || JSON.stringify(a) === JSON.stringify(b);
+const NO_APPROVALS: Approval[] = [];
 
 export const defaultFeed: FeedDependencies = {
   read: (sessionId) => api.feed(sessionId),
@@ -58,7 +59,16 @@ export function useFeed(
   sessionId: string,
   deps: FeedDependencies = defaultFeed,
 ) {
-  const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [approvalPage, setApprovalPage] = useState({
+    sessionId: "",
+    items: NO_APPROVALS,
+  });
+  // Scope cards during render, before a changed selection's effect/read runs.
+  // Reselecting the same conversation keeps its current pending approvals.
+  const approvals =
+    sessionId && approvalPage.sessionId === sessionId
+      ? approvalPage.items
+      : NO_APPROVALS;
   const [jobs, setJobsState] = useState<Job[]>([]);
   const [waiting, setWaiting] = useState<string[]>([]);
   const session = useRef(sessionId);
@@ -90,10 +100,17 @@ export function useFeed(
         try {
           const page = await dependencies.current.read(selected);
           if (!live.current) return;
-          if (selected === session.current)
-            setApprovals((prev) =>
-              same(prev, page.approvals) ? prev : page.approvals,
+          if (selected === session.current) {
+            const scoped = selected
+              ? page.approvals.filter((a) => a.session_id === selected)
+              : NO_APPROVALS;
+            const items = scoped.length ? scoped : NO_APPROVALS;
+            setApprovalPage((prev) =>
+              prev.sessionId === selected && same(prev.items, items)
+                ? prev
+                : { sessionId: selected, items },
             );
+          }
           setJobs(page.jobs);
           const nextWaiting = page.waiting || [];
           setWaiting((prev) => (same(prev, nextWaiting) ? prev : nextWaiting));
@@ -108,8 +125,6 @@ export function useFeed(
     reading.current = run;
     return run;
   }, [setJobs]);
-
-  const clearApprovals = useCallback(() => setApprovals([]), []);
 
   useEffect(() => {
     live.current = true;
@@ -145,5 +160,5 @@ export function useFeed(
     void refresh();
   }, [sessionId, refresh]);
 
-  return { approvals, jobs, waiting, setJobs, refresh, clearApprovals };
+  return { approvals, jobs, waiting, setJobs, refresh };
 }

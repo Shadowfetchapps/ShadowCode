@@ -45,6 +45,34 @@ async function choose(name: RegExp) {
   await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
 }
 
+it("keeps a pending approval when the selected conversation is opened again", async () => {
+  await boot();
+  const pending = fake.requestApproval({
+    session_id: "s1",
+    task_id: "command-task",
+    command: "sleep 45",
+    arguments: { command: "sleep 45" },
+  });
+  const card = () =>
+    document.querySelector(`[data-approval-id="${pending.id}"]`);
+  await waitFor(() => expect(card()).not.toBeNull());
+  const selected = document.querySelector<HTMLButtonElement>(
+    'button[data-session-id="s1"][aria-current="page"]',
+  )!;
+  expect(selected).not.toBeNull();
+  const reads = fake.log.filter((r) => r.path.startsWith("/api/feed?")).length;
+  // This sends no new engine event and does not advance the 15s backstop.
+  await act(async () => fireEvent.click(selected));
+  expect(screen.queryByText("Opening task…")).toBeNull();
+  expect(fake.state.approvals.map((a: { id: string }) => a.id)).toContain(
+    pending.id,
+  );
+  expect(fake.log.filter((r) => r.path.startsWith("/api/feed?")).length).toBe(
+    reads,
+  );
+  expect(card()).not.toBeNull();
+});
+
 it("disables Send until a ready row is chosen and remembers it per conversation", async () => {
   await boot();
   fireEvent.change(prompt(), { target: { value: "Fix the add function" } });
