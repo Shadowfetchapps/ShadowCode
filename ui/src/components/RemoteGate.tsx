@@ -71,7 +71,7 @@ export function RemoteGate({ children }: { children: ReactNode }) {
   if (state.kind === "ready") return <>{children}</>;
   return (
     <main className="remote-gate" aria-labelledby="remote-gate-title">
-      <img src="/icon.svg" alt="" className="welcome-mark" />
+      <img src="/icon-192.png" alt="" className="welcome-mark" />
       {state.kind === "checking" && (
         <>
           <h1 id="remote-gate-title">ShadowCode</h1>

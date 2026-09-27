@@ -45,7 +45,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
       className="wizard"
       onClose={() => undefined}
     >
-      <img src="/icon.svg" alt="" className="welcome-mark" />
+      <img src="/icon-192.png" alt="" className="welcome-mark" />
       <h2 id="onboarding-title">Welcome to ShadowCode</h2>
       <p className="hint">
         Open a project to start. You choose a model for each conversation in the

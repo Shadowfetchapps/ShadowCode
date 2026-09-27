@@ -220,7 +220,7 @@ export function Sidebar({
   return (
     <aside className="sidebar" aria-label="Projects and tasks">
       <div className="brand">
-        <img src="/icon.svg" alt="" />
+        <img src="/icon-192.png" alt="" />
         <strong>ShadowCode</strong>
         <span className="grow" />
         <button

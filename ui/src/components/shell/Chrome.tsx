@@ -16,7 +16,7 @@ export function BootScreen({
 }) {
   return (
     <div className="boot">
-      <img src="/icon.svg" alt="" />
+      <img src="/icon-192.png" alt="" />
       <span>Opening your workspace…</span>
       <LoaderCircle className="spin" size={18} aria-hidden="true" />
       {timedOut && (

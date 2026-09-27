@@ -1,5 +1,9 @@
 # ShadowCode
 
+<p align="center">
+  <img src="assets/branding/shadowcode-original.png" alt="ShadowCode — One Harness. All Models." width="420" />
+</p>
+
 ShadowCode is a Linux desktop coding agent. Open a project, pick a model,
 describe the change, watch the agent work, then review the diff.
 

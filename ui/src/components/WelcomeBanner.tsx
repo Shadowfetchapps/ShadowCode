@@ -16,7 +16,7 @@ export function WelcomeBanner({
 }) {
   return (
     <div className="welcome">
-      <img src="/icon.svg" alt="" className="welcome-mark" />
+      <img src="/icon-192.png" alt="" className="welcome-mark" />
       <h1>What should we work on?</h1>
       <div className="welcome-suggestions" aria-label="Suggestions">
         {SUGGESTIONS.map((s) => (
