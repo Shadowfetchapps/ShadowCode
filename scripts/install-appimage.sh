@@ -17,7 +17,9 @@
 #     is restored if a later step fails or a handled signal interrupts install.
 #   * Installers are serialized. Different bytes cannot replace an already
 #     installed version. A recorded, unchanged pre-activation interruption is
-#     recovered on retry or with --recover; ambiguous backups are preserved.
+#     recovered on retry or with --recover. An activation-started crash is also
+#     recoverable while every recorded launcher/desktop integration is unchanged;
+#     ambiguous or changed state is preserved for review.
 #   * Settings and task history are never touched. Previous ShadowCode
 #     AppImages are removed only after success.
 set -euo pipefail
@@ -66,6 +68,17 @@ flock -n "$INSTALL_LOCK" || fail 'Another ShadowCode install is already running.
 
 exists() { [[ -e "$1" || -L "$1" ]]; }
 file_hash() { [[ -f "$1" && ! -L "$1" ]] && sha256sum < "$1" | awk '{print $1}'; }
+# Fingerprint an optional integration file without following a leaf symlink.
+# The mode is part of a regular file's identity; unknown file types fail closed.
+integration_fingerprint() {
+  if ! exists "$1"; then printf '%s\n' -
+  elif [[ -L "$1" ]]; then
+    { printf 'link\0'; readlink -z -- "$1"; } | sha256sum | awk '{print $1}'
+  elif [[ -f "$1" ]]; then
+    { printf 'file\0%s\0' "$(stat -c '%f' -- "$1")"; sha256sum < "$1"; } | sha256sum | awk '{print $1}'
+  else return 1
+  fi
+}
 # Bind names, entry types, modes, file bytes and symlink targets without
 # following symlinks. Timestamps are deliberately excluded: renames and reads
 # must not make the recorded runtime cease to match itself.
@@ -110,7 +123,10 @@ recover_install() {
   candidate="$(read_field candidate)"; candidate_hash="$(read_field candidate-sha256)"
   existed="$(read_field candidate-existed)"; new_hash="$(read_field new-runtime-sha256)"
   stage_name="$(read_field stage)"
-  [[ ( "$schema" == 1 || "$schema" == 2 ) && "$phase" == prepared ]] || recovery_refusal 'unsupported intent or activation already started'
+  [[ ( "$schema" == 1 || "$schema" == 2 || "$schema" == 3 ) && ( "$phase" == prepared || ( "$schema" == 3 && "$phase" == activation_started ) ) ]] || recovery_refusal 'unsupported intent or activation already started'
+  if [[ "$schema" == 3 ]]; then
+    [[ "$(read_field bin-root)" == "$(realpath -- "$BIN")" && "$(read_field applications-root)" == "$(realpath -- "$DATA/applications")" && "$(read_field icons-root)" == "$(realpath -- "$DATA/icons/hicolor/scalable/apps")" ]] || recovery_refusal 'launcher or desktop installation root changed'
+  fi
   if [[ "$schema" == 1 ]] && exists "$STATE"; then recovery_refusal 'legacy intent conflicts with authenticated state'; fi
   [[ "$candidate" =~ ^ShadowCode-[0-9]+\.[0-9]+\.[0-9]+-x86_64\.AppImage$ && "$candidate_hash" =~ ^[a-f0-9]{64}$ && "$new_hash" =~ ^[a-f0-9]{64}$ ]] || recovery_refusal 'invalid candidate identity'
   [[ "$had" =~ ^[01]$ && "$existed" =~ ^[01]$ && "$stage_name" =~ ^\.shadowcode-install\.[A-Za-z0-9]{6}$ ]] || recovery_refusal 'invalid transaction identity'
@@ -148,8 +164,23 @@ recover_install() {
   else
     [[ "$previous_hash" == - && ( "$live_hash" == - || "$live_hash" == "$new_hash" ) ]] || recovery_refusal 'unexpected runtime or backup'
   fi
-  if [[ "$schema" == 2 ]]; then
+  if [[ "$schema" == 2 || "$schema" == 3 ]]; then
     validate_recovery_state "$stage" "$candidate" "$candidate_hash" "$existed" "$old_hash" "$live_hash" "$previous_hash"
+  fi
+  if [[ "$phase" == activation_started ]]; then
+    local name location expected actual
+    for name in shadow shadowcode icon desktop; do
+      case "$name" in
+        shadow) location="$BIN/shadow" ;;
+        shadowcode) location="$BIN/shadowcode" ;;
+        icon) location="$DATA/icons/hicolor/scalable/apps/shadow-agent.svg" ;;
+        desktop) location="$DATA/applications/shadow-agent.desktop" ;;
+      esac
+      expected="$(read_field "integration-$name")"
+      [[ "$expected" == - || "$expected" =~ ^[a-f0-9]{64}$ ]] || recovery_refusal 'invalid integration identity'
+      actual="$(integration_fingerprint "$location")" || recovery_refusal "$name integration cannot be identified"
+      [[ "$actual" == "$expected" ]] || recovery_refusal "$name integration changed after activation began"
+    done
   fi
   # All identities are checked before any recovery mutation. Preserve the
   # candidate until restoration succeeds, including if recovery is killed.
@@ -308,14 +339,25 @@ fi
 OLD_RUNTIME_HASH=-
 [[ "$HAD_RUNTIME" == 0 ]] || OLD_RUNTIME_HASH="$(runtime_hash "$LIB")" || fail 'Prior runtime cannot be identified.'
 NEW_RUNTIME_HASH="$(runtime_hash "$NEW_RUNTIME")" || fail 'Candidate runtime cannot be identified.'
+SHADOW_INTEGRATION="$(integration_fingerprint "$BIN/shadow")" || fail 'Existing shadow launcher cannot be identified.'
+SHADOWCODE_INTEGRATION="$(integration_fingerprint "$BIN/shadowcode")" || fail 'Existing shadowcode launcher cannot be identified.'
+ICON_INTEGRATION="$(integration_fingerprint "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg")" || fail 'Existing desktop icon cannot be identified.'
+DESKTOP_INTEGRATION="$(integration_fingerprint "$DATA/applications/shadow-agent.desktop")" || fail 'Existing desktop entry cannot be identified.'
 [[ "$(file_hash "$SOURCE")" == "$ACTUAL" ]] || fail 'AppImage changed during validation.'
 prepare_accepted_record
 JOURNAL_TEMP="$(mktemp -d "$(dirname "$LIB")/.shadowcode-intent.XXXXXX")"
 write_field() { printf '%s\n' "$2" > "$JOURNAL_TEMP/$1"; chmod 600 "$JOURNAL_TEMP/$1"; }
-write_field schema 2
+write_field schema 3
 write_field phase prepared
 write_field apps-root "$(realpath -- "$APPS")"
 write_field library-root "$(realpath -- "$(dirname "$LIB")")"
+write_field bin-root "$(realpath -- "$BIN")"
+write_field applications-root "$(realpath -- "$DATA/applications")"
+write_field icons-root "$(realpath -- "$DATA/icons/hicolor/scalable/apps")"
+write_field integration-shadow "$SHADOW_INTEGRATION"
+write_field integration-shadowcode "$SHADOWCODE_INTEGRATION"
+write_field integration-icon "$ICON_INTEGRATION"
+write_field integration-desktop "$DESKTOP_INTEGRATION"
 write_field prior-link "${PREVIOUS_LINK:--}"
 write_field prior-app-sha256 "$PRIOR_HASH"
 write_field had-runtime "$HAD_RUNTIME"

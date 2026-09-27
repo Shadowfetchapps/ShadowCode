@@ -246,6 +246,13 @@ case "$SHADOW_TEST_FAULT" in
       echo 'Injected recovery rename failure' >&2
       exit 76
     fi ;;
+  after-link-kill)
+    if [[ "$source_path" == "$HOME/Applications/.ShadowCode.AppImage.pending" && "$target_path" == "$HOME/Applications/ShadowCode.AppImage" ]]; then
+      "$SHADOW_TEST_REAL_MV" "$@"
+      echo 'Injected KILL after active link replacement' >&2
+      kill -KILL "$PPID"
+      exit 0
+    fi ;;
 esac
 exec "$SHADOW_TEST_REAL_MV" "$@"
 WRAPPER
@@ -407,11 +414,25 @@ test ! -e "$HOME/Applications/ShadowCode-0.28.5-x86_64.AppImage"
 mv "$SCRATCH/prior-runtime" "$LIB"
 mv "$SCRATCH/prior-active-link" "$HOME/Applications/ShadowCode.AppImage"
 
-# 18. Activation may touch desktop metadata. It is deliberately outside this
-# bounded automatic recovery claim, even if the old link still looks intact.
+# 18. A crash at activation's first durable marker is recoverable only while
+# the active link and all four recorded launcher/desktop files are unchanged.
+cp -p "$XDG_DATA_HOME/applications/shadow-agent.desktop" "$SCRATCH/prior-desktop"
 expect_refusal 'killed at activation boundary' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=after-activation-kill "$INSTALLER" "$NEXT"
-expect_refusal 'activation needs manual review' "$INSTALLER" --recover
-grep -Fq 'activation already started' "$SCRATCH/refused.txt"
+printf 'external edit\n' >> "$XDG_DATA_HOME/applications/shadow-agent.desktop"
+expect_refusal 'changed desktop after activation' "$INSTALLER" --recover
+grep -Fq 'desktop integration changed after activation began' "$SCRATCH/refused.txt"
+test -d "$JOURNAL"
+grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
+cp -p "$SCRATCH/prior-desktop" "$XDG_DATA_HOME/applications/shadow-agent.desktop"
+"$INSTALLER" --recover > "$SCRATCH/recovered-activation.txt"
+grep -Fq 'Recovered the previous runtime and AppImage' "$SCRATCH/recovered-activation.txt"
+assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
+
+# 19. Once the active link changes, the old installer cannot safely infer
+# whether desktop/launcher activation was completed. Preserve for review.
+expect_refusal 'killed after link replacement' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=after-link-kill "$INSTALLER" "$NEXT"
+expect_refusal 'changed active link needs manual review' "$INSTALLER" --recover
+grep -Fq 'prior AppImage changed' "$SCRATCH/refused.txt"
 test -d "$JOURNAL"
 grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
 test "$(cat "$XDG_DATA_HOME/shadow-agent/profile.txt")" = 'keep this profile data'

@@ -70,6 +70,7 @@ boundary=''
 [[ "$target_path" != "$HOME/.local/lib/shadowcode.previous" ]] || boundary=old-runtime
 [[ "$source_path" != */squashfs-root/usr/lib/shadowcode ]] || boundary=new-runtime
 [[ "$source_path" != "$HOME/.local/lib/.shadowcode-install-intent/phase.pending" ]] || boundary=activation
+[[ "$target_path" != "$HOME/Applications/ShadowCode.AppImage" ]] || boundary=link
 if [[ "$boundary" == "$AUTH_FAULT" && "$AUTH_FAULT_MODE" == fail ]]; then echo "Injected failure at $boundary" >&2; exit 74; fi
 /usr/bin/mv "$@"
 if [[ "$boundary" == "$AUTH_FAULT" && "$AUTH_FAULT_MODE" == kill ]]; then echo "Injected SIGKILL at $boundary" >&2; kill -KILL "$PPID"; fi
@@ -143,11 +144,29 @@ test('failed accepted-pointer publication does not mutate the previous runtime a
   assert.equal(await accepted(f), prior); passed(f.run(['--recover']));
   assert.equal(await accepted(f), prior); assert.equal(await readlink(path.join(f.home, 'Applications/ShadowCode.AppImage')), 'ShadowCode-0.28.0-x86_64.AppImage');
 });
-test('activation-stage interruption stays preserved for manual recovery', async t => {
+test('activation marker recovers only while launcher and desktop identities remain unchanged', async t => {
   const f = await fixture(t), first = await candidate(f), next = await candidate(f, '0.28.1');
   passed(f.run([first])); const faults = await faultWrapper(f);
   refused(f.run([next], { ...faults, AUTH_FAULT: 'activation' })); const receipt = await accepted(f);
-  const result = f.run(['--recover']); refused(result); assert.match(result.stderr, /activation already started/);
+  const schema = path.join(f.journal, 'schema');
+  await writeFile(schema, '2\n');
+  const legacy = f.run(['--recover']); refused(legacy); assert.match(legacy.stderr, /activation already started/);
+  await writeFile(schema, '3\n');
+  const desktop = path.join(f.home, '.local/share/applications/shadow-agent.desktop');
+  const prior = await readFile(desktop, 'utf8');
+  await writeFile(desktop, `${prior}external edit\n`);
+  const changed = f.run(['--recover']); refused(changed); assert.match(changed.stderr, /desktop integration changed after activation began/);
+  await stat(f.journal); await stat(`${f.library}.previous`);
+  await writeFile(desktop, prior);
+  passed(f.run(['--recover'])); assert.equal(await accepted(f), receipt);
+  assert.equal(await readlink(path.join(f.home, 'Applications/ShadowCode.AppImage')), 'ShadowCode-0.28.0-x86_64.AppImage');
+  await missing(f.journal); await missing(`${f.library}.previous`);
+});
+test('interruption after active-link replacement preserves the ambiguous installation for review', async t => {
+  const f = await fixture(t), first = await candidate(f), next = await candidate(f, '0.28.1');
+  passed(f.run([first])); const faults = await faultWrapper(f);
+  refused(f.run([next], { ...faults, AUTH_FAULT: 'link' })); const receipt = await accepted(f);
+  const result = f.run(['--recover']); refused(result); assert.match(result.stderr, /prior AppImage changed/);
   assert.equal(await accepted(f), receipt); await stat(f.journal); await stat(`${f.library}.previous`);
 });
 test('state-pointer traversal and receipt tampering refuse execution and preserve evidence', async t => {
