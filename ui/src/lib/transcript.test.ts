@@ -11,6 +11,96 @@ const event = (
 const messages = (items: ReturnType<typeof replay>["items"]) =>
   items.filter((item) => item.kind !== "summary");
 describe("durable transcript", () => {
+  it("separates Cursor's earlier permission reason from command output and keeps failures red", () => {
+    const output = {
+      status: "completed",
+      input: { command: "python3 -m unittest -q" },
+      content: ["Not in allowlist: python3"],
+      cursor_execution: { exit_code: 0 },
+      raw_output: { exitCode: 0, stdout: "", stderr: "Ran 5 tests\nOK" },
+      raw_output_format: "json",
+      raw_output_truncated: false,
+      acp_provenance: {
+        schema_version: 1,
+        history_complete: true,
+        content: { source: "permission_request", phase: "pending" },
+        raw_output: {
+          source: "tool_update",
+          phase: "completed",
+          explicit_terminal: true,
+        },
+        permission: {
+          state: "resolved",
+          decision: "allow_once",
+          current_operation_matches: true,
+        },
+      },
+    };
+    const rows = [
+      event(1, "agent.started", { task: "Test" }),
+      event(2, "tool.started", {
+        tool: "cursor.execute",
+        call_id: "cursor-call",
+      }),
+      event(3, "tool.completed", {
+        tool: "cursor.execute",
+        call_id: "cursor-call",
+        success: true,
+        output,
+      }),
+    ];
+    const result = replay(rows);
+    const card = result.items.find((i) => i.kind === "tool");
+    expect(card).toMatchObject({ text: "Command result · exit 0", ok: true });
+    if (card?.kind !== "tool") throw new Error("missing tool card");
+    expect(card.fullOutput).toContain(
+      "Earlier approval reason\nNot in allowlist: python3",
+    );
+    expect(card.fullOutput).toContain(
+      "Client permission decision\nApproved once",
+    );
+    expect(card.fullOutput).toContain("Standard error\nRan 5 tests\nOK");
+    const failed = replay([
+      ...rows.slice(0, 2),
+      event(3, "tool.completed", {
+        tool: "cursor.execute",
+        call_id: "cursor-call",
+        success: true,
+        output: {
+          ...output,
+          cursor_execution: { exit_code: 7 },
+          raw_output: "clipped output",
+          raw_output_format: "json_text_preview",
+          raw_output_truncated: true,
+        },
+      }),
+    ]);
+    expect(failed.items.find((i) => i.kind === "tool")).toMatchObject({
+      ok: false,
+      text: "Command result · exit 7",
+    });
+    expect(failed.activity.one.calls[0].ok).toBe(false);
+    expect(failed.activity.one.calls[0].output).toContain(
+      "Raw output preview (truncated)",
+    );
+    const historical = replay([
+      ...rows.slice(0, 2),
+      event(3, "tool.completed", {
+        tool: "cursor.execute",
+        call_id: "cursor-call",
+        success: true,
+        output: {
+          ...output,
+          acp_provenance: undefined,
+          cursor_execution: undefined,
+        },
+      }),
+    ]);
+    const oldCard = historical.items.find((i) => i.kind === "tool");
+    if (oldCard?.kind !== "tool") throw new Error("missing old tool card");
+    expect(oldCard.fullOutput).not.toContain("Earlier approval reason");
+    expect(oldCard.fullOutput).toContain("Not in allowlist: python3");
+  });
   it("preserves running state during queue changes and moves each prompt to its execution turn", () => {
     const started = replay([
       event(1, "user.message", { text: "First" }),

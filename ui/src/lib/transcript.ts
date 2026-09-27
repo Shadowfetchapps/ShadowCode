@@ -21,6 +21,7 @@ import { keyRows } from "./rowKeys";
 import { localPhase } from "./localProgress";
 import { parseLocalRuntimeReceipt } from "./provenance";
 import { parseTimings } from "./timing";
+import { cursorCommandOutput } from "./vendorOutput";
 
 const ROUTE_PRODUCTS: Record<string, string> = {
   "cli:codex": "Codex",
@@ -747,20 +748,24 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
       objectFields(args?.input) ||
       args;
     const tool = String(p.tool);
+    const vendorOutput = cursorCommandOutput(tool, p.output);
+    const success = Boolean(p.success) && !vendorOutput?.failed;
     const previous = index >= 0 ? items[index] : undefined;
     const card: ChatItem = {
       kind: "tool",
       tool,
-      text: String(p.output_preview || p.error || ""),
-      fullOutput: String(
-        p.output_full ||
-          (p.output ? JSON.stringify(p.output, null, 2) : "") ||
-          p.output_preview ||
-          p.error ||
-          "",
-      ),
+      text: vendorOutput?.text || String(p.output_preview || p.error || ""),
+      fullOutput:
+        vendorOutput?.fullOutput ||
+        String(
+          p.output_full ||
+            (p.output ? JSON.stringify(p.output, null, 2) : "") ||
+            p.output_preview ||
+            p.error ||
+            "",
+        ),
       live: false,
-      ok: Boolean(p.success),
+      ok: success,
       collapsed: previous?.kind === "tool" ? previous.collapsed : true,
       headline: String(p.headline || p.tool),
       icon: String(p.icon || ""),
@@ -817,7 +822,7 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
             tool,
         ),
         live: false,
-        ok: Boolean(p.success),
+        ok: success,
         output: card.kind === "tool" ? card.fullOutput || card.text : "",
         path,
         command,
@@ -834,7 +839,7 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
           ...a,
           calls,
           changed:
-            step === "editing" && p.success
+            step === "editing" && success
               ? addChanged(a.changed, outputPaths || path)
               : a.changed,
         },

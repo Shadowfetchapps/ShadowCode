@@ -417,6 +417,7 @@ impl CodexAppServerAdapter {
                 self.pending_approvals.insert(key.clone(), method.into());
                 Step::update(Update::Approval(ApprovalPrompt {
                     request_id: key,
+                    tool_identity: params["itemId"].as_str().filter(|id| !id.is_empty()).map(super::approval_tool_identity),
                     kind: "command".into(),
                     tool: "codex.command_execution".into(),
                     command: redact(&command),
@@ -428,6 +429,7 @@ impl CodexAppServerAdapter {
                 self.pending_approvals.insert(key.clone(), method.into());
                 Step::update(Update::Approval(ApprovalPrompt {
                     request_id: key,
+                    tool_identity: params["itemId"].as_str().filter(|id| !id.is_empty()).map(super::approval_tool_identity),
                     kind: "file_change".into(),
                     tool: "codex.file_change".into(),
                     command: format!(
@@ -455,6 +457,7 @@ impl CodexAppServerAdapter {
                 self.pending_approvals.insert(key.clone(), method.into());
                 Step::update(Update::Approval(ApprovalPrompt {
                     request_id: key,
+                    tool_identity: None,
                     kind: "command".into(),
                     tool: "codex.command_execution".into(),
                     command: redact(&command),
@@ -466,6 +469,7 @@ impl CodexAppServerAdapter {
                 self.pending_approvals.insert(key.clone(), method.into());
                 Step::update(Update::Approval(ApprovalPrompt {
                     request_id: key,
+                    tool_identity: None,
                     kind: "file_change".into(),
                     tool: "codex.file_change".into(),
                     command: "Apply patch".into(),
@@ -481,6 +485,7 @@ impl CodexAppServerAdapter {
                 self.pending_approvals.insert(key.clone(), method.into());
                 Step::update(Update::Approval(ApprovalPrompt {
                     request_id: key,
+                    tool_identity: None,
                     kind: "permissions".into(),
                     tool: "codex.permissions".into(),
                     command: format!(

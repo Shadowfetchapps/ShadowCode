@@ -209,6 +209,10 @@ pub fn is_cli_provider(provider: &str) -> bool {
 pub struct ApprovalPrompt {
     /// Opaque protocol-level id the adapter needs to answer the request.
     pub request_id: String,
+    /// Internal fixed-size correlation for tool retirement. Kept outside
+    /// redacted display arguments and never serialized or accepted from JSON.
+    #[serde(skip)]
+    pub(super) tool_identity: Option<[u8; 32]>,
     /// `command`, `file_change`, `permissions`, or `tool`.
     pub kind: String,
     /// Tool label shown in the approval card, e.g. `codex.command_execution`.
@@ -217,6 +221,11 @@ pub struct ApprovalPrompt {
     pub command: String,
     pub reason: String,
     pub arguments: Value,
+}
+
+pub(super) fn approval_tool_identity(id: &str) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(id.as_bytes()).into()
 }
 
 /// How ShadowCode answers a vendor permission prompt.
@@ -693,4 +702,32 @@ pub(crate) fn redact(text: &str) -> String {
 pub(crate) fn redact_value(mut value: Value) -> Value {
     crate::redaction::redact_value(&mut value);
     value
+}
+
+#[cfg(test)]
+mod approval_identity_tests {
+    use super::*;
+
+    #[test]
+    fn correlation_is_distinct_and_never_serialized_or_deserialized() {
+        let first = approval_tool_identity("tool-fixture-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890");
+        assert_ne!(
+            first,
+            approval_tool_identity("tool-fixture-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567891")
+        );
+        let prompt = ApprovalPrompt {
+            request_id: "1".into(),
+            tool_identity: Some(first),
+            kind: "command".into(),
+            tool: "cursor.execute".into(),
+            command: "true".into(),
+            reason: String::new(),
+            arguments: serde_json::json!({}),
+        };
+        let mut encoded = serde_json::to_value(&prompt).unwrap();
+        assert!(encoded.get("tool_identity").is_none());
+        encoded["tool_identity"] = serde_json::json!(vec![7; 32]);
+        let decoded: ApprovalPrompt = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.tool_identity.is_none());
+    }
 }

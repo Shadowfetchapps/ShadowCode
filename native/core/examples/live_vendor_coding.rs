@@ -267,27 +267,86 @@ fn antigravity_raw_test_output<'a>(output: &'a Value, project: &Path) -> Option<
         // replaced by a successful-looking structured result.
         return None;
     }
+    unittest_five_summary(text).then_some(text)
+}
+
+fn unittest_five_summary(text: &str) -> bool {
     let lines: Vec<_> = text.lines().filter(|line| !line.is_empty()).collect();
     if lines.len() != 3
         || lines[0].len() < 3
         || !lines[0].bytes().all(|byte| byte == b'-')
         || lines[2] != "OK"
     {
-        return None;
+        return false;
     }
-    let seconds = lines[1]
-        .strip_prefix("Ran 5 tests in ")?
-        .strip_suffix('s')?;
-    if !seconds
+    let Some(seconds) = lines[1]
+        .strip_prefix("Ran 5 tests in ")
+        .and_then(|s| s.strip_suffix('s'))
+    else {
+        return false;
+    };
+    seconds
         .bytes()
         .all(|byte| byte.is_ascii_digit() || byte == b'.')
-        || !seconds
+        && seconds
             .parse::<f64>()
-            .is_ok_and(|seconds| seconds.is_finite() && seconds >= 0.0)
+            .is_ok_and(|s| s.is_finite() && s >= 0.0)
+}
+
+fn cursor_raw_test_output(output: &Value) -> Option<&str> {
+    // Cursor 2026.09.15's presenter omits shell content on completion. Its
+    // earlier permission reason is retained by ACP; ONLY new adapter-owned
+    // provenance can distinguish that reason from a terminal contradiction.
+    // Historical merged captures remain ambiguous and cannot be upgraded.
+    let provenance = &output["acp_provenance"];
+    let raw_origin = &provenance["raw_output"];
+    if provenance["schema_version"] != 1
+        || provenance["history_complete"] != true
+        || !matches!(
+            raw_origin["source"].as_str(),
+            Some("tool_update" | "tool_call")
+        )
+        || raw_origin["phase"] != "completed"
+        || raw_origin["explicit_terminal"] != true
+        || output["cursor_execution"]["exit_code"] != 0
+        || output["raw_output_format"] != "json"
+        || output["raw_output_truncated"] != false
     {
         return None;
     }
-    Some(text)
+    let permission = &provenance["permission"];
+    let allowed = permission["state"] == "resolved"
+        && matches!(
+            permission["decision"].as_str(),
+            Some("allow_once" | "allow_always")
+        )
+        && permission["current_operation_matches"] == true
+        && raw_origin["after_permission_decision"] == true;
+    if !permission.is_null() && !allowed {
+        return None;
+    }
+    let content = output["content"].as_array()?;
+    if !content.is_empty() {
+        let origin = &provenance["content"];
+        if !allowed
+            || origin["source"] != "permission_request"
+            || origin["phase"] != "pending"
+            || origin["before_permission_decision"] != true
+            || origin["explicit_terminal"] != false
+            || content.as_slice() != [json!("Not in allowlist: python3")]
+        {
+            return None;
+        }
+    }
+    let raw = output["raw_output"].as_object()?;
+    if raw.len() != 3
+        || raw.get("exitCode")?.as_i64() != Some(0)
+        || !raw.get("stdout")?.as_str()?.is_empty()
+    {
+        return None;
+    }
+    let text = raw.get("stderr")?.as_str()?;
+    unittest_five_summary(text).then_some(text)
 }
 
 fn test_receipt(
@@ -352,21 +411,22 @@ fn test_receipt(
                 if tool != format!("{}.execute", vendor.id())
                     || payload["output"]["tool_kind"] != "execute"
                     || payload["output"]["status"] != "completed"
-                    || payload["output"]["content"]
-                        .as_array()
-                        .is_some_and(|content| {
-                            content.iter().filter_map(Value::as_str).any(|text| {
-                                let text = text.to_ascii_lowercase();
-                                [
-                                    "not in allowlist:",
-                                    "denied by user",
-                                    "rejected by user",
-                                    "tool execution failed",
-                                ]
-                                .iter()
-                                .any(|denial| text.contains(denial))
-                            })
-                        })
+                    || (vendor != Vendor::Cursor
+                        && payload["output"]["content"]
+                            .as_array()
+                            .is_some_and(|content| {
+                                content.iter().filter_map(Value::as_str).any(|text| {
+                                    let text = text.to_ascii_lowercase();
+                                    [
+                                        "not in allowlist:",
+                                        "denied by user",
+                                        "rejected by user",
+                                        "tool execution failed",
+                                    ]
+                                    .iter()
+                                    .any(|denial| text.contains(denial))
+                                })
+                            }))
                     || !cwd_matches(&latest, tool, project)
                     || tool_command(&latest, tool)
                         .is_none_or(|command| command.trim() != CHECK_COMMAND)
@@ -379,8 +439,13 @@ fn test_receipt(
             // Only captured tool output is execution evidence. Typed input,
             // descriptions and titles can also contain apparent test results.
             let mut source = "captured_content";
-            let output = if vendor == Vendor::Antigravity
-                && payload["output"].get("raw_output").is_some()
+            let output = if vendor == Vendor::Cursor {
+                source = "cursor_provenanced_structured_raw_output";
+                let Some(text) = cursor_raw_test_output(&payload["output"]) else {
+                    continue;
+                };
+                text.to_owned()
+            } else if vendor == Vendor::Antigravity && payload["output"].get("raw_output").is_some()
             {
                 source = "antigravity_structured_raw_output";
                 let Some(text) = antigravity_raw_test_output(&payload["output"], project) else {
@@ -760,6 +825,208 @@ mod tests {
         let fixture: Value =
             serde_json::from_str(include_str!("support/acp_coding_receipts.json")).unwrap();
         fixture[vendor].as_array().unwrap().clone()
+    }
+
+    fn cursor_protocol_receipt(scenario: &str) -> Vec<Value> {
+        use shadowcode_core::cli_agent::{acp::AcpAdapter, CliAdapter, Update};
+        // Replay the observed protocol shape through the real adapter. This
+        // is synthetic unit evidence, never a rewritten live capture.
+        let captured = captured_receipts("cursor");
+        let prior = &captured[1]["payload"]["output"];
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        let initial = json!({"method":"session/update","params":{"update":{
+            "sessionUpdate":"tool_call","toolCallId":"cursor-fixture","kind":"execute",
+            "status":"pending","rawInput":prior["input"]}}});
+        let permission = json!({"id":1,"method":"session/request_permission","params":{
+            "toolCall":{"toolCallId":"cursor-fixture","kind":"execute","rawInput":prior["input"],"status":"pending",
+                "content":[{"type":"content","content":{"type":"text","text":"Not in allowlist: python3"}}]},
+            "options":if scenario == "unusable" {json!([])} else {json!([{"optionId":"allow","kind":"allow_once"},{"optionId":"reject","kind":"reject_once"}])}}});
+        let permission_first =
+            scenario == "permission_first" || scenario == "permission_first_evicted";
+        let mut start = None;
+        if !permission_first {
+            start = Some(adapter.on_line(&initial.to_string()).unwrap());
+        }
+        if scenario != "no_permission" {
+            adapter.on_line(&permission.to_string()).unwrap();
+        }
+        if !matches!(scenario, "pending" | "unusable" | "no_permission") {
+            adapter.approve("1", scenario == "allowed").unwrap();
+        }
+        if scenario == "reject_then_pending" {
+            let mut second = permission.clone();
+            second["id"] = json!(2);
+            adapter.on_line(&second.to_string()).unwrap();
+        }
+        if scenario == "evicted" || scenario == "permission_first_evicted" {
+            adapter.on_line(&json!({"method":"session/update","params":{"update":{
+                "sessionUpdate":"tool_call_update","toolCallId":"cursor-fixture",
+                "content":[{"type":"content","content":{"type":"text","text":"x".repeat(64_000)}}]}}}).to_string()).unwrap();
+            adapter
+                .on_line(
+                    &json!({"method":"session/update","params":{"update":{
+                "sessionUpdate":"tool_call_update","toolCallId":"cursor-fixture",
+                "kind":"execute","rawInput":prior["input"],"content":[]}}})
+                    .to_string(),
+                )
+                .unwrap();
+        }
+        if permission_first {
+            start = Some(adapter.on_line(&initial.to_string()).unwrap());
+        }
+        let mut terminal = json!({"method":"session/update","params":{"update":{
+            "sessionUpdate":"tool_call_update","toolCallId":"cursor-fixture","status":"completed",
+            "rawOutput":prior["raw_output"]}}});
+        if scenario != "allowed" {
+            terminal["params"]["update"]["content"] = json!([]);
+        }
+        let done = adapter.on_line(&terminal.to_string()).unwrap();
+        let start = start.unwrap();
+        start.updates.into_iter().chain(done.updates).filter_map(|u| match u {
+            Update::ToolStarted {id,name,detail} => Some(json!({"type":"tool.started","payload":{"call_id":id,"tool":name,"arguments":detail}})),
+            Update::ToolCompleted {id,name,success,output} => Some(json!({"type":"tool.completed","payload":{"call_id":id,"tool":name,"success":success,"output":output}})),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn new_cursor_protocol_provenance_qualifies_without_relabeling_historical_capture() {
+        let events = cursor_protocol_receipt("allowed");
+        let receipt = fixture_receipt(&events, Vendor::Cursor, Path::new("/fixture")).unwrap();
+        assert_eq!(
+            receipt["source"],
+            "cursor_provenanced_structured_raw_output"
+        );
+        assert!(fixture_receipt(
+            &captured_receipts("cursor"),
+            Vendor::Cursor,
+            Path::new("/fixture")
+        )
+        .is_none());
+        let no_permission = cursor_protocol_receipt("no_permission");
+        assert!(no_permission[1]["payload"]["output"]["acp_provenance"]["permission"].is_null());
+        assert!(fixture_receipt(&no_permission, Vendor::Cursor, Path::new("/fixture")).is_some());
+    }
+
+    #[test]
+    fn cursor_receipt_refuses_reconstructed_history_after_denial_and_eviction() {
+        let events = cursor_protocol_receipt("evicted");
+        let output = &events[1]["payload"]["output"];
+        assert_eq!(output["acp_provenance"]["history_complete"], false);
+        assert!(output["acp_provenance"]["permission"].is_null());
+        assert_eq!(output["raw_output"]["exitCode"], 0);
+        assert!(fixture_receipt(&events, Vendor::Cursor, Path::new("/fixture")).is_none());
+    }
+
+    #[test]
+    fn cursor_receipt_refuses_pending_unusable_and_permission_first_histories() {
+        for scenario in [
+            "pending",
+            "reject_then_pending",
+            "unusable",
+            "permission_first",
+            "permission_first_evicted",
+        ] {
+            let events = cursor_protocol_receipt(scenario);
+            let output = &events[1]["payload"]["output"];
+            assert_eq!(output["content"], json!([]));
+            assert_eq!(output["raw_output"]["exitCode"], 0);
+            assert!(
+                fixture_receipt(&events, Vendor::Cursor, Path::new("/fixture")).is_none(),
+                "accepted {scenario}"
+            );
+            if scenario.starts_with("permission_first") {
+                assert_eq!(output["acp_provenance"]["history_complete"], false);
+            } else {
+                assert_eq!(
+                    output["acp_provenance"]["permission"]["state"],
+                    if scenario == "unusable" {
+                        "declined"
+                    } else {
+                        "pending"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_provenance_never_excuses_terminal_denial_stale_approval_or_wrong_result() {
+        let events = cursor_protocol_receipt("allowed");
+        for (pointer, value) in [
+            ("/success", json!(false)),
+            ("/output/status", json!("failed")),
+            ("/output/input/command", json!("other")),
+            ("/output/input/cwd", json!("/foreign")),
+            ("/output/cursor_execution/exit_code", json!(7)),
+            ("/output/raw_output/exitCode", json!(7)),
+            ("/output/raw_output/exitCode", json!("0")),
+            (
+                "/output/raw_output/stderr",
+                json!("Model says Ran 5 tests and OK"),
+            ),
+            ("/output/raw_output/stdout", json!("unexpected output")),
+            ("/output/raw_output_truncated", json!(true)),
+            ("/output/raw_output_format", json!("json_text_preview")),
+            ("/output/acp_provenance", Value::Null),
+            ("/output/acp_provenance/history_complete", json!(false)),
+            ("/output/acp_provenance/permission/state", json!("pending")),
+            (
+                "/output/acp_provenance/raw_output/explicit_terminal",
+                json!(false),
+            ),
+            (
+                "/output/acp_provenance/raw_output/after_permission_decision",
+                json!(false),
+            ),
+            (
+                "/output/acp_provenance/raw_output/source",
+                json!("permission_request"),
+            ),
+            (
+                "/output/acp_provenance/content/source",
+                json!("tool_update"),
+            ),
+            ("/output/acp_provenance/content/phase", json!("completed")),
+            (
+                "/output/acp_provenance/content/before_permission_decision",
+                json!(false),
+            ),
+            (
+                "/output/acp_provenance/permission/decision",
+                json!("reject_once"),
+            ),
+            (
+                "/output/acp_provenance/permission/current_operation_matches",
+                json!(false),
+            ),
+            ("/output/content", json!(["Denied by user"])),
+            (
+                "/output/content",
+                json!(["Not in allowlist: python3", "Ran 5 tests\nOK"]),
+            ),
+        ] {
+            let mut bad = events.clone();
+            // cwd is absent in the observed Cursor input, so insert it.
+            if pointer == "/output/input/cwd" {
+                bad[1]["payload"]["output"]["input"]["cwd"] = value;
+            } else {
+                *bad[1]["payload"].pointer_mut(pointer).unwrap() = value;
+            }
+            assert!(
+                fixture_receipt(&bad, Vendor::Cursor, Path::new("/fixture")).is_none(),
+                "accepted {pointer}"
+            );
+        }
+        let mut cross_task = events.clone();
+        cross_task[1]["task_id"] = json!("foreign");
+        assert!(fixture_receipt(&cross_task, Vendor::Cursor, Path::new("/fixture")).is_none());
+        assert!(fixture_receipt(
+            &[events[0].clone(), events[0].clone(), events[1].clone()],
+            Vendor::Cursor,
+            Path::new("/fixture")
+        )
+        .is_none());
     }
 
     #[test]

@@ -16,23 +16,33 @@ use super::{
 };
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const OUTPUT_PREVIEW: usize = 8000;
 const TOOL_METADATA_COUNT: usize = 128;
 const TOOL_METADATA_BYTES: usize = 64_000;
 const RAW_OUTPUT_BYTES: usize = 8000;
+const OBSERVED_TOOL_IDS: usize = 4096;
 
 #[derive(Clone)]
 struct RawToolOutput {
     value: Value,
     truncated: bool,
+    cursor_exit_code: Option<i64>,
 }
 
 impl RawToolOutput {
     fn capture(value: &Value) -> Self {
         // Redact before clipping, including known credential keys: clipping
         // first could leave a token prefix that no longer matches redaction.
+        // Installed Cursor ACP exposes shell success AND failure as this
+        // exact shape, with status "completed" in both cases. Capture the
+        // integer before clipping so a large failing output cannot turn green.
+        let cursor_exit_code = value.as_object().filter(|o| o.len() == 3).and_then(|o| {
+            o.get("stdout")?.as_str()?;
+            o.get("stderr")?.as_str()?;
+            o.get("exitCode")?.as_i64()
+        });
         let mut value = value.clone();
         crate::redaction::redact_known_secrets(&mut value);
         let value = redact_value(value);
@@ -41,6 +51,7 @@ impl RawToolOutput {
             return Self {
                 value,
                 truncated: false,
+                cursor_exit_code,
             };
         }
         // Oversize JSON becomes explicitly labeled JSON text, not a partial
@@ -53,8 +64,33 @@ impl RawToolOutput {
         Self {
             value: Value::String(encoded[..end].to_owned()),
             truncated: true,
+            cursor_exit_code,
         }
     }
+}
+
+// An approval displays proposed changes as well as typed input. Bind those
+// bytes/targets for non-execute operations, including generic tool kinds.
+// Ordinary shell text is diagnostic/output (Cursor retains its pre-approval
+// allowlist reason); it must not turn a later shell result into a new command.
+// A shell's explicit diff proposal is still approval-relevant if present.
+fn operation_identity(tool: &Value) -> Value {
+    let proposal = if tool["kind"] == "execute" {
+        let diffs: Vec<_> = tool["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|block| block["type"] == "diff")
+            .collect();
+        if diffs.is_empty() {
+            Value::Null
+        } else {
+            json!({"content":diffs,"locations":tool["locations"]})
+        }
+    } else {
+        json!({"content":tool["content"],"locations":tool["locations"]})
+    };
+    json!([tool["kind"], tool["rawInput"], proposal])
 }
 
 /// Shown when the Antigravity server has no valid Google sign-in.
@@ -73,9 +109,105 @@ fn error(id: &Value, code: i64, message: &str) -> String {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}).to_string()
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ToolOrigin {
+    Initial,
+    Update,
+    Permission,
+}
+impl ToolOrigin {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Initial => "tool_call",
+            Self::Update => "tool_update",
+            Self::Permission => "permission_request",
+        }
+    }
+}
+#[derive(Clone)]
+struct FieldOrigin {
+    source: ToolOrigin,
+    phase: Option<String>,
+    revision: u64,
+    explicit_terminal: bool,
+}
+#[derive(Clone)]
+struct PermissionBinding {
+    tool_id: String,
+    generation: u64,
+    operation_revision: u64,
+    request_revision: u64,
+}
+#[derive(Clone)]
+struct PermissionDecision {
+    binding: PermissionBinding,
+    kind: &'static str,
+    revision: u64,
+}
+#[derive(Clone)]
+struct ToolEvidence {
+    // Only an explicit initial call starts complete history. Eviction must
+    // never make an earlier denied permission look like no permission asked.
+    history_complete: bool,
+    generation: u64,
+    revision: u64,
+    operation_hash: Option<String>,
+    operation_revision: u64,
+    permission_revision: Option<u64>,
+    permission_usable: bool,
+    content: Option<FieldOrigin>,
+    raw_output: Option<FieldOrigin>,
+    decision: Option<PermissionDecision>,
+}
+impl ToolEvidence {
+    fn matches(&self, binding: &PermissionBinding) -> bool {
+        self.operation_hash.is_some()
+            && self.generation == binding.generation
+            && self.operation_revision == binding.operation_revision
+            && self.permission_revision == Some(binding.request_revision)
+    }
+    fn json(&self) -> Value {
+        let decision = self.decision.as_ref();
+        let field = |origin: &Option<FieldOrigin>| {
+            origin.as_ref().map(|origin| json!({
+            "source": origin.source.label(), "phase": origin.phase,
+            "explicit_terminal": origin.explicit_terminal && origin.revision == self.revision,
+            "before_permission_decision": decision.is_some_and(|d| origin.revision < d.revision),
+            "after_permission_decision": decision.is_some_and(|d| origin.revision > d.revision),
+        }))
+        };
+        json!({
+            "schema_version": 1,
+            "history_complete": self.history_complete,
+            "content": field(&self.content),
+            "raw_output": field(&self.raw_output),
+            "permission": decision.map(|d| json!({
+                "state": "resolved", "decision": d.kind,
+                "current_operation_matches": self.matches(&d.binding),
+            })).or_else(|| self.permission_revision.map(|_| json!({
+                "state": if self.permission_usable { "pending" } else { "declined" },
+                "decision": if self.permission_usable { Value::Null } else { json!("unusable_options") },
+                "current_operation_matches": false,
+            }))),
+        })
+    }
+}
+// This typed sidecar is created only by the adapter; protocol JSON cannot
+// supply provenance, execution status, or permission-correlation flags.
+struct RememberedTool {
+    metadata: Value,
+    raw_output: Option<RawToolOutput>,
+    evidence: Option<ToolEvidence>,
+}
+struct PermissionChoice {
+    id: String,
+    kind: &'static str,
+}
 struct PendingPermission {
-    allow: Option<String>,
-    reject: Option<String>,
+    allow: Option<PermissionChoice>,
+    reject: Option<PermissionChoice>,
+    binding: Option<PermissionBinding>,
+    require_binding: bool,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -108,6 +240,16 @@ pub struct AcpAdapter {
     // At most 128 values of 8,000 serialized bytes; IDs have the existing
     // metadata byte ceiling. These are payload bounds, not heap estimates.
     tool_outputs: HashMap<String, RawToolOutput>,
+    // Small provenance sidecars share the metadata count and ID bounds.
+    // Decisions retain the bounded call ID; revisions distinguish a changed-
+    // then-restored operation. No input or result payload is duplicated.
+    tool_evidence: HashMap<String, ToolEvidence>,
+    evidence_revision: u64,
+    // Hashed IDs are bounded independently of live metadata. A permission-
+    // first or evicted ID must never become a permission-free initial call.
+    // Once full, new histories remain incomplete for the rest of the prompt.
+    observed_tool_ids: HashSet<String>,
+    tool_history_exhausted: bool,
     options: Option<LaunchOptions>,
     prompt_active: bool,
     /// A model switch was sent and not yet answered. Prompts wait for it:
@@ -137,6 +279,10 @@ impl AcpAdapter {
             tool_names: HashMap::new(),
             tool_metadata: HashMap::new(),
             tool_outputs: HashMap::new(),
+            tool_evidence: HashMap::new(),
+            evidence_revision: 0,
+            observed_tool_ids: HashSet::new(),
+            tool_history_exhausted: false,
             options: None,
             prompt_active: false,
             switching: false,
@@ -174,8 +320,13 @@ impl AcpAdapter {
         let id = self.id();
         self.prompt_id = Some(id);
         self.prompt_active = true;
-        self.tool_metadata.clear();
         self.tool_outputs.clear();
+        self.tool_evidence.clear();
+        self.observed_tool_ids.clear();
+        self.tool_history_exhausted = false;
+        self.tool_metadata.clear();
+        self.tool_names.clear();
+        self.pending_permissions.clear();
         let mut prompt = vec![json!({"type":"text","text":text})];
         for image in images {
             prompt.push(json!({
@@ -337,6 +488,10 @@ impl AcpAdapter {
             if Some(id) == self.prompt_id {
                 self.prompt_active = false;
                 self.tool_outputs.clear();
+                self.tool_evidence.clear();
+                self.tool_metadata.clear();
+                self.tool_names.clear();
+                self.pending_permissions.clear();
                 return Ok(Step::update(Update::TurnFailed(format!(
                     "{} could not run the prompt: {text}",
                     self.vendor.id()
@@ -418,6 +573,10 @@ impl AcpAdapter {
         if Some(id) == self.prompt_id {
             self.prompt_active = false;
             self.tool_outputs.clear();
+            self.tool_evidence.clear();
+            self.tool_metadata.clear();
+            self.tool_names.clear();
+            self.pending_permissions.clear();
             let stop = res["stopReason"].as_str().unwrap_or("end_turn");
             return Ok(match stop {
                 "cancelled" => Step::update(Update::TurnCompleted {
@@ -449,29 +608,35 @@ impl AcpAdapter {
         }
         Ok(Step::default())
     }
-    fn remember_tool(&mut self, update: &Value, initial: bool) -> Value {
-        let Some(id) = update["toolCallId"].as_str().filter(|id| !id.is_empty()) else {
-            let mut current = update.clone();
-            if let Some(object) = current.as_object_mut() {
-                object.remove("rawOutputTruncated");
+    fn evidence_id(&mut self) -> u64 {
+        self.evidence_revision = self.evidence_revision.saturating_add(1);
+        self.evidence_revision
+    }
+    fn remember_tool(&mut self, update: &Value, source: ToolOrigin) -> RememberedTool {
+        let initial = source == ToolOrigin::Initial;
+        let id = update["toolCallId"].as_str().filter(|id| !id.is_empty());
+        let first_observation = id.is_some_and(|id| {
+            let digest = crate::workspace::hash(id.as_bytes());
+            if self.observed_tool_ids.contains(&digest) {
+                false
+            } else if self.observed_tool_ids.len() < OBSERVED_TOOL_IDS {
+                self.observed_tool_ids.insert(digest);
+                !self.tool_history_exhausted
+            } else {
+                self.tool_history_exhausted = true;
+                false
             }
-            if let Some(raw) = update.get("rawOutput").filter(|value| !value.is_null()) {
-                let output = RawToolOutput::capture(raw);
-                current["rawOutput"] = output.value;
-                current["rawOutputTruncated"] = json!(output.truncated);
-            }
-            return current;
-        };
+        });
         let mut current = if initial {
             json!({"toolCallId":id})
         } else {
-            self.tool_metadata
-                .get(id)
+            id.and_then(|id| self.tool_metadata.get(id))
                 .cloned()
                 .unwrap_or_else(|| json!({"toolCallId":id}))
         };
-        // ToolCallUpdate omission/null leaves previously reported metadata
-        // unchanged (ACP v1). An explicit empty object/array does replace it.
+        // ToolCallUpdate omission/null leaves previous metadata unchanged
+        // (ACP v1). Explicit empty values replace it. Only protocol fields
+        // enter this view: a peer cannot forge our sidecar or output flags.
         for key in [
             "kind",
             "title",
@@ -484,39 +649,96 @@ impl AcpAdapter {
                 current[key] = value.clone();
             }
         }
-        if serde_json::to_vec(&current).is_ok_and(|bytes| bytes.len() <= TOOL_METADATA_BYTES)
-            && (self.tool_metadata.contains_key(id)
-                || self.tool_metadata.len() < TOOL_METADATA_COUNT)
-        {
-            self.tool_metadata.insert(id.to_owned(), current.clone());
+        let retained = id.is_some_and(|id| {
+            serde_json::to_vec(&current).is_ok_and(|bytes| bytes.len() <= TOOL_METADATA_BYTES)
+                && (self.tool_metadata.contains_key(id)
+                    || self.tool_metadata.len() < TOOL_METADATA_COUNT)
+        });
+        let revision = self.evidence_id();
+        let mut evidence = if retained {
+            let hash = (!current["rawInput"].is_null() && current["kind"].is_string()).then(|| {
+                crate::workspace::hash(operation_identity(&current).to_string().as_bytes())
+            });
+            let mut evidence = (!initial)
+                .then(|| id.and_then(|id| self.tool_evidence.get(id)).cloned())
+                .flatten()
+                .unwrap_or(ToolEvidence {
+                    history_complete: initial && first_observation,
+                    generation: revision,
+                    revision,
+                    operation_hash: None,
+                    operation_revision: revision,
+                    permission_revision: None,
+                    permission_usable: true,
+                    content: None,
+                    raw_output: None,
+                    decision: None,
+                });
+            if evidence.operation_hash != hash {
+                evidence.operation_revision = revision;
+                evidence.operation_hash = hash;
+            }
+            evidence.revision = revision;
+            let origin = FieldOrigin {
+                source,
+                revision,
+                explicit_terminal: source != ToolOrigin::Permission
+                    && matches!(update["status"].as_str(), Some("completed" | "failed")),
+                // Bound this host-retained string; arbitrary status text is
+                // never meaningful provenance for a command result.
+                phase: current["status"]
+                    .as_str()
+                    .filter(|s| matches!(*s, "pending" | "in_progress" | "completed" | "failed"))
+                    .map(str::to_owned),
+            };
+            if update.get("content").is_some_and(|v| !v.is_null()) {
+                evidence.content = Some(origin.clone());
+            }
+            if update.get("rawOutput").is_some_and(|v| !v.is_null()) {
+                evidence.raw_output = Some(origin);
+            }
+            if source == ToolOrigin::Permission {
+                evidence.permission_revision = Some(revision);
+                evidence.permission_usable = true;
+                evidence.decision = None;
+            }
+            Some(evidence)
         } else {
-            // Oversize/new excess entries remain usable in the current frame
-            // but cannot later recover an obsolete cached approval input.
-            self.tool_metadata.remove(id);
+            None
+        };
+        if let Some(id) = id {
+            if retained {
+                self.tool_metadata.insert(id.to_owned(), current.clone());
+                self.tool_evidence
+                    .insert(id.to_owned(), evidence.as_ref().unwrap().clone());
+            } else {
+                // Never recover obsolete input/provenance after eviction.
+                self.tool_metadata.remove(id);
+                self.tool_evidence.remove(id);
+                evidence = None;
+            }
+            if initial {
+                self.tool_outputs.remove(id);
+            }
         }
-        if initial {
-            self.tool_outputs.remove(id);
-        }
-        // ACP rawOutput has the same omission/null semantics as rawInput.
-        // Keep its typed JSON when small enough, independently of content.
         let output = update
             .get("rawOutput")
-            .filter(|value| !value.is_null())
+            .filter(|v| !v.is_null())
             .map(RawToolOutput::capture)
-            .or_else(|| self.tool_outputs.get(id).cloned());
-        if let Some(output) = output {
+            .or_else(|| id.and_then(|id| self.tool_outputs.get(id)).cloned());
+        if let (Some(id), Some(output)) = (id, &output) {
             if id.len() <= TOOL_METADATA_BYTES
                 && (self.tool_outputs.contains_key(id)
                     || self.tool_outputs.len() < TOOL_METADATA_COUNT)
             {
                 self.tool_outputs.insert(id.to_owned(), output.clone());
             }
-            // Add only to this frame's merged view, after approval metadata
-            // has been cached, so output cannot change that cache's budget.
-            current["rawOutput"] = output.value;
-            current["rawOutputTruncated"] = json!(output.truncated);
         }
-        current
+        RememberedTool {
+            metadata: current,
+            raw_output: output,
+            evidence,
+        }
     }
     fn session_update(&mut self, update: &Value) -> Step {
         match update["sessionUpdate"].as_str().unwrap_or("") {
@@ -525,7 +747,8 @@ impl AcpAdapter {
                 _ => Step::default(),
             },
             "tool_call" => {
-                let update = self.remember_tool(update, true);
+                let remembered = self.remember_tool(update, ToolOrigin::Initial);
+                let update = &remembered.metadata;
                 let id = update["toolCallId"].as_str().unwrap_or("").to_owned();
                 let name = format!(
                     "{}.{}",
@@ -546,12 +769,13 @@ impl AcpAdapter {
                     update["status"].as_str(),
                     Some("completed") | Some("failed")
                 ) {
-                    step = step.merge(self.tool_finished(&id, &name, &update));
+                    step = step.merge(self.tool_finished(&id, &name, &remembered));
                 }
                 step
             }
             "tool_call_update" => {
-                let update = self.remember_tool(update, false);
+                let remembered = self.remember_tool(update, ToolOrigin::Update);
+                let update = &remembered.metadata;
                 let id = update["toolCallId"].as_str().unwrap_or("").to_owned();
                 let name = update["kind"]
                     .as_str()
@@ -559,7 +783,9 @@ impl AcpAdapter {
                     .or_else(|| self.tool_names.get(&id).cloned())
                     .unwrap_or_else(|| format!("{}.tool", self.vendor.id()));
                 match update["status"].as_str() {
-                    Some("completed") | Some("failed") => self.tool_finished(&id, &name, &update),
+                    Some("completed") | Some("failed") => {
+                        self.tool_finished(&id, &name, &remembered)
+                    }
                     _ => Step::default(),
                 }
             }
@@ -579,10 +805,22 @@ impl AcpAdapter {
             _ => Step::default(),
         }
     }
-    fn tool_finished(&mut self, id: &str, name: &str, update: &Value) -> Step {
+    fn tool_finished(&mut self, id: &str, name: &str, remembered: &RememberedTool) -> Step {
+        let update = &remembered.metadata;
         self.tool_metadata.remove(id);
         self.tool_outputs.remove(id);
-        let success = update["status"].as_str() == Some("completed");
+        self.tool_evidence.remove(id);
+        self.tool_names.remove(id);
+        let cursor_exit = (self.vendor == Vendor::Cursor && name == "cursor.execute")
+            .then(|| {
+                remembered
+                    .raw_output
+                    .as_ref()
+                    .and_then(|o| o.cursor_exit_code)
+            })
+            .flatten();
+        let success = update["status"].as_str() == Some("completed")
+            && cursor_exit.is_none_or(|code| code == 0);
         let paths: Vec<String> = update["locations"]
             .as_array()
             .into_iter()
@@ -607,18 +845,14 @@ impl AcpAdapter {
             "locations": paths,
             "content": content,
         }));
-        if let Some(raw) = update.get("rawOutput").filter(|value| !value.is_null()) {
-            // All output reaching the merged view is already redacted and
-            // bounded. The missing-ID path skips caching, so bound it here.
-            let captured = if update.get("rawOutputTruncated").is_some() {
-                RawToolOutput {
-                    value: raw.clone(),
-                    truncated: update["rawOutputTruncated"] == true,
-                }
-            } else {
-                RawToolOutput::capture(raw)
-            };
-            output["raw_output"] = captured.value;
+        if let Some(evidence) = &remembered.evidence {
+            output["acp_provenance"] = evidence.json();
+        }
+        if let Some(code) = cursor_exit {
+            output["cursor_execution"] = json!({"exit_code":code});
+        }
+        if let Some(captured) = &remembered.raw_output {
+            output["raw_output"] = captured.value.clone();
             output["raw_output_truncated"] = json!(captured.truncated);
             output["raw_output_format"] = json!(if captured.truncated {
                 "json_text_preview"
@@ -642,6 +876,23 @@ impl AcpAdapter {
         step
     }
     fn permission_request(&mut self, id: &Value, params: &Value) -> Step {
+        let key = id.to_string();
+        if self.pending_permissions.remove(&key).is_some() {
+            // The outstanding user decision belongs to the original request.
+            // A malformed/question duplicate may not emit Approval at all, so
+            // reject it here before any early return or replacement binding.
+            return Step {
+                send: vec![error(
+                    id,
+                    -32600,
+                    "Duplicate outstanding permission request ID",
+                )],
+                updates: vec![Update::TurnFailed(format!(
+                    "{} reused an outstanding permission request ID; no approval was granted",
+                    self.vendor.id()
+                ))],
+            };
+        }
         // Antigravity sends questions for the user through the permission
         // method with an `interaction_` tool call id; their options are
         // answers, not approvals. ShadowCode can't show them yet.
@@ -659,20 +910,49 @@ impl AcpAdapter {
                 ))],
             };
         }
-        let key = id.to_string();
+        // Record even an unusable request: declining malformed options must
+        // not later look as if the call never required permission.
+        let remembered = self.remember_tool(&params["toolCall"], ToolOrigin::Permission);
         let mut allow = None;
         let mut reject = None;
         for option in params["options"].as_array().into_iter().flatten() {
-            let option_id = option["optionId"].as_str().map(str::to_owned);
+            let Some(option_id) = option["optionId"].as_str() else {
+                continue;
+            };
             match option["kind"].as_str() {
-                Some("allow_once") => allow = option_id.or(allow),
-                Some("allow_always") if allow.is_none() => allow = option_id,
-                Some("reject_once") => reject = option_id.or(reject),
-                Some("reject_always") if reject.is_none() => reject = option_id,
+                Some("allow_once") => {
+                    allow = Some(PermissionChoice {
+                        id: option_id.into(),
+                        kind: "allow_once",
+                    })
+                }
+                Some("allow_always") if allow.is_none() => {
+                    allow = Some(PermissionChoice {
+                        id: option_id.into(),
+                        kind: "allow_always",
+                    })
+                }
+                Some("reject_once") => {
+                    reject = Some(PermissionChoice {
+                        id: option_id.into(),
+                        kind: "reject_once",
+                    })
+                }
+                Some("reject_always") if reject.is_none() => {
+                    reject = Some(PermissionChoice {
+                        id: option_id.into(),
+                        kind: "reject_always",
+                    })
+                }
                 _ => {}
             }
         }
         if allow.is_none() && reject.is_none() {
+            if let Some(tool_id) = params["toolCall"]["toolCallId"].as_str() {
+                if let Some(evidence) = self.tool_evidence.get_mut(tool_id) {
+                    evidence.permission_usable = false;
+                }
+            }
             return Step {
                 send: vec![error(
                     id,
@@ -684,17 +964,41 @@ impl AcpAdapter {
                 )],
             };
         }
-        self.pending_permissions
-            .insert(key.clone(), PendingPermission { allow, reject });
-        let tool = self.remember_tool(&params["toolCall"], false);
+        let tool = &remembered.metadata;
         let title = tool["title"].as_str().unwrap_or("tool call");
         let kind = tool["kind"].as_str().unwrap_or("tool");
+        let binding = remembered
+            .evidence
+            .as_ref()
+            .filter(|e| e.operation_hash.is_some())
+            .map(|e| PermissionBinding {
+                tool_id: tool["toolCallId"].as_str().unwrap_or_default().to_owned(),
+                generation: e.generation,
+                operation_revision: e.operation_revision,
+                request_revision: e.revision,
+            });
+        self.pending_permissions.insert(
+            key.clone(),
+            PendingPermission {
+                allow,
+                reject,
+                binding,
+                // Cursor approvals must refer to a retained typed operation.
+                // Requiring this for every kind prevents a generic/read call
+                // from changing into execute while its approval is open.
+                require_binding: self.vendor == Vendor::Cursor,
+            },
+        );
         let command = tool["rawInput"]["command"]
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| title.to_owned());
         Step::update(Update::Approval(ApprovalPrompt {
             request_id: key,
+            tool_identity: tool["toolCallId"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(super::approval_tool_identity),
             kind: match kind {
                 "execute" => "command".into(),
                 "edit" | "delete" | "move" => "file_change".into(),
@@ -858,18 +1162,43 @@ impl CliAdapter for AcpAdapter {
         };
         let id: Value = serde_json::from_str(request_id)
             .unwrap_or_else(|_| Value::String(request_id.to_owned()));
-        let choice = if approve {
+        let current = pending
+            .binding
+            .as_ref()
+            .and_then(|b| self.tool_evidence.get(&b.tool_id));
+        let matches = pending
+            .binding
+            .as_ref()
+            .zip(current)
+            .is_some_and(|(b, e)| e.matches(b));
+        let choice = if approve && pending.require_binding && !matches {
+            // Approval covered the displayed operation, never a new command,
+            // repeated call ID, evicted input, or a newer permission request.
+            None
+        } else if approve {
             pending.allow
         } else {
             pending.reject
         };
+        let revision = self.evidence_id();
+        if let Some(binding) = pending.binding {
+            if let Some(evidence) = self.tool_evidence.get_mut(&binding.tool_id) {
+                if evidence.generation == binding.generation
+                    && evidence.permission_revision == Some(binding.request_revision)
+                {
+                    evidence.decision = Some(PermissionDecision {
+                        binding,
+                        revision,
+                        kind: choice.as_ref().map(|c| c.kind).unwrap_or("cancelled"),
+                    });
+                }
+            }
+        }
         Ok(vec![match choice {
             Some(option) => result(
                 &id,
-                json!({"outcome":{"outcome":"selected","optionId":option}}),
+                json!({"outcome":{"outcome":"selected","optionId":option.id}}),
             ),
-            // The agent offered no option matching the decision; a cancelled
-            // outcome is the protocol's safe refusal.
             None => result(&id, json!({"outcome":{"outcome":"cancelled"}})),
         }])
     }
@@ -897,6 +1226,410 @@ mod metadata_tests {
                 _ => None,
             })
             .expect("completed tool output")
+    }
+
+    fn cursor_start(adapter: &mut AcpAdapter) {
+        adapter.session_update(
+            &json!({"sessionUpdate":"tool_call", "toolCallId":"shell-one",
+            "kind":"execute", "status":"pending", "rawInput":{"command":"python3 -m unittest -q"}}),
+        );
+    }
+    fn cursor_permission(adapter: &mut AcpAdapter) {
+        permission(
+            adapter,
+            json!({"toolCallId":"shell-one", "status":"pending",
+            "content":[{"type":"content","content":{"type":"text","text":"Not in allowlist: python3"}}]}),
+        );
+    }
+    fn cursor_terminal(adapter: &mut AcpAdapter, code: i64, large: bool) -> (bool, Value) {
+        adapter.session_update(&json!({"sessionUpdate":"tool_call_update", "toolCallId":"shell-one",
+            "status":"completed", "rawOutput":{"exitCode":code,"stdout":if large {"x".repeat(RAW_OUTPUT_BYTES * 2)} else {String::new()},
+            "stderr":"----------------------------------------------------------------------\nRan 5 tests in 0.000s\n\nOK\n"}}))
+            .updates.into_iter().find_map(|u| match u {
+                Update::ToolCompleted { success, output, .. } => Some((success, output)), _ => None,
+            }).unwrap()
+    }
+
+    #[test]
+    fn cursor_shell_provenance_separates_earlier_permission_reason_from_terminal_result() {
+        // Sequence reproduced by the installed Cursor 2026.09.15 presenter:
+        // permission reason in content; approved shell result in rawOutput;
+        // terminal update omits content, so ACP correctly retains the reason.
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        cursor_start(&mut adapter);
+        cursor_permission(&mut adapter);
+        assert!(adapter.approve("1", true).unwrap()[0].contains("selected"));
+        let (success, output) = cursor_terminal(&mut adapter, 0, false);
+        assert!(success);
+        assert_eq!(output["content"], json!(["Not in allowlist: python3"]));
+        assert_eq!(output["cursor_execution"]["exit_code"], 0);
+        assert_eq!(
+            output["acp_provenance"],
+            json!({
+                "schema_version":1,
+                "history_complete":true,
+                "content":{"source":"permission_request", "phase":"pending", "explicit_terminal":false,
+                    "before_permission_decision":true,"after_permission_decision":false},
+                "raw_output":{"source":"tool_update", "phase":"completed", "explicit_terminal":true,
+                    "before_permission_decision":false,"after_permission_decision":true},
+                "permission":{"state":"resolved","decision":"allow_once","current_operation_matches":true}
+            })
+        );
+        assert!(adapter.tool_evidence.is_empty());
+    }
+
+    #[test]
+    fn cursor_nonzero_shell_exit_fails_without_permission_even_when_output_is_truncated() {
+        for large in [false, true] {
+            let mut adapter = AcpAdapter::new(Vendor::Cursor);
+            cursor_start(&mut adapter);
+            let (success, output) = cursor_terminal(&mut adapter, 7, large);
+            assert!(!success, "completed ACP status must not hide exit 7");
+            assert_eq!(output["cursor_execution"]["exit_code"], 7);
+            assert_eq!(output["raw_output_truncated"], large);
+            assert!(output["acp_provenance"]["permission"].is_null());
+        }
+        let mut other = AcpAdapter::new(Vendor::Grok);
+        cursor_start(&mut other);
+        let (success, output) = cursor_terminal(&mut other, 7, false);
+        assert!(success, "Cursor shell shape is not a cross-vendor contract");
+        assert!(output.get("cursor_execution").is_none());
+    }
+
+    #[test]
+    fn cursor_approval_cannot_authorize_changed_then_restored_operation() {
+        for decision_before_change in [false, true] {
+            let mut adapter = AcpAdapter::new(Vendor::Cursor);
+            cursor_start(&mut adapter);
+            cursor_permission(&mut adapter);
+            if decision_before_change {
+                adapter.approve("1", true).unwrap();
+            }
+            for command in ["other", "python3 -m unittest -q"] {
+                adapter.session_update(
+                    &json!({"sessionUpdate":"tool_call_update", "toolCallId":"shell-one",
+                    "rawInput":{"command":command}}),
+                );
+            }
+            if !decision_before_change {
+                assert!(adapter.approve("1", true).unwrap()[0].contains("cancelled"));
+            }
+            let (_, output) = cursor_terminal(&mut adapter, 0, false);
+            assert_eq!(
+                output["acp_provenance"]["permission"]["current_operation_matches"],
+                false
+            );
+            assert_eq!(
+                output["acp_provenance"]["permission"]["decision"],
+                if decision_before_change {
+                    "allow_once"
+                } else {
+                    "cancelled"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_approval_binds_non_execute_kinds_and_refuses_missing_input() {
+        for kind in ["read", "tool", "execute"] {
+            for input in [json!({"path":"helpers.py"}), Value::Null] {
+                let mut adapter = AcpAdapter::new(Vendor::Cursor);
+                adapter.session_update(
+                    &json!({"sessionUpdate":"tool_call","toolCallId":"shell-one",
+                    "kind":kind,"rawInput":input}),
+                );
+                cursor_permission(&mut adapter);
+                adapter.session_update(
+                    &json!({"sessionUpdate":"tool_call_update","toolCallId":"shell-one",
+                    "kind":"execute","rawInput":{"command":"different command"}}),
+                );
+                assert!(adapter.approve("1", true).unwrap()[0].contains("cancelled"));
+            }
+        }
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        permission(
+            &mut adapter,
+            json!({"toolCallId":"unknown","kind":"tool","title":"Just a title"}),
+        );
+        assert!(adapter.approve("1", true).unwrap()[0].contains("cancelled"));
+        permission(
+            &mut adapter,
+            json!({"toolCallId":"read-one","kind":"read","rawInput":{"path":"helpers.py"}}),
+        );
+        assert!(adapter.approve("1", true).unwrap()[0].contains("selected"));
+    }
+
+    #[test]
+    fn cursor_approval_binds_displayed_edit_proposal_and_targets() {
+        // Adapter-level guarantee: these updates have already been delivered
+        // to on_line/session_update before the approval response is selected.
+        for kind in ["edit", "delete", "move", "other"] {
+            let content =
+                json!([{"type":"diff","path":"helpers.py","oldText":"old","newText":"approved"}]);
+            let locations = json!([{"path":"helpers.py"}]);
+            for mutation in [
+                Value::Null,
+                json!({"content":[{"type":"diff","path":"helpers.py","oldText":"old","newText":"changed"}]}),
+                json!({"locations":[{"path":"outside.py"}]}),
+            ] {
+                let mut adapter = AcpAdapter::new(Vendor::Cursor);
+                adapter.session_update(&json!({"sessionUpdate":"tool_call","toolCallId":"edit-one",
+                    "kind":kind,"rawInput":{"path":"helpers.py"},"content":content,"locations":locations}));
+                permission(
+                    &mut adapter,
+                    json!({"toolCallId":"edit-one","status":"pending"}),
+                );
+                let mut update =
+                    json!({"sessionUpdate":"tool_call_update","toolCallId":"edit-one"});
+                if let Some(fields) = mutation.as_object() {
+                    for (key, value) in fields {
+                        update[key] = value.clone();
+                    }
+                }
+                adapter.session_update(&update);
+                let response = adapter.approve("1", true).unwrap();
+                assert!(
+                    response[0].contains(if mutation.is_null() {
+                        "selected"
+                    } else {
+                        "cancelled"
+                    }),
+                    "{kind}: {mutation}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_shell_diagnostics_are_not_identity_but_displayed_diffs_are() {
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        cursor_start(&mut adapter);
+        cursor_permission(&mut adapter);
+        adapter.session_update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"shell-one",
+            "content":[{"type":"content","content":{"type":"text","text":"Updated permission explanation"}}]}));
+        assert!(adapter.approve("1", true).unwrap()[0].contains("selected"));
+        adapter.session_update(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"shell-one",
+            "content":[{"type":"content","content":{"type":"text","text":"Command output"}}]}),
+        );
+        let (_, output) = cursor_terminal(&mut adapter, 0, false);
+        assert_eq!(
+            output["acp_provenance"]["permission"]["current_operation_matches"],
+            true
+        );
+
+        cursor_start(&mut adapter);
+        permission(
+            &mut adapter,
+            json!({"toolCallId":"shell-one",
+            "content":[{"type":"diff","path":"helpers.py","newText":"approved"}]}),
+        );
+        adapter.session_update(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"shell-one",
+            "content":[{"type":"diff","path":"helpers.py","newText":"different"}]}),
+        );
+        assert!(adapter.approve("1", true).unwrap()[0].contains("cancelled"));
+    }
+
+    #[test]
+    fn cursor_permission_binding_cannot_cross_reused_ids_new_prompts_or_requests() {
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        cursor_start(&mut adapter);
+        cursor_permission(&mut adapter);
+        cursor_start(&mut adapter);
+        assert!(adapter.approve("1", true).unwrap()[0].contains("cancelled"));
+        cursor_permission(&mut adapter);
+        adapter.session_id = Some("session-one".into());
+        adapter.start_prompt("new task", &[]).unwrap();
+        assert!(adapter.approve("1", true).is_err());
+        assert!(adapter.tool_evidence.is_empty());
+
+        cursor_start(&mut adapter);
+        cursor_permission(&mut adapter);
+        adapter.permission_request(
+            &json!(2),
+            &json!({"toolCall":{"toolCallId":"shell-one"},
+            "options":[{"optionId":"yes","kind":"allow_once"}]}),
+        );
+        assert!(adapter.approve("1", true).unwrap()[0].contains("cancelled"));
+        assert!(adapter.approve("2", true).unwrap()[0].contains("selected"));
+    }
+
+    #[test]
+    fn cursor_evicted_permission_history_cannot_reappear_as_never_requested() {
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        cursor_start(&mut adapter);
+        cursor_permission(&mut adapter);
+        assert!(adapter.approve("1", false).unwrap()[0].contains("selected"));
+        adapter.session_update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"shell-one",
+            "content":[{"type":"content","content":{"type":"text","text":"x".repeat(TOOL_METADATA_BYTES)}}]}));
+        assert!(!adapter.tool_evidence.contains_key("shell-one"));
+        adapter.session_update(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"shell-one",
+            "kind":"execute","rawInput":{"command":"python3 -m unittest -q"},"content":[]}),
+        );
+        let (_, output) = cursor_terminal(&mut adapter, 0, false);
+        assert_eq!(output["tool_kind"], "execute");
+        assert_eq!(output["acp_provenance"]["history_complete"], false);
+        assert!(output["acp_provenance"]["permission"].is_null());
+        assert_eq!(output["raw_output"]["exitCode"], 0);
+        // An initial call for the old ID cannot launder earlier history.
+        cursor_start(&mut adapter);
+        let (_, output) = cursor_terminal(&mut adapter, 0, false);
+        assert_eq!(output["acp_provenance"]["history_complete"], false);
+    }
+
+    #[test]
+    fn duplicate_permission_id_cannot_keep_old_authority_through_early_returns() {
+        for (vendor, tool, options) in [
+            (
+                Vendor::Cursor,
+                json!({"toolCallId":"other","kind":"execute","rawInput":{"command":"different"}}),
+                json!([]),
+            ),
+            (
+                Vendor::Cursor,
+                json!({"toolCallId":"other","kind":"execute","rawInput":{"command":"different"}}),
+                json!([{"optionId":"yes","kind":"allow_once"}]),
+            ),
+            (
+                Vendor::Antigravity,
+                json!({"toolCallId":"interaction_other","title":"A question"}),
+                json!([{"optionId":"yes","kind":"allow_once"}]),
+            ),
+        ] {
+            let mut adapter = AcpAdapter::new(vendor);
+            permission(
+                &mut adapter,
+                json!({"toolCallId":"original","kind":"execute","rawInput":{"command":"original"}}),
+            );
+            let duplicate =
+                adapter.permission_request(&json!(1), &json!({"toolCall":tool,"options":options}));
+            assert!(duplicate
+                .updates
+                .iter()
+                .any(|update| matches!(update, Update::TurnFailed(_))));
+            assert!(duplicate.send[0].contains("Duplicate outstanding permission request ID"));
+            assert!(adapter.approve("1", true).is_err());
+        }
+    }
+
+    #[test]
+    fn cursor_unanswered_or_unusable_permission_never_looks_unrequested() {
+        for scenario in ["pending", "reject_then_pending", "unusable"] {
+            let mut adapter = AcpAdapter::new(Vendor::Cursor);
+            cursor_start(&mut adapter);
+            if scenario == "unusable" {
+                let step = adapter.permission_request(
+                    &json!(1),
+                    &json!({
+                    "toolCall":{"toolCallId":"shell-one","status":"pending"},"options":[]}),
+                );
+                assert!(step.send[0].contains("No usable permission options"));
+            } else {
+                cursor_permission(&mut adapter);
+                if scenario == "reject_then_pending" {
+                    adapter.approve("1", false).unwrap();
+                    cursor_permission(&mut adapter);
+                }
+            }
+            adapter.session_update(
+                &json!({"sessionUpdate":"tool_call_update","toolCallId":"shell-one","content":[]}),
+            );
+            let (_, output) = cursor_terminal(&mut adapter, 0, false);
+            let permission = &output["acp_provenance"]["permission"];
+            assert_eq!(
+                permission["state"],
+                if scenario == "unusable" {
+                    "declined"
+                } else {
+                    "pending"
+                }
+            );
+            assert_eq!(permission["current_operation_matches"], false);
+            assert_eq!(output["acp_provenance"]["history_complete"], true);
+        }
+    }
+
+    #[test]
+    fn cursor_permission_first_and_evicted_ids_cannot_start_complete_history() {
+        for evict in [false, true] {
+            let mut adapter = AcpAdapter::new(Vendor::Cursor);
+            permission(
+                &mut adapter,
+                json!({"toolCallId":"shell-one","kind":"execute",
+                "rawInput":{"command":"python3 -m unittest -q"}}),
+            );
+            adapter.approve("1", false).unwrap();
+            if evict {
+                adapter.session_update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"shell-one",
+                    "content":[{"type":"content","content":{"type":"text","text":"x".repeat(TOOL_METADATA_BYTES)}}]}));
+            }
+            cursor_start(&mut adapter);
+            let (_, output) = cursor_terminal(&mut adapter, 0, false);
+            assert_eq!(output["acp_provenance"]["history_complete"], false);
+        }
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        for i in 0..OBSERVED_TOOL_IDS {
+            adapter
+                .observed_tool_ids
+                .insert(crate::workspace::hash(format!("seen-{i}").as_bytes()));
+        }
+        cursor_start(&mut adapter);
+        let (_, output) = cursor_terminal(&mut adapter, 0, false);
+        assert_eq!(output["acp_provenance"]["history_complete"], false);
+        assert_eq!(adapter.observed_tool_ids.len(), OBSERVED_TOOL_IDS);
+        assert!(adapter.tool_history_exhausted);
+        adapter.session_id = Some("session".into());
+        adapter.start_prompt("new prompt", &[]).unwrap();
+        cursor_start(&mut adapter);
+        let (_, output) = cursor_terminal(&mut adapter, 0, false);
+        assert_eq!(output["acp_provenance"]["history_complete"], true);
+    }
+
+    #[test]
+    fn cursor_provenance_rejects_forged_and_cached_terminal_flags_and_bounds_retention() {
+        let mut adapter = AcpAdapter::new(Vendor::Cursor);
+        cursor_start(&mut adapter);
+        cursor_permission(&mut adapter);
+        adapter.approve("1", true).unwrap();
+        adapter.session_update(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"shell-one",
+            "rawOutput":{"exitCode":0,"stdout":"","stderr":"early"}}),
+        );
+        let output = finished_output(
+            &mut adapter,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"shell-one",
+            "status":"completed","rawOutput":null,
+            "acp_provenance":{"raw_output":{"explicit_terminal":true}},"cursor_execution":{"exit_code":99},
+            "content":[{"type":"content","content":{"type":"text","text":"Not in allowlist: python3"}}]}),
+        );
+        assert_eq!(
+            output["acp_provenance"]["raw_output"]["explicit_terminal"],
+            false
+        );
+        assert_eq!(output["acp_provenance"]["content"]["source"], "tool_update");
+        assert_eq!(output["acp_provenance"]["content"]["phase"], "completed");
+        assert_eq!(output["cursor_execution"]["exit_code"], 0);
+        let output = finished_output(
+            &mut adapter,
+            json!({"sessionUpdate":"tool_call","status":"completed",
+            "acp_provenance":{"schema_version":1},"cursor_execution":{"exit_code":99}}),
+        );
+        assert!(output.get("acp_provenance").is_none());
+        assert!(output.get("cursor_execution").is_none());
+        for i in 0..TOOL_METADATA_COUNT + 5 {
+            adapter.session_update(
+                &json!({"sessionUpdate":"tool_call","toolCallId":format!("bounded-{i}"),
+                "kind":"execute","rawInput":{"command":"true"}}),
+            );
+        }
+        assert_eq!(adapter.tool_evidence.len(), TOOL_METADATA_COUNT);
+        assert!(adapter
+            .tool_evidence
+            .keys()
+            .all(|id| adapter.tool_metadata.contains_key(id)));
     }
 
     #[test]
@@ -1052,7 +1785,14 @@ mod metadata_tests {
     }
 
     fn permission(adapter: &mut AcpAdapter, tool: Value) -> ApprovalPrompt {
-        adapter.permission_request(&json!(1), &json!({
+        let id = adapter
+            .pending_permissions
+            .keys()
+            .filter_map(|key| key.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        adapter.permission_request(&json!(id), &json!({
             "toolCall":tool,
             "options":[{"optionId":"yes","kind":"allow_once"},{"optionId":"no","kind":"reject_once"}]
         })).updates.into_iter().find_map(|u| match u {
@@ -1127,11 +1867,11 @@ mod metadata_tests {
         let mut adapter = AcpAdapter::new(Vendor::Cursor);
         adapter.remember_tool(
             &json!({"toolCallId":"kept","rawInput":{"command":"old"}}),
-            true,
+            ToolOrigin::Initial,
         );
         adapter.remember_tool(
             &json!({"toolCallId":"kept","rawInput":{"command":"x".repeat(TOOL_METADATA_BYTES)}}),
-            false,
+            ToolOrigin::Update,
         );
         assert!(
             permission(&mut adapter, json!({"toolCallId":"kept"})).arguments["input"].is_null()
@@ -1139,7 +1879,7 @@ mod metadata_tests {
         for i in 0..TOOL_METADATA_COUNT + 5 {
             adapter.remember_tool(
                 &json!({"toolCallId":format!("call-{i}"),"rawInput":{"command":"test"}}),
-                true,
+                ToolOrigin::Initial,
             );
         }
         assert_eq!(adapter.tool_metadata.len(), TOOL_METADATA_COUNT);

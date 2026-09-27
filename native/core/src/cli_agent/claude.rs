@@ -184,6 +184,10 @@ impl ClaudeAdapter {
                     .insert(request_id.clone(), input.clone());
                 Step::update(Update::Approval(ApprovalPrompt {
                     request_id,
+                    tool_identity: request["tool_use_id"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .map(super::approval_tool_identity),
                     kind: kind.into(),
                     tool: format!("claude.{tool}"),
                     command: redact(&command),
