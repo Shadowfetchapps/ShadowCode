@@ -171,12 +171,19 @@ NEXT="$SCRATCH/release/0.28.2/ShadowCode_0.28.2_amd64.AppImage"
 rm -f "$SCRATCH/release/SHA256SUMS"
 fake_appimage "$NEXT" 0.28.2 "$COMMIT_A" good
 checksum "$NEXT"
+cp -a -- "$HOME/.local/bin/shadow" "$SCRATCH/prior-shadow"
+cp -a -- "$DESKTOP" "$SCRATCH/prior-desktop"
+cp -a -- "$XDG_DATA_HOME/icons/hicolor/scalable/apps/shadow-agent.svg" "$SCRATCH/prior-icon"
 chmod 555 "$XDG_DATA_HOME/applications"
 expect_refusal 'unwritable desktop entry directory' "$INSTALLER" "$NEXT"
 chmod 755 "$XDG_DATA_HOME/applications"
 grep -Fq 'previous runtime and AppImage were restored' "$SCRATCH/refused.txt"
 test ! -e "$HOME/Applications/ShadowCode-0.28.2-x86_64.AppImage"
 assert_state_unchanged ShadowCode-0.28.1-x86_64.AppImage "$COMMIT_B"
+cmp -s -- "$HOME/.local/bin/shadow" "$SCRATCH/prior-shadow"
+cmp -s -- "$DESKTOP" "$SCRATCH/prior-desktop"
+cmp -s -- "$XDG_DATA_HOME/icons/hicolor/scalable/apps/shadow-agent.svg" "$SCRATCH/prior-icon"
+test "$(readlink "$HOME/.local/bin/shadowcode")" = shadow
 
 # 6. A changed AppImage fails its checksum.
 printf '# modified after checksum\n' >> "$NEXT"
@@ -253,6 +260,12 @@ case "$SHADOW_TEST_FAULT" in
       kill -KILL "$PPID"
       exit 0
     fi ;;
+  after-desktop-failure)
+    if [[ "$source_path" == "$XDG_DATA_HOME/applications/shadow-agent.desktop.pending" && "$target_path" == "$XDG_DATA_HOME/applications/shadow-agent.desktop" ]]; then
+      "$SHADOW_TEST_REAL_MV" "$@"
+      echo 'Injected failure after desktop replacement' >&2
+      exit 74
+    fi ;;
 esac
 exec "$SHADOW_TEST_REAL_MV" "$@"
 WRAPPER
@@ -261,7 +274,10 @@ NEXT="$SCRATCH/release/0.28.4/ShadowCode_0.28.4_amd64.AppImage"
 rm -f "$SCRATCH/release/SHA256SUMS"
 fake_appimage "$NEXT" 0.28.4 "$COMMIT_A" good
 checksum "$NEXT"
-for fault in old-runtime-failure new-runtime-failure after-old-runtime-term after-new-runtime-term; do
+cp -a -- "$HOME/.local/bin/shadow" "$SCRATCH/prior-shadow"
+cp -a -- "$DESKTOP" "$SCRATCH/prior-desktop"
+cp -a -- "$XDG_DATA_HOME/icons/hicolor/scalable/apps/shadow-agent.svg" "$SCRATCH/prior-icon"
+for fault in old-runtime-failure new-runtime-failure after-old-runtime-term after-new-runtime-term after-desktop-failure; do
   expect_refusal "$fault" env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT="$fault" "$INSTALLER" "$NEXT"
   grep -Fq 'Injected' "$SCRATCH/refused.txt"
   grep -Fq 'previous runtime and AppImage were restored' "$SCRATCH/refused.txt"
@@ -269,6 +285,12 @@ for fault in old-runtime-failure new-runtime-failure after-old-runtime-term afte
   assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
   test ! -e "$HOME/Applications/ShadowCode-0.28.4-x86_64.AppImage"
   test ! -e "$HOME/Applications/ShadowCode-0.28.4-x86_64.AppImage.pending"
+  if [[ "$fault" == after-desktop-failure ]]; then
+    cmp -s -- "$HOME/.local/bin/shadow" "$SCRATCH/prior-shadow"
+    cmp -s -- "$DESKTOP" "$SCRATCH/prior-desktop"
+    cmp -s -- "$XDG_DATA_HOME/icons/hicolor/scalable/apps/shadow-agent.svg" "$SCRATCH/prior-icon"
+    test "$(readlink "$HOME/.local/bin/shadowcode")" = shadow
+  fi
 done
 
 # 9. Same-version retries are byte-immutable, even with a valid new checksum.

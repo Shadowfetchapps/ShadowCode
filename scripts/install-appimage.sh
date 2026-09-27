@@ -227,7 +227,28 @@ HAD_RUNTIME=0
 [[ -e "$LIB" || -L "$LIB" ]] && HAD_RUNTIME=1
 LINK_REPLACING=0
 DEST_CREATING=0
+INTEGRATION_ACTIVE=0
 PREVIOUS_LINK="$(readlink "$APPS/ShadowCode.AppImage" 2>/dev/null || true)"
+restore_integration() {
+  local name=$1 destination=$2 prior=$3 candidate=$4 actual backup pending
+  backup="$STAGE/integration-prior/$name"
+  actual="$(integration_fingerprint "$destination")" || return 1
+  [[ "$actual" == "$prior" || "$actual" == "$candidate" ]] || return 1
+  if [[ "$prior" == - ]]; then
+    ! exists "$backup" || return 1
+  else
+    [[ "$(integration_fingerprint "$backup")" == "$prior" ]] || return 1
+  fi
+  [[ "$actual" == "$prior" ]] && return 0
+  if [[ "$prior" == - ]]; then
+    rm -f -- "$destination"
+  else
+    pending="$destination.rollback.pending"
+    ! exists "$pending" || return 1
+    cp -a --no-dereference -- "$backup" "$pending" || return 1
+    mv -Tf -- "$pending" "$destination"
+  fi
+}
 finish() {
   local status=$?
   local restored=1
@@ -255,6 +276,12 @@ finish() {
         rm -f -- "$APPS/ShadowCode.AppImage" || restored=0
       fi
     fi
+    if [[ "$INTEGRATION_ACTIVE" == 1 ]]; then
+      restore_integration desktop "$DATA/applications/shadow-agent.desktop" "$DESKTOP_INTEGRATION" "$POST_DESKTOP_INTEGRATION" || restored=0
+      restore_integration icon "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg" "$ICON_INTEGRATION" "$POST_ICON_INTEGRATION" || restored=0
+      restore_integration shadowcode "$BIN/shadowcode" "$SHADOWCODE_INTEGRATION" "$POST_SHADOWCODE_INTEGRATION" || restored=0
+      restore_integration shadow "$BIN/shadow" "$SHADOW_INTEGRATION" "$POST_SHADOW_INTEGRATION" || restored=0
+    fi
     if [[ "$DEST_CREATING" == 1 && "$restored" == 1 ]]; then
       rm -f -- "$DEST" || restored=0
     fi
@@ -268,6 +295,11 @@ finish() {
   fi
   [[ -z "$DEST" ]] || rm -f -- "$DEST.pending"
   rm -f -- "$APPS/.ShadowCode.AppImage.pending"
+  if [[ "$INTEGRATION_ACTIVE" == 1 && "$restored" == 1 ]]; then
+    rm -f -- "$BIN/.shadow-install" "$BIN/.shadowcode-install" \
+      "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg.pending" \
+      "$DATA/applications/shadow-agent.desktop.pending"
+  fi
   if [[ "$STATE_ADVANCING" == 1 && "$STATE_DURABLE" == 0 ]]; then
     restored=0
     echo "Accepted-release state needs recovery; preserve $JOURNAL and $STAGE." >&2
@@ -343,6 +375,45 @@ SHADOW_INTEGRATION="$(integration_fingerprint "$BIN/shadow")" || fail 'Existing 
 SHADOWCODE_INTEGRATION="$(integration_fingerprint "$BIN/shadowcode")" || fail 'Existing shadowcode launcher cannot be identified.'
 ICON_INTEGRATION="$(integration_fingerprint "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg")" || fail 'Existing desktop icon cannot be identified.'
 DESKTOP_INTEGRATION="$(integration_fingerprint "$DATA/applications/shadow-agent.desktop")" || fail 'Existing desktop entry cannot be identified.'
+for pending in "$BIN/.shadow-install" "$BIN/.shadowcode-install" \
+  "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg.pending" \
+  "$DATA/applications/shadow-agent.desktop.pending" \
+  "$BIN/shadow.rollback.pending" "$BIN/shadowcode.rollback.pending" \
+  "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg.rollback.pending" \
+  "$DATA/applications/shadow-agent.desktop.rollback.pending"; do
+  ! exists "$pending" || fail "A desktop integration staging path already exists: $pending"
+done
+mkdir -m 700 "$STAGE/integration-prior" "$STAGE/integration-new"
+stage_prior_integration() {
+  local name=$1 source=$2 prior=$3
+  if [[ "$prior" != - ]]; then
+    cp -a --no-dereference -- "$source" "$STAGE/integration-prior/$name"
+    [[ "$(integration_fingerprint "$STAGE/integration-prior/$name")" == "$prior" ]] \
+      || fail "Existing $name integration changed during staging."
+  fi
+  [[ "$(integration_fingerprint "$source")" == "$prior" ]] \
+    || fail "Existing $name integration changed during staging."
+}
+stage_prior_integration shadow "$BIN/shadow" "$SHADOW_INTEGRATION"
+stage_prior_integration shadowcode "$BIN/shadowcode" "$SHADOWCODE_INTEGRATION"
+stage_prior_integration icon "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg" "$ICON_INTEGRATION"
+stage_prior_integration desktop "$DATA/applications/shadow-agent.desktop" "$DESKTOP_INTEGRATION"
+# Prepare exact candidate integration bytes before durable install intent or live writes.
+cat > "$STAGE/integration-new/shadow" <<'LAUNCH'
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$HOME/Applications/ShadowCode.AppImage" --appimage-extract-and-run "$@"
+LAUNCH
+chmod 755 "$STAGE/integration-new/shadow"
+ln -s shadow "$STAGE/integration-new/shadowcode"
+cp -- "$ROOT/assets/icons/shadow-agent.svg" "$STAGE/integration-new/icon"
+sed "s|^Exec=.*|Exec=\"${BIN}/shadow\" ui|; s|^TryExec=.*|TryExec=${BIN}/shadow|; s|^X-ShadowCode-Version=.*|X-ShadowCode-Version=${VERSION}|; /^X-ShadowCode-GitSha=/d" "$ROOT/packaging/shadow-agent.desktop" > "$STAGE/integration-new/desktop"
+printf 'X-ShadowCode-GitSha=%s\n' "$VERIFIED_COMMIT" >> "$STAGE/integration-new/desktop"
+POST_SHADOW_INTEGRATION="$(integration_fingerprint "$STAGE/integration-new/shadow")" || fail 'Candidate launcher cannot be identified.'
+POST_SHADOWCODE_INTEGRATION="$(integration_fingerprint "$STAGE/integration-new/shadowcode")" || fail 'Candidate launcher alias cannot be identified.'
+POST_ICON_INTEGRATION="$(integration_fingerprint "$STAGE/integration-new/icon")" || fail 'Candidate icon cannot be identified.'
+POST_DESKTOP_INTEGRATION="$(integration_fingerprint "$STAGE/integration-new/desktop")" || fail 'Candidate desktop entry cannot be identified.'
+sync -f "$STAGE"
 [[ "$(file_hash "$SOURCE")" == "$ACTUAL" ]] || fail 'AppImage changed during validation.'
 prepare_accepted_record
 JOURNAL_TEMP="$(mktemp -d "$(dirname "$LIB")/.shadowcode-intent.XXXXXX")"
@@ -400,21 +471,20 @@ sync -f "$JOURNAL"
 LINK_REPLACING=1
 ln -sfn "$(basename "$DEST")" "$APPS/.ShadowCode.AppImage.pending"
 mv -Tf "$APPS/.ShadowCode.AppImage.pending" "$APPS/ShadowCode.AppImage"
-# Desktop launch uses extraction mode so libfuse2 is not required.
-cat > "$BIN/.shadow-install" <<'LAUNCH'
-#!/usr/bin/env bash
-set -euo pipefail
-exec "$HOME/Applications/ShadowCode.AppImage" --appimage-extract-and-run "$@"
-LAUNCH
-chmod +x "$BIN/.shadow-install"
-mv -f "$BIN/.shadow-install" "$BIN/shadow"
-ln -sfn shadow "$BIN/.shadowcode-install"
-mv -Tf "$BIN/.shadowcode-install" "$BIN/shadowcode"
-cp "$ROOT/assets/icons/shadow-agent.svg" "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg"
-sed "s|^Exec=.*|Exec=\"${BIN}/shadow\" ui|; s|^TryExec=.*|TryExec=${BIN}/shadow|; s|^X-ShadowCode-Version=.*|X-ShadowCode-Version=${VERSION}|; /^X-ShadowCode-GitSha=/d" "$ROOT/packaging/shadow-agent.desktop" > "$DATA/applications/shadow-agent.desktop.pending"
-# The desktop identity describes the authenticated package, not this checkout.
-printf 'X-ShadowCode-GitSha=%s\n' "$VERIFIED_COMMIT" >> "$DATA/applications/shadow-agent.desktop.pending"
-mv -f "$DATA/applications/shadow-agent.desktop.pending" "$DATA/applications/shadow-agent.desktop"
+INTEGRATION_ACTIVE=1
+cp -a --no-dereference -- "$STAGE/integration-new/shadow" "$BIN/.shadow-install"
+mv -Tf -- "$BIN/.shadow-install" "$BIN/shadow"
+cp -a --no-dereference -- "$STAGE/integration-new/shadowcode" "$BIN/.shadowcode-install"
+mv -Tf -- "$BIN/.shadowcode-install" "$BIN/shadowcode"
+cp -a --no-dereference -- "$STAGE/integration-new/icon" "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg.pending"
+mv -Tf -- "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg.pending" "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg"
+cp -a --no-dereference -- "$STAGE/integration-new/desktop" "$DATA/applications/shadow-agent.desktop.pending"
+mv -Tf -- "$DATA/applications/shadow-agent.desktop.pending" "$DATA/applications/shadow-agent.desktop"
+[[ "$(integration_fingerprint "$BIN/shadow")" == "$POST_SHADOW_INTEGRATION" && \
+   "$(integration_fingerprint "$BIN/shadowcode")" == "$POST_SHADOWCODE_INTEGRATION" && \
+   "$(integration_fingerprint "$DATA/icons/hicolor/scalable/apps/shadow-agent.svg")" == "$POST_ICON_INTEGRATION" && \
+   "$(integration_fingerprint "$DATA/applications/shadow-agent.desktop")" == "$POST_DESKTOP_INTEGRATION" ]] \
+  || fail 'Desktop integration changed during activation; rollback requires review if an unrelated edit occurred.'
 # Success: drop the previous runtime and older AppImages.
 mv -T -- "$JOURNAL" "$STAGE/completed-intent"
 JOURNAL_CREATED=0
