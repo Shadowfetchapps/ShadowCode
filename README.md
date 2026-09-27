@@ -77,6 +77,12 @@ git clone https://github.com/Shadowfetchapps/ShadowCode.git
   and `shadowcode` launchers in `~/.local/bin`, and the desktop entry.
 - leaves settings, history and project data alone. It removes older ShadowCode
   AppImages only after a successful install.
+- records interrupted replacement before activation and restores the prior
+  AppImage/runtime on retry when all recorded identities still match. Run
+  `./ShadowCode/scripts/install-appimage.sh --recover` to attempt that recovery
+  without the original download. Changed, ambiguous or activation-stage states
+  are preserved for manual recovery; first-window and database rollback are
+  not yet qualified.
 
 To run the AppImage without installing it:
 `./ShadowCode_0.32.0_amd64.AppImage --appimage-extract-and-run`. FUSE is not
@@ -302,10 +308,16 @@ rate limits are retried automatically. Details: [OpenRouter](docs/OPENROUTER.md)
 folder. It shows the runtime, the detected hardware and the loaded model.
 ShadowCode never downloads weights. Removing a row never deletes the file.
 
-- **Everything is read from the file.** ShadowCode reads the GGUF header for
+- **Model metadata comes from the file.** ShadowCode reads the GGUF header for
   architecture, trained context, chat template and tensors, never the file name.
   A model whose architecture the bundled llama.cpp doesn't support is listed as
   incompatible, with the reason.
+- **Tool-template compatibility.** The exact supported Hermes 2 Pro Llama-3
+  metadata and plain-chat template select a bundled upstream tool template.
+  ShadowCode confirms the runtime's reported template identity before enabling
+  tools and shows the applied template provenance. It does not rewrite model
+  files or Ollama settings. Other models keep their embedded template; a
+  compatibility profile alone does not establish coding quality.
 - **Import from Ollama.** Models in an existing Ollama store can be imported
   by reference: ShadowCode registers the store's blob paths, including any
   vision projector. It never copies the blobs, never writes to the store and

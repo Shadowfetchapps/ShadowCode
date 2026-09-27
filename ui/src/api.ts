@@ -816,7 +816,10 @@ export type LocalModelProvenance = {
     source?: string;
     source_commit?: string;
     source_sha256?: string;
+    source_template?: LocalStringIdentity;
     template?: LocalStringIdentity;
+    match_kind?: "source_exact" | "pinned_lexer_exact";
+    normalization?: "none" | "single_final_lf_removed";
     runtime_template_verified?: boolean;
   } | null;
   context: { requested_tokens?: number; reported_tokens?: number | null };
