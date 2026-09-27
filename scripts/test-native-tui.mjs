@@ -280,19 +280,33 @@ try {
   await delay(200);
   assert.equal((await cli(["approvals"])).approvals[0].id, approval.id);
   tui.child.stdin.write("\x7f");
+  // Backend approval visibility precedes the TUI worker's next poll. F4
+  // acts on that rendered view, so observe its pending indicator first.
+  // Width changes force full frames; ANSI diffs can otherwise split words.
+  const pendingFrame = tui.output.stdout.length;
+  const terminal = (await readFile(tui.ttyFile, "utf8")).trim();
+  assert.match(terminal, /^\/dev\/pts\/\d+$/);
+  let approvalColumns = 110;
+  await until("terminal pending approval indicator", async () => {
+    if (
+      tui.output.stdout
+        .slice(pendingFrame)
+        .includes("1 approval(s) waiting · F4 to review")
+    )
+      return true;
+    approvalColumns = approvalColumns === 110 ? 111 : 110;
+    await execute("stty", ["-F", terminal, "cols", String(approvalColumns)]);
+    return false;
+  });
   const openingApproval = tui.output.stdout.length;
   tui.child.stdin.write("\x1bOS");
   await until("terminal approval dialog", () =>
-    tui.output.stdout
-      .slice(openingApproval)
-      .includes("DENY · Tab switches"),
+    tui.output.stdout.slice(openingApproval).includes("DENY · Tab switches"),
   );
   const switchingApproval = tui.output.stdout.length;
   tui.child.stdin.write("\t");
   await until("terminal approval allow state", () =>
-    tui.output.stdout
-      .slice(switchingApproval)
-      .includes("ALLOW · Tab switches"),
+    tui.output.stdout.slice(switchingApproval).includes("ALLOW · Tab switches"),
   );
   tui.child.stdin.write("\r");
   await until(
