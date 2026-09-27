@@ -1806,32 +1806,55 @@ mod tests {
             let barrier = barrier.clone();
             tasks.push(tokio::spawn(async move {
                 barrier.wait().await;
-                super::super::create(&paths, &source, "HEAD", CancellationToken::new()).await
+                let result =
+                    super::super::create(&paths, &source, "HEAD", CancellationToken::new()).await;
+                (source, result)
             }));
         }
         barrier.wait().await;
         let mut successes = 0;
         let mut refusals = 0;
+        let mut busy_source = None;
         for task in tasks {
-            match tokio::time::timeout(Duration::from_secs(5), task)
+            let (source, result) = tokio::time::timeout(Duration::from_secs(5), task)
                 .await
                 .unwrap()
-                .unwrap()
-            {
+                .unwrap();
+            match result {
                 Ok(record) => {
                     successes += 1;
                     assert_eq!(record.state, "ready");
                 }
                 Err(error) => {
-                    refusals += 1;
-                    assert!(
-                        error
-                            .to_string()
-                            .contains("At most 64 managed worktree records"),
-                        "{error:#}"
-                    );
+                    let message = error.to_string();
+                    if message.contains("At most 64 managed worktree records") {
+                        refusals += 1;
+                    } else if message.contains("Another process owns worktree admission") {
+                        // Admission is nonblocking across processes. A transient
+                        // busy result must become a capacity refusal once the
+                        // concurrent creator has released its reservation lock.
+                        assert!(busy_source.replace(source).is_none(), "{error:#}");
+                    } else {
+                        panic!("{error:#}");
+                    }
                 }
             }
+        }
+        if let Some(source) = busy_source {
+            assert_eq!(
+                successes, 1,
+                "A busy admission requires another creator to succeed"
+            );
+            let error = super::super::create(&f.paths, &source, "HEAD", CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("At most 64 managed worktree records"),
+                "{error:#}"
+            );
+            refusals += 1;
         }
         assert_eq!((successes, refusals), (1, 1));
         let active = fs::read_dir(&records)
