@@ -10,4 +10,7 @@ RUN apt-get update -qq \
  && ! command -v node \
  && ! command -v cargo \
  && ! command -v rustc
-COPY --chmod=755 clean-host-gui-smoke.sh /usr/local/bin/shadowcode-clean-gui-smoke
+COPY clean-host-gui-smoke.sh /usr/local/bin/shadowcode-clean-gui-smoke
+RUN chmod 755 /usr/local/bin/shadowcode-clean-gui-smoke \
+ && groupadd --gid 1000 shadowcode \
+ && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin shadowcode
