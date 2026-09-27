@@ -38,6 +38,8 @@ jobs:
           node-version: '22'
       - name: No credentials in tracked files
         run: node scripts/check-secrets.mjs
+      - name: Verify publisher authentication and private release snapshots
+        run: node --test scripts/test-native-release-auth.mjs
       - name: Managed llama.cpp packaging (pins, notices, relative links, deb repack)
         run: node --test scripts/test-llama-runtime.mjs
       - name: Packaging PATH ignores host node hijacks

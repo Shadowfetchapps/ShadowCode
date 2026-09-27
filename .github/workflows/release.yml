@@ -23,6 +23,8 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - name: Test release staging and immutable retry behavior
         run: node scripts/native-release-verification.mjs run release-tests
+      - name: Verify publisher authentication and private release snapshots
+        run: node scripts/native-release-verification.mjs run release-auth
       - name: Validate native release tag
         run: node scripts/native-release-verification.mjs run release-tag
       - name: Native package dependencies

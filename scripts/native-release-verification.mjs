@@ -11,6 +11,7 @@ const version = String.raw`VERSION=$(node -p "require('./src-tauri/tauri.conf.js
 const packaged = `${version}\nBINARY="$GITHUB_WORKSPACE/target/release/bundle/appimage/ShadowCode_${'${VERSION}'}_amd64.AppImage"`;
 export const GATES = {
   'release-tests': { script: 'node --test --test-reporter=tap scripts/test-native-release.mjs scripts/test-native-release-verification.mjs' },
+  'release-auth': { script: 'node --test --test-reporter=tap scripts/test-native-release-auth.mjs', scope: 'Publisher authentication parser, crypto, replay and private-snapshot fixtures with ephemeral keys; production signing and installer integration are separate.' },
   'release-tag': { script: `${version}\n` + String.raw`test "$GITHUB_REF_NAME" = "v$VERSION"
 test "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)" = "$VERSION"
 test "$(node -p "require('./ui/package.json').version")" = "$VERSION"
