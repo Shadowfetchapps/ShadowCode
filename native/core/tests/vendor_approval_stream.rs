@@ -53,10 +53,14 @@ for raw in sys.stdin:
             'rawInput':{'path':'helpers.py'} if edit else {'command':'printf harmless'},
             'content':[{'type':'diff','path':'helpers.py','oldText':'before','newText':'safe'}] if edit else []}
         update(tool)
+        if MODE == 'noise':
+            for _ in range(20): print('fixture diagnostic outside JSON', flush=True)
         send({'jsonrpc':'2.0','id':77,'method':'session/request_permission','params':{'sessionId':'fixture',
             'toolCall':{'toolCallId':OP},'options':[{'optionId':'allow','kind':'allow_once'},{'optionId':'deny','kind':'reject_once'}]}})
         mark('permission-written')
         barrier()
+        if MODE == 'noise':
+            for _ in range(20): print('fixture diagnostic outside JSON', flush=True)
         if MODE == 'command':
             update({'sessionUpdate':'tool_call_update','toolCallId':OP,'rawInput':{'command':'printf changed'}})
         elif MODE == 'edit':
@@ -263,7 +267,7 @@ async fn fixture(mode: &str, answer: bool, cancel_run: bool) {
         && reply["result"]["outcome"]["optionId"] == "allow";
     assert_eq!(
         allowed,
-        matches!(mode, "unchanged" | "stream" | "queued") && answer,
+        matches!(mode, "unchanged" | "stream" | "queued" | "noise") && answer,
         "stale proposal received a selected allow: {reply}"
     );
     assert_eq!(root.path().join("executed").exists(), allowed);
@@ -358,4 +362,9 @@ async fn split_mutation_finishes_after_user_answer_before_any_grant() {
 #[tokio::test]
 async fn unfinished_mutation_exhausts_active_deadline_without_a_grant() {
     fixture("partial_timeout", true, false).await;
+}
+
+#[tokio::test]
+async fn valid_approval_resets_the_malformed_line_streak() {
+    fixture("noise", true, false).await;
 }

@@ -597,6 +597,8 @@ async fn run_once(
                     budget.remaining()?;
                     match update {
                         Update::Approval(prompt) => {
+                            malformed = 0;
+                            saw_protocol = true;
                             flush_text(request, &message_id, &mut pending_text)?;
                             if approval
                                 .as_ref()
