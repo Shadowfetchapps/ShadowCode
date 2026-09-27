@@ -40,6 +40,42 @@ function Harness({ workspace }: { workspace: string }) {
   );
 }
 
+it("indents and outdents selected lines without replacing the code", async () => {
+  const content = "one\ntwo\nthree\n";
+  vi.mocked(api.files).mockResolvedValue({
+    entries: [{ name: "block.ts", path: "block.ts", type: "file" }],
+    workspace: "/indent",
+    path: ".",
+    parent: "",
+  });
+  vi.mocked(api.file).mockResolvedValue({
+    path: "block.ts",
+    content,
+    hash: "d".repeat(64),
+    bytes: content.length,
+    truncated: false,
+  });
+  vi.mocked(api.fileRevision).mockResolvedValue({
+    path: "block.ts",
+    hash: "d".repeat(64),
+    bytes: content.length,
+  });
+  render(<Harness workspace="/indent" />);
+  fireEvent.click(await screen.findByRole("button", { name: "block.ts" }));
+  const editor = (await screen.findByRole("textbox", {
+    name: "Edit block.ts",
+  })) as HTMLTextAreaElement;
+  editor.setSelectionRange(1, 8);
+  fireEvent.keyDown(editor, { key: "Tab" });
+  await waitFor(() => expect(editor.value).toBe("  one\n  two\nthree\n"));
+  await waitFor(() => expect(editor.selectionStart).toBe(0));
+  expect(editor.selectionEnd).toBe(11);
+  fireEvent.keyDown(editor, { key: "Tab", shiftKey: true });
+  await waitFor(() => expect(editor.value).toBe(content));
+  await waitFor(() => expect(editor.selectionStart).toBe(0));
+  expect(editor.selectionEnd).toBe(7);
+});
+
 it("keeps a project draft and requires explicit review before saving over an agent edit", async () => {
   let disk = { content: "const value = 1;\n", hash: "a".repeat(64) };
   vi.mocked(api.files).mockResolvedValue({

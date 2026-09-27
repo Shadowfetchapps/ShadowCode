@@ -296,6 +296,27 @@ test("keeps an unsaved file draft and reviews an agent edit before saving", asyn
   expect(saved).toBe("# My draft\n");
 });
 
+test("indents and outdents selected file lines in the rendered editor", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const drawer = page.getByRole("complementary", { name: "Drawer" });
+  await drawer
+    .locator(".drawer-tabs")
+    .getByRole("button", { name: "Files" })
+    .click();
+  await drawer.getByRole("button", { name: "README.md", exact: true }).click();
+  const editor = drawer.getByRole("textbox", { name: "Edit README.md" });
+  await editor.fill("one\ntwo\nthree\n");
+  await editor.evaluate((element) =>
+    (element as HTMLTextAreaElement).setSelectionRange(1, 8),
+  );
+  await editor.press("Tab");
+  await expect(editor).toHaveValue("  one\n  two\nthree\n");
+  await editor.press("Shift+Tab");
+  await expect(editor).toHaveValue("one\ntwo\nthree\n");
+});
+
 test("recovers an unsaved editor draft after window reload and clears it after save", async ({
   page,
 }) => {

@@ -299,14 +299,50 @@ export function FileEditor({
       const input = event.currentTarget;
       const start = input.selectionStart;
       const end = input.selectionEnd;
-      if (active)
-        updateBuffer(active, (current) => ({
-          ...current,
-          draft:
-            current.draft.slice(0, start) + "  " + current.draft.slice(end),
-        }));
+      const text = input.value;
+      let selectionStart = start;
+      let selectionEnd = end;
+      if (active) {
+        if (start === end && !event.shiftKey) {
+          updateBuffer(active, (current) => ({
+            ...current,
+            draft:
+              current.draft.slice(0, start) + "  " + current.draft.slice(end),
+          }));
+          selectionStart = selectionEnd = start + 2;
+        } else {
+          const lineStart = text.lastIndexOf("\n", start - 1) + 1;
+          const lastSelected =
+            end > start && text[end - 1] === "\n" ? end - 1 : end;
+          const nextBreak = text.indexOf("\n", lastSelected);
+          const lineEnd = nextBreak === -1 ? text.length : nextBreak;
+          const before = text.slice(lineStart, lineEnd);
+          const after = before
+            .split("\n")
+            .map((line) =>
+              event.shiftKey ? line.replace(/^ {1,2}/, "") : `  ${line}`,
+            )
+            .join("\n");
+          updateBuffer(active, (current) => ({
+            ...current,
+            draft:
+              current.draft.slice(0, lineStart) +
+              after +
+              current.draft.slice(lineEnd),
+          }));
+          if (start === end) {
+            selectionStart = selectionEnd = Math.max(
+              lineStart,
+              start - (before.length - after.length),
+            );
+          } else {
+            selectionStart = lineStart;
+            selectionEnd = lineStart + after.length;
+          }
+        }
+      }
       requestAnimationFrame(() => {
-        input.selectionStart = input.selectionEnd = start + 2;
+        input.setSelectionRange(selectionStart, selectionEnd);
       });
     }
   }
@@ -594,7 +630,8 @@ export function FileEditor({
             onKeyDown={editKey}
           />
           <p className="file-editor-hint">
-            Ctrl/⌘+S to save · Tab inserts two spaces · Esc leaves the editor
+            Ctrl/⌘+S to save · Tab indents · Shift+Tab outdents · Esc leaves the
+            editor
           </p>
         </div>
       )}
