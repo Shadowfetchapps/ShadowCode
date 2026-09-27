@@ -1,0 +1,105 @@
+{
+  "source_capture_sha256": "2b9e5c9dc27184378a8a8a971bfa03fe7dc7579cccd3ff7763173dcd0f740d0f",
+  "source_build": "ffea0a8",
+  "normalization": "Saved tool payloads; temporary workspace and identifiers replaced, event timestamps omitted.",
+  "cursor": [
+    {
+      "type": "tool.started",
+      "session_id": "fixture-session",
+      "task_id": "fixture-task",
+      "payload": {
+        "arguments": {
+          "input": {
+            "command": "python3 -m unittest -q"
+          },
+          "locations": null,
+          "title": "`python3 -m unittest -q`"
+        },
+        "call_id": "check",
+        "tool": "cursor.execute"
+      }
+    },
+    {
+      "type": "tool.completed",
+      "session_id": "fixture-session",
+      "task_id": "fixture-task",
+      "payload": {
+        "call_id": "check",
+        "error": "",
+        "output": {
+          "content": [
+            "Not in allowlist: python3"
+          ],
+          "input": {
+            "command": "python3 -m unittest -q"
+          },
+          "locations": [],
+          "raw_output": {
+            "exitCode": 0,
+            "stderr": "----------------------------------------------------------------------\nRan 5 tests in 0.000s\n\nOK\n",
+            "stdout": ""
+          },
+          "raw_output_format": "json",
+          "raw_output_truncated": false,
+          "status": "completed",
+          "title": "`python3 -m unittest -q`",
+          "tool_kind": "execute"
+        },
+        "success": true,
+        "tool": "cursor.execute"
+      }
+    }
+  ],
+  "antigravity": [
+    {
+      "type": "tool.started",
+      "session_id": "fixture-session",
+      "task_id": "fixture-task",
+      "payload": {
+        "arguments": {
+          "input": {
+            "CommandLine": "python3 -m unittest -q",
+            "Cwd": "/fixture",
+            "WaitMsBeforeAsync": 5000
+          },
+          "locations": null,
+          "title": "python3 -m unittest -q"
+        },
+        "call_id": "check",
+        "tool": "antigravity.execute"
+      }
+    },
+    {
+      "type": "tool.completed",
+      "session_id": "fixture-session",
+      "task_id": "fixture-task",
+      "payload": {
+        "call_id": "check",
+        "error": "",
+        "output": {
+          "content": [],
+          "input": {
+            "command_line": "python3 -m unittest -q",
+            "working_dir": "/fixture"
+          },
+          "locations": [],
+          "raw_output": {
+            "combinedOutput": "----------------------------------------------------------------------\nRan 5 tests in 0.000s\n\nOK\n",
+            "commandLine": "python3 -m unittest -q",
+            "exitCode": 0,
+            "exit_code": 0,
+            "formatted_output": "----------------------------------------------------------------------\nRan 5 tests in 0.000s\n\nOK\n",
+            "workingDir": "/fixture"
+          },
+          "raw_output_format": "json",
+          "raw_output_truncated": false,
+          "status": "completed",
+          "title": "python3 -m unittest -q",
+          "tool_kind": "execute"
+        },
+        "success": true,
+        "tool": "antigravity.execute"
+      }
+    }
+  ]
+}
