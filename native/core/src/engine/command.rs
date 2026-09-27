@@ -42,7 +42,7 @@ impl Engine {
         tools: &ToolExecutor,
         command: &CommandRequest,
     ) -> Result<(String, Value)> {
-        events.emit("user.message", json!({"text":job.task}))?;
+        // Store::create_job already recorded the prompt atomically.
         events.emit(
             "agent.started",
             json!({"task":job.task,"model":"native command","mode":"command"}),

@@ -540,3 +540,141 @@ async fn test_timeouts_stop_command_children_and_keep_the_workspace_reusable() {
     assert_eq!(wait(&service, &next).await["status"], "completed");
     service.engine.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn native_test_job_records_one_prompt_in_live_feed_and_reopen_for_each_invocation() {
+    let (_root, service) = fixture();
+    let project = service.workspace().unwrap();
+    let command = "printf x >> command-invocations; printf command-output";
+    let expected = format!("Run test command: {command}");
+    let mut session = None;
+    let mut task_ids = Vec::new();
+    let mut live_pages = Vec::new();
+    let mut done_pages = Vec::new();
+    for _ in 0..2 {
+        let job = api(
+            &service,
+            "POST",
+            "/api/jobs/test",
+            json!({
+                "command":command,"session_id":session,"timeout":5
+            }),
+        )
+        .await
+        .unwrap();
+        let approval = pending(&service).await;
+        assert_eq!(approval.command, command);
+        assert_eq!(approval.task_id, job["task_id"]);
+        let feed = format!(
+            "/api/jobs/{}/events?after={}&limit=512",
+            job["id"].as_str().unwrap(),
+            job["event_cursor"].as_i64().unwrap()
+        );
+        // This is the same durable read path used by nativeJobStream while
+        // approval is pending; no command has yet been permitted for this job.
+        live_pages.push(api(&service, "GET", &feed, Value::Null).await.unwrap());
+        service
+            .engine
+            .approvals()
+            .decide(&approval.id, &approval.session_id, true)
+            .unwrap();
+        let done = wait(&service, &job).await;
+        assert_eq!(done["status"], "completed", "{done}");
+        assert_eq!(done["result"]["command"]["stdout"], "command-output");
+        assert_eq!(done["usage"]["total_tokens"], 0);
+        done_pages.push(api(&service, "GET", &feed, Value::Null).await.unwrap());
+        session = Some(job["session_id"].as_str().unwrap().to_owned());
+        task_ids.push(job["task_id"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(
+        fs::read_to_string(project.join("command-invocations")).unwrap(),
+        "xx",
+        "two explicit requests execute once each; duplicate prompts are not duplicate execution"
+    );
+    let session = session.unwrap();
+    let persisted = service.engine.store().recent_events(&session, 100).unwrap();
+    let paths = service.engine.paths().clone();
+    service.engine.shutdown().await.unwrap();
+    drop(service);
+    let reopened = Service::open(paths, Some(project)).unwrap();
+    let replay = api(
+        &reopened,
+        "GET",
+        &format!("/api/sessions/{session}"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    reopened.engine.shutdown().await.unwrap();
+    for (i, task_id) in task_ids.iter().enumerate() {
+        for (label, events) in [
+            (
+                "live pending feed",
+                live_pages[i]["events"].as_array().unwrap(),
+            ),
+            ("terminal feed", done_pages[i]["events"].as_array().unwrap()),
+            ("durable history", &persisted),
+            (
+                "reopened session replay",
+                replay["events"].as_array().unwrap(),
+            ),
+        ] {
+            let prompts: Vec<_> = events
+                .iter()
+                .filter(|e| e["task_id"] == *task_id && e["type"] == "user.message")
+                .collect();
+            assert_eq!(
+                prompts.len(),
+                1,
+                "{label}: one explicit command task must have one prompt: {prompts:?}"
+            );
+            assert_eq!(prompts[0]["payload"]["text"], expected);
+        }
+        let own: Vec<_> = persisted
+            .iter()
+            .filter(|e| e["task_id"] == *task_id)
+            .collect();
+        for kind in [
+            "agent.started",
+            "tool.started",
+            "tool.completed",
+            "command.completed",
+            "agent.completed",
+        ] {
+            assert_eq!(
+                own.iter().filter(|e| e["type"] == kind).count(),
+                1,
+                "{task_id}: {kind}"
+            );
+        }
+        assert!(!own.iter().any(|e| e["type"] == "model.request_metadata"));
+    }
+}
+
+#[tokio::test]
+async fn desktop_explicit_test_slash_command_uses_direct_terminal_without_command_job_prompts() {
+    let (_root, service) = fixture();
+    let project = service.workspace().unwrap();
+    // Same endpoint/name/args used by useTaskActions -> api.runCommand.
+    // This desktop action differs from the owned /api/jobs/test route.
+    let result = api(
+        &service,
+        "POST",
+        "/api/commands/run",
+        json!({
+            "name":"test", "args":"printf x >> slash-invocations; printf slash-output"
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["headline"], "Command completed", "{result}");
+    assert!(result["body"].as_str().unwrap().contains("slash-output"));
+    assert!(result["metadata"]["job"].is_null());
+    assert_eq!(
+        fs::read_to_string(project.join("slash-invocations")).unwrap(),
+        "x"
+    );
+    assert!(service.engine.store().jobs(100).unwrap().is_empty());
+    assert!(service.engine.approvals().list(None).is_empty());
+    service.engine.shutdown().await.unwrap();
+}
