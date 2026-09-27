@@ -76,11 +76,15 @@ jobs:
       - run: cargo +1.95.0 install tauri-driver --version 2.0.6 --locked
       - name: Exercise the native window
         run: xvfb-run -a -s '-screen 0 1440x1100x24' dbus-run-session -- node scripts/test-native-desktop.mjs
+      - name: Exercise the embedded Markdown worker under the native security policy
+        run: xvfb-run -a -s '-screen 0 1440x1100x24' dbus-run-session -- node scripts/test-native-markdown.mjs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: native-window-diagnostics
-          path: artifacts/native
+          path: |
+            artifacts/native
+            artifacts/native-markdown
       - run: cargo +1.95.0 build --release -p shadowcode-core --examples --locked
       - name: Check pinned-source failures and mirror recovery
         run: node --test scripts/test-native-source-fetch.mjs

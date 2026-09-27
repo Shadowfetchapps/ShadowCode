@@ -29,6 +29,13 @@ const webkitDriver = process.env.SHADOW_WEBKIT_DRIVER;
 const artifactParent = path.resolve(process.env.SHADOW_NATIVE_ARTIFACTS || path.join(repo, 'artifacts/native-markdown'));
 await mkdir(artifactParent, { recursive: true });
 const artifacts = await mkdtemp(path.join(artifactParent, 'run-'));
+const html = await readFile(path.join(repo, 'ui/dist/index.html'), 'utf8');
+const expectedScript = html.match(/src="([^"]+\.js)"/)[1];
+const workers = (await readdir(path.join(repo, 'ui/dist/assets'))).filter((p) => /^markdown\.worker-.+\.js$/.test(p));
+assert.equal(workers.length, 1, 'Exactly one production Markdown worker asset');
+const workerPath = `/assets/${workers[0]}`;
+const workerBytes = await readFile(path.join(repo, 'ui/dist', workerPath.slice(1)));
+const expectedWorkerSha256 = createHash('sha256').update(workerBytes).digest('hex');
 const scratch = await mkdtemp(path.join(tmpdir(), 'shadowcode-native-markdown-'));
 const profile = path.join(scratch, 'profile');
 const project = path.join(scratch, 'project');
@@ -42,13 +49,6 @@ await writeFile(path.join(profile, 'config/config.yaml'), JSON.stringify({
   trusted_workspaces: [project],
   ui: { notify: false },
 }));
-const html = await readFile(path.join(repo, 'ui/dist/index.html'), 'utf8');
-const expectedScript = html.match(/src="([^"]+\.js)"/)[1];
-const workers = (await readdir(path.join(repo, 'ui/dist/assets'))).filter((p) => /^markdown\.worker-.+\.js$/.test(p));
-assert.equal(workers.length, 1, 'Exactly one production Markdown worker asset');
-const workerPath = `/assets/${workers[0]}`;
-const workerBytes = await readFile(path.join(repo, 'ui/dist', workerPath.slice(1)));
-const expectedWorkerSha256 = createHash('sha256').update(workerBytes).digest('hex');
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 // A PID alone is not an ownership token: session deletion can terminate the
 // process before cleanup runs, and Linux may reuse its PID.
@@ -97,7 +97,10 @@ const driver = spawn(driverBinary, [
 ], { cwd: project, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
 driver.stdout.pipe(log); driver.stderr.pipe(log);
 let spawnError, session, appIdentity, driverIdentity;
+let launchRequested = false;
 const ownedGroup = new Map();
+const ownedAppGroup = new Map();
+let appGroupScope = 'unverified';
 driver.on('error', (error) => { spawnError = error; });
 async function wd(method, route, body, timeout = 30000, interruptible = true) {
   const response = await fetch(`http://127.0.0.1:${driverPort}${route}`, {
@@ -137,36 +140,87 @@ const report = {
   binary, artifacts, workerPath, expectedScript, expectedWorkerSha256,
   profile, project, cli_agents_enabled: false, network_mode: 'offline',
 };
-async function rememberOwnedGroup() {
+async function sameOwnedGroup(identity, group = driver.pid) {
+  const current = identity && await processIdentity(identity.pid);
+  return !!current && current.state !== 'Z' && current.start === identity.start
+    && identity.group === group && current.group === group;
+}
+async function rememberOwnedGroup(group = driver.pid, members = ownedGroup) {
   // Only enumerate the group while an already-owned member still exists.
   // A live member prevents this process-group ID from being recycled.
-  if (!(await Promise.all([...ownedGroup.values()].map(sameProcess))).some(Boolean)) return;
+  if (!(await Promise.all([...members.values()].map(identity => sameOwnedGroup(identity, group)))).some(Boolean)) return;
   for (const name of await readdir('/proc')) {
     if (!/^\d+$/.test(name)) continue;
     const identity = await processIdentity(Number(name));
-    if (identity?.group === driver.pid) ownedGroup.set(identity.pid, identity);
+    if (identity?.group === group) members.set(identity.pid, identity);
   }
 }
-async function signalOwnedGroup(signal) {
-  await rememberOwnedGroup();
-  if ((await Promise.all([...ownedGroup.values()].map(sameProcess))).some(Boolean)) {
-    try { process.kill(-driver.pid, signal); } catch {}
+async function signalOwnedGroup(signal, group = driver.pid, members = ownedGroup) {
+  await rememberOwnedGroup(group, members);
+  if ((await Promise.all([...members.values()].map(identity => sameOwnedGroup(identity, group)))).some(Boolean)) {
+    try { process.kill(-group, signal); } catch {}
   }
+}
+async function matchesOwnedApp(identity) {
+  if (!await sameProcess(identity)) return false;
+  try {
+    const executable = await readlink(`/proc/${identity.pid}/exe`);
+    if (executable !== binary) return false;
+    const args = (await readFile(`/proc/${identity.pid}/cmdline`, 'utf8')).split('\0');
+    const exactOption = (name, value) => args.filter(arg => arg === name).length === 1
+      && args.indexOf(name) > 0 && args[args.indexOf(name) + 1] === value;
+    return exactOption('--profile', profile)
+      && exactOption('--workspace', project) && await sameProcess(identity);
+  } catch { return false; }
+}
+async function captureAppGroup() {
+  if (!await sameProcess(appIdentity)) return;
+  appGroupScope = 'unverified';
+  if (!await matchesOwnedApp(appIdentity)) return;
+  if (await sameOwnedGroup(appIdentity)) {
+    ownedGroup.set(appIdentity.pid, appIdentity);
+    appGroupScope = 'driver';
+  } else if (appIdentity.group === appIdentity.pid && await sameOwnedGroup(appIdentity, appIdentity.pid)) {
+    // Only an exact-owned live group leader can establish this second group.
+    // Retained live descendants can anchor escalation after that leader exits.
+    ownedAppGroup.set(appIdentity.pid, appIdentity);
+    appGroupScope = 'app_led';
+    await rememberOwnedGroup(appIdentity.pid, ownedAppGroup);
+  }
+  // A shared/non-led group is not ours to signal. Preserve the profile if its
+  // descendant cleanup cannot be established, even if the app itself exits.
+}
+async function discoverOwnedApp() {
+  // A driver can exit after spawning the app but before /api/version returns.
+  // The private profile AND workspace plus executable establish ownership;
+  // an unanchored driver process-group ID never does.
+  const matches = [];
+  const deadline = Date.now() + 2000;
+  try {
+    for (const name of await readdir('/proc')) {
+      if (Date.now() >= deadline) return { state: 'timed_out' };
+      if (!/^\d+$/.test(name)) continue;
+      const identity = await processIdentity(Number(name));
+      if (await matchesOwnedApp(identity)) matches.push(identity);
+    }
+  } catch { return { state: 'unavailable' }; }
+  if (matches.length !== 1) return { state: matches.length ? 'ambiguous' : 'not_found' };
+  if (!await matchesOwnedApp(matches[0])) return { state: 'changed_before_capture' };
+  appIdentity = matches[0];
+  return { state: 'matched', pid: appIdentity.pid };
 }
 async function signalApp(signal) {
-  if (!await sameProcess(appIdentity)) return;
-  try {
-    const executable = await readlink(`/proc/${appIdentity.pid}/exe`);
-    const args = (await readFile(`/proc/${appIdentity.pid}/cmdline`, 'utf8')).split('\0');
-    if (executable !== binary || args[args.indexOf('--profile') + 1] !== profile) return;
-    if (await sameProcess(appIdentity)) process.kill(appIdentity.pid, signal);
-  } catch {}
+  if (!await matchesOwnedApp(appIdentity)) return;
+  try { process.kill(appIdentity.pid, signal); } catch {}
 }
 try {
   driverIdentity = await processIdentity(driver.pid);
-  if (driverIdentity) ownedGroup.set(driver.pid, driverIdentity);
+  if (driverIdentity?.group === driver.pid && driver.exitCode === null && driver.signalCode === null) {
+    ownedGroup.set(driver.pid, driverIdentity);
+  }
   report.binarySha256 = createHash('sha256').update(await readFile(binary)).digest('hex');
   await until('WebDriver startup', (remaining) => wd('GET', '/status', undefined, remaining));
+  launchRequested = true;
   session = (await wd('POST', '/session', { capabilities: { alwaysMatch: { 'tauri:options': {
     application: binary, args: ['--profile', profile, '--workspace', project],
   } } } })).sessionId;
@@ -177,11 +231,9 @@ try {
   assert.equal(report.version.runtime, 'rust');
   const candidate = await processIdentity(report.version.pid);
   assert.ok(candidate, 'Native API reports a live process');
-  assert.equal(await readlink(`/proc/${candidate.pid}/exe`), binary);
-  const appArgs = (await readFile(`/proc/${candidate.pid}/cmdline`, 'utf8')).split('\0');
-  assert.equal(appArgs[appArgs.indexOf('--profile') + 1], profile, 'Native process belongs to this isolated profile');
-  assert.equal(await sameProcess(candidate), true);
+  assert.equal(await matchesOwnedApp(candidate), true, 'Native process belongs to this exact binary, private profile and workspace');
   appIdentity = candidate;
+  await captureAppGroup();
   await rememberOwnedGroup();
   report.page = await execute('return { url: location.href, userAgent: navigator.userAgent, mainScript: new URL(document.querySelector("script[type=module]").src).pathname, csp: document.querySelector("meta[http-equiv=Content-Security-Policy]")?.content || null }');
   assert.equal(report.page.mainScript, expectedScript, 'Fresh embedded production main bundle');
@@ -256,26 +308,39 @@ try {
 } catch (error) {
   report.ok = false; report.failure = error.stack || String(error); process.exitCode ||= 1;
 } finally {
+  const discovery = launchRequested && !appIdentity ? await discoverOwnedApp() : { state: 'not_needed' };
+  await captureAppGroup();
   await rememberOwnedGroup();
   if (session) {
     try { await wd('DELETE', `/session/${session}`, undefined, 3000, false); } catch {}
   }
   await signalOwnedGroup('SIGTERM');
+  if (ownedAppGroup.size) await signalOwnedGroup('SIGTERM', appIdentity.pid, ownedAppGroup);
   await signalApp('SIGTERM');
   await delay(400);
   await signalOwnedGroup('SIGKILL');
+  if (ownedAppGroup.size) await signalOwnedGroup('SIGKILL', appIdentity.pid, ownedAppGroup);
   await signalApp('SIGKILL');
   await delay(200);
   const groupAlive = (await Promise.all([...ownedGroup.values()].map(async (id) => await sameProcess(id) ? id.pid : null))).filter(Boolean);
-  report.cleanup = { driver_alive: await sameProcess(driverIdentity), app_alive: await sameProcess(appIdentity), group_alive: groupAlive };
-  if (report.cleanup.driver_alive || report.cleanup.app_alive || groupAlive.length) {
+  const appGroupAlive = (await Promise.all([...ownedAppGroup.values()].map(async (id) => await sameProcess(id) ? id.pid : null))).filter(Boolean);
+  const ownershipUnknown = launchRequested && !appIdentity;
+  const groupUnknown = launchRequested && appGroupScope === 'unverified';
+  report.cleanup = { launch_requested: launchRequested, ownership_established: !!appIdentity, discovery,
+    app_group_scope: appGroupScope, app_group_alive: appGroupAlive,
+    driver_alive: await sameProcess(driverIdentity), app_alive: await sameProcess(appIdentity), group_alive: groupAlive };
+  report.cleanup.incomplete = ownershipUnknown || groupUnknown || report.cleanup.driver_alive || report.cleanup.app_alive || groupAlive.length > 0 || appGroupAlive.length > 0;
+  if (report.cleanup.incomplete) {
     report.ok = false;
-    report.cleanup.failure = 'Owned probe process remained after bounded cleanup';
+    report.cleanup.failure = ownershipUnknown
+      ? 'Launch was requested but app ownership could not be established; private profile preserved'
+      : groupUnknown ? 'App process-group ownership could not be established; private profile preserved'
+      : 'Owned probe process remained after bounded cleanup';
     process.exitCode = 1;
   }
   log.end();
   // Scratch contains only this test's generated profile and project.
-  if (!report.cleanup.driver_alive && !report.cleanup.app_alive && !groupAlive.length) {
+  if (!report.cleanup.incomplete) {
     await rm(scratch, { recursive: true, force: true });
     report.cleanup.profile_removed = true;
   }
