@@ -2669,6 +2669,200 @@ async fn live_local_acceptance_from_explicit_models() {
     }
 }
 
+/// Real three-model cancellation acceptance. The first installed model must
+/// start streaming before cancellation; the other two must never load.
+/// Requires a loopback-only network namespace for offline evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires three explicit installed GGUF paths and a real llama-server"]
+async fn live_three_model_compare_cancels_queued_models() {
+    let files: Vec<String> = serde_json::from_str(
+        &std::env::var("SHADOWCODE_LIVE_GGUF_FILES")
+            .expect("SHADOWCODE_LIVE_GGUF_FILES JSON array"),
+    )
+    .unwrap();
+    assert_eq!(files.len(), 3, "three installed models are required");
+    let server = std::env::var("SHADOWCODE_LLAMA_SERVER").expect("SHADOWCODE_LLAMA_SERVER");
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("README.md"), "Offline cancellation fixture\n").unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Offline Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "acceptance fixture",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+    Config::patch(&paths,json!({
+        "model":{"provider":"local","endpoint":"http://127.0.0.1:9/v1","name":"unused","context_limit":4096},
+        "local_engine":{"llama_binary":server,"files":files,"context_size":4096},
+        "network":{"mode":"offline"},"cli_agents":{"enabled":false},
+        "trusted_workspaces":[project],"agent":{"max_steps":4,"max_task_tokens":8192}
+    })).unwrap();
+    let service = Service::open(paths, Some(project.clone())).unwrap();
+    let catalog = call(&service, "GET", "/api/local-models", Value::Null)
+        .await
+        .unwrap();
+    let models = catalog["models"].as_array().unwrap();
+    assert_eq!(models.len(), 3, "{catalog}");
+    let ids: Vec<_> = files
+        .iter()
+        .map(|file| {
+            models.iter().find(|model| model["path"] == *file).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let record = call(
+        &service,
+        "POST",
+        "/api/compare",
+        json!({"workspace":project,"task":"List the integers from 1 through 2000, separated by commas. Do not abbreviate or call tools.","models":ids,"mode":"ask","web":false}),
+    )
+    .await
+    .unwrap();
+    let comparison = record["id"].as_str().unwrap().to_owned();
+    let lanes = record["lanes"].as_array().unwrap();
+    let job_ids: Vec<_> = lanes
+        .iter()
+        .map(|lane| lane["job_id"].as_str().unwrap().to_owned())
+        .collect();
+    let task_ids: Vec<_> = job_ids
+        .iter()
+        .map(|id| {
+            service.engine.store().job(id).unwrap().unwrap()["task_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            if service
+                .engine
+                .store()
+                .last_task_event(&task_ids[0], "model.stream")
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("first model did not stream before the acceptance deadline");
+    assert!(service
+        .engine
+        .store()
+        .last_task_event(&task_ids[0], "local.runtime_ready")
+        .unwrap()
+        .is_some());
+    assert!(service
+        .engine
+        .store()
+        .last_task_event(&task_ids[1], "local.runtime_ready")
+        .unwrap()
+        .is_none());
+    assert!(service
+        .engine
+        .store()
+        .last_task_event(&task_ids[2], "local.runtime_ready")
+        .unwrap()
+        .is_none());
+    call(
+        &service,
+        "POST",
+        &format!("/api/compare/{comparison}/cancel"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    let mut jobs = Vec::new();
+    for id in &job_ids {
+        jobs.push(
+            tokio::time::timeout(Duration::from_secs(30), service.engine.wait(id))
+                .await
+                .expect("cancelled job did not reach a terminal state")
+                .unwrap(),
+        );
+    }
+    let queued_loading: Vec<_> = jobs[1..]
+        .iter()
+        .map(|job| {
+            service
+                .engine
+                .store()
+                .events_after(&job.session_id, 0, None, 10_000)
+                .unwrap()
+                .into_iter()
+                .any(|event| {
+                    event["task_id"] == job.task_id
+                        && event["type"] == "local.runtime_progress"
+                        && event["payload"]["phase"] == "loading"
+                })
+        })
+        .collect();
+    let report = json!({
+        "scope":"real three-model Compare cancellation during first-model stream",
+        "models":models,
+        "jobs":jobs,
+        "first_stream_observed":true,
+        "queued_loading":queued_loading,
+        "queued_runtime_ready":[
+            service.engine.store().last_task_event(&task_ids[1], "local.runtime_ready").unwrap().is_some(),
+            service.engine.store().last_task_event(&task_ids[2], "local.runtime_ready").unwrap().is_some()
+        ]
+    });
+    if let Ok(output) = std::env::var("SHADOWCODE_LIVE_REPORT") {
+        fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    println!(
+        "LIVE_CANCEL_ACCEPTANCE {}",
+        serde_json::to_string(&report).unwrap()
+    );
+    assert!(jobs.iter().all(|job| job.status == "cancelled"), "{jobs:?}");
+    assert_eq!(
+        queued_loading,
+        vec![false, false],
+        "queued models began loading"
+    );
+    for task_id in &task_ids[1..] {
+        assert!(service
+            .engine
+            .store()
+            .last_task_event(task_id, "local.runtime_ready")
+            .unwrap()
+            .is_none());
+    }
+    call(
+        &service,
+        "POST",
+        &format!("/api/compare/{comparison}/discard"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    service.engine.shutdown().await.unwrap();
+}
+
 fn addition_answer_valid(answer: &str) -> bool {
     !answer.contains("<|")
         && !answer.contains("|>")
