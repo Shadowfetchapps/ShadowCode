@@ -491,6 +491,9 @@ pub struct CliAgentsConfig {
     pub approval_timeout_sec: u64,
     /// Seconds without any stdout line before the run is considered stalled.
     pub stall_timeout_sec: u64,
+    /// Maximum active seconds for one vendor run, even if it keeps producing
+    /// output. Explicit approval and paused-steering waits are excluded.
+    pub max_run_time_sec: u64,
 }
 impl Default for CliAgentsConfig {
     fn default() -> Self {
@@ -504,6 +507,7 @@ impl Default for CliAgentsConfig {
             antigravity_binary: "agy".into(),
             approval_timeout_sec: 600,
             stall_timeout_sec: 900,
+            max_run_time_sec: 7200,
         }
     }
 }
@@ -531,6 +535,9 @@ impl CliAgentsConfig {
         }
         if !(30..=86400).contains(&self.stall_timeout_sec) {
             bail!("cli_agents.stall_timeout_sec must be between 30 and 86400");
+        }
+        if !(1..=86400).contains(&self.max_run_time_sec) {
+            bail!("cli_agents.max_run_time_sec must be between 1 and 86400");
         }
         Ok(())
     }

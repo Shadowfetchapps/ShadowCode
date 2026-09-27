@@ -381,6 +381,11 @@ function VendorToolsPanel({
     Number(cli.approval_timeout_sec ?? 600),
   );
   const [stall, setStall] = useState(Number(cli.stall_timeout_sec ?? 900));
+  const [runLimit, setRunLimit] = useState(
+    Number(cli.max_run_time_sec ?? 7200),
+  );
+  const validRunLimit =
+    Number.isInteger(runLimit) && runLimit >= 1 && runLimit <= 86400;
   const [saving, setSaving] = useState(false);
   return (
     <section className="settings-section advanced-card">
@@ -438,11 +443,30 @@ function VendorToolsPanel({
           onChange={(e) => setStall(Number(e.target.value))}
         />
       </div>
+      <div className="field">
+        <label htmlFor="cli-run-limit">Maximum active run time (seconds)</label>
+        <input
+          id="cli-run-limit"
+          type="number"
+          min={1}
+          max={86400}
+          step={1}
+          value={runLimit}
+          aria-describedby="cli-run-limit-hint"
+          aria-invalid={!validRunLimit}
+          onChange={(e) => setRunLimit(Number(e.target.value))}
+        />
+        <p className="hint" id="cli-run-limit-hint">
+          Stops a subscription run that exceeds this limit, even if output keeps
+          arriving. Time paused or waiting for your approval does not count.
+          Default: two hours. Choose a whole number from 1 to 86,400 seconds.
+        </p>
+      </div>
       <div className="row end">
         <button
           type="button"
           className="primary"
-          disabled={saving}
+          disabled={saving || !validRunLimit}
           onClick={() => {
             setSaving(true);
             void onSave({
@@ -451,6 +475,7 @@ function VendorToolsPanel({
                 ...binaries,
                 approval_timeout_sec: approval,
                 stall_timeout_sec: stall,
+                max_run_time_sec: runLimit,
               },
             }).finally(() => setSaving(false));
           }}

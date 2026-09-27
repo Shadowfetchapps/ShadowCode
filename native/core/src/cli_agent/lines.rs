@@ -4,6 +4,21 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
 pub(super) const MAX_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 
+/// Keep framing overflow distinguishable from unsupported handshakes. It must
+/// not trigger another execution route after rejecting the first runtime.
+#[derive(Debug)]
+pub(super) struct ProtocolLineLimit(pub usize);
+impl std::fmt::Display for ProtocolLineLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Vendor protocol line exceeded the {} byte limit; runtime stopped",
+            self.0
+        )
+    }
+}
+impl std::error::Error for ProtocolLineLimit {}
+
 #[derive(Debug, PartialEq)]
 pub(super) enum Line {
     Text(String),
@@ -83,10 +98,7 @@ impl<R: AsyncRead + Unpin> BoundedLines<R> {
     pub(super) async fn next_protocol_line(&mut self) -> anyhow::Result<Option<String>> {
         match self.next_line().await? {
             Some(Line::Text(line)) => Ok(Some(line)),
-            Some(Line::TooLong) => anyhow::bail!(
-                "Vendor protocol line exceeded the {} byte limit; runtime stopped",
-                self.limit
-            ),
+            Some(Line::TooLong) => Err(ProtocolLineLimit(self.limit).into()),
             None => Ok(None),
         }
     }

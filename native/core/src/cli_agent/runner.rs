@@ -5,7 +5,7 @@
 //! its tools or bubblewrap, and kills the process group on cancel.
 use super::{
     adapter_for, clip,
-    lines::{BoundedLines, Line, MAX_DIAGNOSTIC_BYTES},
+    lines::{BoundedLines, Line, ProtocolLineLimit, MAX_DIAGNOSTIC_BYTES},
     redact, resolve_binary, ApprovalPrompt, CliAdapter, CliAgentsConfig, LaunchOptions, Update,
     Vendor, VendorAnswer, MAX_LINE_BYTES, MAX_MALFORMED_LINES,
 };
@@ -15,7 +15,7 @@ use crate::{
     models::Usage,
     steering::SteerControl,
 };
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::json;
 use std::{
     path::{Path, PathBuf},
@@ -31,6 +31,85 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 const TEXT_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
 const INPUT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const INTERRUPT_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
+
+// Per spawned run, across all turns/steering. Do not silently truncate a reply
+// into an apparently successful result. These also bound adapter bookkeeping
+// and durable event growth caused by many individually valid frames.
+const MAX_PROTOCOL_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PROTOCOL_FRAMES: usize = 250_000;
+const MAX_ASSISTANT_TEXT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_STDERR_WARNINGS: usize = 1000;
+
+/// A resource/deadline failure must never be mistaken for an unsupported
+/// Codex handshake and retried through exec, including before ready().
+#[derive(Debug)]
+struct RunLimit(String);
+impl std::fmt::Display for RunLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for RunLimit {}
+
+struct RunBudget {
+    started: Instant,
+    user_wait: Duration,
+    active_limit: Duration,
+    protocol_bytes: usize,
+    protocol_frames: usize,
+}
+impl RunBudget {
+    fn new(seconds: u64) -> Self {
+        Self {
+            started: Instant::now(),
+            user_wait: Duration::ZERO,
+            active_limit: Duration::from_secs(seconds),
+            protocol_bytes: 0,
+            protocol_frames: 0,
+        }
+    }
+    fn remaining(&self) -> Result<Duration> {
+        let active = self.started.elapsed().saturating_sub(self.user_wait);
+        self.active_limit.checked_sub(active).filter(|left| !left.is_zero()).ok_or_else(|| {
+            RunLimit(format!(
+                "Vendor CLI exceeded the {}-second active runtime limit (cli_agents.max_run_time_sec). The run was stopped; existing file changes remain. Continue with a smaller task or adjust this limit in Settings → Advanced.",
+                self.active_limit.as_secs()
+            )).into()
+        })
+    }
+    fn protocol_line(&mut self, bytes: usize) -> Result<()> {
+        // Include framing bytes even for empty lines.
+        self.protocol_bytes = self.protocol_bytes.saturating_add(bytes.saturating_add(1));
+        self.protocol_frames = self.protocol_frames.saturating_add(1);
+        if self.protocol_bytes > MAX_PROTOCOL_BYTES || self.protocol_frames > MAX_PROTOCOL_FRAMES {
+            return Err(RunLimit(format!(
+                "Vendor CLI exceeded the per-run protocol output limit ({} MiB or {} frames). The run was stopped; existing file changes remain. Reduce verbose output or split the task before continuing.",
+                MAX_PROTOCOL_BYTES / 1024 / 1024, MAX_PROTOCOL_FRAMES
+            )).into());
+        }
+        Ok(())
+    }
+    async fn wait_for_user<T>(
+        &mut self,
+        future: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let started = Instant::now();
+        let result = future.await;
+        self.user_wait += started.elapsed();
+        result
+    }
+}
+
+fn append_assistant_text(collected: &mut String, text: &str) -> Result<()> {
+    if text.len() > MAX_ASSISTANT_TEXT_BYTES.saturating_sub(collected.len()) {
+        return Err(RunLimit(format!(
+            "Vendor CLI exceeded the {} MiB assistant text limit for one run. The run was stopped; earlier transcript output and file changes remain. Ask for a shorter reply or split the task before continuing.",
+            MAX_ASSISTANT_TEXT_BYTES / 1024 / 1024
+        )).into());
+    }
+    collected.push_str(text);
+    Ok(())
+}
 
 struct ProcessGroup(u32);
 impl ProcessGroup {
@@ -160,6 +239,8 @@ pub async fn run(request: Request<'_>) -> Result<RunOutcome> {
                 && !reached_ready
                 && request.images.is_empty()
                 && error.downcast_ref::<LimitReached>().is_none()
+                && error.downcast_ref::<RunLimit>().is_none()
+                && error.downcast_ref::<ProtocolLineLimit>().is_none()
                 && !request.cancel.is_cancelled() =>
         {
             run_exec_fallback(&request, &format!("{error:#}")).await
@@ -241,9 +322,10 @@ async fn run_once(
         request.events.clone(),
         sign_in_needed.clone(),
     )));
+    let mut budget = RunBudget::new(request.config.max_run_time_sec);
     let mut outgoing = adapter.on_start(&request.options);
     outgoing.extend(adapter.prompt(&request.prompt, &request.images)?);
-    send_lines(request, &mut stdin, &outgoing).await?;
+    send_lines(request, &mut stdin, &outgoing, &budget).await?;
     if adapter.one_shot() {
         // One-shot CLIs (`codex exec -`) read the prompt until EOF.
         stdin = None;
@@ -270,6 +352,9 @@ async fn run_once(
             flush_text(request, &message_id, &mut pending_text)?;
             bail!("Task cancelled. The vendor CLI was stopped; its file changes remain on disk.");
         }
+        // Test before reading: a ready stdout future can otherwise win forever
+        // against a zero-duration timeout during continuous protocol traffic.
+        budget.remaining()?;
         if sign_in_needed.load(std::sync::atomic::Ordering::Acquire) {
             group.terminate();
             let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
@@ -277,7 +362,7 @@ async fn run_once(
             bail!("{}", super::acp::ANTIGRAVITY_SIGN_IN);
         }
         if request.steer.is_paused() && !interrupted_turn && !finished {
-            send_lines(request, &mut stdin, &adapter.interrupt()).await?;
+            send_lines(request, &mut stdin, &adapter.interrupt(), &budget).await?;
             interrupted_turn = true;
         }
         // Text must reach the transcript during generation, including a short
@@ -292,7 +377,9 @@ async fn run_once(
         } else {
             TEXT_FLUSH_INTERVAL.saturating_sub(last_flush.elapsed())
         };
-        let remaining = stall.saturating_sub(last_line.elapsed());
+        let remaining = stall
+            .saturating_sub(last_line.elapsed())
+            .min(budget.remaining()?);
         let read = tokio::time::timeout(remaining.min(poll_interval), reader.next_protocol_line());
         match read.await {
             Ok(Ok(None)) => {
@@ -312,14 +399,17 @@ async fn run_once(
                 );
             }
             Ok(Ok(Some(line))) => {
+                budget.protocol_line(line.len())?;
                 last_line = Instant::now();
                 let step = adapter.on_line(&line)?;
                 // Once a prompt may be written, input failure must not start
                 // an exec fallback and risk submitting the task twice.
                 *reached_ready |= adapter.ready();
-                send_lines(request, &mut stdin, &step.send).await?;
+                send_lines(request, &mut stdin, &step.send, &budget).await?;
                 let mut saw_protocol = false;
+                let user_wait_before = budget.user_wait;
                 for update in step.updates {
+                    budget.remaining()?;
                     match update {
                         Update::Warning(text) => {
                             if text.contains("Ignored a non-JSON")
@@ -328,11 +418,13 @@ async fn run_once(
                                 || text.contains("without type")
                             {
                                 malformed += 1;
-                                ensure!(
-                                    malformed <= MAX_MALFORMED_LINES,
-                                    "{} sent too many malformed lines",
-                                    vendor.label()
-                                );
+                                if malformed > MAX_MALFORMED_LINES {
+                                    return Err(RunLimit(format!(
+                                        "{} sent too many malformed lines; the runtime was stopped",
+                                        vendor.label()
+                                    ))
+                                    .into());
+                                }
                             } else {
                                 malformed = 0;
                             }
@@ -355,11 +447,13 @@ async fn run_once(
                                 &mut final_text,
                                 &mut stdin,
                                 &mut adapter,
+                                &mut budget,
                             )
                             .await?;
                         }
                     }
                 }
+                last_line += budget.user_wait.saturating_sub(user_wait_before);
                 if saw_protocol {
                     malformed = 0;
                 }
@@ -393,12 +487,12 @@ async fn run_once(
         }
         if finished && request.steer.is_paused() {
             flush_text(request, &message_id, &mut pending_text)?;
-            if let Some(follow_up) = wait_for_steer(request).await? {
+            if let Some(follow_up) = budget.wait_for_user(wait_for_steer(request)).await? {
                 finished = false;
                 interrupted_turn = false;
                 message_id = crate::id();
                 outgoing = adapter.prompt(&follow_up, &[])?;
-                send_lines(request, &mut stdin, &outgoing).await?;
+                send_lines(request, &mut stdin, &outgoing, &budget).await?;
             } else {
                 group.kill();
                 break;
@@ -506,6 +600,7 @@ async fn send_lines(
     request: &Request<'_>,
     stdin: &mut Option<ChildStdin>,
     lines: &[String],
+    budget: &RunBudget,
 ) -> Result<()> {
     if lines.is_empty() {
         return Ok(());
@@ -513,7 +608,18 @@ async fn send_lines(
     let Some(stdin) = stdin.as_mut() else {
         bail!("The vendor CLI input is closed");
     };
-    send_lines_bounded(stdin, lines, &request.cancel, INPUT_WRITE_TIMEOUT).await
+    let result = send_lines_bounded(
+        stdin,
+        lines,
+        &request.cancel,
+        INPUT_WRITE_TIMEOUT.min(budget.remaining()?),
+    )
+    .await;
+    // Preserve the typed deadline failure so startup cannot fall back to exec.
+    if !request.cancel.is_cancelled() {
+        budget.remaining()?;
+    }
+    result
 }
 
 async fn send_lines_bounded<W: tokio::io::AsyncWrite + Unpin>(
@@ -564,32 +670,40 @@ async fn drain_stderr<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     sign_in_needed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut reader = BoundedLines::new(stderr, MAX_DIAGNOSTIC_BYTES);
+    let mut retained = 0;
     while let Ok(Some(line)) = reader.next_line().await {
-        let Line::Text(line) = line else {
-            let _ = events.emit(
-                "agent.warning",
-                json!({"text":"vendor stderr: omitted oversized diagnostic line"}),
-            );
-            continue;
+        let text = match line {
+            Line::TooLong => "vendor stderr: omitted oversized diagnostic line".to_owned(),
+            Line::Text(line) => {
+                let line = redact(line.trim());
+                if line.is_empty() {
+                    continue;
+                }
+                // Continue inspecting even after diagnostic retention fills:
+                // authentication failure must not become a silent spinner.
+                if super::antigravity_server::is_sign_in_prompt(&line) {
+                    if !sign_in_needed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                        let _ = events.emit(
+                            "agent.warning",
+                            json!({"text": super::acp::ANTIGRAVITY_SIGN_IN}),
+                        );
+                    }
+                    continue;
+                }
+                format!("vendor stderr: {}", clip(&line, 400))
+            }
         };
-        let line = redact(line.trim());
-        if line.is_empty() {
-            continue;
+        if retained < MAX_STDERR_WARNINGS {
+            retained += 1;
+            let _ = events.emit("agent.warning", json!({"text":text}));
+        } else if retained == MAX_STDERR_WARNINGS {
+            retained += 1;
+            let _ = events.emit("agent.warning", json!({
+                "text":format!("vendor stderr: further diagnostics omitted after {MAX_STDERR_WARNINGS} lines; the process continues and sign-in failures are still detected")
+            }));
         }
-        // Antigravity's server prints a Google sign-in link when its
-        // sign-in is missing or expired; the run cannot continue.
-        if super::antigravity_server::is_sign_in_prompt(&line) {
-            sign_in_needed.store(true, std::sync::atomic::Ordering::Release);
-            let _ = events.emit(
-                "agent.warning",
-                json!({"text": super::acp::ANTIGRAVITY_SIGN_IN}),
-            );
-            continue;
-        }
-        let _ = events.emit(
-            "agent.warning",
-            json!({"text":format!("vendor stderr: {}", clip(&line, 400))}),
-        );
+        // Keep draining after the cap so a full stderr pipe cannot deadlock
+        // normal protocol output. Only diagnostics are omitted, never results.
     }
 }
 
@@ -620,10 +734,11 @@ async fn apply_update(
     final_text: &mut Option<String>,
     stdin: &mut Option<ChildStdin>,
     adapter: &mut Box<dyn CliAdapter>,
+    budget: &mut RunBudget,
 ) -> Result<()> {
     match update {
         Update::Text(text) => {
-            collected.push_str(&text);
+            append_assistant_text(collected, &text)?;
             pending_text.push_str(&text);
             if pending_text.len() >= 4000 {
                 flush_text(request, message_id, pending_text)?;
@@ -678,10 +793,22 @@ async fn apply_update(
                         clip(&prompt.command, 300)
                     ),"vendor":vendor.id(),"kind":prompt.kind}),
                 )?;
-                send_lines(request, stdin, &adapter.approve(&prompt.request_id, false)?).await?;
+                send_lines(
+                    request,
+                    stdin,
+                    &adapter.approve(&prompt.request_id, false)?,
+                    budget,
+                )
+                .await?;
                 return Ok(());
             }
-            let answer = request_approval(request, prompt.clone(), adapter.deny_note()).await?;
+            let answer = budget
+                .wait_for_user(request_approval(
+                    request,
+                    prompt.clone(),
+                    adapter.deny_note(),
+                ))
+                .await?;
             let reply = VendorAnswer {
                 allow: answer.allow,
                 // The first "Allow for this task" maps to the vendor's own
@@ -690,7 +817,13 @@ async fn apply_update(
                 for_session: answer.for_task && !answer.automatic,
                 note: answer.note.clone(),
             };
-            send_lines(request, stdin, &adapter.answer(&prompt.request_id, &reply)?).await?;
+            send_lines(
+                request,
+                stdin,
+                &adapter.answer(&prompt.request_id, &reply)?,
+                budget,
+            )
+            .await?;
         }
         Update::Warning(text) => {
             request.events.emit("agent.warning", json!({"text":text}))?;
@@ -713,6 +846,12 @@ async fn apply_update(
             usage.source = "vendor".into();
         }
         Update::TurnCompleted { text, interrupted } => {
+            if let Some(text) = text {
+                if !text.is_empty() {
+                    append_assistant_text(collected, &text)?;
+                    *final_text = Some(text);
+                }
+            }
             flush_text(request, message_id, pending_text)?;
             // The streamed reply is complete, so the final result can
             // recognise it instead of repeating it.
@@ -720,16 +859,10 @@ async fn apply_update(
                 "model.stream_end",
                 json!({"message_id": message_id, "complete": !interrupted}),
             )?;
-            if let Some(text) = text {
-                if !text.is_empty() {
-                    collected.push_str(&text);
-                    *final_text = Some(text);
-                }
-            }
             if interrupted && request.steer.is_paused() {
-                if let Some(follow_up) = wait_for_steer(request).await? {
+                if let Some(follow_up) = budget.wait_for_user(wait_for_steer(request)).await? {
                     *message_id = crate::id();
-                    send_lines(request, stdin, &adapter.prompt(&follow_up, &[])?).await?;
+                    send_lines(request, stdin, &adapter.prompt(&follow_up, &[])?, budget).await?;
                     return Ok(());
                 }
             }
@@ -936,6 +1069,89 @@ pub fn resolve_launch_binary(configured: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod transport_tests {
     use super::*;
+
+    #[test]
+    fn protocol_budget_counts_bytes_and_empty_frames_before_adaptation() {
+        let mut bytes = RunBudget::new(10);
+        bytes.protocol_line(MAX_PROTOCOL_BYTES - 1).unwrap();
+        assert!(bytes
+            .protocol_line(0)
+            .unwrap_err()
+            .downcast_ref::<RunLimit>()
+            .is_some());
+        let mut frames = RunBudget::new(10);
+        for _ in 0..MAX_PROTOCOL_FRAMES {
+            frames.protocol_line(0).unwrap();
+        }
+        assert!(frames
+            .protocol_line(0)
+            .unwrap_err()
+            .downcast_ref::<RunLimit>()
+            .is_some());
+    }
+
+    #[test]
+    fn oversized_text_is_refused_without_retaining_a_partial_final_result() {
+        let mut text = "x".repeat(MAX_ASSISTANT_TEXT_BYTES - 2);
+        append_assistant_text(&mut text, "é").unwrap();
+        assert_eq!(text.len(), MAX_ASSISTANT_TEXT_BYTES);
+        let error = append_assistant_text(&mut text, "x").unwrap_err();
+        assert!(error.downcast_ref::<RunLimit>().is_some());
+        assert_eq!(text.len(), MAX_ASSISTANT_TEXT_BYTES);
+        assert!(text.ends_with('é'));
+    }
+
+    #[test]
+    fn only_explicit_user_waits_extend_the_active_deadline() {
+        let mut budget = RunBudget::new(2);
+        budget.started = Instant::now() - Duration::from_secs(3);
+        assert!(budget
+            .remaining()
+            .unwrap_err()
+            .downcast_ref::<RunLimit>()
+            .is_some());
+        budget.user_wait = Duration::from_secs(2);
+        let remaining = budget.remaining().unwrap();
+        assert!(remaining > Duration::from_millis(900) && remaining <= Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn stderr_retention_is_bounded_and_authentication_detection_survives_the_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::AppPaths::isolated(root.path()).unwrap();
+        let store = std::sync::Arc::new(crate::store::Store::open(&paths.database()).unwrap());
+        let session = store
+            .create_session(root.path(), "cli:antigravity", "")
+            .unwrap();
+        let session_id = session["id"].as_str().unwrap().to_owned();
+        let task_id = store
+            .create_task(&session_id, "bounded diagnostics")
+            .unwrap();
+        let (sender, _) = tokio::sync::broadcast::channel(8);
+        let events = TaskEvents {
+            store: store.clone(),
+            session_id: session_id.clone(),
+            task_id,
+            sender,
+        };
+        let mut input = "ordinary diagnostic\n".repeat(MAX_STDERR_WARNINGS + 100);
+        input.push_str(
+            "Sign in to authenticate the ACP server\nSign in to authenticate the ACP server\n",
+        );
+        let sign_in = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        drain_stderr(std::io::Cursor::new(input), events, sign_in.clone()).await;
+        assert!(sign_in.load(std::sync::atomic::Ordering::Acquire));
+        let saved = store.events_after(&session_id, 0, None, 10000).unwrap();
+        assert_eq!(saved.len(), MAX_STDERR_WARNINGS + 2);
+        assert!(saved[MAX_STDERR_WARNINGS]["payload"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("further diagnostics omitted"));
+        assert_eq!(
+            saved[MAX_STDERR_WARNINGS + 1]["payload"]["text"],
+            super::super::acp::ANTIGRAVITY_SIGN_IN
+        );
+    }
 
     #[tokio::test]
     async fn blocked_input_write_obeys_its_deadline() {

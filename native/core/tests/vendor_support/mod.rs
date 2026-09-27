@@ -70,6 +70,24 @@ for raw in sys.stdin:
     m = json.loads(raw)
     method = m.get("method"); mid = m.get("id"); params = m.get("params") or {}
     if method == "initialize":
+        if C.get("turn") == "startup_malformed":
+            mark("transport.pid", str(os.getpid()))
+            for _ in range(40):
+                print("not JSON", flush=True)
+            time.sleep(20)
+            continue
+        if C.get("turn") == "startup_oversized":
+            mark("transport.pid", str(os.getpid()))
+            sys.stdout.write("x" * 4_000_001); sys.stdout.flush()
+            time.sleep(20)
+            continue
+        if C.get("turn") == "startup_protocol":
+            mark("transport.pid", str(os.getpid()))
+            until = time.monotonic() + 20
+            while time.monotonic() < until:
+                send({"jsonrpc":"2.0","method":"future/heartbeat","params":{}})
+                time.sleep(0.01)
+            continue
         if C.get("reject_initialize"):
             send({"jsonrpc":"2.0","id":mid,"error":{"code":-1,"message":"unsupported client"}}); continue
         send({"jsonrpc":"2.0","id":mid,"result":{"userAgent":"fake"}})
@@ -112,6 +130,31 @@ for raw in sys.stdin:
         mark("prompts.log", json.dumps(text))
         send({"jsonrpc":"2.0","id":mid,"result":{"turn":{"id":"turn-1"}}})
         mode = C.get("turn", "ok")
+        if mode == "pause_budget" and not os.path.exists(os.path.join(HERE, "interrupted")):
+            mark("pause_ready")
+            continue
+        if mode == "continuous_protocol":
+            mark("transport.pid", str(os.getpid()))
+            until = time.monotonic() + 20
+            while time.monotonic() < until:
+                # Both ignored frames and meaningful accounting frames are
+                # valid protocol traffic; neither should extend a run forever.
+                send({"jsonrpc":"2.0","method":"future/heartbeat","params":{}})
+                send({"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":1,"outputTokens":1}}}})
+                time.sleep(0.01)
+            continue
+        if mode == "aggregate_protocol":
+            mark("transport.pid", str(os.getpid()))
+            for _ in range(34):
+                send({"jsonrpc":"2.0","method":"future/heartbeat","params":{"padding":"x" * (2 * 1024 * 1024)}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}})
+            continue
+        if mode == "aggregate_text":
+            mark("transport.pid", str(os.getpid()))
+            for n in range(72):
+                send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"x" * (128 * 1024)}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}})
+            continue
         if mode == "stream_approval":
             for _ in range(300):
                 send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"x"}})
@@ -172,6 +215,8 @@ for raw in sys.stdin:
         send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}})
     elif method == "turn/interrupt":
         mark("interrupted")
+        if C.get("turn") == "pause_budget":
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"interrupted"}}})
         send({"jsonrpc":"2.0","id":mid,"result":{}})
 "#;
 

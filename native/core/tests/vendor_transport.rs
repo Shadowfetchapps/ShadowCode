@@ -19,11 +19,14 @@ async fn start_fixture(
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     fs::create_dir(&project).unwrap();
+    let max_run_time = config["max_run_time_sec"].as_u64().unwrap_or(30);
     let fake = FakeCodex::new(root.path(), config);
+    let mut agent_config = cli_agents(&fake);
+    agent_config["max_run_time_sec"] = json!(max_run_time);
     let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
     Config::patch(
         &paths,
-        json!({"cli_agents":cli_agents(&fake),"trusted_workspaces":[project]}),
+        json!({"cli_agents":agent_config,"trusted_workspaces":[project]}),
     )
     .unwrap();
     let service = Service::open(paths, Some(project.clone())).unwrap();
@@ -197,10 +200,19 @@ async fn run_case(mode: &str, expected_status: &str, expected_text: &str) {
     let project = root.path().join("project");
     fs::create_dir(&project).unwrap();
     let fake = FakeCodex::new(root.path(), json!({"auth":"chatgpt","turn":mode}));
+    let mut agent_config = cli_agents(&fake);
+    agent_config["max_run_time_sec"] = json!(if matches!(
+        mode,
+        "continuous_protocol" | "startup_protocol"
+    ) {
+        2
+    } else {
+        30
+    });
     let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
     Config::patch(
         &paths,
-        json!({"cli_agents":cli_agents(&fake),"trusted_workspaces":[project]}),
+        json!({"cli_agents":agent_config,"trusted_workspaces":[project]}),
     )
     .unwrap();
     let service = Service::open(paths, Some(project.clone())).unwrap();
@@ -221,8 +233,21 @@ async fn run_case(mode: &str, expected_status: &str, expected_text: &str) {
     let done = result
         .expect("vendor transport must finish promptly")
         .unwrap();
-    assert_eq!(done.status, expected_status, "{}", done.summary);
-    assert!(done.summary.contains(expected_text), "{}", done.summary);
+    assert_eq!(
+        done.status,
+        expected_status,
+        "{}",
+        done.summary.chars().take(200).collect::<String>()
+    );
+    assert!(
+        done.summary.contains(expected_text),
+        "{}",
+        done.summary.chars().take(200).collect::<String>()
+    );
+    assert!(
+        fake.marker("exec_ran").is_none(),
+        "limits must not cause an exec retry"
+    );
     let stored = service.engine.store().job(id).unwrap().unwrap();
     assert_eq!(stored["status"], expected_status);
     let events = service
@@ -315,4 +340,127 @@ for raw in sys.stdin:
         .unwrap();
     assert!(probe.session_started);
     assert_eq!(probe.protocol_version, Some(1));
+}
+
+#[tokio::test]
+async fn continuous_valid_protocol_cannot_extend_the_active_run_deadline() {
+    run_case("continuous_protocol", "failed", "active runtime limit").await;
+}
+
+#[tokio::test]
+async fn aggregate_text_is_bounded_even_when_each_frame_is_valid() {
+    run_case("aggregate_text", "failed", "assistant text limit").await;
+}
+
+#[tokio::test]
+async fn startup_protocol_deadline_does_not_trigger_an_exec_fallback() {
+    run_case("startup_protocol", "failed", "active runtime limit").await;
+}
+
+#[tokio::test]
+async fn approval_time_is_excluded_even_when_answer_arrives_after_original_deadline() {
+    let (_root, _fake, service, job) = start_fixture(
+        json!({"auth":"chatgpt","turn":"approval","max_run_time_sec":2}),
+        "permission timing".into(),
+    )
+    .await;
+    let id = job["id"].as_str().unwrap();
+    let sid = job["session_id"].as_str().unwrap();
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let events = service
+                .engine
+                .store()
+                .events_after(sid, 0, None, 1000)
+                .unwrap();
+            if let Some(event) = events
+                .into_iter()
+                .find(|e| e["type"] == "approval.requested")
+            {
+                break event;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    service
+        .dispatch(Request {
+            method: "POST".into(),
+            path: format!(
+                "/api/approvals/{}",
+                approval["payload"]["id"].as_str().unwrap()
+            ),
+            body: json!({"session_id":sid,"decision":"deny"}),
+        })
+        .await
+        .unwrap();
+    let done = tokio::time::timeout(Duration::from_secs(5), service.engine.wait(id))
+        .await
+        .unwrap()
+        .unwrap();
+    service.engine.shutdown().await.unwrap();
+    assert_eq!(done.status, "completed", "{}", done.summary);
+    assert_eq!(done.summary, "decision=decline");
+}
+
+#[tokio::test]
+async fn paused_steering_time_is_excluded_after_the_original_deadline() {
+    let (_root, fake, service, job) = start_fixture(
+        json!({"auth":"chatgpt","turn":"pause_budget","max_run_time_sec":2}),
+        "pause timing".into(),
+    )
+    .await;
+    let id = job["id"].as_str().unwrap();
+    let sid = job["session_id"].as_str().unwrap();
+    vendor_support::eventually(|| fake.marker("pause_ready"), "provider ready to pause").await;
+    service.engine.pause_job(id).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let events = service
+                .engine
+                .store()
+                .events_after(sid, 0, None, 1000)
+                .unwrap();
+            if events.iter().any(|e| e["type"] == "agent.paused") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    service
+        .dispatch(Request {
+            method: "POST".into(),
+            path: format!("/api/jobs/{id}/steer"),
+            body: json!({"instruction":"resume"}),
+        })
+        .await
+        .unwrap();
+    service.engine.resume_job(id).unwrap();
+    let done = tokio::time::timeout(Duration::from_secs(5), service.engine.wait(id))
+        .await
+        .unwrap()
+        .unwrap();
+    service.engine.shutdown().await.unwrap();
+    assert_eq!(done.status, "completed", "{}", done.summary);
+    assert_eq!(done.summary, "fake answer");
+}
+
+#[tokio::test]
+async fn aggregate_protocol_bytes_are_bounded_even_for_ignored_valid_frames() {
+    run_case("aggregate_protocol", "failed", "protocol output limit").await;
+}
+
+#[tokio::test]
+async fn startup_framing_overflow_does_not_trigger_an_exec_fallback() {
+    run_case("startup_oversized", "failed", "protocol line exceeded").await;
+}
+
+#[tokio::test]
+async fn startup_malformed_frame_limit_does_not_trigger_an_exec_fallback() {
+    run_case("startup_malformed", "failed", "too many malformed lines").await;
 }

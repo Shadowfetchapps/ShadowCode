@@ -60,6 +60,17 @@ fn vendor_catalog_and_config_validation() {
     bad = CliAgentsConfig::default();
     bad.approval_timeout_sec = 1;
     assert!(bad.validate().is_err());
+    assert_eq!(config.max_run_time_sec, 7200);
+    assert_eq!(
+        CliAgentsConfig::from_value(&json!({}))
+            .unwrap()
+            .max_run_time_sec,
+        7200
+    );
+    for seconds in [0, 86401] {
+        assert!(CliAgentsConfig::from_value(&json!({"max_run_time_sec":seconds})).is_err());
+    }
+    assert!(CliAgentsConfig::from_value(&json!({"max_run_time_sec":1})).is_ok());
     let off = CliAgentsConfig {
         claude_enabled: false,
         ..Default::default()
