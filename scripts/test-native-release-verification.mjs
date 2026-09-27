@@ -1,10 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, copyFile, readFile, writeFile, rm, chmod, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { GATES, REQUIRED_GATES, executeScript, inspectLine, readVerification, runGate, scriptDigest, validateVerification } from './native-release-verification.mjs';
+import { GATES, REQUIRED_GATES, executeScript, inspectLine, readVerification, runGate as checkedRunGate, scriptDigest, validateVerification } from './native-release-verification.mjs';
+
+// Recorder unit fixtures use synthetic commit IDs. The CLI fixtures below
+// exercise the production source guard in actual disposable Git repositories.
+const runGate = args => checkedRunGate({ verifySource: () => {}, ...args });
 
 const commit = 'a'.repeat(40);
 const artifacts = { 'test.AppImage': 'b'.repeat(64), 'test.deb': 'c'.repeat(64), 'sources.tar.gz': 'd'.repeat(64) };
@@ -17,6 +21,97 @@ async function scratch(fn) {
   const directory = await mkdtemp(path.join(tmpdir(), 'release-verification-'));
   try { await fn(directory); } finally { await rm(directory, { recursive: true, force: true }); }
 }
+
+async function sourceFixture(directory) {
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+  const git = (...args) => {
+    const result = spawnSync('git', ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', ...args], { cwd: directory, env, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  for (const name of ['scripts', 'ui', 'src-tauri', 'packaging', 'artifacts/bin']) await mkdir(path.join(directory, name), { recursive: true });
+  await copyFile(new URL('./native-release-verification.mjs', import.meta.url), path.join(directory, 'scripts/native-release-verification.mjs'));
+  await writeFile(path.join(directory, '.gitignore'), '/artifacts/\n');
+  await writeFile(path.join(directory, 'tracked.txt'), 'committed source\n');
+  await utimes(path.join(directory, 'tracked.txt'), 946684800, 946684800);
+  await writeFile(path.join(directory, 'Cargo.toml'), 'version = "0.1.0"\n');
+  await writeFile(path.join(directory, 'ui/package.json'), '{"version":"0.1.0"}\n');
+  await writeFile(path.join(directory, 'src-tauri/tauri.conf.json'), '{"version":"0.1.0"}\n');
+  await writeFile(path.join(directory, 'packaging/shadow-agent.desktop'), 'X-ShadowCode-Version=0.1.0\n');
+  git('init', '--quiet'); git('config', 'user.name', 'Release fixture'); git('config', 'user.email', 'fixture@example.invalid');
+  git('add', '.'); git('commit', '--quiet', '-m', 'Fixture');
+  const original = git('rev-parse', 'HEAD');
+  const quote = text => `'${text.replaceAll("'", "'\\''")}'`;
+  const wrapper = path.join(directory, 'artifacts/bin/node');
+  await writeFile(wrapper, `#!/bin/sh\nif [ ! -e artifacts/entered ]; then\n  touch artifacts/entered\n  case "$SOURCE_MUTATION" in\n    content) printf 'changed during check\\n' > tracked.txt ;;\n    head) git -c commit.gpgsign=false -c core.hooksPath=/dev/null commit --quiet --allow-empty -m 'Changed during check' ;;\n    restored-stat) ${quote(process.execPath)} -e 'const fs=require("node:fs"); fs.writeFileSync("tracked.txt", "X".repeat(fs.statSync("tracked.txt").size)); fs.utimesSync("tracked.txt",946684800,946684800)'; git status --porcelain > artifacts/stat-status ;;\n  esac\nfi\nexec ${quote(process.execPath)} "$@"\n`);
+  await chmod(wrapper, 0o755);
+  return {
+    git,
+    run(mutation = '') {
+      return spawnSync(process.execPath, ['scripts/native-release-verification.mjs', 'run', 'release-tag'], {
+        cwd: directory, encoding: 'utf8', timeout: 15000,
+        env: { ...env, PATH: `${path.dirname(wrapper)}:${env.PATH}`, GITHUB_SHA: original, GITHUB_REF_NAME: 'v0.1.0', GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2', SOURCE_MUTATION: mutation },
+      });
+    },
+  };
+}
+
+test('release CLI accepts clean committed source and ignored build outputs', () => scratch(async directory => {
+  const fixture = await sourceFixture(directory);
+  const index = await readFile(path.join(directory, '.git/index'));
+  const result = fixture.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(await readFile(path.join(directory, '.git/index')), index, 'source comparison must not rewrite the shared index');
+  const receipt = JSON.parse(await readFile(path.join(directory, 'artifacts/release-verification/release-tag.json'), 'utf8'));
+  assert.equal(receipt.status, 'passed');
+}));
+
+for (const kind of ['unstaged', 'staged', 'untracked', 'assume-unchanged', 'skip-worktree', 'restored-stat']) {
+  test(`release CLI refuses ${kind} source before running a check`, () => scratch(async directory => {
+    const fixture = await sourceFixture(directory);
+    if (kind === 'untracked') await writeFile(path.join(directory, 'extra-source.rs'), '// not committed\n');
+    else {
+      if (kind === 'assume-unchanged' || kind === 'skip-worktree') fixture.git('update-index', `--${kind}`, 'tracked.txt');
+      if (kind === 'restored-stat') {
+        fixture.git('config', 'core.trustctime', 'false'); fixture.git('config', 'core.checkStat', 'minimal');
+        await writeFile(path.join(directory, 'tracked.txt'), 'X'.repeat(Buffer.byteLength('committed source\n')));
+        await utimes(path.join(directory, 'tracked.txt'), 946684800, 946684800);
+        assert.equal(fixture.git('status', '--porcelain'), '', 'ordinary status can cache the restored-stat edit as clean');
+      } else await writeFile(path.join(directory, 'tracked.txt'), 'not committed\n');
+      if (kind === 'staged') fixture.git('add', 'tracked.txt');
+    }
+    const result = fixture.run();
+    assert.notEqual(result.status, 0, 'dirty source must not receive a passing release receipt');
+    await assert.rejects(readFile(path.join(directory, 'artifacts/entered')), /ENOENT/);
+    const receipt = JSON.parse(await readFile(path.join(directory, 'artifacts/release-verification/release-tag.json'), 'utf8'));
+    assert.equal(receipt.status, 'failed');
+    assert.equal(receipt.exit_code, null);
+  }));
+}
+
+for (const mutation of ['content', 'head', 'restored-stat']) {
+  test(`release CLI refuses ${mutation} changes made during a successful check`, () => scratch(async directory => {
+    const fixture = await sourceFixture(directory);
+    if (mutation === 'restored-stat') {
+      fixture.git('config', 'core.trustctime', 'false'); fixture.git('config', 'core.checkStat', 'minimal');
+    }
+    const result = fixture.run(mutation);
+    assert.notEqual(result.status, 0, 'source changed while a release check ran');
+    const receipt = JSON.parse(await readFile(path.join(directory, 'artifacts/release-verification/release-tag.json'), 'utf8'));
+    assert.equal(receipt.status, 'failed');
+    assert.equal(receipt.exit_code, 0, 'the underlying version check succeeded');
+  }));
+}
+
+test('release CLI invalidates a previous receipt when HEAD already changed', () => scratch(async directory => {
+  const fixture = await sourceFixture(directory);
+  assert.equal(fixture.run().status, 0);
+  fixture.git('commit', '--quiet', '--allow-empty', '-m', 'New head');
+  assert.notEqual(fixture.run().status, 0);
+  const receipt = JSON.parse(await readFile(path.join(directory, 'artifacts/release-verification/release-tag.json'), 'utf8'));
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.exit_code, null);
+}));
 
 test('all required passed receipts produce a scoped verification result', () => {
   const verified = validateVerification(complete(), commit, artifacts);

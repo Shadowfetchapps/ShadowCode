@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, rename, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -125,7 +126,35 @@ export async function readVerification(directory, commit, runId, attempt, artifa
   return result;
 }
 
-export async function runGate({ gate, directory, commit, runId, attempt, execute, hashes = packageHashes }) {
+// A commit label is not sufficient if the checked-out inputs differ from it.
+// Build outputs must be ignored; local source changes require their own commit.
+// Refuse index flags that can hide working edits without changing the index.
+export async function verifySourceCommit(commit) {
+  const git = (args, extraEnv = {}) => execFileSync('git', ['-c', 'core.fsmonitor=false', '-c', 'core.ignorestat=false', '-c', 'core.trustctime=true', '-c', 'core.checkStat=default', '-c', 'core.untrackedCache=false', '-c', 'core.ignoreCase=false', '-c', 'core.fileMode=true', '-c', 'core.splitIndex=false', '-c', 'core.sparseCheckout=false', ...args], {
+    encoding: 'utf8', maxBuffer: 8 * 1024 * 1024,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', ...extraEnv },
+  });
+  assert.equal(git(['rev-parse', 'HEAD']).trim(), commit, 'Source commit changed during release verification');
+  const flagged = git(['ls-files', '-v', '-z']).split('\0').some(entry => /^[a-zS] /.test(entry));
+  assert(!flagged, 'Release source has assume-unchanged or skip-worktree index flags');
+  assert.equal(git(['status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignore-submodules=none']), '', 'Release source has uncommitted or untracked changes');
+  // An earlier status command can have refreshed the real index's stat cache
+  // while trustctime was disabled. A new index has no cached working stats,
+  // so this checks committed content without rewriting the caller's index.
+  const scratch = await mkdtemp(path.join(tmpdir(), 'shadowcode-release-source-'));
+  try {
+    const env = { GIT_INDEX_FILE: path.join(scratch, 'index') };
+    git(['read-tree', commit], env);
+    try {
+      git(['update-index', '--really-refresh'], env);
+      git(['diff-files', '--quiet', '--no-ext-diff', '--ignore-submodules=none'], env);
+    }
+    catch { throw new Error('Release source content differs from the expected commit'); }
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+  assert.equal(git(['rev-parse', 'HEAD']).trim(), commit, 'Source commit changed during release verification');
+}
+
+export async function runGate({ gate, directory, commit, runId, attempt, execute, hashes = packageHashes, verifySource = verifySourceCommit }) {
   assert(GATES[gate], `Unknown release gate: ${gate}`);
   assert.match(commit, /^[a-f0-9]{40}$/);
   assert.match(runId, /^\d+$/);
@@ -137,6 +166,7 @@ export async function runGate({ gate, directory, commit, runId, attempt, execute
   const skips = new Set(), optional = new Set();
   const receipt = { schema: 1, gate, commit, run_id: runId, run_attempt: attempt, script_sha256: scriptDigest(gate), status: 'failed', exit_code: null, required_skips: [], optional_checks: [] };
   try {
+    await verifySource(commit);
     const before = GATES[gate].unchanged ? await hashes() : null;
     const code = await execute(GATES[gate].script, line => inspectLine(gate, line, skips, optional));
     receipt.exit_code = code;
@@ -147,6 +177,7 @@ export async function runGate({ gate, directory, commit, runId, attempt, execute
       receipt.artifacts = await hashes();
       if (before) assert.deepEqual(receipt.artifacts, before, 'Packages changed during required verification');
     }
+    await verifySource(commit);
   } catch (error) { receipt.status = 'failed'; receipt.error = String(error.message || error); }
   await writeFile(`${file}.pending`, `${JSON.stringify(receipt, null, 2)}\n`);
   await rename(`${file}.pending`, file);
@@ -176,8 +207,8 @@ export function executeScript(script, line) {
 async function main() {
   const [mode, gate] = process.argv.slice(2);
   assert.equal(mode, 'run', 'Usage: node scripts/native-release-verification.mjs run GATE');
-  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-  assert.equal(commit, process.env.GITHUB_SHA);
+  // Let the recorder invalidate any earlier success before checking HEAD.
+  const commit = process.env.GITHUB_SHA;
   await runGate({ gate, directory: 'artifacts/release-verification', commit, runId: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT, execute: executeScript });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main();
