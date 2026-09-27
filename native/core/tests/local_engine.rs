@@ -2630,9 +2630,23 @@ async fn live_local_acceptance_from_explicit_models() {
                 .engine
                 .store()
                 .last_task_event(&job.task_id, "local.runtime_ready")
-                .unwrap(),
+                .unwrap()
+                .expect("each completed local job must record its own runtime"),
         );
     }
+    for ((job, runtime), file) in jobs.iter().zip(&runtimes).zip(&files) {
+        assert_eq!(job.result.as_ref().unwrap()["timings"]["model_requests"], 1);
+        assert_eq!(runtime["payload"]["automatic_cpu_fallback_allowed"], false);
+        assert_eq!(runtime["payload"]["runtime"]["cpu_fallback"], false);
+        assert_eq!(
+            runtime["payload"]["runtime"]["provenance"]["files"]["model"]["path"],
+            *file
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(project.join("calc.py")).unwrap(),
+        "def add(a, b):\n    return a + b\n"
+    );
     let answer_valid: Vec<_> = jobs
         .iter()
         .map(|job| addition_answer_valid(&job.summary))
