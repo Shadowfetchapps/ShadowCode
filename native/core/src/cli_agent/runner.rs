@@ -17,8 +17,13 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use serde_json::json;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
 use std::{
+    collections::VecDeque,
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
     time::{Duration, Instant},
 };
@@ -39,6 +44,55 @@ const MAX_PROTOCOL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PROTOCOL_FRAMES: usize = 250_000;
 const MAX_ASSISTANT_TEXT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STDERR_WARNINGS: usize = 1000;
+const MAX_PENDING_APPROVALS: usize = 32;
+const MAX_PENDING_APPROVAL_BYTES: usize = 8 * 1024 * 1024;
+const MAX_APPROVAL_DRAIN_FRAMES: usize = 128;
+
+struct PendingApproval<'a> {
+    prompt: ApprovalPrompt,
+    bytes: usize,
+    future: Pin<Box<dyn Future<Output = Result<Answer>> + Send + 'a>>,
+    answer: Option<Answer>,
+}
+
+enum RunnerInput {
+    Line(Result<Option<String>>),
+    Tick,
+    Decision(Result<Answer>),
+    Reconciled,
+}
+
+/// Tokio may not have received the reactor notification for bytes already in
+/// the pipe. An async Pending therefore cannot alone authorize a reply. The
+/// reader owns this descriptor for the entire run; this check never consumes
+/// bytes or changes descriptor flags.
+#[cfg(unix)]
+fn pipe_has_readable_event(fd: RawFd) -> Result<bool> {
+    let mut poll = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let result = unsafe { libc::poll(&mut poll, 1, 0) };
+    if result < 0 {
+        let error = std::io::Error::last_os_error();
+        // A signal interrupted the check; retry without sending a decision.
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(true);
+        }
+        return Err(error.into());
+    }
+    anyhow::ensure!(
+        poll.revents & libc::POLLNVAL == 0,
+        "Vendor stdout closed during approval reconciliation"
+    );
+    Ok(poll.revents != 0)
+}
+
+#[cfg(not(unix))]
+fn pipe_has_readable_event(_: ()) -> Result<bool> {
+    bail!("Vendor approval reconciliation cannot verify pipe readiness on this platform")
+}
 
 /// A resource/deadline failure must never be mistaken for an unsupported
 /// Codex handshake and retried through exec, including before ready().
@@ -54,6 +108,7 @@ impl std::error::Error for RunLimit {}
 struct RunBudget {
     started: Instant,
     user_wait: Duration,
+    approval_wait: Option<Instant>,
     active_limit: Duration,
     protocol_bytes: usize,
     protocol_frames: usize,
@@ -63,19 +118,32 @@ impl RunBudget {
         Self {
             started: Instant::now(),
             user_wait: Duration::ZERO,
+            approval_wait: None,
             active_limit: Duration::from_secs(seconds),
             protocol_bytes: 0,
             protocol_frames: 0,
         }
     }
     fn remaining(&self) -> Result<Duration> {
-        let active = self.started.elapsed().saturating_sub(self.user_wait);
+        let waiting = self
+            .approval_wait
+            .map(|start| start.elapsed())
+            .unwrap_or_default();
+        let active = self
+            .started
+            .elapsed()
+            .saturating_sub(self.user_wait + waiting);
         self.active_limit.checked_sub(active).filter(|left| !left.is_zero()).ok_or_else(|| {
             RunLimit(format!(
                 "Vendor CLI exceeded the {}-second active runtime limit (cli_agents.max_run_time_sec). The run was stopped; existing file changes remain. Continue with a smaller task or adjust this limit in Settings → Advanced.",
                 self.active_limit.as_secs()
             )).into()
         })
+    }
+    fn finish_approval_wait(&mut self) {
+        if let Some(started) = self.approval_wait.take() {
+            self.user_wait += started.elapsed();
+        }
     }
     fn protocol_line(&mut self, bytes: usize) -> Result<()> {
         // Include framing bytes even for empty lines.
@@ -314,6 +382,10 @@ async fn run_once(
     let mut group = ProcessGroup(pid);
     let mut stdin = Some(child.stdin.take().context("Vendor CLI stdin missing")?);
     let stdout = child.stdout.take().context("Vendor CLI stdout missing")?;
+    #[cfg(unix)]
+    let stdout_fd = stdout.as_raw_fd();
+    #[cfg(not(unix))]
+    let stdout_fd = ();
     let stderr = child.stderr.take().context("Vendor CLI stderr missing")?;
     let mut reader = BoundedLines::new(stdout, MAX_LINE_BYTES);
     let sign_in_needed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -343,6 +415,9 @@ async fn run_once(
     let mut interrupted_turn = false;
     let mut finished = false;
     let mut final_text = None;
+    let mut approval: Option<PendingApproval<'_>> = None;
+    let mut queued_approvals: VecDeque<(ApprovalPrompt, usize)> = VecDeque::new();
+    let mut approval_drain_frames = 0usize;
     loop {
         if request.cancel.is_cancelled() {
             interrupt_vendor(&mut stdin, &mut adapter).await;
@@ -361,9 +436,41 @@ async fn run_once(
             group.kill();
             bail!("{}", super::acp::ANTIGRAVITY_SIGN_IN);
         }
-        if request.steer.is_paused() && !interrupted_turn && !finished {
-            send_lines(request, &mut stdin, &adapter.interrupt(), &budget).await?;
-            interrupted_turn = true;
+        if request.steer.is_paused() && !finished {
+            if approval.is_some() || !queued_approvals.is_empty() {
+                retire_approvals(
+                    request,
+                    &mut approval,
+                    &mut queued_approvals,
+                    &mut stdin,
+                    &mut adapter,
+                    &mut budget,
+                    |_| true,
+                    "The turn was paused",
+                )
+                .await?;
+                last_line = Instant::now();
+            }
+            if !interrupted_turn {
+                send_lines(request, &mut stdin, &adapter.interrupt(), &budget).await?;
+                interrupted_turn = true;
+            }
+        }
+        if approval.is_none() {
+            if let Some((prompt, bytes)) = queued_approvals.pop_front() {
+                approval = Some(PendingApproval {
+                    future: Box::pin(request_approval(
+                        request,
+                        prompt.clone(),
+                        adapter.deny_note(),
+                    )),
+                    prompt,
+                    bytes,
+                    answer: None,
+                });
+                budget.approval_wait = Some(Instant::now());
+                approval_drain_frames = 0;
+            }
         }
         // Text must reach the transcript during generation, including a short
         // delta followed by a quiet provider. Check between frames as well as
@@ -377,12 +484,84 @@ async fn run_once(
         } else {
             TEXT_FLUSH_INTERVAL.saturating_sub(last_flush.elapsed())
         };
-        let remaining = stall
-            .saturating_sub(last_line.elapsed())
-            .min(budget.remaining()?);
-        let read = tokio::time::timeout(remaining.min(poll_interval), reader.next_protocol_line());
-        match read.await {
-            Ok(Ok(None)) => {
+        let waiting = budget.approval_wait.is_some();
+        let remaining = if waiting {
+            stall
+        } else {
+            stall.saturating_sub(last_line.elapsed())
+        }
+        .min(budget.remaining()?);
+        let ready_answer = approval.as_ref().is_some_and(|p| p.answer.is_some());
+        let input = if ready_answer && reader.has_partial_frame() {
+            // A split write is still an outstanding frame, even if the kernel
+            // pipe is temporarily empty. Its completion remains subject to
+            // the active/stall deadline, framing cap and cancellation polls.
+            match tokio::time::timeout(remaining.min(poll_interval), reader.next_protocol_line())
+                .await
+            {
+                Ok(line) => RunnerInput::Line(line),
+                Err(_) => RunnerInput::Tick,
+            }
+        } else if ready_answer {
+            // A user answer and a changed proposal may both be ready. Consume
+            // complete frames already readable before consulting the adapter's
+            // permission binding. A continuous producer must fail closed rather
+            // than hold this drain open forever. This is a protocol boundary,
+            // not proof of what the external vendor actually executes.
+            tokio::select! {
+                biased;
+                // Cooperative scheduler yields are not evidence of an empty
+                // pipe. This poll has explicit frame, byte and time bounds.
+                line = tokio::task::unconstrained(reader.next_protocol_line()) => RunnerInput::Line(line),
+                _ = std::future::ready(()) => RunnerInput::Reconciled,
+            }
+        } else {
+            tokio::select! {
+                biased;
+                answer = async { approval.as_mut().expect("guarded approval").future.as_mut().await }, if approval.is_some() => RunnerInput::Decision(answer),
+                read = tokio::time::timeout(remaining.min(poll_interval), reader.next_protocol_line()) => match read {
+                    Ok(line) => RunnerInput::Line(line),
+                    Err(_) => RunnerInput::Tick,
+                },
+            }
+        };
+        match input {
+            RunnerInput::Decision(answer) => {
+                approval.as_mut().expect("active approval").answer = Some(answer?);
+                budget.finish_approval_wait();
+                last_line = Instant::now();
+                continue;
+            }
+            RunnerInput::Reconciled => {
+                if request.steer.is_paused() {
+                    continue;
+                }
+                if reader.has_partial_frame() {
+                    continue;
+                }
+                if pipe_has_readable_event(stdout_fd)? {
+                    // Let the reactor deliver readiness before polling again.
+                    // Active runtime and cancellation are checked each pass.
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    continue;
+                }
+                let pending = approval.take().expect("ready approval");
+                let answer = pending.answer.expect("ready answer");
+                let reply = VendorAnswer {
+                    allow: answer.allow,
+                    for_session: answer.for_task && !answer.automatic,
+                    note: answer.note,
+                };
+                send_lines(
+                    request,
+                    &mut stdin,
+                    &adapter.answer(&pending.prompt.request_id, &reply)?,
+                    &budget,
+                )
+                .await?;
+                continue;
+            }
+            RunnerInput::Line(Ok(None)) => {
                 flush_text(request, &message_id, &mut pending_text)?;
                 let status = tokio::time::timeout(Duration::from_secs(3), child.wait())
                     .await
@@ -398,8 +577,14 @@ async fn run_once(
                     vendor.label()
                 );
             }
-            Ok(Ok(Some(line))) => {
+            RunnerInput::Line(Ok(Some(line))) => {
                 budget.protocol_line(line.len())?;
+                if ready_answer {
+                    approval_drain_frames += 1;
+                    if approval_drain_frames > MAX_APPROVAL_DRAIN_FRAMES {
+                        return Err(RunLimit("Vendor CLI continued streaming beyond the bounded approval reconciliation limit; no approval was sent".into()).into());
+                    }
+                }
                 last_line = Instant::now();
                 let step = adapter.on_line(&line)?;
                 // Once a prompt may be written, input failure must not start
@@ -411,6 +596,52 @@ async fn run_once(
                 for update in step.updates {
                     budget.remaining()?;
                     match update {
+                        Update::Approval(prompt) => {
+                            flush_text(request, &message_id, &mut pending_text)?;
+                            if approval
+                                .as_ref()
+                                .is_some_and(|p| p.prompt.request_id == prompt.request_id)
+                                || queued_approvals
+                                    .iter()
+                                    .any(|(p, _)| p.request_id == prompt.request_id)
+                            {
+                                return Err(RunLimit("Vendor CLI reused an outstanding permission request ID; no approval was sent".into()).into());
+                            }
+                            if request.steer.is_paused()
+                                || (request.options.read_only
+                                    && matches!(
+                                        prompt.kind.as_str(),
+                                        "command" | "file_change" | "permissions"
+                                    ))
+                            {
+                                request.events.emit("agent.warning", json!({"text":format!(
+                                    "Denied automatically: this task is {}, so {}'s request was declined ({}).",
+                                    if request.steer.is_paused() { "paused" } else { "read-only" }, vendor.product_label(), clip(&prompt.command, 300)
+                                ),"vendor":vendor.id(),"kind":prompt.kind}))?;
+                                send_lines(
+                                    request,
+                                    &mut stdin,
+                                    &adapter.approve(&prompt.request_id, false)?,
+                                    &budget,
+                                )
+                                .await?;
+                            } else {
+                                let bytes = serde_json::to_vec(&prompt)?.len()
+                                    + std::mem::size_of_val(&prompt.tool_identity);
+                                let retained = approval.as_ref().map(|p| p.bytes).unwrap_or(0)
+                                    + queued_approvals
+                                        .iter()
+                                        .map(|(_, bytes)| bytes)
+                                        .sum::<usize>();
+                                if queued_approvals.len() + usize::from(approval.is_some())
+                                    >= MAX_PENDING_APPROVALS
+                                    || bytes > MAX_PENDING_APPROVAL_BYTES.saturating_sub(retained)
+                                {
+                                    return Err(RunLimit("Vendor CLI exceeded the pending permission request limit; no approval was sent".into()).into());
+                                }
+                                queued_approvals.push_back((prompt, bytes));
+                            }
+                        }
                         Update::Warning(text) => {
                             if text.contains("Ignored a non-JSON")
                                 || text.contains("Ignored a non-object")
@@ -431,8 +662,48 @@ async fn run_once(
                             request.events.emit("agent.warning", json!({"text":text}))?;
                         }
                         other => {
+                            let retirement = match &other {
+                                Update::TurnCompleted { .. }
+                                | Update::TurnFailed(_)
+                                | Update::LimitReached(_) => Some("The vendor turn ended"),
+                                Update::NativeSession { id }
+                                    if native_session.as_deref() != Some(id) =>
+                                {
+                                    Some("The vendor session changed")
+                                }
+                                Update::ToolCompleted { .. } => {
+                                    Some("The proposed tool call already finished")
+                                }
+                                _ => None,
+                            };
+                            if let Some(reason) = retirement {
+                                retire_approvals(
+                                    request,
+                                    &mut approval,
+                                    &mut queued_approvals,
+                                    &mut stdin,
+                                    &mut adapter,
+                                    &mut budget,
+                                    |prompt| match &other {
+                                        Update::ToolCompleted { id, .. } => {
+                                            prompt.tool_identity
+                                                == Some(super::approval_tool_identity(id))
+                                        }
+                                        _ => true,
+                                    },
+                                    reason,
+                                )
+                                .await?;
+                            }
                             malformed = 0;
                             saw_protocol = true;
+                            let completed_interruption = matches!(
+                                &other,
+                                Update::TurnCompleted {
+                                    interrupted: true,
+                                    ..
+                                }
+                            );
                             apply_update(
                                 request,
                                 vendor,
@@ -450,10 +721,18 @@ async fn run_once(
                                 &mut budget,
                             )
                             .await?;
+                            if completed_interruption && !finished {
+                                // The inner handler parked and submitted the
+                                // follow-up. A later pause must interrupt that
+                                // new turn and retire its pending permissions.
+                                interrupted_turn = false;
+                            }
                         }
                     }
                 }
-                last_line += budget.user_wait.saturating_sub(user_wait_before);
+                if budget.user_wait != user_wait_before {
+                    last_line = Instant::now();
+                }
                 if saw_protocol {
                     malformed = 0;
                 }
@@ -465,11 +744,11 @@ async fn run_once(
                     break;
                 }
             }
-            Ok(Err(error)) => {
+            RunnerInput::Line(Err(error)) => {
                 group.kill();
                 return Err(error);
             }
-            Err(_) if last_line.elapsed() >= stall => {
+            RunnerInput::Tick if !waiting && last_line.elapsed() >= stall => {
                 group.terminate();
                 let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
                 group.kill();
@@ -479,7 +758,7 @@ async fn run_once(
                     request.config.stall_timeout_sec
                 );
             }
-            Err(_) => {
+            RunnerInput::Tick => {
                 if request.steer.is_paused() && finished {
                     break;
                 }
@@ -719,6 +998,48 @@ fn flush_text(request: &Request<'_>, message_id: &str, pending: &mut String) -> 
     Ok(())
 }
 
+/// Retire stale dialogs before a tool/turn/session boundary. Dropping the
+/// ApprovalHub future removes its ticket even if nobody answered the card.
+#[allow(clippy::too_many_arguments)]
+async fn retire_approvals(
+    request: &Request<'_>,
+    active: &mut Option<PendingApproval<'_>>,
+    queued: &mut VecDeque<(ApprovalPrompt, usize)>,
+    stdin: &mut Option<ChildStdin>,
+    adapter: &mut Box<dyn CliAdapter>,
+    budget: &mut RunBudget,
+    retire: impl Fn(&ApprovalPrompt) -> bool,
+    reason: &str,
+) -> Result<()> {
+    let mut retired = Vec::new();
+    if active.as_ref().is_some_and(|p| retire(&p.prompt)) {
+        let pending = active.take().expect("matched approval");
+        drop(pending.future);
+        budget.finish_approval_wait();
+        request.events.emit(
+            "approval.resolved",
+            json!({"tool":"vendor","approved":false,"job_id":request.job_id,"reason":reason}),
+        )?;
+        retired.push(pending.prompt);
+    }
+    queued.retain(|(prompt, _)| {
+        if retire(prompt) {
+            retired.push(prompt.clone());
+            false
+        } else {
+            true
+        }
+    });
+    for prompt in retired {
+        // A terminal adapter transition may already have removed the RPC.
+        // If it still exists, explicitly reject; never reuse an old grant.
+        if let Ok(lines) = adapter.approve(&prompt.request_id, false) {
+            send_lines(request, stdin, &lines, budget).await?;
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn apply_update(
     request: &Request<'_>,
@@ -775,56 +1096,7 @@ async fn apply_update(
                 json!({"paths":paths,"detail":detail,"vendor":vendor.id()}),
             )?;
         }
-        Update::Approval(prompt) => {
-            flush_text(request, message_id, pending_text)?;
-            if request.options.read_only
-                && matches!(
-                    prompt.kind.as_str(),
-                    "command" | "file_change" | "permissions"
-                )
-            {
-                // Plan/Review tasks are read-only in ShadowCode even when the
-                // vendor asks: deny without prompting and say so.
-                request.events.emit(
-                    "agent.warning",
-                    json!({"text":format!(
-                        "Denied automatically: this task is read-only, so {}'s request was declined ({}).",
-                        vendor.product_label(),
-                        clip(&prompt.command, 300)
-                    ),"vendor":vendor.id(),"kind":prompt.kind}),
-                )?;
-                send_lines(
-                    request,
-                    stdin,
-                    &adapter.approve(&prompt.request_id, false)?,
-                    budget,
-                )
-                .await?;
-                return Ok(());
-            }
-            let answer = budget
-                .wait_for_user(request_approval(
-                    request,
-                    prompt.clone(),
-                    adapter.deny_note(),
-                ))
-                .await?;
-            let reply = VendorAnswer {
-                allow: answer.allow,
-                // The first "Allow for this task" maps to the vendor's own
-                // session-wide allow where the protocol has one; requests
-                // ShadowCode already allowed are answered once.
-                for_session: answer.for_task && !answer.automatic,
-                note: answer.note.clone(),
-            };
-            send_lines(
-                request,
-                stdin,
-                &adapter.answer(&prompt.request_id, &reply)?,
-                budget,
-            )
-            .await?;
-        }
+        Update::Approval(_) => unreachable!("approvals are handled by the transport loop"),
         Update::Warning(text) => {
             request.events.emit("agent.warning", json!({"text":text}))?;
         }

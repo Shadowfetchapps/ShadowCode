@@ -42,6 +42,12 @@ impl<R: AsyncRead + Unpin> BoundedLines<R> {
         }
     }
 
+    /// An approval decision cannot treat consumed but unfinished protocol
+    /// bytes as an empty stream. Keep waiting within the caller's deadline.
+    pub(super) fn has_partial_frame(&self) -> bool {
+        !self.pending.is_empty() || self.discarding
+    }
+
     /// Report overflow immediately, without waiting for a newline. The next
     /// call discards the rest of that line with bounded storage and resumes
     /// at the following line. Never return fragments of oversized diagnostics.
