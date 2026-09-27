@@ -96,6 +96,7 @@ impl Engine {
         };
         store.create_job(&json!(job))?;
         let running = Arc::new(Running {
+            clock: crate::timing::Clock::default(),
             record: Mutex::new(job.clone()),
             config: spec.config,
             system_context: Some(spec.system_context),

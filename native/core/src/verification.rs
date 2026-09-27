@@ -68,6 +68,10 @@ pub struct Receipt {
     pub scope: String,
     pub started_at: f64,
     pub finished_at: f64,
+    /// Monotonic duration from the owned process, excluding approval waits
+    /// and workspace fingerprinting. Missing when no process result exists.
+    #[serde(default)]
+    pub process_seconds: Option<f64>,
     pub exit_code: Option<i64>,
     pub termination_reason: String,
     pub workspace_fingerprint: Option<String>,
@@ -230,6 +234,7 @@ pub async fn execute(
         provenance: "locally_observed".into(),
         scope: if check { "Exact configured/project check; non-ignored workspace content excluding generated directories. No assertion about test counts or overall task acceptance." } else { "Process execution only; not verification." }.into(),
         started_at, finished_at, exit_code, timed_out,
+        process_seconds: result.output["duration_ms"].as_u64().map(|ms| ms as f64 / 1000.0),
         termination_reason: if cancelled { "cancelled" } else if timed_out { "timeout" } else if exit_code.is_some() { "exited" } else { "not_started_or_failed" }.into(),
         workspace_fingerprint: after, output_ref,
     };
@@ -416,6 +421,7 @@ mod tests {
             scope: "configured check".into(),
             started_at: 1.0,
             finished_at: 2.0,
+            process_seconds: Some(1.0),
             termination_reason: "exited".into(),
             workspace_fingerprint: Some("hash".into()),
             output_ref: "tool.completed:call".into(),

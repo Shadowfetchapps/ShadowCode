@@ -71,6 +71,7 @@ pub mod symbol_index;
 pub mod system_info;
 pub mod terminal;
 pub mod textdiff;
+pub mod timing;
 pub mod tools;
 pub mod usage;
 pub mod vision;

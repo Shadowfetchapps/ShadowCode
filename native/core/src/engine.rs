@@ -114,8 +114,11 @@ pub struct Job {
     pub usage_is_estimated: bool,
     pub result: Option<Value>,
     pub steps: usize,
+    #[serde(default)]
+    pub timings: Option<crate::timing::Timings>,
 }
 struct Running {
+    clock: crate::timing::Clock,
     record: Mutex<Job>,
     config: Config,
     system_context: Option<String>,
@@ -615,6 +618,7 @@ impl Engine {
                 .to_owned()
         };
         let event_cursor = self.0.store.event_cursor(&sid)?;
+        let clock = crate::timing::Clock::default();
         let job = Job {
             id: crate::id(),
             workspace: workspace.path.clone(),
@@ -649,6 +653,7 @@ impl Engine {
             usage_is_estimated: false,
             result: None,
             steps: 0,
+            timings: None,
         };
         let cancel = match context.owner {
             Some(owner) => owner.register(self, &job.id)?,
@@ -669,6 +674,7 @@ impl Engine {
             )?;
         }
         let running = Arc::new(Running {
+            clock,
             record: Mutex::new(job.clone()),
             config,
             system_context: context.system_context,
@@ -1318,6 +1324,7 @@ impl Engine {
             Err(error) => format!("{error:#}"),
         };
         job.finished_at = Some(crate::now());
+        job.timings = Some(running.clock.snapshot(true));
         let plan = if plan["steps"].as_array().is_some_and(Vec::is_empty) {
             self.0
                 .store
@@ -1346,6 +1353,7 @@ impl Engine {
         job.result = Some(
             json!({"success":success,"cancelled":cancelled,"summary":job.summary,"plan":plan,"usage":job.usage,"usage_is_estimated":job.usage_is_estimated,"verification":verification}),
         );
+        job.result.as_mut().unwrap()["timings"] = json!(job.timings);
         if let Some(limit) = limit {
             job.result.as_mut().unwrap()["limit_reached"] = limit;
         }
@@ -1381,6 +1389,8 @@ impl Engine {
                 "Task cancelled before starting"
             );
             record.status = "running".into();
+            running.clock.admit();
+            record.timings = Some(running.clock.snapshot(false));
             record.started_at = crate::now();
             self.0.store.save_job(&json!(*record))?;
             record.clone()
@@ -1787,6 +1797,8 @@ impl Engine {
         // Held until this task returns: the local model lease lives in it.
         let prepare_started = Instant::now();
         let managed = crate::local_engine::is_managed(&running.config.model);
+        let preparation = managed.then(|| running.clock.span(crate::timing::Section::Preparation));
+        let runtime_phase = Mutex::new(None);
         let comparison = self
             .0
             .store
@@ -1807,6 +1819,16 @@ impl Engine {
                 &running.cancel,
                 !comparison,
                 &|phase| {
+                    let mut current = runtime_phase.lock().unwrap_or_else(|e| e.into_inner());
+                    *current = None;
+                    *current = Some(running.clock.span(match phase {
+                        crate::local_runtime::Progress::Waiting => {
+                            crate::timing::Section::RuntimeWait
+                        }
+                        crate::local_runtime::Progress::Loading => {
+                            crate::timing::Section::ModelLoad
+                        }
+                    }));
                     events.emit(
                         "local.runtime_progress",
                         json!({
@@ -1822,7 +1844,10 @@ impl Engine {
             self.prepare_model_client(&running.config, &running.config.model, &running.cancel)
                 .await?
         };
+        drop(runtime_phase);
+        drop(preparation);
         if managed {
+            running.clock.local_ready();
             events.emit(
                 "local.runtime_ready",
                 json!({
@@ -2062,16 +2087,19 @@ impl Engine {
                 let mut flushed = Instant::now();
                 let mut event_error = None;
                 let mut text_loop_hit = false;
+                let request_messages = crate::vision::hydrate_for_provider(
+                    &messages,
+                    &running.workspace,
+                    &running.config.model.provider,
+                )?;
+                let request_timing = running.clock.span(crate::timing::Section::ModelRequest);
                 let response = model
                     .chat(
-                        &crate::vision::hydrate_for_provider(
-                            &messages,
-                            &running.workspace,
-                            &running.config.model.provider,
-                        )?,
+                        &request_messages,
                         &schemas,
                         running.cancel.clone(),
                         |delta| {
+                            request_timing.text(delta);
                             if text_loop_hit {
                                 return;
                             }
@@ -2118,6 +2146,15 @@ impl Engine {
                         },
                     )
                     .await;
+                let request_receipt = json!({
+                    "message_id": message_id,
+                    "elapsed_seconds": request_timing.elapsed_seconds(),
+                    "first_text_seconds": request_timing.first_text_seconds(),
+                    "success": response.is_ok(),
+                    "cancelled": running.cancel.is_cancelled(),
+                });
+                drop(request_timing);
+                events.emit("model.request_timing", request_receipt)?;
                 if let Some(error) = event_error {
                     return Err(error);
                 }
@@ -2220,6 +2257,7 @@ impl Engine {
                 );
                 record.usage.add(&response.usage);
                 record.steps = step + 1;
+                record.timings = Some(running.clock.snapshot(false));
                 record.event_cursor = self.0.store.event_cursor(&job.session_id)?;
                 self.0.store.save_job(&json!(*record))?;
                 let session = crate::usage::session_total(
@@ -2353,6 +2391,7 @@ impl Engine {
                     messages.push(json!({"role":"system","content":"Execution check: the user explicitly requested inspection of the current workspace. You have not read or searched any current files in this task. Use the appropriate read-only tool before giving the final answer. Historical conversation is not proof of current file contents. If inspection fails, report that limitation; do not invent a result."}));
                     continue;
                 }
+                let _checks_timing = running.clock.span(crate::timing::Section::FinalChecks);
                 let outcomes = tools
                     .fire_hooks(hooks::context(
                         "on_complete",
@@ -2422,6 +2461,7 @@ impl Engine {
                     }
                 }
                 let calls = &response.tool_calls[start..index];
+                let _tools_timing = running.clock.span(crate::timing::Section::Tools);
                 let mut results = stream::iter(calls.iter().cloned().map(|call| {
                     let tools = tools.clone();
                     let attempt = job.id.clone();
@@ -2438,6 +2478,11 @@ impl Engine {
                 .buffered(4);
                 while let Some((call, result)) = results.next().await {
                     let result = result?;
+                    if call.name == "exec" {
+                        running
+                            .clock
+                            .record_check(&result.output["verification_receipt"]);
+                    }
                     if result.success
                         && matches!(
                             call.name.as_str(),
@@ -2500,7 +2545,13 @@ impl Running {
     fn snapshot(&self) -> Result<Job> {
         self.record
             .lock()
-            .map(|v| v.clone())
+            .map(|v| {
+                let mut job = v.clone();
+                if !self.finished.load(Ordering::Acquire) {
+                    job.timings = Some(self.clock.snapshot(false));
+                }
+                job
+            })
             .map_err(|_| anyhow!("Job lock poisoned"))
     }
 }

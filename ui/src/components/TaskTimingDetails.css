@@ -1,0 +1,24 @@
+.task-timings {
+  margin: 0.7rem 0;
+  font-size: 0.8rem;
+}
+.task-timings > summary {
+  cursor: pointer;
+}
+.task-timings dl {
+  margin: 0.6rem 0;
+}
+.task-timings dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0.3rem 0;
+}
+.task-timings dd {
+  margin: 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.task-timings p {
+  line-height: 1.45;
+}

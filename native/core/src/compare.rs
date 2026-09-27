@@ -152,6 +152,7 @@ pub struct Lane {
     pub changed_files_truncated: bool,
     pub checks: Checks,
     pub duration_s: f64,
+    pub timings: Option<crate::timing::Timings>,
     pub usage: Value,
     pub local_runtime: Value,
     pub local_progress: Value,
@@ -697,9 +698,17 @@ async fn refresh(engine: &Engine, record: &mut Record, cancel: &CancellationToke
             "total_tokens": job.usage.total_tokens,
             "estimated": job.usage_is_estimated,
         });
-        lane.duration_s =
-            ((job.finished_at.unwrap_or_else(crate::now) - job.started_at).max(0.0) * 10.0).round()
-                / 10.0;
+        lane.duration_s = (job
+            .timings
+            .as_ref()
+            .map(|timings| timings.active_seconds.unwrap_or(0.0))
+            .unwrap_or_else(|| {
+                (job.finished_at.unwrap_or_else(crate::now) - job.started_at).max(0.0)
+            })
+            * 10.0)
+            .round()
+            / 10.0;
+        lane.timings = job.timings.clone();
         lane.checks = checks_of(engine, &job);
         lane.error = matches!(
             job.status.as_str(),

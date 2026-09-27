@@ -939,6 +939,21 @@ async fn native_agent_turns_use_the_local_server_with_its_key_and_capabilities()
         .iter()
         .any(|t| t == "view_image"));
     assert_eq!(seen[0]["kwargs"], json!({"enable_thinking": false}));
+    assert_eq!(done["timings"]["model_reused"], false);
+    let warm = call(
+        &service,
+        "POST",
+        "/api/jobs",
+        json!({
+            "workspace": f.project, "task": "What does hello.txt say?", "model": id("coder")
+        }),
+    )
+    .await
+    .unwrap();
+    let warm = wait_job(&service, warm["id"].as_str().unwrap()).await;
+    assert_eq!(warm["status"], "completed", "{warm}");
+    assert_eq!(warm["timings"]["model_reused"], true);
+    assert!(warm["timings"]["model_load_seconds"].is_null());
     assert_eq!(seen[0]["type_list"], false, "type lists are sent as anyOf");
     assert!(seen[0]["max_tokens"].as_u64().unwrap() <= 4096);
 
@@ -1611,6 +1626,20 @@ async fn managed_jobs_run_in_submission_order_across_projects_and_skip_cancelled
         })
         .collect();
     assert_eq!(phases, ["preparing", "waiting", "loading", "ready"]);
+    let timing = first.timings.as_ref().unwrap();
+    assert!(timing.complete);
+    assert!(timing.runtime_wait_seconds.unwrap() > 0.0);
+    assert!(timing.model_load_seconds.unwrap() > 0.0);
+    assert!(
+        timing.preparation_seconds.unwrap()
+            >= timing.runtime_wait_seconds.unwrap() + timing.model_load_seconds.unwrap()
+    );
+    assert!(last.timings.as_ref().unwrap().queue_seconds > timing.runtime_wait_seconds.unwrap());
+    let cancelled_timing = cancelled.timings.as_ref().unwrap();
+    assert!(cancelled_timing.complete);
+    assert!(cancelled_timing.active_seconds.is_none());
+    assert!(cancelled_timing.model_load_seconds.is_none());
+    assert!(cancelled_timing.model_requests_seconds.is_none());
     assert_eq!(engine.job(&middle.id).unwrap().unwrap().status, "cancelled");
     assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 3);
     engine.shutdown().await.unwrap();
@@ -1698,6 +1727,8 @@ async fn compare_runs_two_installed_gguf_models_sequentially_in_offline_mode() {
         );
         assert_eq!(lane["local_runtime"]["runtime"]["cpu_fallback"], false);
         assert_eq!(lane["base_commit"], result["base"]["commit"]);
+        assert_eq!(lane["timings"]["complete"], true);
+        assert!(lane["timings"]["model_load_seconds"].as_f64().unwrap() > 0.0);
     }
     assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 2);
     // A new turn must replace the lane's old runtime receipt while it waits.
@@ -1747,6 +1778,8 @@ async fn compare_runs_two_installed_gguf_models_sequentially_in_offline_mode() {
     assert_eq!(waiting["lanes"][0]["job_id"], followup.id);
     assert!(waiting["lanes"][0]["local_runtime"].is_null());
     assert_eq!(waiting["lanes"][0]["local_progress"]["phase"], "waiting");
+    assert_eq!(waiting["lanes"][0]["timings"]["complete"], false);
+    assert!(waiting["lanes"][0]["timings"]["model_load_seconds"].is_null());
     service.engine.cancel(&followup.id).await.unwrap();
     let stopped = tokio::time::timeout(Duration::from_secs(5), service.engine.wait(&followup.id))
         .await

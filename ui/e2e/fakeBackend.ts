@@ -12,6 +12,8 @@ export type FakeOptions = {
   stepMs?: number;
   /** Include recorded managed-runtime startup before agent.started. */
   localStartup?: boolean;
+  /** Versioned timing receipt supplied by a rendering fixture. */
+  taskTimings?: Record<string, unknown>;
   /** Start with the onboarding screen. */
   onboarding?: boolean;
   /** Codex tasks stop at the plan limit (then limits.on_limit applies). */
@@ -1166,12 +1168,19 @@ export function installFakeBackend(options: FakeOptions = {}) {
       job.status = "completed";
       job.finished_at = now();
       job.summary = "Fixed `add` in src/app.ts and ran the tests.";
-      job.result = { success: true, summary: job.summary, verification };
+      job.timings = options.taskTimings;
+      job.result = {
+        success: true,
+        summary: job.summary,
+        verification,
+        timings: job.timings,
+      };
       emit(sid, tid, "agent.completed", {
         summary: job.summary,
         success: true,
         cancelled: false,
         verification,
+        timings: job.timings,
         usage: {},
       });
       job.event_cursor = state.cursor;

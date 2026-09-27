@@ -1275,3 +1275,24 @@ so editor threads never change the desktop's selected project):
 - When no desktop or server is running the agent owns the engine;
   `GET /api/runtime` then reports `mode: "acp"` and `persistent: true`, and a
   desktop attaches to it as a view.
+
+### Task timing observations (additive, schema version 1)
+
+`Job.timings`, `Job.result.timings`, `agent.completed.payload.timings` and a Compare lane's `timings` carry the same optional timing snapshot. Older records omit it. While a job is live, job lookup observes its current monotonic clock; snapshots saved on admission and foreground responses are partial. Final timings are persisted with the terminal job and event. Restart does not estimate missing durations or reconstruct a monotonic clock from wall-clock timestamps.
+
+`schema_version: 1` identifies the shape. `complete` means the task reached its observed terminal boundary, including failure or cancellation; it does not mean every category is measured or the task passed verification. Numeric durations are seconds. Unobserved durations are null, not invented zeroes.
+
+- `total_seconds`: elapsed from local job acceptance to the finish decision, or observation time while live. Includes queue time, but not the final terminal database commit.
+- `queue_seconds`: acceptance to engine admission; includes workspace/local admission and worker waiting. For a task cancelled before admission, it equals total time.
+- `active_seconds`: admission to the observation/finish boundary; includes preparation, approvals, pauses, tools, provider work and integration cleanup. Null if never admitted.
+- `preparation_seconds`: managed local preparation, including catalog checks and runtime acquisition. `runtime_wait_seconds` and `model_load_seconds` are subsets. Load includes stopping a previous runtime and starting/readiness checks for the new one; it is not isolated GPU weight-transfer time.
+- `model_reused`: true only after successfully acquiring an already-loaded managed model; false after starting a model for this task; null before readiness or for unmanaged routes. A reused model has no model-load interval.
+- `model_requests` / `model_requests_seconds`: count and cumulative duration of foreground native model attempts, including unsuccessful attempts and retries. Includes request preparation inside the model client, transport and decoding, but excludes image hydration, retry backoff, tools and context-compaction requests. No vendor-internal request durations are inferred.
+- `first_text_seconds` / `first_text_request`: request-relative delay to the first nonempty text callback and its one-based attempt number. Buffered JSON responses qualify; tool-only responses do not. This is not time to first generated token or first rendered UI text.
+- `tool_batches_seconds`: cumulative native tool-batch wall time, including approvals, hooks, checkpoints and result handling. Concurrent tools in one batch are not double-counted.
+- `final_checks_seconds`: completion hooks and final evidence refresh, including failed completion retries; for an explicit command/check job, its verification path. This can include approval waiting.
+- `check_process_seconds`: sum of the owned process durations in locally observed configured-check receipts, including failed/cancelled processes that return a result. Excludes approval waiting and file fingerprinting. It overlaps tool/final-check time.
+
+Do not add these overlapping measurements into a total or call model request time pure generation time. Subscription jobs currently expose total/queue/active measurements only.
+
+Each completed native foreground attempt also emits `model.request_timing` with `message_id`, `elapsed_seconds`, optional `first_text_seconds`, `success` and `cancelled`. The message ID associates timing with its response/retry in the existing transcript. `success` describes transport/response completion, not overall task acceptance. Verification receipts add optional `process_seconds`, sourced from the native owned-process result; older receipts remain readable.

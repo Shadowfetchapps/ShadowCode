@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { TaskTimingDetails } from "./TaskTimingDetails";
 import {
   ArrowLeft,
   Check,
@@ -564,7 +565,10 @@ export function LaneCard({
         )}
         <span>{state.label}</span>
         {lane.duration_s > 0 && (
-          <span className="dim"> · {formatSeconds(lane.duration_s)}</span>
+          <span className="dim" title="Active task time, excluding the queue">
+            {" "}
+            · {formatSeconds(lane.duration_s)}
+          </span>
         )}
       </p>
       {lane.local_runtime?.runtime && (
@@ -577,6 +581,7 @@ export function LaneCard({
             " · automatic CPU fallback off"}
         </p>
       )}
+      <TaskTimingDetails timings={lane.timings} />
       {active && lane.summary && (
         <p className="compare-lane-activity">{lane.summary}</p>
       )}

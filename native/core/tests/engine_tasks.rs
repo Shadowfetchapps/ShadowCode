@@ -295,7 +295,9 @@ async fn queued_cancel_is_immediate_and_shutdown_cancels_a_stalled_provider() {
         .unwrap();
     assert_eq!(result.status, "cancelled");
     tokio::time::timeout(Duration::from_secs(3), async {
-        while engine.job(&first.id).unwrap().unwrap().status != "running" {
+        while engine.job(&first.id).unwrap().unwrap().status != "running"
+            || server.requests.lock().unwrap().is_empty()
+        {
             tokio::task::yield_now().await;
         }
     })
@@ -312,7 +314,13 @@ async fn queued_cancel_is_immediate_and_shutdown_cancels_a_stalled_provider() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(wait(&engine, &first.id).await.status, "cancelled");
+    let stopped = wait(&engine, &first.id).await;
+    assert_eq!(stopped.status, "cancelled");
+    let timing = stopped.timings.as_ref().unwrap();
+    assert!(timing.complete);
+    assert_eq!(timing.model_requests, 1);
+    assert!(timing.model_requests_seconds.unwrap() > 0.0);
+    assert!(timing.first_text_seconds.is_none());
     let events = engine
         .store()
         .recent_events(&queued.session_id, 100)
@@ -1113,4 +1121,83 @@ async fn command_names_do_not_verify_and_configured_receipts_go_stale_after_edit
         }));
         engine.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn timings_separate_model_attempts_from_check_processes_and_survive_restart() {
+    let server = support::server(|index, _| {
+        let result = if index == 0 {
+            response(
+                "",
+                json!([tool("check", "exec", json!({"command":"sleep 0.15"}))]),
+            )
+        } else {
+            response("Finished the requested check.", json!([]))
+        };
+        (result, Duration::from_millis(120))
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint);
+    Config::patch(
+        engine.paths(),
+        json!({"verification":{"commands":["sleep 0.15"]}}),
+    )
+    .unwrap();
+    let job = engine
+        .start(request(root.path(), "Run the configured check", None))
+        .await
+        .unwrap();
+    let done = wait(&engine, &job.id).await;
+    assert_eq!(done.status, "completed", "{}", done.summary);
+    let t = done.timings.as_ref().unwrap();
+    assert!(t.complete);
+    assert_eq!(t.model_requests, 2);
+    assert_eq!(t.first_text_request, Some(2)); // Tool-only response is not text.
+    assert!(t.first_text_seconds.unwrap() >= 0.1); // Buffered JSON is documented as such.
+    assert!(t.model_requests_seconds.unwrap() >= 0.2);
+    assert!(t.check_process_seconds.unwrap() >= 0.1);
+    assert!(t.tool_batches_seconds.unwrap() >= t.check_process_seconds.unwrap());
+    assert!(
+        t.total_seconds
+            >= t.queue_seconds
+                + t.model_requests_seconds.unwrap()
+                + t.tool_batches_seconds.unwrap()
+    );
+    assert!(t.model_load_seconds.is_none()); // External endpoint, no invented load.
+    let events = engine
+        .store()
+        .events_after(&job.session_id, 0, None, 10000)
+        .unwrap();
+    let receipts: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "model.request_timing")
+        .collect();
+    assert_eq!(receipts.len(), 2);
+    assert!(receipts[0]["payload"]["first_text_seconds"].is_null());
+    assert!(
+        receipts[1]["payload"]["first_text_seconds"]
+            .as_f64()
+            .unwrap()
+            >= 0.1
+    );
+    let sum: f64 = receipts
+        .iter()
+        .map(|e| e["payload"]["elapsed_seconds"].as_f64().unwrap())
+        .sum();
+    assert!((t.model_requests_seconds.unwrap() - sum).abs() < 0.02);
+    let completed = events
+        .iter()
+        .find(|e| e["type"] == "agent.completed")
+        .unwrap();
+    let expected = serde_json::to_value(t).unwrap();
+    assert_eq!(completed["payload"]["timings"], expected);
+    let paths = engine.paths().clone();
+    engine.shutdown().await.unwrap();
+    drop(engine);
+    let reopened = Engine::open(paths).unwrap();
+    assert_eq!(
+        serde_json::to_value(reopened.job(&job.id).unwrap().unwrap().timings).unwrap(),
+        expected
+    );
+    reopened.shutdown().await.unwrap();
 }

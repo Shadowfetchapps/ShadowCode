@@ -1112,6 +1112,11 @@ async fn historical_verification_rechecks_external_edits_and_restart_without_rew
         .unwrap()
         .unwrap();
     assert_eq!(job.status, "completed", "{}", job.summary);
+    let timing = job.timings.as_ref().unwrap();
+    assert!(timing.complete);
+    assert_eq!(timing.model_requests, 0);
+    assert!(timing.model_requests_seconds.is_none());
+    assert!(timing.final_checks_seconds.unwrap() >= timing.check_process_seconds.unwrap());
     assert_eq!(
         job.result.as_ref().unwrap()["verification"]["verified"],
         true

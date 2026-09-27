@@ -611,7 +611,26 @@ export type WorktreeInspection = {
   reason: string;
   hash: string;
 };
+export type TaskTimings = {
+  schema_version: number;
+  complete: boolean;
+  total_seconds: number;
+  queue_seconds: number;
+  active_seconds?: number | null;
+  preparation_seconds?: number | null;
+  runtime_wait_seconds?: number | null;
+  model_load_seconds?: number | null;
+  model_reused?: boolean | null;
+  model_requests_seconds?: number | null;
+  model_requests: number;
+  first_text_seconds?: number | null;
+  first_text_request?: number | null;
+  tool_batches_seconds?: number | null;
+  final_checks_seconds?: number | null;
+  check_process_seconds?: number | null;
+};
 export type Job = {
+  timings?: TaskTimings | null;
   id: string;
   task_id?: string;
   workspace: string;
@@ -630,6 +649,7 @@ export type Job = {
   routing?: RoutingDecision | null;
   web?: boolean;
   result?: {
+    timings?: TaskTimings | null;
     success: boolean;
     summary: string;
     plan: { goal: string; steps: PlanStep[] };
@@ -790,6 +810,7 @@ export type CompareLane = {
     }[];
   };
   duration_s: number;
+  timings?: TaskTimings | null;
   local_progress?: { model_id: string; phase: string } | null;
   local_runtime?: {
     model_id: string;

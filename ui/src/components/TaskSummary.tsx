@@ -8,6 +8,7 @@ import {
   type TaskActivity,
 } from "../lib/activity";
 import type { LineCounts } from "../lib/diffStats";
+import { TaskTimingDetails } from "./TaskTimingDetails";
 
 export type DiffStat = LineCounts;
 
@@ -134,8 +135,9 @@ export const TaskSummary = memo(function TaskSummary({
           ),
         }
     : activity.verification;
-  const duration =
-    activity.startedAt && activity.finishedAt
+  const duration = activity.timings?.complete
+    ? `Total ${formatDuration(activity.timings.total_seconds)}`
+    : activity.startedAt && activity.finishedAt
       ? formatDuration(activity.finishedAt - activity.startedAt)
       : null;
   const stopped = Boolean(activity.finished?.cancelled);
@@ -180,6 +182,7 @@ export const TaskSummary = memo(function TaskSummary({
             </span>
           )}
         </header>
+        <TaskTimingDetails timings={activity.timings} />
       </section>
     );
   }
@@ -310,6 +313,7 @@ export const TaskSummary = memo(function TaskSummary({
           </p>
         )}
       </div>
+      <TaskTimingDetails timings={activity.timings} />
       <div className="row task-summary-actions">
         {changed.length > 0 && (
           <button

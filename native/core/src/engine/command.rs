@@ -53,7 +53,11 @@ impl Engine {
             name: "exec".into(),
             arguments: arguments.clone(),
         };
+        let _checks_timing = running.clock.span(crate::timing::Section::FinalChecks);
         let mut result = crate::verification::execute(tools, call, &job.id, true).await?;
+        running
+            .clock
+            .record_check(&result.output["verification_receipt"]);
         if result.success {
             let outcomes = tools
                 .fire_hooks(hooks::context(

@@ -19,6 +19,7 @@ import { CONTINUATION } from "./allowance";
 import { applySubagentEvent, isSubagentEvent } from "./subagents";
 import { keyRows } from "./rowKeys";
 import { localPhase } from "./localProgress";
+import { parseTimings } from "./timing";
 
 const ROUTE_PRODUCTS: Record<string, string> = {
   "cli:codex": "Codex",
@@ -859,6 +860,7 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     touch((a) => ({
       ...a,
       finishedAt: event.ts,
+      timings: parseTimings(p.timings),
       verification: verification || a.verification,
       calls: a.calls.map((call) =>
         call.live ? { ...call, live: false } : call,
