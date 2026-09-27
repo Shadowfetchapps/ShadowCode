@@ -239,26 +239,178 @@ async fn real_engine_sigkill_reattaches_without_replay_or_duplicate_events() {
     let _ = owner.0.wait();
 }
 
+/// A concurrent, recording crash fixture. The first response authorizes one
+/// write; every later response is held while the listener continues recording
+/// requests. Waiting for the second complete request makes the kill boundary
+/// unambiguous: the old engine is already waiting for a reply it never receives.
+struct CrashModel {
+    endpoint: String,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    second_entered: tokio::sync::oneshot::Receiver<()>,
+    cancel: tokio_util::sync::CancellationToken,
+    worker: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+}
+impl CrashModel {
+    async fn start() -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let (entered, second_entered) = tokio::sync::oneshot::channel();
+        let entered = std::sync::Arc::new(std::sync::Mutex::new(Some(entered)));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let stopped = cancel.clone();
+        let worker = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = stopped.cancelled() => {
+                        connections.abort_all();
+                        while connections.join_next().await.is_some() {}
+                        return Ok(());
+                    }
+                    done = connections.join_next(), if !connections.is_empty() => {
+                        done.expect("nonempty connection set")??;
+                    }
+                    accepted = listener.accept() => {
+                        let (mut socket, _) = accepted?;
+                        anyhow::ensure!(connections.len() < 8, "Crash fixture exceeded its concurrent connection bound");
+                        let captured = captured.clone();
+                        let entered = entered.clone();
+                        let stopped = stopped.clone();
+                        connections.spawn(async move {
+                            let body = tokio::time::timeout(Duration::from_secs(10), async {
+                                let mut wire = Vec::new();
+                                let mut buffer = [0; 8192];
+                                loop {
+                                    let count = socket.read(&mut buffer).await?;
+                                    anyhow::ensure!(count > 0, "Crash fixture request ended before its body");
+                                    wire.extend_from_slice(&buffer[..count]);
+                                    anyhow::ensure!(wire.len() < 16_000_000, "Crash fixture request exceeded its byte bound");
+                                    if let Some(end) = wire.windows(4).position(|w| w == b"\r\n\r\n") {
+                                        let headers = String::from_utf8_lossy(&wire[..end]).to_lowercase();
+                                        let len = headers.lines().find_map(|line| line.strip_prefix("content-length:")
+                                            .and_then(|value| value.trim().parse::<usize>().ok()))
+                                            .ok_or_else(|| anyhow::anyhow!("Crash fixture needs Content-Length"))?;
+                                        anyhow::ensure!(len < 16_000_000, "Crash fixture declared body exceeded its byte bound");
+                                        if wire.len() >= end + 4 + len {
+                                            return Ok::<Value, anyhow::Error>(serde_json::from_slice(&wire[end + 4..end + 4 + len])?);
+                                        }
+                                    }
+                                }
+                            }).await??;
+                            let index = {
+                                let mut requests = captured.lock().unwrap();
+                                anyhow::ensure!(requests.len() < 8, "Crash fixture exceeded its retained request bound");
+                                let index = requests.len();
+                                requests.push(body);
+                                index
+                            };
+                            if index == 0 {
+                                let text = json!({"choices":[{"message":{"role":"assistant","content":"Writing.","tool_calls":[{"id":"w1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"crash.txt\",\"content\":\"once\\n\",\"expected_hash\":\"missing\"}"}}]},"finish_reason":"tool_calls"}]}).to_string();
+                                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).as_bytes()).await?;
+                            } else {
+                                if index == 1 {
+                                    if let Some(entered) = entered.lock().unwrap().take() { let _ = entered.send(()); }
+                                }
+                                // Do not complete this response, and do not stop
+                                // accepting other connections while it is held.
+                                stopped.cancelled().await;
+                            }
+                            Ok::<(), anyhow::Error>(())
+                        });
+                    }
+                }
+            }
+        });
+        Self {
+            endpoint,
+            requests,
+            second_entered,
+            cancel,
+            worker: Some(worker),
+        }
+    }
+    async fn shutdown(&mut self) {
+        self.cancel.cancel();
+        if let Some(worker) = self.worker.take() {
+            worker.await.unwrap().unwrap();
+        }
+    }
+}
+impl Drop for CrashModel {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(worker) = self.worker.take() {
+            worker.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn crash_fixture_observes_replay_while_the_original_response_is_held() {
+    let mut model = CrashModel::start().await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let url = format!("{}/chat/completions", model.endpoint);
+    let first = client
+        .post(&url)
+        .json(&json!({"messages":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(first.status().is_success());
+    let reply: Value = first.json().await.unwrap();
+    assert_eq!(reply["choices"][0]["message"]["tool_calls"][0]["id"], "w1");
+    let second_client = client.clone();
+    let second_url = url.clone();
+    let second = tokio::spawn(async move {
+        second_client
+            .post(second_url)
+            .json(&json!({"messages":[{"role":"tool","tool_call_id":"w1"}]}))
+            .send()
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), &mut model.second_entered)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(model.requests.lock().unwrap().len(), 2);
+    assert!(!second.is_finished(), "Original request must still be held");
+    let third = tokio::spawn(async move {
+        client
+            .post(url)
+            .json(&json!({"messages":[{"role":"user","content":"deliberate replay sentinel"}]}))
+            .send()
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while model.requests.lock().unwrap().len() < 3 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("A held response must not hide a new request");
+    assert_eq!(
+        model.requests.lock().unwrap()[2]["messages"][0]["content"],
+        "deliberate replay sentinel"
+    );
+    assert!(!second.is_finished() && !third.is_finished());
+    second.abort();
+    third.abort();
+    let _ = second.await;
+    let _ = third.await;
+    model.shutdown().await;
+}
+
 #[tokio::test]
 async fn real_engine_kill_during_active_task_marks_interrupted_and_does_not_replay_write() {
     assert!(binary().is_file());
-    let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let seen_write = writes.clone();
-    let model = support::server(move |index, _| {
-        if index == 0 {
-            (
-                json!({"choices":[{"message":{"role":"assistant","content":"Writing.","tool_calls":[{"id":"w1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"crash.txt\",\"content\":\"once\\n\",\"expected_hash\":\"missing\"}"}}]},"finish_reason":"tool_calls"}]}),
-                Duration::ZERO,
-            )
-        } else {
-            seen_write.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            (
-                json!({"choices":[{"message":{"role":"assistant","content":"hang"},"finish_reason":null}]}),
-                Duration::from_secs(60),
-            )
-        }
-    })
-    .await;
+    let mut model = CrashModel::start().await;
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("project");
     let profile = root.path().join("profile");
@@ -289,20 +441,42 @@ async fn real_engine_kill_during_active_task_marks_interrupted_and_does_not_repl
     ))
     .await
     .unwrap();
-    let written = tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if workspace.join("crash.txt").is_file() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        (&mut model.second_entered)
+            .await
+            .expect("Crash fixture ended before the held request");
     })
-    .await;
-    assert!(written.is_ok(), "write_file never created crash.txt");
+    .await
+    .expect("write_file and the original engine's held follow-up request must precede SIGKILL");
     let first = fs::read_to_string(workspace.join("crash.txt")).unwrap();
-    let model_after_write = writes.load(std::sync::atomic::Ordering::SeqCst);
+    let requests_before_kill = {
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "Unexpected original engine requests: {requests:?}"
+        );
+        assert!(
+            requests[1]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["role"] == "tool" && message["tool_call_id"] == "w1"),
+            "Held request must follow the observed write tool: {:?}",
+            requests[1]
+        );
+        requests.len()
+    };
+    let killed_pid = owner.0.id();
     owner.0.kill().unwrap();
     owner.0.wait().unwrap();
+    assert!(dead(killed_pid), "Old engine must be reaped before restart");
 
     let mut owner = spawn_serve(&profile, &workspace);
     wait_client(&client, Duration::from_secs(20)).await.unwrap();
@@ -332,10 +506,11 @@ async fn real_engine_kill_during_active_task_marks_interrupted_and_does_not_repl
     );
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(
-        writes.load(std::sync::atomic::Ordering::SeqCst),
-        model_after_write,
-        "engine restart must not continue the hung model turn or rewrite the file"
+        model.requests.lock().unwrap().len(),
+        requests_before_kill,
+        "engine restart must not send another model request while the original response stays held"
     );
+    model.shutdown().await;
     let store = Store::open(&paths.database()).unwrap();
     let stats = store.local_stats().unwrap();
     assert_eq!(stats["telemetry"], false);
