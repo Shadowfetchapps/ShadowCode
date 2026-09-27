@@ -367,6 +367,16 @@ async fn missing_saved_route_emits_a_persisted_fallback_event() {
 
 #[tokio::test]
 async fn goal_verification_uses_the_tester_route_and_executes_its_acceptance_command() {
+    goal_verification_on_tester_route(true).await;
+}
+
+#[tokio::test]
+async fn goal_verification_rejects_unconfigured_tester_commands_despite_success_prose() {
+    goal_verification_on_tester_route(false).await;
+}
+
+async fn goal_verification_on_tester_route(configured: bool) {
+    const CHECK: &str = "test \"$(cat acceptance.txt)\" = verified";
     let primary = support::server(|_, _| {
         (
             response("Implementation milestone complete", json!([])),
@@ -374,10 +384,31 @@ async fn goal_verification_uses_the_tester_route_and_executes_its_acceptance_com
         )
     })
     .await;
-    let tester=support::server(|index,_| (if index==0 {
-        response("Running acceptance",json!([{"id":"acceptance","type":"function","function":{"name":"exec","arguments":json!({"command":"printf verified > acceptance.txt"}).to_string()}}]))
-    } else { response("Acceptance passed",json!([])) },Duration::ZERO)).await;
+    let tester = support::server(|index, _| {
+        let value = if index == 0 {
+            response(
+                "Running acceptance",
+                json!([
+                    {"id":"acceptance-write","type":"function","function":{"name":"exec","arguments":json!({"command":"printf verified > acceptance.txt"}).to_string()}},
+                    {"id":"acceptance-check","type":"function","function":{"name":"exec","arguments":json!({"command":CHECK}).to_string()}}
+                ]),
+            )
+        } else {
+            response("Acceptance passed", json!([]))
+        };
+        (value, Duration::ZERO)
+    })
+    .await;
     let (_root, service) = setup(&primary.endpoint);
+    if configured {
+        // A successful write is process evidence, not a configured check.
+        // Keep acceptance read-only so its workspace fingerprint stays valid.
+        Config::patch(
+            service.engine.paths(),
+            json!({"verification":{"commands":[CHECK]}}),
+        )
+        .unwrap();
+    }
     register(&service, "tester-model", &tester.endpoint).await;
     call(
         &service,
@@ -395,20 +426,62 @@ async fn goal_verification_uses_the_tester_route_and_executes_its_acceptance_com
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(
+        result["status"],
+        if configured { "completed" } else { "blocked" },
+        "{result}"
+    );
+    if !configured {
+        assert!(result["run_detail"]
+            .as_str()
+            .unwrap()
+            .contains("verification is not_run"));
+    }
     assert_eq!(
         fs::read_to_string(service.workspace().unwrap().join("acceptance.txt")).unwrap(),
         "verified"
     );
     let jobs = service.engine.store().jobs(10).unwrap();
+    let tester_jobs: Vec<_> = jobs
+        .iter()
+        .filter(|j| {
+            j["routing"]["purpose"] == "tester" && j["routing"]["model_id"] == "tester-model"
+        })
+        .collect();
+    assert_eq!(tester_jobs.len(), 1);
+    let tester_job = tester_jobs[0];
+    let verification = &tester_job["result"]["verification"];
     assert_eq!(
-        jobs.iter()
-            .filter(|j| j["routing"]["purpose"] == "tester"
-                && j["routing"]["model_id"] == "tester-model")
-            .count(),
-        1
+        verification["status"],
+        if configured { "passed" } else { "not_run" }
     );
+    assert_eq!(verification["verified"], configured);
+    let commands = verification["commands"].as_array().unwrap();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0]["kind"], "command");
+    let check = commands
+        .iter()
+        .find(|receipt| receipt["command"] == CHECK)
+        .unwrap();
+    assert_eq!(
+        check["kind"],
+        if configured {
+            "configured_check"
+        } else {
+            "command"
+        }
+    );
+    for receipt in commands {
+        assert_eq!(receipt["state"], "passed");
+        assert_eq!(receipt["exit_code"], 0);
+        assert_eq!(receipt["provenance"], "locally_observed");
+        assert_eq!(receipt["task_id"], tester_job["task_id"]);
+    }
     assert_eq!(primary.requests.lock().unwrap().len(), 1);
     assert_eq!(tester.requests.lock().unwrap().len(), 2);
+    eprintln!(
+        "{}",
+        json!({"configured":configured,"goal_status":result["status"],"tester_route":tester_job["routing"]["model_id"],"verification":verification["status"],"observed_commands":commands.len()})
+    );
     service.engine.shutdown().await.unwrap();
 }
