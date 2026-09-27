@@ -9,6 +9,7 @@ import {
 } from "../lib/activity";
 import type { LineCounts } from "../lib/diffStats";
 import { TaskTimingDetails } from "./TaskTimingDetails";
+import { LocalModelDetails } from "./LocalModelDetails";
 
 export type DiffStat = LineCounts;
 
@@ -183,6 +184,7 @@ export const TaskSummary = memo(function TaskSummary({
           )}
         </header>
         <TaskTimingDetails timings={activity.timings} />
+        <LocalModelDetails receipt={activity.localRuntime} />
       </section>
     );
   }
@@ -314,6 +316,7 @@ export const TaskSummary = memo(function TaskSummary({
         )}
       </div>
       <TaskTimingDetails timings={activity.timings} />
+      <LocalModelDetails receipt={activity.localRuntime} />
       <div className="row task-summary-actions">
         {changed.length > 0 && (
           <button

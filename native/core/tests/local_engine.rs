@@ -32,6 +32,11 @@ def log(name, value):
         f.write(json.dumps(value) + "\n")
 
 if args == ["--version"]:
+    if os.path.exists(os.path.join(HERE, "hold-probe")):
+        open(os.path.join(HERE, "probe-started"), "w").close()
+        while not os.path.exists(os.path.join(HERE, "release-probe")):
+            time.sleep(0.01)
+        open(os.path.join(HERE, "probe-finished"), "w").close()
     print("version: 9.9.9-fake (build 1, commit fakecommit)")
     sys.exit(0)
 if args == ["--list-devices"]:
@@ -65,6 +70,9 @@ if "gpufail" in name and not cpu:
     sys.exit(1)
 if "slow" in name:
     time.sleep(60)
+if "holdload" in name:
+    while not os.path.exists(os.path.join(HERE, "release-load")):
+        time.sleep(0.01)
 
 def sse(handler, chunks):
     handler.send_response(200)
@@ -109,7 +117,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return self.reply(401, {"error": "Invalid API Key"})
         if self.path == "/props":
-            return self.reply(200, {"default_generation_settings": {"n_ctx": ctx},
+            return self.reply(200, {"default_generation_settings": {"n_ctx": ctx,
+                                    "params": {"temperature":0.8,"top_k":40,"top_p":0.95,"seed":4294967295,
+                                               "prompt":"must not appear in provenance"}},
+                                    "chat_template": "runtime template fixture",
                                     "modalities": {"vision": mmproj is not None}})
         self.reply(404, {})
     def do_POST(self):
@@ -459,6 +470,218 @@ async fn memory_too_large_is_marked_unavailable_and_refused() {
 }
 
 #[tokio::test]
+async fn cancel_or_unload_during_provenance_probe_never_launches_a_server() {
+    for unload in [false, true] {
+        let f = fixture(GPU);
+        let path = f.models.join("a.gguf");
+        qwen_like(&path, "qwen3", TOOLS_TEMPLATE);
+        fs::write(f.bin.join("hold-probe"), b"").unwrap();
+        let local = std::sync::Arc::new(shadowcode_core::local_runtime::LocalRuntime::new());
+        let request_local = local.clone();
+        let cancel = CancellationToken::new();
+        let request_cancel = cancel.clone();
+        let spec = shadowcode_core::local_runtime::LaunchSpec {
+            id: local_engine::entry_id(&path),
+            name: "a".into(),
+            binary: f.bin.join("llama-server"),
+            model: path,
+            mmproj: None,
+            ctx: 4096,
+            gpu: shadowcode_core::local_runtime::GpuMode::All,
+            backend: "vulkan".into(),
+        };
+        let loading =
+            tokio::spawn(async move { request_local.acquire(spec, &request_cancel).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !f.bin.join("probe-started").is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if unload {
+            tokio::time::timeout(Duration::from_secs(1), local.unload())
+                .await
+                .expect("unload releases the slot before the probe returns")
+                .unwrap();
+        } else {
+            cancel.cancel();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(1), loading)
+            .await
+            .expect("Stop does not wait for the blocking probe")
+            .unwrap();
+        assert!(result.err().unwrap().to_string().contains("cancelled"));
+        assert!(local.loaded().is_none());
+        fs::write(f.bin.join("release-probe"), b"").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !f.bin.join("probe-finished").is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(lines(&f.bin.join("launches.jsonl")).is_empty());
+        local.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn replacing_a_model_at_the_same_path_never_reuses_old_weights() {
+    let f = fixture(GPU);
+    let path = f.models.join("replaced.gguf");
+    qwen_like(&path, "qwen3", TOOLS_TEMPLATE);
+    Config::patch(&f.paths, json!({"local_engine":{"files":[path]}})).unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    local_engine::scan(&cfg.local_engine);
+    let model = model_for(&local_engine::entry_id(&path));
+    let engine = Engine::open(f.paths.clone()).unwrap();
+    let cancel = CancellationToken::new();
+    let first = engine
+        .prepare_model_client(&cfg, &model, &cancel)
+        .await
+        .unwrap();
+    let first_pid = engine.local_runtime().loaded().unwrap().pid.unwrap();
+    let metadata = fs::metadata(&path).unwrap();
+    let replacement = path.with_extension("replacement");
+    let mut bytes = fs::read(&path).unwrap();
+    *bytes.last_mut().unwrap() = 17;
+    fs::write(&replacement, bytes).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(metadata.modified().unwrap()))
+        .unwrap();
+    fs::rename(replacement, &path).unwrap();
+    // Size and modification time deliberately match the old file.
+    assert_eq!(fs::metadata(&path).unwrap().len(), metadata.len());
+    assert_eq!(
+        fs::metadata(&path).unwrap().modified().unwrap(),
+        metadata.modified().unwrap()
+    );
+    let held_result = engine.prepare_model_client(&cfg, &model, &cancel).await;
+    assert!(
+        held_result.is_err(),
+        "a changed file must not share a live model lease"
+    );
+    assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 1);
+    drop(first);
+    let second = engine
+        .prepare_model_client(&cfg, &model, &cancel)
+        .await
+        .unwrap();
+    assert_ne!(
+        engine.local_runtime().loaded().unwrap().pid.unwrap(),
+        first_pid
+    );
+    assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 2);
+    assert!(!pid_alive(u64::from(first_pid)));
+    drop(second);
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn changed_queued_or_loading_model_is_rejected_before_use() {
+    let f = fixture(GPU);
+    let a = f.models.join("a.gguf");
+    let b = f.models.join("b.gguf");
+    let slow = f.models.join("holdload.gguf");
+    for path in [&a, &b, &slow] {
+        qwen_like(path, "qwen3", TOOLS_TEMPLATE);
+    }
+    Config::patch(&f.paths, json!({"local_engine":{"files":[a,b,slow]}})).unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    local_engine::scan(&cfg.local_engine);
+    let engine = Engine::open(f.paths.clone()).unwrap();
+    let first = engine
+        .prepare_model_client(
+            &cfg,
+            &model_for(&local_engine::entry_id(&a)),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let waiting = std::sync::Arc::new(tokio::sync::Notify::new());
+    let signal = waiting.clone();
+    let queued_engine = engine.clone();
+    let queued_config = cfg.local_engine.clone();
+    let queued_model = model_for(&local_engine::entry_id(&b));
+    let queued = tokio::spawn(async move {
+        local_engine::prepare_with_progress(
+            &queued_config,
+            &queued_model,
+            queued_engine.local_runtime(),
+            &CancellationToken::new(),
+            true,
+            &|phase| {
+                if matches!(phase, shadowcode_core::local_runtime::Progress::Waiting) {
+                    signal.notify_one();
+                }
+                Ok(())
+            },
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), waiting.notified())
+        .await
+        .unwrap();
+    let replacement = b.with_extension("new");
+    fs::copy(&b, &replacement).unwrap();
+    fs::rename(replacement, &b).unwrap();
+    drop(first);
+    let result = tokio::time::timeout(Duration::from_secs(5), queued)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("changed while preparing"));
+    assert_eq!(
+        lines(&f.bin.join("launches.jsonl")).len(),
+        1,
+        "changed queued model never launches"
+    );
+    let loading_engine = engine.clone();
+    let loading_cfg = cfg.clone();
+    let loading_model = model_for(&local_engine::entry_id(&slow));
+    let loading = tokio::spawn(async move {
+        loading_engine
+            .prepare_model_client(&loading_cfg, &loading_model, &CancellationToken::new())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while lines(&f.bin.join("launches.jsonl")).len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let replacement = slow.with_extension("new");
+    fs::copy(&slow, &replacement).unwrap();
+    fs::rename(replacement, &slow).unwrap();
+    fs::write(f.bin.join("release-load"), b"ready").unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), loading)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("changed while preparing"));
+    assert!(engine.local_runtime().loaded().is_none());
+    let launches = lines(&f.bin.join("launches.jsonl"));
+    assert!(
+        !pid_alive(launches[1]["pid"].as_u64().unwrap()),
+        "changed load is terminated and reaped"
+    );
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn load_switch_lease_unload_and_shutdown_stop_the_server() {
     let f = fixture(GPU);
     let a = f.models.join("a.gguf");
@@ -501,6 +724,43 @@ async fn load_switch_lease_unload_and_shutdown_stop_the_server() {
     assert_eq!(launches[0]["key_in_argv"], false);
     assert_eq!(launches[0]["proxy_env"], false);
     let pid_a = launches[0]["pid"].as_u64().unwrap();
+
+    // A nested or concurrent same-ID request with different launch settings
+    // must fail promptly, not wait on a lease held by its own parent.
+    for (ctx, gpu, backend) in [
+        (
+            16384,
+            shadowcode_core::local_runtime::GpuMode::Off,
+            "vulkan",
+        ),
+        (8192, shadowcode_core::local_runtime::GpuMode::All, "vulkan"),
+        (16384, shadowcode_core::local_runtime::GpuMode::All, "cuda"),
+    ] {
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            engine.local_runtime().acquire(
+                shadowcode_core::local_runtime::LaunchSpec {
+                    id: id_a.clone(),
+                    name: "a".into(),
+                    binary: f.bin.join("llama-server"),
+                    model: a.clone(),
+                    mmproj: None,
+                    ctx,
+                    gpu,
+                    backend: backend.into(),
+                },
+                &cancel,
+            ),
+        )
+        .await
+        .expect("same-ID configuration conflicts do not wait for a lease");
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("launch configuration changed"));
+    }
+    assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 1);
 
     // A task holds A: B waits without loading and cancellation removes it.
     let queued_cancel = CancellationToken::new();
@@ -570,6 +830,34 @@ async fn load_switch_lease_unload_and_shutdown_stop_the_server() {
     assert_eq!(loaded["context_tokens"], 16384);
     assert_eq!(loaded["backend"], "vulkan");
     assert_eq!(loaded["in_use"], 1);
+    let provenance = &loaded["provenance"];
+    assert_eq!(provenance["identity_kind"], "filesystem_metadata");
+    assert_eq!(
+        provenance["files"]["model"]["path"],
+        b.display().to_string()
+    );
+    assert_eq!(provenance["model"]["architecture"], "gemma4");
+    assert_eq!(
+        provenance["model"]["chat_template"],
+        json!(shadowcode_core::gguf::string_identity(TOOLS_TEMPLATE))
+    );
+    assert_eq!(provenance["runtime"]["reported_version"], "9.9.9-fake");
+    assert_eq!(
+        provenance["runtime"]["reported_generation_defaults"]["temperature"],
+        0.8
+    );
+    assert_eq!(
+        provenance["runtime"]["reported_generation_defaults"]["top_k"],
+        40
+    );
+    assert!(provenance["runtime"]["reported_generation_defaults"]
+        .get("prompt")
+        .is_none());
+    assert_eq!(
+        provenance["context"],
+        json!({"requested_tokens":16384,"reported_tokens":16384})
+    );
+    assert!(provenance["files"]["projector"].is_object());
     drop(second);
     let pid_b = launches[1]["pid"].as_u64().unwrap();
     assert!(pid_alive(pid_b));
@@ -1726,6 +2014,18 @@ async fn compare_runs_two_installed_gguf_models_sequentially_in_offline_mode() {
             false
         );
         assert_eq!(lane["local_runtime"]["runtime"]["cpu_fallback"], false);
+        assert_eq!(
+            lane["local_runtime"]["runtime"]["provenance"]["model"]["architecture"],
+            "qwen3"
+        );
+        assert_eq!(
+            lane["local_runtime"]["request_policy"]["sampling_source"],
+            "runtime_defaults"
+        );
+        assert_eq!(
+            lane["local_runtime"]["request_policy"]["chat_template_kwargs"]["enable_thinking"],
+            false
+        );
         assert_eq!(lane["base_commit"], result["base"]["commit"]);
         assert_eq!(lane["timings"]["complete"], true);
         assert!(lane["timings"]["model_load_seconds"].as_f64().unwrap() > 0.0);
@@ -1960,7 +2260,11 @@ async fn live_local_acceptance_from_explicit_models() {
                 .unwrap(),
         );
     }
-    let report = json!({"scope":if comparison.is_some(){"real multi-model Compare inference"}else{"real single-model inference only"},"runtime":catalog["runtime"],"hardware":catalog["hardware"],"models":models,"jobs":jobs,"runtime_events":runtimes});
+    let answer_valid: Vec<_> = jobs
+        .iter()
+        .map(|job| addition_answer_valid(&job.summary))
+        .collect();
+    let report = json!({"scope":if comparison.is_some(){"real multi-model Compare inference"}else{"real single-model inference only"},"runtime":catalog["runtime"],"hardware":catalog["hardware"],"models":models,"jobs":jobs,"runtime_events":runtimes,"answer_valid":answer_valid,"answer_check":"An explanation contains add/adds/addition/sum/sums and no chat control token; this is a simple output sanity check, not a coding-quality evaluation."});
     if let Ok(output) = std::env::var("SHADOWCODE_LIVE_REPORT") {
         fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
@@ -1979,11 +2283,37 @@ async fn live_local_acceptance_from_explicit_models() {
         .unwrap();
     }
     service.engine.shutdown().await.unwrap();
-    for job in &jobs {
+    for (job, valid) in jobs.iter().zip(answer_valid) {
         assert_eq!(job.status, "completed", "{}", job.summary);
-        assert!(!job.summary.trim().is_empty());
+        assert!(
+            valid,
+            "model {} failed the addition-answer sanity check: {:?}",
+            job.model, job.summary
+        );
     }
     for pair in jobs.windows(2) {
         assert!(pair[1].started_at >= pair[0].finished_at.unwrap());
     }
+}
+
+fn addition_answer_valid(answer: &str) -> bool {
+    !answer.contains("<|")
+        && !answer.contains("|>")
+        && answer.split(|c: char| !c.is_alphabetic()).any(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "add" | "adds" | "addition" | "sum" | "sums"
+            )
+        })
+}
+
+#[test]
+fn live_acceptance_rejects_control_tokens_and_irrelevant_nonempty_answers() {
+    assert!(!addition_answer_valid("<|im_end|>"));
+    assert!(!addition_answer_valid("<|assistant|>It adds two values."));
+    assert!(!addition_answer_valid("Ready."));
+    assert!(addition_answer_valid("It returns the sum of a and b."));
+    assert!(addition_answer_valid(
+        "The function adds its two arguments."
+    ));
 }

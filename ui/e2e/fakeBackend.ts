@@ -14,6 +14,8 @@ export type FakeOptions = {
   localStartup?: boolean;
   /** Versioned timing receipt supplied by a rendering fixture. */
   taskTimings?: Record<string, unknown>;
+  /** Managed-runtime provenance receipt supplied by a rendering fixture. */
+  localRuntimeReceipt?: Record<string, unknown>;
   /** Start with the onboarding screen. */
   onboarding?: boolean;
   /** Codex tasks stop at the plan limit (then limits.on_limit applies). */
@@ -1011,7 +1013,10 @@ export function installFakeBackend(options: FakeOptions = {}) {
               "local.runtime_progress",
               { model_id: job.model, phase: "loading" },
             ],
-            ["local.runtime_ready", { model_id: job.model }],
+            [
+              "local.runtime_ready",
+              { model_id: job.model, ...options.localRuntimeReceipt },
+            ],
           ] as [string, Json][])
         : []),
       ["agent.started", { task: job.task, job_id: job.id }],

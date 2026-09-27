@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, LazyLock, Mutex},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 const MAX_SCAN_FILES: usize = 256;
@@ -173,14 +173,13 @@ pub fn entry_id(path: &Path) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// GGUF header cache (per path + size + mtime)
+// GGUF header cache (filesystem identity, including inode + ctime on Unix)
 // ---------------------------------------------------------------------------
 
-type FileKey = (PathBuf, u64, Option<SystemTime>);
+type FileKey = crate::local_runtime::FileIdentity;
 
 fn file_key(path: &Path) -> Option<FileKey> {
-    let meta = fs::metadata(path).ok()?;
-    Some((path.to_path_buf(), meta.len(), meta.modified().ok()))
+    FileKey::capture(path).ok()
 }
 
 type HeaderCache = HashMap<PathBuf, (FileKey, Arc<GgufHeader>)>;
@@ -196,6 +195,11 @@ pub fn header(path: &Path) -> Result<Arc<GgufHeader>> {
         }
     }
     let parsed = Arc::new(gguf::read_header(path)?);
+    ensure!(
+        file_key(path).as_ref() == Some(&key),
+        "GGUF changed while reading its header: {}",
+        path.display()
+    );
     if let Ok(mut cache) = HEADERS.lock() {
         if cache.len() > 512 {
             cache.clear();
@@ -549,7 +553,7 @@ fn tail(text: &str, max: usize) -> String {
 }
 
 /// Ready only after `<llama-server> --version` succeeds. Results are cached
-/// per binary path + size + mtime, so replacing the runtime re-probes.
+/// per filesystem identity, so replacing the runtime re-probes.
 pub fn probe(binary: &Path) -> Probe {
     let key = file_key(binary);
     if let (Some(key), Ok(cache)) = (&key, PROBES.lock()) {
@@ -605,6 +609,12 @@ pub fn probe(binary: &Path) -> Probe {
             probe.devices = parse_devices(&text);
             probe.devices_known = true;
         }
+    }
+    if file_key(binary) != key {
+        probe.ok = false;
+        probe.error =
+            Some("Runtime file changed while probing it. Retry with stable files.".into());
+        return probe;
     }
     if let (Some(key), Ok(mut cache)) = (key, PROBES.lock()) {
         cache.insert(binary.to_path_buf(), (key, probe.clone()));
@@ -1527,20 +1537,47 @@ pub async fn prepare_with_progress(
     progress: &(dyn Fn(crate::local_runtime::Progress) -> Result<()> + Send + Sync),
 ) -> Result<PreparedModel> {
     let id = model.default.trim().to_owned();
+    ensure!(!cancel.is_cancelled(), "Model preparation cancelled");
     let config_owned = config.clone();
-    let (runtime, entry) = tokio::task::spawn_blocking(move || {
-        let runtime = runtime(&config_owned.llama_binary);
+    let scan = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut runtime = runtime(&config_owned.llama_binary);
         let budget = Budget::from_runtime(&runtime, &config_owned);
-        let entry = scan_with(&config_owned, &budget)
+        let candidate = candidates(&config_owned)
             .into_iter()
-            .find(|e| e.id == id);
-        (runtime, entry)
-    })
-    .await
-    .context("Local catalog scan stopped")?;
-    let entry = entry.context(
-        "That local model is not in the catalog. Add it in Settings › Local models (removing a row never deletes weights).",
-    )?;
+            .find(|c| entry_id(&c.path) == id)
+            .context("That local model is not in the catalog. Add it in Settings › Local models (removing a row never deletes weights).")?;
+        ensure!(runtime.ready(), "{}", runtime.detail);
+        // Resolve the projector, then freeze the files before the final
+        // compatibility/context/template inspection used by this task.
+        let initial = inspect(&candidate, &budget)?;
+        let projector = initial.mmproj.as_ref().map(PathBuf::from);
+        let sources = crate::local_runtime::SourceIdentity {
+            model: FileKey::capture(&candidate.path)?,
+            runtime: FileKey::capture(runtime.path.as_deref().context("Runtime path missing")?)?,
+            projector: projector.as_deref().map(FileKey::capture).transpose()?,
+        };
+        runtime.probe = Some(probe(
+            runtime.path.as_deref().context("Runtime path missing")?,
+        ));
+        ensure!(
+            runtime.probe.as_ref().is_some_and(|p| p.ok),
+            "Runtime changed or became unavailable during preparation"
+        );
+        let budget = Budget::from_runtime(&runtime, &config_owned);
+        let entry = inspect(
+            &Candidate {
+                mmproj: Some(projector),
+                ..candidate
+            },
+            &budget,
+        )?;
+        Ok((runtime, entry, sources))
+    });
+    let (runtime, entry, sources) = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => bail!("Model preparation cancelled"),
+        result = scan => result.context("Local catalog scan stopped")??,
+    };
     ensure!(runtime.ready(), "{}", runtime.detail);
     ensure!(
         entry.compatible,
@@ -1580,7 +1617,7 @@ pub async fn prepare_with_progress(
         backend: runtime.backend(),
     };
     let (loaded, lease) = local
-        .acquire_with_progress(spec, cancel, allow_cpu_fallback, progress)
+        .acquire_checked_with_progress(spec, cancel, allow_cpu_fallback, progress, Some(sources))
         .await?;
     let mut next = model.clone();
     next.endpoint = loaded.endpoint.clone();
@@ -1603,6 +1640,28 @@ pub async fn prepare_with_progress(
 mod tests {
     use super::*;
     use crate::gguf::test_support::{write_gguf, V};
+
+    #[test]
+    fn header_cache_detects_replacement_with_identical_size_and_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        model(&path, "qwen3", Some("old_template"));
+        let before = header(&path).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let replacement = path.with_extension("new");
+        model(&replacement, "qwen3", Some("new_template"));
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(metadata.modified().unwrap()))
+            .unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        let after = header(&path).unwrap();
+        assert_eq!(metadata.len(), fs::metadata(&path).unwrap().len());
+        assert_eq!(after.chat_template(), Some("new_template"));
+        assert_ne!(before.header_sha256, after.header_sha256);
+    }
 
     fn model(path: &Path, arch: &str, template: Option<&str>) {
         // No general.name: rows fall back to the file name.

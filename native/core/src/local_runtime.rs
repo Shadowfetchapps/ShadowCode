@@ -11,7 +11,7 @@ use std::{
     collections::{HashMap, VecDeque},
     io::Read,
     net::TcpListener,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -65,6 +65,80 @@ impl LaunchSpec {
             && self.model == other.model
             && self.mmproj == other.mmproj
             && self.ctx == other.ctx
+            && self.gpu == other.gpu
+            && self.backend == other.backend
+    }
+}
+
+/// A filesystem snapshot, not a hash of file contents. Unix change time and
+/// inode catch same-size rewrites and replacements even when mtime is restored.
+/// These observations cannot make a mutable file immutable during inference.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct FileIdentity {
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub modified_ns: Option<String>,
+    #[cfg(unix)]
+    pub device: String,
+    #[cfg(unix)]
+    pub inode: String,
+    #[cfg(unix)]
+    pub changed_seconds: i64,
+    #[cfg(unix)]
+    pub changed_nanoseconds: i64,
+}
+
+impl FileIdentity {
+    pub fn capture(path: &Path) -> Result<Self> {
+        let resolved = std::fs::canonicalize(path)
+            .with_context(|| format!("Cannot resolve model or runtime file {}", path.display()))?;
+        let meta = std::fs::metadata(&resolved)?;
+        ensure!(meta.is_file(), "Not a regular file: {}", path.display());
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Ok(Self {
+            path: resolved,
+            bytes: meta.len(),
+            modified_ns: meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|t| t.as_nanos().to_string()),
+            #[cfg(unix)]
+            device: meta.dev().to_string(),
+            #[cfg(unix)]
+            inode: meta.ino().to_string(),
+            #[cfg(unix)]
+            changed_seconds: meta.ctime(),
+            #[cfg(unix)]
+            changed_nanoseconds: meta.ctime_nsec(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct SourceIdentity {
+    pub model: FileIdentity,
+    pub runtime: FileIdentity,
+    pub projector: Option<FileIdentity>,
+}
+
+impl SourceIdentity {
+    pub fn capture(spec: &LaunchSpec) -> Result<Self> {
+        Ok(Self {
+            model: FileIdentity::capture(&spec.model)?,
+            runtime: FileIdentity::capture(&spec.binary)?,
+            projector: spec
+                .mmproj
+                .as_deref()
+                .map(FileIdentity::capture)
+                .transpose()?,
+        })
+    }
+
+    fn validate(&self, spec: &LaunchSpec) -> Result<()> {
+        ensure!(*self == Self::capture(spec)?, "A model, projector, or runtime file changed while preparing the local model. Retry with stable files.");
+        Ok(())
     }
 }
 
@@ -83,6 +157,7 @@ pub struct Loaded {
     pub fallback_reason: Option<String>,
     pub since: f64,
     pub pid: Option<u32>,
+    pub provenance: Value,
 }
 
 /// Keeps the loaded model in place while a task uses it.
@@ -117,6 +192,7 @@ struct Server {
     info: Loaded,
     stderr: Arc<Mutex<Ring>>,
     leases: Arc<AtomicUsize>,
+    sources: SourceIdentity,
 }
 
 impl Server {
@@ -215,6 +291,7 @@ impl LocalRuntime {
             "fallback_reason": loaded.fallback_reason,
             "vision": loaded.vision,
             "in_use": self.in_use(),
+            "provenance": loaded.provenance,
         }))
     }
 
@@ -246,7 +323,26 @@ impl LocalRuntime {
         allow_cpu_fallback: bool,
         progress: &(dyn Fn(Progress) -> Result<()> + Send + Sync),
     ) -> Result<(Loaded, Lease)> {
+        self.acquire_checked_with_progress(spec, cancel, allow_cpu_fallback, progress, None)
+            .await
+    }
+
+    /// The catalog may pass its already-frozen identities so changes between
+    /// compatibility checks and runtime acquisition fail before launch.
+    pub async fn acquire_checked_with_progress(
+        &self,
+        spec: LaunchSpec,
+        cancel: &CancellationToken,
+        allow_cpu_fallback: bool,
+        progress: &(dyn Fn(Progress) -> Result<()> + Send + Sync),
+        expected: Option<SourceIdentity>,
+    ) -> Result<(Loaded, Lease)> {
         ensure!(!cancel.is_cancelled(), "Model load cancelled");
+        let sources = match expected {
+            Some(sources) => sources,
+            None => SourceIdentity::capture(&spec)?,
+        };
+        sources.validate(&spec)?;
         let abort = self.abort_token();
         let mut waiting_reported = false;
         loop {
@@ -273,9 +369,10 @@ impl LocalRuntime {
                 !cancel.is_cancelled() && !abort.is_cancelled(),
                 "Model load cancelled"
             );
+            sources.validate(&spec)?;
             if let Some(current) = slot.as_mut() {
                 let alive = current.alive();
-                if current.spec.same_model(&spec) && alive {
+                if current.spec.same_model(&spec) && current.sources == sources && alive {
                     ensure!(allow_cpu_fallback || !current.info.cpu_fallback, "Comparison cannot reuse an automatic CPU fallback. Unload it and explicitly choose CPU settings or retry the GPU configuration.");
                     current.leases.fetch_add(1, Ordering::AcqRel);
                     return Ok((
@@ -299,6 +396,7 @@ impl LocalRuntime {
                 }
                 let busy = current.leases.load(Ordering::Acquire);
                 if busy > 0 && alive {
+                    ensure!(current.spec.id != spec.id || (current.sources == sources && current.spec.same_model(&spec)), "A local model file or launch configuration changed while this model is in use. Stop its running tasks before retrying.");
                     drop(slot);
                     if !waiting_reported {
                         progress(Progress::Waiting)?;
@@ -319,7 +417,7 @@ impl LocalRuntime {
                 previous.stop().await;
             }
             let result = self
-                .launch_with_fallback(&spec, cancel, &abort, allow_cpu_fallback)
+                .launch_with_fallback(&spec, &sources, cancel, &abort, allow_cpu_fallback)
                 .await;
             return match result {
                 Ok(server) => {
@@ -348,14 +446,15 @@ impl LocalRuntime {
     async fn launch_with_fallback(
         &self,
         spec: &LaunchSpec,
+        sources: &SourceIdentity,
         cancel: &CancellationToken,
         abort: &CancellationToken,
         allow_cpu_fallback: bool,
     ) -> Result<Server> {
-        match launch(spec, spec.gpu, cancel, abort).await {
+        match launch(spec, sources, spec.gpu, cancel, abort).await {
             Ok(server) => Ok(server),
             Err(LoadFailure::Exited(first)) if spec.gpu != GpuMode::Off && allow_cpu_fallback => {
-                let mut server = match launch(spec, GpuMode::Off, cancel, abort).await {
+                let mut server = match launch(spec, sources, GpuMode::Off, cancel, abort).await {
                     Ok(server) => server,
                     Err(LoadFailure::Exited(second)) => {
                         bail!("{second}\nThe GPU attempt failed first: {first}")
@@ -473,11 +572,37 @@ pub fn loopback_client(timeout: Duration) -> Result<reqwest::Client> {
 
 async fn launch(
     spec: &LaunchSpec,
+    sources: &SourceIdentity,
     gpu: GpuMode,
     cancel: &CancellationToken,
     abort: &CancellationToken,
 ) -> std::result::Result<Server, LoadFailure> {
     let other = LoadFailure::Other;
+    if cancel.is_cancelled() || abort.is_cancelled() {
+        return Err(other(anyhow!("Model load cancelled")));
+    }
+    sources.validate(spec).map_err(other)?;
+    let model_path = spec.model.clone();
+    let runtime_path = spec.binary.clone();
+    let metadata = tokio::task::spawn_blocking(move || -> Result<_> {
+        let model = crate::local_engine::header(&model_path)?.provenance();
+        let probe = crate::local_engine::probe(&runtime_path);
+        ensure!(
+            probe.ok,
+            "{}",
+            probe.error.as_deref().unwrap_or("Runtime probe failed")
+        );
+        Ok((model, probe))
+    });
+    // File reads and short-lived CLI probes remain bounded blocking work,
+    // but neither a task nor the inference slot waits for them after Stop.
+    let (model_provenance, runtime_probe) = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(other(anyhow!("Model load cancelled"))),
+        _ = abort.cancelled() => return Err(other(anyhow!("Model load cancelled because the model was unloaded"))),
+        result = metadata => result.map_err(|e| other(e.into()))?.map_err(other)?,
+    };
+    sources.validate(spec).map_err(other)?;
     if !spec.binary.is_file() {
         return Err(other(anyhow!(
             "llama.cpp runtime is missing: {}",
@@ -512,6 +637,9 @@ async fn launch(
             }
             Ok(())
         });
+    }
+    if cancel.is_cancelled() || abort.is_cancelled() {
+        return Err(other(anyhow!("Model load cancelled")));
     }
     let mut child = command
         .spawn()
@@ -578,6 +706,10 @@ async fn launch(
         }
     }
     let props = props(&client, port, &api_key).await;
+    if let Err(error) = sources.validate(spec) {
+        terminate(&mut child).await;
+        return Err(other(error));
+    }
     let n_ctx = props
         .pointer("/default_generation_settings/n_ctx")
         .and_then(Value::as_u64);
@@ -596,6 +728,11 @@ async fn launch(
         .unwrap_or(spec.mmproj.is_some())
         && spec.mmproj.is_some();
     let pid = child.id();
+    let mode = |gpu| match gpu {
+        GpuMode::All => "all",
+        GpuMode::Auto => "auto",
+        GpuMode::Off => "off",
+    };
     Ok(Server {
         info: Loaded {
             id: spec.id.clone(),
@@ -614,12 +751,79 @@ async fn launch(
             fallback_reason: None,
             since: crate::now(),
             pid,
+            provenance: json!({
+                "schema": 1,
+                "identity_kind": "filesystem_metadata",
+                "files": sources,
+                "model": model_provenance,
+                "runtime": {
+                    "reported_version": runtime_probe.version,
+                    "reported_commit": runtime_probe.commit,
+                    "reported_generation_defaults": reported_generation_defaults(&props),
+                    "reported_chat_template": props.get("chat_template").and_then(Value::as_str).map(crate::gguf::string_identity),
+                },
+                "context": {"requested_tokens": spec.ctx, "reported_tokens": n_ctx},
+                "gpu": {"requested_mode": mode(spec.gpu), "launch_mode": mode(gpu), "reported_backend": spec.backend},
+            }),
         },
         child,
         spec: spec.clone(),
         stderr,
         leases: Arc::new(AtomicUsize::new(0)),
+        sources: sources.clone(),
     })
+}
+
+fn reported_generation_defaults(props: &Value) -> Value {
+    let Some(generation) = props
+        .get("default_generation_settings")
+        .and_then(Value::as_object)
+    else {
+        return Value::Null;
+    };
+    let defaults = generation
+        .get("params")
+        .and_then(Value::as_object)
+        .unwrap_or(generation);
+    // Only sampling fields: never persist a server's prompt, raw props, or
+    // unsupported values under the guise of effective request settings.
+    let mut selected = serde_json::Map::new();
+    for key in [
+        "seed",
+        "temperature",
+        "top_k",
+        "top_p",
+        "min_p",
+        "typical_p",
+        "repeat_penalty",
+        "repeat_last_n",
+        "presence_penalty",
+        "frequency_penalty",
+        "mirostat",
+        "mirostat_tau",
+        "mirostat_eta",
+        "dynatemp_range",
+        "dynatemp_exponent",
+        "xtc_probability",
+        "xtc_threshold",
+        "dry_multiplier",
+        "dry_base",
+        "dry_allowed_length",
+        "dry_penalty_last_n",
+        "n_predict",
+    ] {
+        if let Some(value) = defaults.get(key).filter(|v| v.is_number()) {
+            selected.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(samplers) = defaults
+        .get("samplers")
+        .and_then(Value::as_array)
+        .filter(|a| a.len() <= 32 && a.iter().all(|v| v.as_str().is_some_and(|s| s.len() <= 64)))
+    {
+        selected.insert("samplers".into(), json!(samplers));
+    }
+    Value::Object(selected)
 }
 
 async fn health(client: &reqwest::Client, port: u16, key: &str) -> bool {
@@ -650,6 +854,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sampling_provenance_only_records_reported_allowlisted_values() {
+        let flat = json!({"default_generation_settings": {"temperature":0.7,"top_k":40,"prompt":"private prompt", "seed":"bad","samplers":["top_k","top_p"]}});
+        let expected = json!({"temperature":0.7,"top_k":40,"samplers":["top_k","top_p"]});
+        assert_eq!(reported_generation_defaults(&flat), expected);
+        assert_eq!(
+            reported_generation_defaults(
+                &json!({"default_generation_settings":{"params":flat["default_generation_settings"]}})
+            ),
+            expected
+        );
+        assert_eq!(reported_generation_defaults(&Value::Null), Value::Null);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_identity_detects_same_size_in_place_write_with_restored_mtime() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        std::fs::write(&path, b"weights-a").unwrap();
+        let before = FileIdentity::capture(&path).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all(b"weights-b").unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let after = FileIdentity::capture(&path).unwrap();
+        assert_eq!(before.bytes, after.bytes);
+        assert_eq!(before.inode, after.inode);
+        assert_eq!(before.modified_ns, after.modified_ns);
+        assert_ne!(before, after);
+    }
+
+    #[test]
     fn reserves_a_loopback_port_and_random_keys() {
         let port = free_loopback_port().unwrap();
         assert!(port > 0);
@@ -678,6 +917,12 @@ mod tests {
         assert!(!args.contains("api-key"), "the key never appears in argv");
         let cpu = server_args(&spec, 5555, GpuMode::Off).join(" ");
         assert!(cpu.ends_with("--device none -ngl 0"));
+        let mut changed = spec.clone();
+        changed.gpu = GpuMode::Off;
+        assert!(!spec.same_model(&changed));
+        changed = spec.clone();
+        changed.backend = "cuda".into();
+        assert!(!spec.same_model(&changed));
         let mut ring = Ring::default();
         ring.push(&vec![b'a'; STDERR_RING_BYTES]);
         ring.push(b"tail");

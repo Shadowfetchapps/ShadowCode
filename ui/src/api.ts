@@ -775,6 +775,66 @@ export type NativeMcpCatalog = {
 };
 
 /** docs/COMPARE.md: one task on 2–3 models, each in its own worktree. */
+export type LocalFileIdentity = {
+  path: string;
+  bytes: number;
+  modified_ns?: string | null;
+  device?: string;
+  inode?: string;
+  changed_seconds?: number;
+  changed_nanoseconds?: number;
+};
+export type LocalStringIdentity = { sha256: string; bytes: number };
+export type LocalModelProvenance = {
+  schema: 1;
+  identity_kind: "filesystem_metadata";
+  files: {
+    model: LocalFileIdentity;
+    runtime: LocalFileIdentity;
+    projector?: LocalFileIdentity | null;
+  };
+  model: {
+    gguf_version?: number;
+    architecture?: string | null;
+    header_sha256?: string;
+    header_bytes?: number;
+    quantization?: {
+      file_type?: number | null;
+      version?: number | null;
+      tensor_type_counts?: Record<string, number>;
+    };
+    chat_template?: LocalStringIdentity | null;
+  };
+  runtime: {
+    reported_version?: string | null;
+    reported_commit?: string | null;
+    reported_generation_defaults?: Record<string, number | string[]> | null;
+    reported_chat_template?: LocalStringIdentity | null;
+  };
+  context: { requested_tokens?: number; reported_tokens?: number | null };
+  gpu: {
+    requested_mode?: string;
+    launch_mode?: string;
+    reported_backend?: string;
+  };
+};
+export type LocalRuntimeReceipt = {
+  model_id: string;
+  preparation_seconds: number;
+  automatic_cpu_fallback_allowed: boolean;
+  runtime?: {
+    backend: string;
+    context_tokens: number;
+    cpu_fallback?: boolean;
+    provenance?: LocalModelProvenance;
+  } | null;
+  request_policy?: {
+    sampling_source?: string;
+    sampling_overrides?: Record<string, number>;
+    max_tokens_policy?: string;
+    chat_template_kwargs?: { enable_thinking?: boolean } | null;
+  };
+};
 export type CompareFile = {
   path: string;
   /** added | modified | deleted */
@@ -812,12 +872,7 @@ export type CompareLane = {
   duration_s: number;
   timings?: TaskTimings | null;
   local_progress?: { model_id: string; phase: string } | null;
-  local_runtime?: {
-    model_id: string;
-    preparation_seconds: number;
-    automatic_cpu_fallback_allowed: boolean;
-    runtime?: { backend: string; context_tokens: number };
-  } | null;
+  local_runtime?: LocalRuntimeReceipt | null;
   usage: {
     prompt_tokens?: number;
     completion_tokens?: number;

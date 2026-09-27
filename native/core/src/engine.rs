@@ -1846,6 +1846,11 @@ impl Engine {
         };
         drop(runtime_phase);
         drop(preparation);
+        prepared.extra_body = crate::effort::native_body(
+            crate::openrouter::is_openrouter(&running.config.model),
+            prepared.extra_body.take(),
+            running.turn.effort.as_deref(),
+        );
         if managed {
             running.clock.local_ready();
             events.emit(
@@ -1855,15 +1860,16 @@ impl Engine {
                     "runtime": self.0.local_llama.loaded_json(),
                     "preparation_seconds": prepare_started.elapsed().as_secs_f64(),
                     "comparison": comparison,
-                    "automatic_cpu_fallback_allowed": !comparison
+                    "automatic_cpu_fallback_allowed": !comparison,
+                    "request_policy": {
+                        "sampling_source": "runtime_defaults",
+                        "sampling_overrides": {},
+                        "max_tokens_policy": "context_budget_per_request",
+                        "chat_template_kwargs": prepared.extra_body.as_ref().and_then(|body| body.get("chat_template_kwargs")),
+                    }
                 }),
             )?;
         }
-        prepared.extra_body = crate::effort::native_body(
-            crate::openrouter::is_openrouter(&running.config.model),
-            prepared.extra_body.take(),
-            running.turn.effort.as_deref(),
-        );
         let model: ModelClient = prepared.client(&self.0.paths)?;
         let tier = autonomy::description_tier(&autonomy::capability_profile_for(
             &running.config.model.provider,

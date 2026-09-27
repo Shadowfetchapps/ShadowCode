@@ -1,0 +1,12 @@
+.local-model-details dl > div {
+  align-items: baseline;
+}
+.local-model-details dt {
+  flex: 0 0 42%;
+}
+.local-model-details dd {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: right;
+}

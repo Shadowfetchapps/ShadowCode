@@ -19,6 +19,7 @@ import { CONTINUATION } from "./allowance";
 import { applySubagentEvent, isSubagentEvent } from "./subagents";
 import { keyRows } from "./rowKeys";
 import { localPhase } from "./localProgress";
+import { parseLocalRuntimeReceipt } from "./provenance";
 import { parseTimings } from "./timing";
 
 const ROUTE_PRODUCTS: Record<string, string> = {
@@ -581,6 +582,10 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
       touch((a) => ({
         ...a,
         localPhase: phase,
+        localRuntime:
+          event.type === "local.runtime_ready"
+            ? parseLocalRuntimeReceipt(p)
+            : a.localRuntime,
         startedAt: a.startedAt ?? event.ts,
       }));
       // Local preparation precedes agent.started. Keep it on its own task;

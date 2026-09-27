@@ -8,6 +8,7 @@
 //! Ollama, LM Studio) are understood; v1 is rejected because the pinned
 //! runtime no longer loads it.
 use anyhow::{bail, ensure, Context, Result};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -70,9 +71,41 @@ pub struct GgufHeader {
     pub n_tensors: u64,
     pub metadata: BTreeMap<String, Scalar>,
     pub tensor_names: Vec<String>,
+    pub tensor_type_counts: BTreeMap<u32, u64>,
+    pub header_sha256: String,
+    pub header_bytes: u64,
+    pub template_identity: Option<StringIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct StringIdentity {
+    pub sha256: String,
+    pub bytes: u64,
+}
+
+pub fn string_identity(text: &str) -> StringIdentity {
+    StringIdentity {
+        sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+        bytes: text.len() as u64,
+    }
 }
 
 impl GgufHeader {
+    /// Hashes cover exact parsed header/template bytes, never model weights.
+    pub fn provenance(&self) -> serde_json::Value {
+        serde_json::json!({
+            "gguf_version": self.version,
+            "architecture": self.architecture(),
+            "header_sha256": self.header_sha256,
+            "header_bytes": self.header_bytes,
+            "quantization": {
+                "file_type": self.u64("general.file_type"),
+                "version": self.u64("general.quantization_version"),
+                "tensor_type_counts": self.tensor_type_counts,
+            },
+            "chat_template": self.template_identity,
+        })
+    }
     pub fn str(&self, key: &str) -> Option<&str> {
         self.metadata.get(key).and_then(Scalar::as_str)
     }
@@ -150,6 +183,7 @@ impl GgufHeader {
 struct Reader<R: Read> {
     inner: R,
     consumed: u64,
+    digest: Sha256,
 }
 
 impl<R: Read> Reader<R> {
@@ -161,7 +195,9 @@ impl<R: Read> Reader<R> {
         );
         self.inner
             .read_exact(buf)
-            .context("GGUF header ended early")
+            .context("GGUF header ended early")?;
+        self.digest.update(buf);
+        Ok(())
     }
     fn u8(&mut self) -> Result<u8> {
         let mut b = [0u8; 1];
@@ -206,6 +242,29 @@ impl<R: Read> Reader<R> {
         self.exact(&mut bytes)?;
         self.skip(len - keep as u64)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+    fn template_string(&mut self) -> Result<(String, StringIdentity)> {
+        let len = self.u64()?;
+        ensure!(len <= MAX_STRING_BYTES, "GGUF string is unreasonably long");
+        let mut kept = Vec::with_capacity((len as usize).min(KEEP_STRING_BYTES));
+        let mut digest = Sha256::new();
+        let mut remaining = len;
+        let mut buffer = [0u8; 8192];
+        while remaining > 0 {
+            let take = remaining.min(buffer.len() as u64) as usize;
+            self.exact(&mut buffer[..take])?;
+            digest.update(&buffer[..take]);
+            let keep = take.min(KEEP_STRING_BYTES.saturating_sub(kept.len()));
+            kept.extend_from_slice(&buffer[..keep]);
+            remaining -= take as u64;
+        }
+        Ok((
+            String::from_utf8_lossy(&kept).into_owned(),
+            StringIdentity {
+                sha256: format!("{:x}", digest.finalize()),
+                bytes: len,
+            },
+        ))
     }
     fn scalar(&mut self, kind: u32) -> Result<Scalar> {
         Ok(match kind {
@@ -289,6 +348,7 @@ pub fn read_header(path: &Path) -> Result<GgufHeader> {
     let mut reader = Reader {
         inner: BufReader::with_capacity(1 << 20, file),
         consumed: 0,
+        digest: Sha256::new(),
     };
     let mut magic = [0u8; 4];
     reader.exact(&mut magic)?;
@@ -303,13 +363,24 @@ pub fn read_header(path: &Path) -> Result<GgufHeader> {
     ensure!(n_tensors <= MAX_TENSORS, "GGUF declares too many tensors");
     ensure!(n_kv <= MAX_KV, "GGUF declares too many metadata keys");
     let mut metadata = BTreeMap::new();
+    let mut template_identity = None;
     for _ in 0..n_kv {
         let key = reader.string()?;
         let kind = reader.u32()?;
-        let value = reader.scalar(kind)?;
+        if key == "tokenizer.chat_template" {
+            template_identity = None;
+        }
+        let value = if key == "tokenizer.chat_template" && kind == 8 {
+            let (text, identity) = reader.template_string()?;
+            template_identity = Some(identity);
+            Scalar::Str(text)
+        } else {
+            reader.scalar(kind)?
+        };
         metadata.insert(key, value);
     }
     let mut tensor_names = Vec::with_capacity(n_tensors.min(4096) as usize);
+    let mut tensor_type_counts = BTreeMap::new();
     for _ in 0..n_tensors {
         let name = reader.string()?;
         let dims = reader.u32()?;
@@ -317,7 +388,8 @@ pub fn read_header(path: &Path) -> Result<GgufHeader> {
         for _ in 0..dims {
             reader.u64()?;
         }
-        reader.u32()?; // ggml type
+        let tensor_type = reader.u32()?;
+        *tensor_type_counts.entry(tensor_type).or_insert(0) += 1;
         reader.u64()?; // offset
         tensor_names.push(name);
     }
@@ -326,6 +398,10 @@ pub fn read_header(path: &Path) -> Result<GgufHeader> {
         n_tensors,
         metadata,
         tensor_names,
+        tensor_type_counts,
+        header_sha256: format!("{:x}", reader.digest.finalize()),
+        header_bytes: reader.consumed,
+        template_identity,
     })
 }
 
@@ -536,6 +612,49 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::{write_gguf, V};
+
+    #[test]
+    fn provenance_hashes_the_full_template_and_exact_header_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long.gguf");
+        let template = format!(
+            "{}tail beyond retained prefix",
+            "x".repeat(KEEP_STRING_BYTES)
+        );
+        write_gguf(
+            &path,
+            &[
+                ("general.architecture", V::Str("qwen3")),
+                ("general.file_type", V::U32(15)),
+                ("general.quantization_version", V::U32(2)),
+                ("tokenizer.chat_template", V::Str(&template)),
+            ],
+            &["token_embd.weight", "output.weight"],
+        );
+        let header = read_header(&path).unwrap();
+        assert_eq!(header.chat_template().unwrap().len(), KEEP_STRING_BYTES);
+        assert_eq!(
+            header.template_identity.as_ref().unwrap(),
+            &string_identity(&template)
+        );
+        assert_ne!(
+            header.template_identity.as_ref().unwrap(),
+            &string_identity(header.chat_template().unwrap())
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(header.header_bytes < bytes.len() as u64);
+        assert_eq!(
+            header.header_sha256,
+            format!(
+                "{:x}",
+                Sha256::digest(&bytes[..header.header_bytes as usize])
+            )
+        );
+        let receipt = header.provenance();
+        assert_eq!(receipt["quantization"]["file_type"], 15);
+        assert_eq!(receipt["quantization"]["version"], 2);
+        assert_eq!(receipt["quantization"]["tensor_type_counts"]["0"], 2);
+    }
     use super::*;
 
     #[test]

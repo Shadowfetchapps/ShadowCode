@@ -128,6 +128,50 @@ const article = (name: string) =>
   screen.getByRole("article", { name: new RegExp(`^${name}$`) });
 
 describe("CompareView", () => {
+  it("shows the local lane's recorded provenance and clears it for a new turn", async () => {
+    const local = localLane({
+      local_runtime: {
+        model_id: "local:gguf:qwen",
+        preparation_seconds: 1,
+        automatic_cpu_fallback_allowed: false,
+        runtime: {
+          backend: "cpu",
+          context_tokens: 4096,
+          provenance: {
+            schema: 1,
+            identity_kind: "filesystem_metadata",
+            files: {
+              model: { path: "/models/lane.gguf", bytes: 1000 },
+              runtime: { path: "/bin/runtime", bytes: 100 },
+            },
+            model: { architecture: "qwen3" },
+            runtime: {},
+            context: { requested_tokens: 4096 },
+            gpu: { launch_mode: "off" },
+          },
+        },
+      },
+    });
+    mocks.compare.mockResolvedValue(record({ lanes: [local] }));
+    view();
+    expect(await screen.findByText("Local model details")).toBeTruthy();
+    expect(screen.getByText("/models/lane.gguf")).toBeTruthy();
+    mocks.compare.mockResolvedValue(
+      record({
+        lanes: [
+          localLane({
+            local_runtime: null,
+            local_progress: { model_id: local.model, phase: "loading" },
+          }),
+        ],
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Local model details")).toBeNull(),
+    );
+    expect(screen.getByText("Loading local model")).toBeTruthy();
+  });
+
   it("shows interrupted Keep without offering another mutation", async () => {
     mocks.compare.mockResolvedValue(
       record({ state: "needs_review", lanes: [finishedCloud] }),

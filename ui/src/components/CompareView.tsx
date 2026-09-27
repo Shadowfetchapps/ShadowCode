@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { TaskTimingDetails } from "./TaskTimingDetails";
+import { LocalModelDetails } from "./LocalModelDetails";
 import {
   ArrowLeft,
   Check,
@@ -582,6 +583,7 @@ export function LaneCard({
         </p>
       )}
       <TaskTimingDetails timings={lane.timings} />
+      <LocalModelDetails receipt={lane.local_runtime} />
       {active && lane.summary && (
         <p className="compare-lane-activity">{lane.summary}</p>
       )}

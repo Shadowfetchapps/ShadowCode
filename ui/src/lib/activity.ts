@@ -1,7 +1,7 @@
 /** Activity derived only from recorded events: tool calls (native and vendor),
  * approvals, web sources, changed files, verification and completion. */
 import { localProgressLabel, type LocalPhase } from "./localProgress";
-import type { TaskTimings } from "../api";
+import type { LocalRuntimeReceipt, TaskTimings } from "../api";
 
 export type StepId =
   | "local"
@@ -60,6 +60,7 @@ export type TaskActivity = {
   startedAt?: number;
   localPhase?: LocalPhase;
   timings?: TaskTimings;
+  localRuntime?: LocalRuntimeReceipt;
   finishedAt?: number;
   calls: ActivityCall[];
   sources: WebSource[];
