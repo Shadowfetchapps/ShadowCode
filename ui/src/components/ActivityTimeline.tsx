@@ -1,5 +1,5 @@
 import { memo, type ReactNode } from "react";
-import { Check, CircleAlert, LoaderCircle } from "lucide-react";
+import { Check, CircleAlert, CircleDashed, LoaderCircle } from "lucide-react";
 import {
   deriveSteps,
   type TaskActivity,
@@ -66,7 +66,8 @@ function StepIcon({ state }: { state: TimelineStep["state"] }) {
   if (state === "active")
     return <LoaderCircle size={14} className="spin" aria-hidden="true" />;
   if (state === "failed") return <CircleAlert size={14} aria-hidden="true" />;
-  return <Check size={14} aria-hidden="true" />;
+  if (state === "done") return <Check size={14} aria-hidden="true" />;
+  return <CircleDashed size={14} aria-hidden="true" />;
 }
 
 function Step({
@@ -91,7 +92,9 @@ function Step({
           ? "in progress"
           : step.state === "failed"
             ? "with problems"
-            : "done"}
+            : step.state === "done"
+              ? "done"
+              : "not verified or incomplete"}
       </span>
     </>
   );
@@ -112,9 +115,11 @@ function Step({
                 ? "running"
                 : call.ok === false
                   ? "failed"
-                  : call.tool.includes(".")
-                    ? call.tool
-                    : "done"}
+                  : call.ok !== true
+                    ? "outcome unknown"
+                    : call.tool.includes(".")
+                      ? call.tool
+                      : "done"}
             </span>
             {call.output && (
               <pre>

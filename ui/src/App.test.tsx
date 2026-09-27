@@ -112,8 +112,19 @@ it("runs a task and shows the event-derived timeline and summary", async () => {
   expect(within(summary).getByText("exit 0")).toBeTruthy();
   await waitFor(() => expect(within(summary).getByText("+1")).toBeTruthy());
   const timeline = screen.getAllByLabelText("Agent activity").at(-1)!;
-  for (const label of ["Reading project", "Editing files", "Running checks"])
+  for (const label of ["Reading project", "Editing files"])
     expect(within(timeline).getByText(label)).toBeTruthy();
+  // This fixture reports a successful legacy command, not a configured
+  // verification receipt. Its completed process cannot create a green check.
+  const checks = within(timeline)
+    .getByText("Checks not verified")
+    .closest(".activity-step")!;
+  expect(checks.className).toBe("activity-step is-incomplete");
+  expect(
+    within(checks as HTMLElement).getByText("Verification not run"),
+  ).toBeTruthy();
+  expect(checks.querySelector(".lucide-check")).toBeNull();
+  expect(checks.querySelector(".lucide-circle-dashed")).toBeTruthy();
   // The summary card states the outcome; the timeline does not repeat it.
   expect(within(timeline).queryByText("Finished")).toBeNull();
   expect(within(summary).getByText("Finished")).toBeTruthy();

@@ -93,9 +93,15 @@ describe("activity timeline from real events", () => {
         output: { exit_code: 0 },
       }),
       ev("verification.summary", {
-        status: "last_command_succeeded",
+        status: "passed",
         commands: [
-          { command: "python -m pytest -q", success: true, exit_code: 0 },
+          {
+            command: "python -m pytest -q",
+            kind: "configured_check",
+            state: "passed",
+            success: true,
+            exit_code: 0,
+          },
         ],
       }),
       ev("agent.completed", { summary: "Fixed", success: true }),
@@ -106,7 +112,7 @@ describe("activity timeline from real events", () => {
     ).toEqual([
       ["Reading project", "done"],
       ["Editing files", "done"],
-      ["Running checks", "done"],
+      ["Checks passed", "done"],
       ["Finished", "done"],
     ]);
     const activity = state.activity.t1;
@@ -182,7 +188,7 @@ describe("activity timeline from real events", () => {
       "Reading project",
       "Editing files",
       "Running commands",
-      "Running checks",
+      "Checks failed",
       "Finished",
     ]);
     expect(derived.find((s) => s.id === "testing")?.detail).toBe(
@@ -408,4 +414,200 @@ it("keeps not-run and freshness-refresh labels ahead of an incomplete assessment
   expect(verificationLine({ ...verification, status: "unavailable" })).toBe(
     "Current verification unavailable",
   );
+});
+
+describe("timeline verdicts do not promote unfinished or unsuccessful evidence", () => {
+  const check = {
+    command: "npm test",
+    kind: "configured_check",
+    state: "passed",
+    success: true,
+    exit_code: 0,
+  };
+  const completedRead = [
+    ev("tool.started", {
+      tool: "read_file",
+      call_id: "read",
+      arguments: { path: "app.ts" },
+    }),
+    ev("tool.completed", { tool: "read_file", call_id: "read", success: true }),
+  ];
+  it.each([
+    ["cancelled", "Checks cancelled"],
+    ["stale", "Checks stale"],
+    ["skipped", "Checks incomplete"],
+    ["incomplete", "Checks incomplete"],
+    ["unavailable", "Checks unavailable"],
+  ])(
+    "%s check receipts stay neutral while completed reading stays done",
+    (status, label) => {
+      const activity = replay([
+        ...completedRead,
+        ev("verification.summary", {
+          status,
+          commands: [{ ...check, state: status, success: false }],
+        }),
+        ev("agent.completed", {
+          success: false,
+          cancelled: status === "cancelled",
+        }),
+      ]).activity.t1;
+      expect(deriveSteps(activity).find((s) => s.id === "reading")?.state).toBe(
+        "done",
+      );
+      expect(
+        deriveSteps(activity).find((s) => s.id === "testing"),
+      ).toMatchObject({ state: "incomplete", label });
+    },
+  );
+  it("keeps failed commands and failed checks visibly failed", () => {
+    const activity = replay([
+      ev("tool.started", {
+        tool: "exec",
+        call_id: "shell",
+        arguments: { command: "git status" },
+      }),
+      ev("tool.completed", { tool: "exec", call_id: "shell", success: false }),
+      ev("verification.summary", {
+        status: "failed",
+        commands: [{ ...check, state: "failed", success: false, exit_code: 1 }],
+      }),
+      ev("agent.completed", { success: false }),
+    ]).activity.t1;
+    expect(
+      deriveSteps(activity)
+        .filter((s) => ["commands", "testing"].includes(s.id))
+        .map((s) => s.state),
+    ).toEqual(["failed", "failed"]);
+  });
+  it("does not turn an interrupted tool into a completed phase", () => {
+    const activity = replay([
+      ...completedRead,
+      ev("tool.started", {
+        tool: "write_file",
+        call_id: "pending",
+        arguments: { path: "app.ts" },
+      }),
+      ev("agent.completed", { success: false, cancelled: true }),
+    ]).activity.t1;
+    expect(deriveSteps(activity).find((s) => s.id === "reading")?.state).toBe(
+      "done",
+    );
+    expect(deriveSteps(activity).find((s) => s.id === "editing")?.state).toBe(
+      "incomplete",
+    );
+  });
+  it.each(["not_run", "vendor_owned"])(
+    "keeps %s distinct from failed even when a classified check command completed",
+    (status) => {
+      const activity = replay([
+        ev("tool.started", {
+          tool: "exec",
+          call_id: "check",
+          arguments: { command: "npm test" },
+        }),
+        ev("tool.completed", { tool: "exec", call_id: "check", success: true }),
+        ev("verification.summary", { status, commands: [] }),
+        ev("agent.completed", { success: true }),
+      ]).activity.t1;
+      expect(deriveSteps(activity).find((s) => s.id === "testing")?.state).toBe(
+        "incomplete",
+      );
+    },
+  );
+  it("retains passed command facts without promoting an interrupted final assessment", () => {
+    const activity = replay([
+      ev("verification.summary", {
+        status: "failed",
+        final_assessment: "not_completed",
+        commands: [check],
+      }),
+      ev("agent.completed", { success: false }),
+    ]).activity.t1;
+    expect(deriveSteps(activity).find((s) => s.id === "testing")).toMatchObject(
+      { state: "incomplete", detail: "Final verification did not finish" },
+    );
+    expect(activity.verification?.commands[0]).toMatchObject({
+      state: "passed",
+      success: true,
+    });
+  });
+  it("preserves an authoritative passing verdict after the same check was rerun", () => {
+    const activity = replay([
+      ev("tool.started", {
+        tool: "exec",
+        call_id: "first",
+        arguments: { command: "npm test" },
+      }),
+      ev("tool.completed", { tool: "exec", call_id: "first", success: false }),
+      ev("tool.started", {
+        tool: "exec",
+        call_id: "second",
+        arguments: { command: "npm test" },
+      }),
+      ev("tool.completed", { tool: "exec", call_id: "second", success: true }),
+      ev("verification.summary", {
+        status: "passed",
+        commands: [
+          { ...check, state: "failed", success: false, exit_code: 1 },
+          check,
+        ],
+      }),
+      ev("agent.completed", { success: true }),
+    ]).activity.t1;
+    expect(deriveSteps(activity).find((s) => s.id === "testing")).toMatchObject(
+      { state: "done", label: "Checks passed" },
+    );
+  });
+});
+
+it("requires configured evidence before a passed status can create a green check", () => {
+  const activity = replay([
+    ev("tool.started", {
+      tool: "exec",
+      call_id: "test",
+      arguments: { command: "npm test" },
+    }),
+    ev("tool.completed", { tool: "exec", call_id: "test", success: true }),
+    ev("verification.summary", {
+      status: "passed",
+      commands: [
+        { command: "npm test", kind: "command", success: true, exit_code: 0 },
+      ],
+    }),
+    ev("agent.completed", { success: true }),
+  ]).activity.t1;
+  expect(
+    deriveSteps(activity).find((step) => step.id === "testing"),
+  ).toMatchObject({
+    state: "incomplete",
+    label: "Checks not verified",
+    detail: "Verification not run",
+  });
+});
+
+it("shows freshness assessment as active only while the task is still running", () => {
+  const activity = replay([
+    ev("verification.summary", {
+      status: "checking",
+      commands: [
+        {
+          command: "npm test",
+          kind: "configured_check",
+          state: "passed",
+          success: true,
+          exit_code: 0,
+        },
+      ],
+    }),
+  ]).activity.t1;
+  expect(
+    deriveSteps(activity).find((step) => step.id === "testing")?.state,
+  ).toBe("active");
+  expect(
+    deriveSteps({
+      ...activity,
+      finished: { success: false, cancelled: true, summary: "Stopped" },
+    }).find((step) => step.id === "testing")?.state,
+  ).toBe("incomplete");
 });

@@ -269,10 +269,66 @@ const ORDER: StepId[] = [
 export type TimelineStep = {
   id: StepId;
   label: string;
-  state: "active" | "done" | "failed";
+  state: "active" | "done" | "failed" | "incomplete";
   calls: ActivityCall[];
   detail?: string;
 };
+
+function checkState(
+  verification: Verification | undefined,
+  failedCall: boolean,
+): TimelineStep["state"] {
+  if (
+    verification?.finalAssessment === "not_completed" ||
+    verification?.finalAssessment === "interrupted"
+  )
+    return "incomplete";
+  const hasChecks = verification?.commands.some(
+    (command) => command.kind === "configured_check",
+  );
+  // The engine's final verdict includes reruns and workspace freshness. A
+  // prior failed attempt must not override a later authoritative pass.
+  if (hasChecks && verification?.status === "passed") return "done";
+  if (
+    verification &&
+    [
+      "cancelled",
+      "stale",
+      "skipped",
+      "incomplete",
+      "unavailable",
+      "checking",
+    ].includes(verification.status)
+  )
+    return "incomplete";
+  if (failedCall || (hasChecks && verification?.status === "failed"))
+    return "failed";
+  // A successful tool process or provider report is not a configured-check
+  // verdict. Keep those facts in the expanded calls without a green check.
+  return "incomplete";
+}
+
+function checkLabel(
+  state: TimelineStep["state"],
+  verification: Verification | undefined,
+): string {
+  if (state === "active") return LABELS.testing;
+  if (state === "done") return "Checks passed";
+  if (state === "failed") return "Checks failed";
+  if (
+    verification?.finalAssessment === "not_completed" ||
+    verification?.finalAssessment === "interrupted"
+  )
+    return "Checks incomplete";
+  if (verification?.status === "cancelled") return "Checks cancelled";
+  if (verification?.status === "stale") return "Checks stale";
+  if (verification?.status === "unavailable") return "Checks unavailable";
+  if (verification?.status === "vendor_owned") return "Vendor checks";
+  if (verification?.status === "not_run") return "Checks not run";
+  if (!verification?.commands.some((c) => c.kind === "configured_check"))
+    return "Checks not verified";
+  return "Checks incomplete";
+}
 
 /** Only steps with real evidence appear. A step is active while one of its
  * calls is running (or an approval is pending); Finished appears only after
@@ -352,12 +408,27 @@ export function deriveSteps(
         )) ||
       (id === "web" && activity.sources.length > 0);
     if (!evidence) continue;
-    const live = calls.some((call) => call.live) && !activity.finished;
+    const live =
+      !activity.finished &&
+      (calls.some((call) => call.live) ||
+        (id === "testing" && activity.verification?.status === "checking"));
     const failed = calls.some((call) => call.ok === false);
+    const state: TimelineStep["state"] = live
+      ? "active"
+      : id === "testing"
+        ? checkState(activity.verification, failed)
+        : failed
+          ? "failed"
+          : calls.some((call) => call.ok !== true)
+            ? "incomplete"
+            : "done";
     steps.push({
       id,
-      label: LABELS[id],
-      state: live ? "active" : "done",
+      label:
+        id === "testing"
+          ? checkLabel(state, activity.verification)
+          : LABELS[id],
+      state,
       calls,
       detail:
         id === "testing"
