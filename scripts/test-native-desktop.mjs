@@ -387,6 +387,11 @@ try {
   await until("Picker loaded", async () => !/Loading models/.test(await execute("return document.querySelector('.unified-picker-current').textContent")), 60000);
   const pickerLoadMs = Date.now() - readyAt;
   console.log(`  ..  picker rows usable ${pickerLoadMs} ms after the workspace opened`);
+  await until("Welcome model action", () => visible(".welcome-model-setup button"));
+  await screenshot("welcome-model-ready");
+  await click(".welcome-model-setup button");
+  await until("Welcome action opens picker", () => visible(".unified-picker-menu"));
+  note("first-run Choose a model opens the unified picker after model discovery");
   const picker = await until("Vendor rows probed", async () => {
     const data = await api("GET", "/api/picker");
     const vendorsChecked = installed.every((vendor) => data.targets.some((t) => t.provider === `cli:${vendor}` && t.reason !== "Not checked yet"));
@@ -394,6 +399,10 @@ try {
   }, 90000);
   await openPicker();
   await until("Picker rows rendered", async () => (await pickerRows()).length > 0 || installed.length === 0);
+  assert.match(await execute("return document.querySelector('.unified-picker-actions button').textContent"), /Refresh models/);
+  await click(".unified-picker-actions button");
+  await until("Manual model refresh completed", () => execute("return [...document.querySelectorAll('.unified-picker-actions button')].some(b=>b.textContent.includes('Refresh models') && !b.disabled)"), 90000);
+  note("open picker manually refreshes provider rows and remains open");
   const rows = await pickerRows();
   const groups = await execute("return [...document.querySelectorAll('.unified-picker-heading')].map(h=>h.textContent)");
   assert.deepEqual(groups, ["Subscriptions", "On this computer", "API keys"]);
