@@ -1288,3 +1288,716 @@ async fn repository_ownership_refuses_keep_before_source_changes() {
     assert_eq!(kept["state"], "applied");
     f.service.engine.shutdown().await.unwrap();
 }
+
+// Deliberate overlap at real service/Git/process boundaries. Linux-only
+// because the owned-process assertions and TERM gate use /proc and signals.
+#[cfg(target_os = "linux")]
+mod concurrency {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+
+    fn quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+
+    struct ReleaseOnDrop(PathBuf);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let _ = fs::write(&self.0, b"release\n");
+        }
+    }
+
+    async fn wait_file(path: &Path, limit: Duration) {
+        tokio::time::timeout(limit, async {
+            while !path.is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("No synchronization marker: {}", path.display()));
+    }
+
+    fn dirty_source(project: &Path) -> (String, String, String) {
+        fs::write(project.join("tracked.txt"), "staged before comparison\n").unwrap();
+        git(project, &["add", "tracked.txt"]);
+        fs::write(project.join("tracked.txt"), "unstaged before comparison\n").unwrap();
+        fs::write(project.join("notes.txt"), "untracked before comparison\n").unwrap();
+        fs::write(project.join("ignored.log"), "ignored before comparison\n").unwrap();
+        (
+            git(project, &["rev-parse", "HEAD"]),
+            git(project, &["write-tree"]),
+            git(project, &["status", "--porcelain=v1"]),
+        )
+    }
+
+    fn assert_user_state(project: &Path, head: &str, index: &str) {
+        assert_eq!(git(project, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(project, &["write-tree"]), index);
+        assert_eq!(
+            fs::read_to_string(project.join("tracked.txt")).unwrap(),
+            "unstaged before comparison\n"
+        );
+        assert_eq!(
+            git(project, &["show", ":tracked.txt"]),
+            "staged before comparison"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("notes.txt")).unwrap(),
+            "untracked before comparison\n"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("ignored.log")).unwrap(),
+            "ignored before comparison\n"
+        );
+    }
+
+    // Invoked only in an isolated test subprocess. The wrapper's PATH and
+    // control files never affect the parent test runner or installed program.
+    #[tokio::test]
+    async fn compare_race_child() {
+        let Some(control) = std::env::var_os("SHADOWCODE_COMPARE_RACE_ROOT") else {
+            return;
+        };
+        let control = PathBuf::from(control);
+        let scenario = std::env::var("SHADOWCODE_COMPARE_RACE_CASE").unwrap();
+        let discard_first = scenario == "discard_keep";
+        let f = fixture().await;
+        let (head, index, initial_status) = dirty_source(&f.project);
+        let record = start(&f).await;
+        let id = record["id"].as_str().unwrap().to_owned();
+        assert_eq!(record["base"]["included_uncommitted"], true);
+        let ready = finished(&f, &id).await;
+        for row in ready["lanes"].as_array().unwrap() {
+            assert_eq!(row["status"], "completed");
+            let copy = Path::new(row["worktree"].as_str().unwrap());
+            assert_eq!(
+                fs::read_to_string(copy.join("tracked.txt")).unwrap(),
+                "unstaged before comparison\n"
+            );
+            assert!(!copy.join("ignored.log").exists());
+        }
+        assert_eq!(
+            git(&f.project, &["status", "--porcelain=v1"]),
+            initial_status
+        );
+        assert_user_state(&f.project, &head, &index);
+
+        fs::write(control.join("source"), f.project.to_str().unwrap()).unwrap();
+        fs::write(
+            control.join("gate"),
+            if discard_first { "remove" } else { "apply" },
+        )
+        .unwrap();
+        let release = ReleaseOnDrop(control.join("release"));
+        let first_service = f.service.clone();
+        let first_path = format!(
+            "/api/compare/{id}/{}",
+            if discard_first { "discard" } else { "keep" }
+        );
+        let first = tokio::spawn(async move {
+            call(
+                &first_service,
+                "POST",
+                &first_path,
+                json!({"model":"lane-alpha"}),
+            )
+            .await
+        });
+        wait_file(&control.join("paused"), Duration::from_secs(15)).await;
+        assert!(
+            !first.is_finished(),
+            "first operation did not remain at its real Git boundary"
+        );
+
+        let (first, second) = {
+            let action = if scenario == "keep_discard" {
+                "discard"
+            } else {
+                "keep"
+            };
+            let model = if scenario == "different_keep" {
+                "lane-beta"
+            } else {
+                "lane-alpha"
+            };
+            let second_path = format!("/api/compare/{id}/{action}");
+            let second = call(&f.service, "POST", &second_path, json!({"model":model}));
+            tokio::pin!(second);
+            // One explicit poll enters dispatch while the first mutation is
+            // blocked. This cannot pass merely because two tasks were spawned
+            // and happened to execute sequentially.
+            assert!(futures_util::poll!(&mut second).is_pending());
+            assert!(!first.is_finished());
+            assert_user_state(&f.project, &head, &index);
+            assert_eq!(
+                fs::read_to_string(f.project.join("lib.txt")).unwrap(),
+                "value = 1\n"
+            );
+            assert!(!f.project.join("answer.txt").exists());
+
+            fs::write(&release.0, b"release\n").unwrap();
+            tokio::time::timeout(Duration::from_secs(20), async {
+                tokio::join!(first, &mut second)
+            })
+            .await
+            .unwrap()
+        };
+        let first = first.unwrap().unwrap();
+        if scenario == "keep_discard" {
+            // Discard after durable Keep is an idempotent cleanup retry.
+            let second = second.unwrap();
+            assert_eq!(second["state"], "applied");
+            assert_eq!(second["winner"], "lane-alpha");
+        } else {
+            let error = second.unwrap_err().to_string();
+            assert!(
+                error.contains(if discard_first {
+                    "already discarded"
+                } else {
+                    "already applied"
+                }),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            first["state"],
+            if discard_first {
+                "discarded"
+            } else {
+                "applied"
+            }
+        );
+        assert_eq!(
+            first["winner"],
+            if discard_first {
+                Value::Null
+            } else {
+                json!("lane-alpha")
+            }
+        );
+        assert_eq!(first["cleanup_pending"], false);
+        assert!(first["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["removed"] == true));
+        assert_user_state(&f.project, &head, &index);
+        assert_eq!(
+            fs::read_to_string(f.project.join("lib.txt")).unwrap(),
+            if discard_first {
+                "value = 1\n"
+            } else {
+                "value = 2 (alpha)\n"
+            }
+        );
+        if discard_first {
+            assert!(!f.project.join("answer.txt").exists());
+            assert_eq!(
+                git(&f.project, &["status", "--porcelain=v1"]),
+                initial_status
+            );
+        } else {
+            assert_eq!(
+                fs::read_to_string(f.project.join("answer.txt")).unwrap(),
+                "alpha\n"
+            );
+        }
+        assert!(!f.project.join("beta.txt").exists());
+        assert_eq!(managed_branches(&f.project), "");
+        assert!(worktrees::list(&f.paths, &f.project).unwrap().is_empty());
+        assert_eq!(git(&f.project, &["worktree", "list"]).lines().count(), 1);
+        let applies = fs::read_to_string(control.join("apply-count"))
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(applies, usize::from(!discard_first));
+
+        f.service.engine.shutdown().await.unwrap();
+        drop(f.service);
+        let reopened = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+        for _ in 0..2 {
+            let saved = call(
+                &reopened,
+                "POST",
+                &format!("/api/compare/{id}/discard"),
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            assert_eq!(saved["state"], first["state"]);
+            assert_eq!(saved["winner"], first["winner"]);
+            let board = call(&reopened, "GET", "/api/compare/scoreboard", Value::Null)
+                .await
+                .unwrap();
+            assert_eq!(
+                board["rows"],
+                json!([
+                    {"model":"lane-alpha","name":"alpha","wins":u64::from(!discard_first),"runs":1},
+                    {"model":"lane-beta","name":"beta","wins":0,"runs":1},
+                ])
+            );
+        }
+        assert_user_state(&f.project, &head, &index);
+        assert_eq!(
+            fs::read_to_string(control.join("apply-count"))
+                .unwrap_or_default()
+                .lines()
+                .count(),
+            applies
+        );
+        reopened.engine.shutdown().await.unwrap();
+        eprintln!(
+            "{}",
+            json!({"scenario":scenario,"source_apply_calls":applies,"state":first["state"],"reopened":true})
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_keep_and_discard_have_one_durable_outcome() {
+        for scenario in [
+            "same_keep",
+            "different_keep",
+            "keep_discard",
+            "discard_keep",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let bin = root.path().join("bin");
+            fs::create_dir(&bin).unwrap();
+            let real_git = Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .unwrap();
+            assert!(real_git.status.success());
+            let real_git = String::from_utf8(real_git.stdout).unwrap();
+            let wrapper = format!(
+                r#"#!/bin/sh
+control={control}
+apply=no
+skip=no
+worktree=no
+remove=no
+for arg do
+  case "$arg" in apply) apply=yes;; --check|--cached) skip=yes;; worktree) worktree=yes;; remove) remove=yes;; esac
+done
+if [ -f "$control/source" ] && [ "$(pwd -P)" = "$(cat "$control/source")" ]; then
+  if [ "$apply" = yes ] && [ "$skip" = no ]; then printf 'apply\n' >> "$control/apply-count"; fi
+  gate=$(cat "$control/gate")
+  if {{ [ "$gate" = apply ] && [ "$apply" = yes ] && [ "$skip" = no ]; }} || {{ [ "$gate" = remove ] && [ "$worktree" = yes ] && [ "$remove" = yes ]; }}; then
+    if mkdir "$control/claimed" 2>/dev/null; then
+      printf '%s\n' "$$" > "$control/paused"
+      count=0
+      while [ ! -f "$control/release" ]; do
+        count=$((count + 1))
+        [ "$count" -lt 1500 ] || exit 97
+        sleep 0.01
+      done
+    fi
+  fi
+fi
+exec {git} "$@"
+"#,
+                control = quote(root.path().to_str().unwrap()),
+                git = quote(real_git.trim())
+            );
+            fs::write(bin.join("git"), wrapper).unwrap();
+            fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+            let log_path = root.path().join("child.log");
+            let log = fs::File::create(&log_path).unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "concurrency::compare_race_child", "--nocapture"])
+                .env("SHADOWCODE_COMPARE_RACE_ROOT", root.path())
+                .env("SHADOWCODE_COMPARE_RACE_CASE", scenario)
+                // Existing fixture location override also keeps all child
+                // profile/worktree files under parent-owned timeout cleanup.
+                .env("SHADOWCODE_COMPARE_CRASH_ROOT", root.path())
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .stdout(Stdio::from(log.try_clone().unwrap()))
+                .stderr(Stdio::from(log))
+                .spawn()
+                .unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    if let Some(status) = child.try_wait().unwrap() {
+                        break status;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            if result.is_err() {
+                let _ = fs::write(root.path().join("release"), b"release\n");
+                let _ = child.kill();
+            }
+            child.wait().unwrap();
+            let log = fs::read_to_string(log_path).unwrap();
+            assert!(
+                result.is_ok_and(|status| status.success()),
+                "{scenario}: {log}"
+            );
+            eprintln!("{scenario}: {log}");
+        }
+    }
+
+    async fn register(service: &Service, id: &str, name: &str, endpoint: &str) {
+        call(
+            service,
+            "POST",
+            "/api/models/register",
+            json!({
+                "id":id,"name":name,"provider":"local","endpoint":endpoint,"context_limit":16384
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    // Bubblewrap gives the shell a namespace-local PID. Resolve the unique
+    // host process in this lane before reading its kernel start time, as in
+    // the existing project-inspection cancellation fixtures.
+    fn host_pid(project: &Path, namespace_pid: u32) -> u32 {
+        let project = project.canonicalize().unwrap();
+        let matches: Vec<_> = fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                let pid = path.file_name()?.to_str()?.parse::<u32>().ok()?;
+                if fs::read_link(path.join("cwd")).ok()? != project {
+                    return None;
+                }
+                let status = fs::read_to_string(path.join("status")).ok()?;
+                let inner = status
+                    .lines()
+                    .find(|line| line.starts_with("NSpid:"))?
+                    .split_whitespace()
+                    .last()?
+                    .parse::<u32>()
+                    .ok()?;
+                (inner == namespace_pid).then_some(pid)
+            })
+            .collect();
+        assert_eq!(matches.len(), 1, "Expected exactly one live fixture shell");
+        matches[0]
+    }
+
+    // PID plus kernel start time identifies only our fixture process. This
+    // read-only check never signals a PID or confuses a recycled PID with it.
+    fn process_identity(pid: u32) -> Option<String> {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat.rsplit_once(") ")?
+            .1
+            .split_whitespace()
+            .nth(19)
+            .map(str::to_owned)
+    }
+
+    #[tokio::test]
+    async fn unrelated_project_status_and_cancel_finish_while_lane_is_stopping() {
+        if std::env::var_os("SHADOWCODE_COMPARE_STOP_ROOT").is_none() {
+            // Bubblewrap's namespace teardown can finish before the shell's
+            // TERM trap holds. Exercise a genuinely slow owned fallback shell
+            // by making only this child's availability probe fail. Never
+            // change PATH in the shared test process or claim sandbox coverage.
+            let root = tempfile::tempdir().unwrap();
+            let bin = root.path().join("bin");
+            fs::create_dir(&bin).unwrap();
+            fs::write(bin.join("bwrap"), "#!/bin/sh\nexit 1\n").unwrap();
+            fs::set_permissions(bin.join("bwrap"), fs::Permissions::from_mode(0o755)).unwrap();
+            let log_path = root.path().join("child.log");
+            let log = fs::File::create(&log_path).unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "concurrency::unrelated_project_status_and_cancel_finish_while_lane_is_stopping",
+                    "--nocapture",
+                ])
+                .env("SHADOWCODE_COMPARE_STOP_ROOT", root.path())
+                .env("SHADOWCODE_COMPARE_CRASH_ROOT", root.path())
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .stdout(Stdio::from(log.try_clone().unwrap()))
+                .stderr(Stdio::from(log))
+                .spawn()
+                .unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    if let Some(status) = child.try_wait().unwrap() {
+                        break status;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            if result.is_err() {
+                let _ = child.kill();
+            }
+            child.wait().unwrap();
+            let log = fs::read_to_string(log_path).unwrap();
+            assert!(result.is_ok_and(|status| status.success()), "{log}");
+            eprintln!("{log}");
+            return;
+        }
+        let f = fixture().await;
+        let (a_head, a_index, _) = dirty_source(&f.project);
+        let hold = support::server(|_, body| {
+            let answer = if body["tools"].as_array().is_none_or(Vec::is_empty) {
+                response("Compare lane", json!([]))
+            } else {
+                response("Waiting for cancellation", json!([tool("owned-shell", "exec", json!({"command":
+                    "trap 'printf stopping > stop-seen; while [ ! -e stop-release ]; do sleep 0.02; done; exit 0' TERM; echo $$ > owned.pid; printf ready > running; while :; do sleep 0.02; done"
+                }))]))
+            };
+            (answer, Duration::ZERO)
+        }).await;
+        register(&f.service, "lane-hold", "beta", &hold.endpoint).await;
+        let a = call(
+            &f.service,
+            "POST",
+            "/api/compare",
+            json!({
+                "workspace":f.project,"task":"Set the answer","models":["lane-alpha","lane-hold"]
+            }),
+        )
+        .await
+        .unwrap();
+        let a_id = a["id"].as_str().unwrap().to_owned();
+        let held_lane = lane(&a, "lane-hold");
+        let held_root = PathBuf::from(held_lane["worktree"].as_str().unwrap());
+        let held_job = held_lane["job_id"].as_str().unwrap().to_owned();
+        wait_file(&held_root.join("running"), Duration::from_secs(10)).await;
+        let namespace_pid: u32 = fs::read_to_string(held_root.join("owned.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let pid = host_pid(&held_root, namespace_pid);
+        let identity =
+            process_identity(pid).expect("owned shell must be alive before cancellation");
+        let alpha_job = lane(&a, "lane-alpha")["job_id"].as_str().unwrap();
+        let alpha = tokio::time::timeout(Duration::from_secs(10), f.service.engine.wait(alpha_job))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(alpha.status, "completed");
+
+        // Same Store/Engine and independent repositories: separate services
+        // would miss a process-global or shared-store serialization bug.
+        let project_b = f._root.path().join("project-b");
+        fs::create_dir(&project_b).unwrap();
+        git(&project_b, &["init", "-q"]);
+        fs::write(project_b.join("lib.txt"), "project B unchanged\n").unwrap();
+        git(&project_b, &["add", "."]);
+        git(&project_b, &["commit", "-qm", "B base"]);
+        let project_b = project_b.canonicalize().unwrap();
+        let b_head = git(&project_b, &["rev-parse", "HEAD"]);
+        let b_index = git(&project_b, &["write-tree"]);
+        let mut trusted = Config::load(&f.paths, None).unwrap().trusted_workspaces;
+        trusted.push(project_b.to_string_lossy().into_owned());
+        Config::patch(&f.paths, json!({"trusted_workspaces":trusted})).unwrap();
+        // A different server is necessary: support::server intentionally
+        // serializes responses, including a delayed response body.
+        let waiting = support::server(|_, _| {
+            (
+                response("Late fixture answer", json!([])),
+                Duration::from_secs(30),
+            )
+        })
+        .await;
+        register(&f.service, "b-alpha", "alpha", &waiting.endpoint).await;
+        register(&f.service, "b-beta", "beta", &waiting.endpoint).await;
+        let b = call(
+            &f.service,
+            "POST",
+            "/api/compare",
+            json!({
+                "workspace":project_b,"task":"Wait for cancellation","models":["b-alpha","b-beta"]
+            }),
+        )
+        .await
+        .unwrap();
+        let b_id = b["id"].as_str().unwrap().to_owned();
+        let b_jobs: Vec<String> = b["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["job_id"].as_str().unwrap().to_owned())
+            .collect();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if !waiting.requests.lock().unwrap().is_empty()
+                    && b_jobs
+                        .iter()
+                        .all(|id| f.service.engine.job(id).unwrap().unwrap().status == "running")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let release = ReleaseOnDrop(held_root.join("stop-release"));
+        let keep_service = f.service.clone();
+        let keep_path = format!("/api/compare/{a_id}/keep");
+        let keep = tokio::spawn(async move {
+            call(
+                &keep_service,
+                "POST",
+                &keep_path,
+                json!({"model":"lane-alpha"}),
+            )
+            .await
+        });
+        wait_file(&held_root.join("stop-seen"), Duration::from_secs(10)).await;
+        assert_eq!(
+            f.service.engine.job(&held_job).unwrap().unwrap().status,
+            "cancelling"
+        );
+        assert!(!keep.is_finished());
+        assert_eq!(process_identity(pid).as_ref(), Some(&identity));
+
+        let begin = Instant::now();
+        let measured = tokio::time::timeout(Duration::from_secs(1), async {
+            let status = call(
+                &f.service,
+                "GET",
+                &format!("/api/compare/{b_id}"),
+                Value::Null,
+            )
+            .await?;
+            let status_ms = begin.elapsed().as_millis();
+            assert_eq!(status["state"], "running");
+            let job = call(
+                &f.service,
+                "GET",
+                &format!("/api/jobs/{}", b_jobs[0]),
+                Value::Null,
+            )
+            .await?;
+            assert_eq!(job["status"], "running");
+            call(
+                &f.service,
+                "POST",
+                &format!("/api/compare/{b_id}/cancel"),
+                Value::Null,
+            )
+            .await?;
+            for id in &b_jobs {
+                let cancelled = call(
+                    &f.service,
+                    "POST",
+                    &format!("/api/jobs/{id}/cancel"),
+                    Value::Null,
+                )
+                .await?;
+                assert_eq!(cancelled["status"], "cancelled");
+            }
+            Ok::<_, anyhow::Error>(
+                json!({"status_ms":status_ms,"cancelled_ms":begin.elapsed().as_millis()}),
+            )
+        })
+        .await;
+        let still_waiting =
+            !keep.is_finished() && process_identity(pid).as_ref() == Some(&identity);
+        // Always release before asserting latency/results, including timeout.
+        fs::write(&release.0, b"release\n").unwrap();
+        let kept = tokio::time::timeout(Duration::from_secs(8), keep).await;
+        f.service.engine.shutdown().await.unwrap();
+        let timing = measured
+            .expect("B status/cancellation blocked behind A shutdown")
+            .unwrap();
+        assert!(
+            still_waiting,
+            "A exited before B responsiveness was established"
+        );
+        let kept = kept.unwrap().unwrap().unwrap();
+        assert_eq!(kept["state"], "applied");
+        assert_eq!(kept["winner"], "lane-alpha");
+        assert_eq!(kept["cleanup_pending"], false);
+        assert_ne!(
+            process_identity(pid).as_ref(),
+            Some(&identity),
+            "owned child survived shutdown"
+        );
+        assert_user_state(&f.project, &a_head, &a_index);
+        assert_eq!(
+            fs::read_to_string(f.project.join("answer.txt")).unwrap(),
+            "alpha\n"
+        );
+        assert_eq!(git(&project_b, &["rev-parse", "HEAD"]), b_head);
+        assert_eq!(git(&project_b, &["write-tree"]), b_index);
+        assert_eq!(git(&project_b, &["status", "--porcelain=v1"]), "");
+        drop(f.service);
+        let reopened = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+        let a_saved = call(
+            &reopened,
+            "GET",
+            &format!("/api/compare/{a_id}"),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        let b_saved = call(
+            &reopened,
+            "GET",
+            &format!("/api/compare/{b_id}"),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert_eq!(a_saved["winner"], "lane-alpha");
+        assert_eq!(b_saved["state"], "done");
+        assert!(b_saved["winner"].is_null());
+        for row in b_saved["lanes"].as_array().unwrap() {
+            assert_eq!(row["status"], "cancelled");
+            assert!(Path::new(row["worktree"].as_str().unwrap()).is_dir());
+        }
+        let a_board = shadowcode_core::compare::scoreboard(&reopened.engine, &f.project)
+            .await
+            .unwrap();
+        let b_board = shadowcode_core::compare::scoreboard(&reopened.engine, &project_b)
+            .await
+            .unwrap();
+        assert_eq!(
+            a_board["rows"],
+            json!([
+                {"model":"lane-alpha","name":"alpha","wins":1,"runs":1},
+                {"model":"lane-hold","name":"beta","wins":0,"runs":1}
+            ])
+        );
+        assert_eq!(
+            b_board["rows"],
+            json!([
+                {"model":"b-alpha","name":"alpha","wins":0,"runs":1},
+                {"model":"b-beta","name":"beta","wins":0,"runs":1}
+            ])
+        );
+        call(
+            &reopened,
+            "POST",
+            &format!("/api/compare/{b_id}/discard"),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        reopened.engine.shutdown().await.unwrap();
+        eprintln!(
+            "{}",
+            json!({"case":"CMP-11","service":"shared","process_scope":"owned fallback shell; isolated failed bubblewrap probe","timing":timing,"a_still_stopping_after_b":still_waiting})
+        );
+    }
+}
