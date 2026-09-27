@@ -1296,3 +1296,23 @@ so editor threads never change the desktop's selected project):
 Do not add these overlapping measurements into a total or call model request time pure generation time. Subscription jobs currently expose total/queue/active measurements only.
 
 Each completed native foreground attempt also emits `model.request_timing` with `message_id`, `elapsed_seconds`, optional `first_text_seconds`, `success` and `cancelled`. The message ID associates timing with its response/retry in the existing transcript. `success` describes transport/response completion, not overall task acceptance. Verification receipts add optional `process_seconds`, sourced from the native owned-process result; older receipts remain readable.
+
+## Local runtime identity receipts
+
+`local.runtime_ready` includes optional `runtime.provenance` schema 1 and a task `request_policy`. The receipt is recorded after preparation and the effort override, remains on that task, and is cleared from a Compare lane when a new turn has no receipt yet. Old receipts are not reconstructed from current machine settings.
+
+`identity_kind: filesystem_metadata` distinguishes model/runtime/projector canonical paths, byte counts and nanosecond modification times, plus Unix device/inode/change times. Device and inode use decimal strings to retain exact values in JavaScript. These are snapshots, not full weight hashes or an immutability guarantee. Runtime identity covers the resolved executable/launcher, not all dependent libraries.
+
+GGUF provenance includes architecture, format version, numeric file type/quantization version, GGML tensor-type counts, exact parsed-header SHA-256 and byte count, and exact embedded-template SHA-256/byte count. The header hash excludes weights; the template hash covers the full string even when the parser retains only a display prefix. Runtime provenance includes its reported version/commit, reported template identity and an allowlist of reported sampling defaults. Missing observations stay absent.
+
+Context records requested/reported tokens. GPU fields distinguish requested mode, actual launch mode and the backend detected by the runtime probe; these do not measure layer offload. CPU fallback remains explicitly recorded. Request policy states use of runtime sampling defaults, no sampling overrides, per-request context-budgeted response limits, and the actual template thinking override when present. This does not establish identical sampling across models.
+
+Runtime reuse requires equal frozen files and launch settings. Changes during preparation/wait/loading refuse the lease. An incompatible same-ID request while the current model is leased fails promptly to prevent parent/child deadlock. Different models retain cancellable waiting. Blocking metadata probes may finish in the background after cancellation, but cannot launch an inference server afterward.
+
+## Subscription run resource limits
+
+`cli_agents.max_run_time_sec` defaults to 7200 and accepts integers from 1 through 86400. It limits one spawned run across its turns/steering using monotonic active time. Explicit approval waits and actual parked steering waits are excluded; ongoing protocol output cannot extend it. The independent idle timeout remains. Input writes obey the smaller of the existing write deadline and remaining active time.
+
+One run accepts at most 64 MiB of decoded protocol line content plus framing and 250,000 frames before adapter processing, and at most 8 MiB of accumulated assistant text. Exceeding a limit fails the task explicitly, retains earlier transcript/file changes and stops the owned process; it never reports a truncated successful result. Deadline, aggregate, framing and malformed-limit errors cannot trigger Codex exec fallback, including before readiness.
+
+Stderr retains at most 1000 warnings plus an omission notice, continues draining, and continues detecting sign-in failures. These are transport/retention bounds, not limits on total application RSS/history. Discovery/help helper output and complete protocol-ordering conformance remain separate work.

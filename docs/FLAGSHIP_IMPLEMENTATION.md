@@ -147,29 +147,29 @@ Remaining Phase 4 work includes true token-level latency/pure-generation measure
 
 ## Full acceptance register
 
-Initial state below is **mapping pending**, not an assertion that existing functionality is missing. Each ID needs an exact test reference and qualified result before completion. Existing successful broad suites do not automatically prove each invariant.
+Each ID records the inspected test evidence and its limits. “Mapping pending” is not an assertion that functionality is missing. Unless an increment explicitly records a fresh run, mapping existing tests does not newly certify current source. Passing broad suites do not automatically prove each invariant.
 
-- **RUN-01 — Very fast hermetic task**: Terminal state observed; CLI exits successfully. Status: mapping pending.
-- **RUN-02 — Engine throws before streaming**: Failure propagated; no permanent spinner. Status: mapping pending.
-- **RUN-03 — Cancel before startup**: Task never executes; cancelled state persists. Status: mapping pending.
-- **RUN-04 — Cancel during output**: No late event changes state to success. Status: mapping pending.
-- **RUN-05 — Two sessions and duplicate events**: No cross-session completion; duplicates deduplicated. Status: mapping pending.
-- **RUN-06 — Owned child ignores graceful stop**: Bounded escalation; unrelated processes untouched. Status: mapping pending.
-- **CMP-01 — Crash before project mutation**: Project unchanged; operation recoverable. Status: mapping pending.
-- **CMP-02 — Crash after apply before applied receipt**: Recovery reconciles actual content; no blind reapply. Status: mapping pending.
-- **CMP-03 — Crash after receipt before cleanup**: Applied result preserved; cleanup retries safely. Status: mapping pending.
-- **CMP-04 — Failure deleting one lane**: Remaining lane retained and reported pending. Status: mapping pending.
-- **CMP-05 — Other lane refuses to stop**: Its worktree is not destructively removed. Status: mapping pending.
-- **CMP-06 — Duplicate Keep or Keep/Discard race**: One logical result; no double score or mutation. Status: mapping pending.
-- **CMP-07 — Project edited after preview**: Revalidate/review conflict; no stale silent overwrite. Status: mapping pending.
-- **CMP-08 — Staged/unstaged changes and unsaved buffer**: Index and unrelated work preserved. Status: mapping pending.
-- **CMP-09 — Binary, rename, delete, executable bit**: Result faithful; review and recovery remain usable. Status: mapping pending.
-- **CMP-10 — Separate app processes target one project**: Ownership/revision conflicts stop competing writes. Status: mapping pending.
-- **CMP-11 — Project A shutdown stalls**: Project B status/cancellation remain responsive. Status: mapping pending.
-- **LOC-01 — Two installed GGUF models offline**: sequential two-model fixture passes. Real single-model inference passes in a loopback-only network namespace; a second installed GGUF is still needed for real two-model acceptance.
-- **LOC-02 — Three-model queue cancelled mid-run**: Pending models do not start. Status: mapping pending.
-- **LOC-03 — Local model exceeds safe allocation**: Clear error; UI survives; project unchanged. Status: mapping pending.
-- **LOC-04 — Runtime crashes or port is occupied**: Honest state and recoverable restart path. Status: mapping pending.
+- **RUN-01 — Very fast hermetic task**: Partial native/fixture evidence: `engine_tasks::concurrent_sessions_and_repeated_followups_survive_restart_without_duplicate_completions`, CLI run/watch/events scenarios, and UI durable-page draining pass at prior checkpoints. A deliberate completion-before-observer-registration barrier and packaged replay remain open.
+- **RUN-02 — Engine throws before streaming**: Partial: `model_routing::provider_failure_does_not_silently_retry_against_the_default_endpoint` covers failed endpoint propagation. A forced pre-stream panic/preparation failure through the actual conversation spinner remains open.
+- **RUN-03 — Cancel before startup**: Partial: `engine_tasks::queued_cancel_is_immediate_and_shutdown_cancels_a_stalled_provider`, `control_owned::dropping_an_owner_cancels_queued_jobs_without_waiting_for_an_unrelated_task`, and managed local queue tests cover no execution after queued cancellation. Exact admission-race and reopened-store assertions remain open.
+- **RUN-04 — Cancel during output**: Partial: background output-flood Stop and TERM-handler exit-zero cases preserve cancellation; blocked provider input cancellation reaps its process. Explicit streamed text → cancel → late successful provider completion through UI still needs a dedicated regression.
+- **RUN-05 — Two sessions and duplicate events**: Partial: native concurrent session/restart tests plus transcript deduplication and obsolete-session navigation tests pass at prior checkpoints. The combined native-window cross-session/reconnect case is not yet qualified.
+- **RUN-06 — Owned child ignores graceful stop**: Partial Linux native evidence: `background_processes::completion_failure_graceful_stop_and_forced_child_cleanup_are_truthful`, hook cancellation and process stress prove bounded stubborn-child termination. Unrelated PID protection is tested separately; a concurrent unrelated sentinel during escalation and all-provider parity remain open.
+- **CMP-01 — Crash before project mutation**: Native SIGKILL coverage: `compare::real_process_crash_before_and_after_apply_recovers_without_reapplication` kills before source apply and recovers the actual journal. This is one mutation boundary, not every journal-write/disk-full/fsync failure.
+- **CMP-02 — Crash after apply before applied receipt**: Native SIGKILL coverage: the same Compare crash test kills after apply before receipt, checks the postimage and reconciles without reapplication. Ambiguous external edits and every persistence boundary remain open.
+- **CMP-03 — Crash after receipt before cleanup**: Native SIGKILL plus restart coverage: the crash test kills before first cleanup after receipt; `applied_outcome_survives_pending_cleanup_and_restart_without_rescoring` preserves later user edits and scores once. Per-lane crash checkpoints remain open.
+- **CMP-04 — Failure deleting one lane**: Partial: `applied_outcome_survives_pending_cleanup_and_restart_without_rescoring` retains a reserved lane and retries after restart. This is ownership refusal, not an injected filesystem deletion error.
+- **CMP-05 — Other lane refuses to stop**: Partial: `cancel_keeps_lanes_and_discard_stops_running_lanes` covers cancellation of a cooperative slow lane. A resistant lane that cannot be proved stopped remains a required case.
+- **CMP-06 — Duplicate Keep or Keep/Discard race**: Partial: existing Keep tests refuse a second Keep; restart cleanup preserves one win. A deliberately synchronized concurrent Keep/Discard race still needs direct coverage.
+- **CMP-07 — Project edited after preview**: Native fixtures: `keep_refuses_conflicts_and_discard_removes_every_lane` preserves an external conflicting edit; stale-check acceptance requires explicit review. External edits during the final apply window remain open.
+- **CMP-08 — Staged/unstaged changes and unsaved buffer**: Partial: `lanes_start_from_uncommitted_work_and_keep_applies_one_result` preserves staged content and unrelated untracked/unstaged work. Unsaved editor buffers and complete index flags are not yet covered.
+- **CMP-09 — Binary, rename, delete, executable bit**: Native Linux crash fixture checks binary bytes, rename/delete results and executable mode through actual Keep and recovery. Full visual review/package parity remains separate.
+- **CMP-10 — Separate app processes target one project**: Native process/lock evidence: the real-crash parent cannot acquire the child repository lock at all three boundaries; `repository_ownership_refuses_keep_before_source_changes` permits retry after release. Noncooperating editors and network filesystems are outside this lock guarantee.
+- **CMP-11 — Project A shutdown stalls**: Partial: unit test verifies independent project metadata locks. End-to-end status/cancel latency while another project shutdown stalls remains unmeasured.
+- **LOC-01 — Two installed GGUF models offline**: real Qwen3 4B Instruct 2507 Q6_K and Qwen3 14B Q4_K_M completed sequential Compare lanes with valid addition explanations in a loopback-only Linux network namespace. All 37 observed INET connects targeted loopback; no automatic CPU fallback. This verifies basic two-model offline inference and sequencing, not coding quality or full desktop/package acceptance.
+- **LOC-02 — Three-model queue cancelled mid-run**: Native runtime fixture: `compare_runs_two_installed_gguf_models_sequentially_in_offline_mode` proves pending models do not load after cancellation. Real three-model cancellation remains open.
+- **LOC-03 — Local model exceeds safe allocation**: Preparation fixture `memory_too_large_is_marked_unavailable_and_refused` covers refusal. Actual GPU allocation exhaustion with responsive desktop and unchanged project remains open.
+- **LOC-04 — Runtime crashes or port is occupied**: Partial fixtures cover early runtime exit, cancellation during load and CPU fallback policy. Full runtime-crash/restart and occupied-port native-window matrix remains open.
 - **LOC-05 — One model fails in Compare**: Other lane results and verification stay intact. Status: mapping pending.
 - **PRF-01 — Model claims tests passed without execution**: engine/receipt/UI regressions pass; final native executable reproduction passes. No paid provider used.
 - **PRF-02 — Configured checks pass, then source changes**: post-check edits before task completion and uncommitted-content/rename unit tests pass. Native service tests cover external edits after completion and restart; Compare tests cover acceptance refresh and explicit stale-evidence review. Continuous invalidation remains open.
@@ -177,7 +177,7 @@ Initial state below is **mapping pending**, not an assertion that existing funct
 - **PRF-04 — Required check cancelled/skipped**: typed-state unit tests prevent passing; failed/cancelled task aggregation and goal gating are implemented. Complete cancellation-boundary native matrix remains open.
 - **PRF-05 — Provider self-reports an external result**: Provenance differs from locally observed evidence. Status: mapping pending.
 - **PRV-01 — Expired auth or unavailable quota**: Clear status; no fabricated usage or fallback billing. Status: mapping pending.
-- **PRV-02 — Malformed/out-of-order protocol data**: split-frame byte loss and unbounded unterminated-line buffering reproduced and fixed. Shared framing tests cover the runner, Codex/ACP probes and stderr omission; broader request ordering, session isolation and aggregate output bounds remain open.
+- **PRV-02 — Malformed/out-of-order protocol data**: Native regressions now cover split/oversized framing, continuous valid traffic deadlines, aggregate text/protocol bounds, malformed limits and pre-ready no-fallback behavior. Request ordering, session isolation, discovery-helper retention and live updated-provider conformance remain open.
 - **PRV-03 — Unsupported image/tool capability**: Explicit rejection or supported alternative with consent. Status: mapping pending.
 - **PRV-04 — Vendor runtime updates capabilities**: Capability record refreshes; stale affordance removed. Status: mapping pending.
 - **SEC-01 — Strict sandbox unavailable**: Operation refused, not silently downgraded. Status: mapping pending.
@@ -186,18 +186,51 @@ Initial state below is **mapping pending**, not an assertion that existing funct
 - **SEC-04 — Repository text requests broader permissions**: Text cannot grant permissions. Status: mapping pending.
 - **SEC-05 — Symlink/path/remote destination changes**: Actual boundary policy rechecked. Status: mapping pending.
 - **UI-01 — Long transcript plus active stream**: Input latency measured and bounded. Status: mapping pending.
-- **UI-02 — Event gap, duplicate event, reconnect**: Resynchronize without duplicate output/tool effects. Status: mapping pending.
+- **UI-02 — Event gap, duplicate event, reconnect**: UI fixtures in `jobEvents.test.ts`, `transcript.test.ts` and `useConversation.test.ts` cover durable polling gaps, duplicate event replay, page draining, obsolete session response rejection and reattachment. Native-window reconnect/duplicate tool-effects acceptance remains open.
 - **UI-03 — 100 sequential fixture tasks**: No unexplained resource-growth trend. Status: mapping pending.
 - **UI-04 — Keyboard and Wayland native session**: Focus, copy/paste, resize, cancellation usable. Status: mapping pending.
-- **REL-01 — Asset upload fails**: No newly advertised incomplete public release. Status: mapping pending.
-- **REL-02 — Retry same version with different binary**: Refused; published version remains immutable. Status: mapping pending.
-- **REL-03 — Checksum/signature mismatch**: Install/update rejected. Status: mapping pending.
-- **REL-04 — Interrupted replacement or failed first launch**: Last valid app/config recoverable. Status: mapping pending.
-- **REL-05 — Fresh packaged install without dev tools**: Intended standalone functions actually work. Status: mapping pending.
-- **REL-06 — Required integration test is skipped**: Release cannot be labelled fully verified. Status: mapping pending.
+- **REL-01 — Asset upload fails**: Publisher fixtures `interrupted upload stays draft and retry resumes without overwrites` and remote-byte validation pass. No actual GitHub failure experiment or full release workflow run was performed.
+- **REL-02 — Retry same version with different binary**: Publisher fixtures refuse changed draft/published bytes; installer fixture refuses changed bytes under an installed version and preserves the old AppImage. Remote tag protection remains unverified.
+- **REL-03 — Checksum/signature mismatch**: Partial: installer/publisher/package checks verify content integrity and reject checksum mismatch. Publisher-authenticated signature/update verification is not implemented.
+- **REL-04 — Interrupted replacement or failed first launch**: Installer fixtures now cover failed rename, SIGTERM, rollback failure and actual SIGKILL preservation. SIGKILL requires explicit recovery; automatic journal recovery, full desktop metadata rollback and first-window/database downgrade qualification remain open.
+- **REL-05 — Fresh packaged install without dev tools**: Package/runtime/CLI/desktop entry points exist, but a fresh installed artifact on a minimal host without development tools has not been qualified.
+- **REL-06 — Required integration test is skipped**: implemented in `28826c0` and fixture-verified: required scoped receipts reject missing, failed, skipped, stale or mismatched gates before GitHub calls. Explicit optional live-test exclusions remain unverified. Actual full release workflow execution is still required.
 
 ## Evidence boundaries
 
 Prior baseline audit: 737 Rust tests passed across completed binaries after one isolated timing rerun; eight ignored. UI: 308 unit and 44 browser E2E tests passed. Sustained native stress: 200 completions, five cancellations, ten output floods. These are baseline measurements, not verification of subsequent edits. Full live-provider, Wayland, offline multi-model, and release-package qualification remain open.
 
 At every checkpoint record changed commit, exact commands and results, fixture/native/live scope, unresolved risks, and the next dependency. Never mark a phase complete from a passing subset alone.
+
+## Parallel reliability and model qualification checkpoint
+
+User authorized practical parallel agent work and explicitly requested the Rhea GGUF plus four other model classes. Three agents owned independent provider, local-runtime and release work; root reviewed/integrated the changes and ran real models. No extra app chats were created. The reference document itself was not treated as permission for account changes or publication.
+
+- `4935ff4` fixes installer rollback intent before filesystem mutation, preserves the previous runtime/AppImage under rename errors and handled signals, excludes concurrent installers, refuses changed bytes at an installed version and preserves unresolved backups. Isolated fixtures include actual SIGKILL; recovery after SIGKILL still requires explicit action. The current installer fixture passes with its real packaged-runtime case explicitly skipped because the built bundle is absent. No installed app was replaced.
+- `58790fd` adds a configurable two-hour active provider budget, excluding explicit human waits, and aggregate protocol/text limits. Continuous valid/no-op traffic and a 9 MiB reply reproduced prior failures. Final adapter/config and native transport suites passed 19 + 15 cases; the prior focused unit/account/handoff/steering runs passed 30/12/4/3. Resource, framing and malformed-limit failures cannot cause exec fallback. Settings exposes the new limit. Discovery helper retention and complete transport conformance remain open.
+- `6de8f34` binds local reuse to model/projector/runtime metadata and launch settings, freezes/revalidates preparation identities, checks cancellation around blocking probes and prevents same-ID incompatible nested leases. The before-fix replacement regression was reproduced on archived HEAD with a forced fresh rebuild. Receipts and the expandable UI record exact header/template hashes, quantization codes and observed runtime/context/sampling/launch settings. Metadata identity does not hash weights or dependent runtime libraries. Final agent runs passed 13 native integration/sanity cases, 16 local-filtered unit cases, 4 GGUF cases, 30 focused UI cases and one inspected two-viewport browser case. Explicit live/Whisper tests remain excluded from fixture runs.
+- `28826c0` makes publication require per-stage receipts bound to commit, workflow attempt, command digest and package hashes. Twenty-five publication/gate fixtures pass, including missing/failed/skipped/stale evidence and changed bytes. Actual installer, runtime TAP, packaging TAP and Vitest 5 skip output was checked. Existing opt-in ignored Rust tests and cloud-consent scope are explicitly excluded rather than described as verified. No real GitHub mutation/full workflow/signing/fresh minimal-host installation was performed.
+
+Integrated root validation: 60 native cases across `cargo test -p shadowcode-core --test engine_tasks --test compare --test subagents --test service_commands` passed. All 328 UI tests passed. Production TypeScript/Vite build and `cargo clippy -p shadowcode-core --all-targets -- -D warnings` passed. The existing bundle-size warning remains. Three evaluator-only tests pass for genuine five-case grading, import-shadow refusal and premature exit-zero rejection. These are meaningful regression checks, not proof of adversarial-proof Python grading.
+
+### User-requested installed models and real results
+
+Ollama now contains Rhea 4B Coding Max Q6_K, Qwen3 8B Q8_0, Hermes 2 Pro Llama-3 8B Q6_K and Qwen3 4B Instruct 2507 Q6_K. Existing Qwen3 14B Q4_K_M was retained. Every full blob SHA-256 was independently checked against its content-addressed filename; the HF Q6_K blobs also match their published LFS digests. Exact tags, paths, sizes, hashes and receipts are in the user-facing inventory/evidence outputs. No model was installed as the application default.
+
+The original Rhea Ollama command produced repetitive text until a 120-second cutoff, with plain `{{ .Prompt }}` template and an empty upstream tokenizer template. Native Compare then loaded Rhea but returned only `<|im_end|>`. The old nonempty-answer assertion wrongly accepted that as inference success; the opt-in harness now persists answer-valid flags and rejects control tokens/irrelevant text. The earlier Rhea run is recorded as transport success and answer failure, never successful inference qualification.
+
+A new explicit-file `live_local_coding` example exercises actual service/catalog routing, separate temporary profiles/projects, required command sandbox and loopback-only network isolation. It asks each model to repair clamp, stable unique (including unhashable values), and chunks. It preserves evaluator-owned tests and independently copies only helpers.py into a fresh sandbox for five unittest cases. It bounds task/cancel/shutdown and retains failure/cleanup evidence. No paid provider or user project is used. Two initial harness errors (missing scratch trust and incorrect direct ModelConfig routing) ran no inference and are excluded from model results; switching to the actual service submission path corrected them.
+
+One run per model at 8192 context, 14 steps and 50000 task tokens produced:
+
+- Qwen3 4B Instruct 2507: successful edits and check, all five cases passed; total 38.17 s.
+- Qwen3 14B: edited and ran tests, four cases passed; unhashable unique failed and the model stopped after promising a repair; total 50.08 s.
+- Qwen3 8B: repeated read/search calls until token budget, no edit, zero cases passed; total 55.43 s.
+- Hermes 2 Pro Llama-3 8B: prose/code in the reply without tool execution, unchanged file, zero cases passed; total 16.11 s. Its unsupported passing claim remained unverified in the application.
+- Rhea 4B: response hit its length bound; incomplete tools were not executed, unchanged file, zero cases passed; total 48.75 s.
+
+These are application/configuration observations from one small repair fixture, not general model rankings or matched-sampling throughput benchmarks. The short times of failed/no-edit tasks are not speed wins. Startup defaults/templates differ; source validation work also ran on the host. Machine-wide sampled GPU memory rose from 693 MiB baseline to 10606 MiB peak over the suite, including desktop use; this is not per-model VRAM. All 204 observed INET connects during the coding suite targeted loopback. App verification remained separate from this external evaluator because no project check configuration was added.
+
+A subsequent stricter real two-model Compare with Qwen3 4B Instruct and Qwen3 14B passed both answer sanity checks in sequence with 4096 context, no CPU fallback and 37 loopback INET connections. LOC-01 now has real two-model basic inference evidence. Real three-model cancellation, native UI performance, runtime allocation/crash boundaries, full local-tool robustness and package qualification remain open.
+
+Priority exposed by the model test: strengthen local agent follow-through after a failing check and after promised-but-unperformed actions; inspect template/tool compatibility for Hermes/Rhea before recommending them as defaults; expand Qwen3 4B evaluation across representative repositories and repeated tasks. Complete release signing, crash recovery, minimal-host package and native Wayland/performance acceptance in parallel with that work.
