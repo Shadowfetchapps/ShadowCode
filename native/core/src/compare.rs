@@ -474,11 +474,21 @@ pub(crate) async fn snapshot_for(
     let env = [("GIT_INDEX_FILE", index_text)];
     // A copy keeps force-added (ignored but staged) files; a fresh index from
     // HEAD is the fallback, e.g. for a split index the copy cannot resolve.
-    let copied = real_index.is_file()
-        && fs::copy(&real_index, &index).is_ok()
-        && git_env(source, &["add", "--all"], &env, cancel)
+    let copied = if real_index.is_file() {
+        let mut original = fs::File::open(&real_index)?;
+        let modified = original.metadata()?.modified()?;
+        let mut copy = fs::File::create(&index)?;
+        std::io::copy(&mut original, &mut copy)?;
+        // Git uses the index timestamp to detect racily-clean stat entries.
+        // Giving the copy a fresh timestamp can hide same-size working edits.
+        copy.set_modified(modified)?;
+        drop(copy);
+        git_env(source, &["add", "--all"], &env, cancel)
             .await
-            .is_ok();
+            .is_ok()
+    } else {
+        false
+    };
     if !copied {
         let _ = fs::remove_file(&index);
         git_env(source, &["read-tree", "HEAD"], &env, cancel).await?;
@@ -1789,5 +1799,92 @@ mod tests {
         save(&second, &mut fresh).unwrap();
         assert_eq!(board(&second, &workspace)["beta"], (1, 1));
         assert_eq!(index(&second, &workspace).unwrap(), vec![created.id]);
+    }
+    #[tokio::test]
+    async fn snapshot_preserves_racy_index_timestamp_and_captures_same_stat_edit() {
+        use std::time::{Duration, SystemTime};
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&scratch).unwrap();
+        let cancel = CancellationToken::new();
+        git(&source, &["init", "-q"], &cancel).await.unwrap();
+        git(&source, &["config", "core.trustctime", "false"], &cancel)
+            .await
+            .unwrap();
+        git(&source, &["config", "core.checkstat", "minimal"], &cancel)
+            .await
+            .unwrap();
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let file = source.join("data.txt");
+        fs::write(&file, b"before\n").unwrap();
+        fs::File::open(&file)
+            .unwrap()
+            .set_modified(timestamp)
+            .unwrap();
+        fs::write(source.join(".gitignore"), b"forced.txt\n").unwrap();
+        git(&source, &["add", "."], &cancel).await.unwrap();
+        let mut commit_args = IDENTITY.to_vec();
+        commit_args.extend(["commit", "-qm", "Fixture base"]);
+        git(&source, &commit_args, &cancel).await.unwrap();
+        fs::write(source.join("forced.txt"), b"force-added ignored bytes\n").unwrap();
+        git(&source, &["add", "-f", "forced.txt"], &cancel)
+            .await
+            .unwrap();
+        let index = source.join(".git/index");
+        fs::File::open(&index)
+            .unwrap()
+            .set_modified(timestamp)
+            .unwrap();
+        let index_bytes = fs::read(&index).unwrap();
+        let head = git(&source, &["rev-parse", "HEAD"], &cancel).await.unwrap();
+        // Same size and cached mtime: Git must use the index's original racy
+        // timestamp to decide to hash bytes instead of trusting its stat cache.
+        fs::write(&file, b"after!\n").unwrap();
+        fs::File::open(&file)
+            .unwrap()
+            .set_modified(timestamp)
+            .unwrap();
+        let captured = snapshot_for(
+            &scratch,
+            &source,
+            "test capture",
+            "Fixture snapshot",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            git(
+                &source,
+                &["show", &format!("{}:data.txt", captured.commit)],
+                &cancel
+            )
+            .await
+            .unwrap(),
+            "after!"
+        );
+        assert_eq!(
+            git(
+                &source,
+                &["show", &format!("{}:forced.txt", captured.commit)],
+                &cancel
+            )
+            .await
+            .unwrap(),
+            "force-added ignored bytes"
+        );
+        assert_eq!(
+            fs::read(&index).unwrap(),
+            index_bytes,
+            "Source index must remain byte-identical"
+        );
+        assert_eq!(fs::metadata(&index).unwrap().modified().unwrap(), timestamp);
+        assert_eq!(
+            git(&source, &["rev-parse", "HEAD"], &cancel).await.unwrap(),
+            head
+        );
+        assert_eq!(fs::read(&file).unwrap(), b"after!\n");
     }
 }
