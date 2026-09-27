@@ -1,29 +1,40 @@
 // Draft staging with byte verification; never replace a versioned asset.
-import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { digest, readVerification, validateVerification } from './native-release-verification.mjs';
+import { digest } from './native-release-verification.mjs';
+import { IDENTITY } from './native-release-auth.mjs';
+import { withReleaseSnapshot, validateContext, validateStagedRelease, readReceipts, requireTransportLayout } from './native-release-assets.mjs';
 
 export { digest } from './native-release-verification.mjs';
 const command = (args) => execFileSync('gh', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 
-export async function publish({ repo, tag, commit, files, verification, gh = command }) {
-  assert.match(repo, /^[\w.-]+\/[\w.-]+$/);
-  assert.match(tag, /^v\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/);
-  assert.match(commit, /^[a-f0-9]{40}$/);
-  const expected = new Map();
-  for (const file of files) {
-    const name = path.basename(file);
-    assert.match(name, /^[\w.-]+$/);
-    assert(!expected.has(name), `Duplicate asset ${name}`);
-    expected.set(name, { file, hash: await digest(file) });
-  }
-  assert(expected.size >= 4, 'Required release assets missing');
-  const packages = Object.fromEntries([...expected].filter(([name]) => !['SHA256SUMS', 'RELEASE-MANIFEST.json'].includes(name)).map(([name, asset]) => [name, asset.hash]));
-  validateVerification(verification, commit, packages);
+export async function publish({ repo, tag, commit, files, verification, trustDir, runId, runAttempt, gh = command }) {
+  const context = { repo, tag, commit, runId, runAttempt };
+  const version = validateContext(context);
+  return withReleaseSnapshot({ files, version }, async (directory, expected) => {
+    await validateStagedRelease({ directory, observed: expected, verification, context, trustDir, signed: true });
+    return publishVerified({ repo, tag, commit, expected, gh });
+  });
+}
+async function publishVerified({ repo, tag, commit, expected, gh }) {
+  const identity = JSON.parse(gh(['api', `repos/${repo}`]));
+  assert.equal(String(identity.id), IDENTITY.repositoryId, 'Remote repository identity changed');
+  assert.equal(String(identity.owner?.id), IDENTITY.ownerId, 'Remote repository owner changed');
+  const verifyTag = () => {
+    let object = JSON.parse(gh(['api', `repos/${repo}/git/ref/tags/${tag}`])).object;
+    let depth = 0;
+    while (object?.type === 'tag') {
+      assert(++depth <= 4 && /^[a-f0-9]{40}$/.test(object.sha), 'Invalid annotated tag chain');
+      object = JSON.parse(gh(['api', `repos/${repo}/git/tags/${object.sha}`])).object;
+    }
+    assert.equal(object?.type, 'commit', 'Release tag must resolve to a commit');
+    assert.equal(object.sha, commit, 'Remote release tag changed');
+  };
+  verifyTag();
   // Listing includes authenticated drafts; the tag endpoint describes
   // published releases and must not be used to infer draft absence.
   const inspect = () => {
@@ -34,12 +45,14 @@ export async function publish({ repo, tag, commit, files, verification, gh = com
   };
   let release = inspect();
   if (!release) {
+    verifyTag();
     gh(['release', 'create', tag, '--repo', repo, '--draft', '--verify-tag', '--target', commit,
       '--title', `ShadowCode ${tag}`, '--notes-file', 'docs/RELEASE_NOTES.md']);
     release = inspect();
   }
   assert(release, 'Draft release is missing after creation');
   assert.equal(release.tag_name, tag);
+  assert.equal(typeof release.draft, 'boolean');
   const verify = async (record, allowMissing) => {
     const names = new Set();
     const scratch = await mkdtemp(path.join(tmpdir(), 'shadowcode-release-'));
@@ -64,44 +77,18 @@ export async function publish({ repo, tag, commit, files, verification, gh = com
   release = inspect();
   assert(release.draft, 'Release changed during staging');
   await verify(release, false);
+  verifyTag();
   gh(['release', 'edit', tag, '--repo', repo, '--draft=false', '--verify-tag']);
   return { status: 'published' };
 }
 
 async function main() {
-  const tag = process.env.GITHUB_REF_NAME;
-  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-  assert.equal(execFileSync('git', ['rev-parse', `${tag}^{commit}`], { encoding: 'utf8' }).trim(), commit);
-  assert.equal(commit, process.env.GITHUB_SHA);
-  const version = JSON.parse(await readFile('src-tauri/tauri.conf.json', 'utf8')).version;
-  assert.equal(tag, `v${version}`);
-  const bundle = 'target/release/bundle';
-  const files = [
-    `${bundle}/appimage/ShadowCode_${version}_amd64.AppImage`,
-    `${bundle}/appimage/ShadowCode_${version}_appimage-runtime-sources.tar.gz`,
-    `${bundle}/deb/ShadowCode_${version}_amd64.deb`,
-  ];
-  const sums = await readFile(`${bundle}/SHA256SUMS`, 'utf8');
-  const listed = new Map(sums.trim().split('\n').map(line => {
-    const match = /^([a-f0-9]{64})  ([\w.-]+)$/.exec(line);
-    assert(match, 'Malformed package checksums');
-    return [match[2], match[1]];
-  }));
-  assert.equal(listed.size, files.length);
-  for (const file of files) assert.equal(await digest(file), listed.get(path.basename(file)), `Package checksum mismatch: ${file}`);
-  const verification = await readVerification('artifacts/release-verification', commit,
-    process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT, Object.fromEntries(listed));
-  const manifest = {
-    schema: 1, tag, commit, target: 'x86_64-unknown-linux-gnu',
-    cargo_lock_sha256: await digest('Cargo.lock'),
-    ui_lock_sha256: await digest('ui/package-lock.json'),
-    runtime_pin: (await readFile('tools/llama.cpp.pin', 'utf8')).trim(),
-    verification: validateVerification(verification, commit, Object.fromEntries(listed)),
-    assets: Object.fromEntries(listed),
-  };
-  const manifestPath = `${bundle}/RELEASE-MANIFEST.json`;
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  console.log(await publish({ repo: process.env.GITHUB_REPOSITORY, tag, commit,
-    files: [...files, `${bundle}/SHA256SUMS`, manifestPath], verification }));
+  const [bundle, trustDir] = process.argv.slice(2);
+  assert(bundle && trustDir && process.argv.length === 4, 'Usage: node publish-native-release.mjs SIGNED_BUNDLE TRUST_DIR');
+  const context = { repo: process.env.GITHUB_REPOSITORY, tag: process.env.GITHUB_REF_NAME, commit: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT };
+  const version = validateContext(context);
+  const files = await requireTransportLayout(bundle, version, true);
+  const verification = await readReceipts(bundle);
+  console.log(await publish({ ...context, files, verification, trustDir }));
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main();

@@ -6,16 +6,52 @@ concurrency:
   group: native-release-${{ github.ref }}
   cancel-in-progress: false
 permissions:
-  contents: write
+  contents: read
 jobs:
-  publish:
+  # Owner provisioning is intentionally required. No environment, key, or
+  # reviewed tooling commit is fabricated by this workflow.
+  configuration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tooling: ${{ steps.validate.outputs.tooling }}
+      environment: ${{ steps.validate.outputs.environment }}
+    steps:
+      - id: validate
+        name: Require approved signing configuration and repository identity
+        env:
+          SIGNING_ENVIRONMENT: ${{ vars.NATIVE_RELEASE_SIGNING_ENVIRONMENT }}
+          TOOLING_COMMIT: ${{ vars.NATIVE_RELEASE_TOOLING_COMMIT }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          OWNER_ID: ${{ github.repository_owner_id }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { appendFileSync } from 'node:fs';
+          const env = process.env;
+          assert.equal(env.GITHUB_REPOSITORY, 'Shadowfetchapps/ShadowCode');
+          assert.equal(env.REPOSITORY_ID, '1377099349');
+          assert.equal(env.OWNER_ID, '209457103');
+          assert.equal(env.GITHUB_EVENT_NAME, 'push');
+          assert.equal(env.GITHUB_REF_TYPE, 'tag');
+          assert.match(env.GITHUB_REF_NAME, /^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$/);
+          assert.match(env.TOOLING_COMMIT || '', /^[a-f0-9]{40}$/, 'Provision a reviewed immutable tooling commit');
+          assert.match(env.SIGNING_ENVIRONMENT || '', /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,254}$/, 'Provision an existing protected signing environment');
+          appendFileSync(env.GITHUB_OUTPUT, `tooling=${env.TOOLING_COMMIT}\nenvironment=${env.SIGNING_ENVIRONMENT}\n`);
+          NODE
+  build:
+    needs: configuration
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     env:
       RUSTUP_TOOLCHAIN: '1.95.0'
       SHADOWCODE_BUILD_JOBS: '4'
+    outputs:
+      artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
@@ -39,6 +75,14 @@ jobs:
         run: node scripts/native-release-verification.mjs run glib-backport
       - name: Verify native source
         run: node scripts/native-release-verification.mjs run native-source
+      - name: Qualify cleanup over actual built UI dependencies and output
+        run: node scripts/native-release-verification.mjs run built-project-cleanup
+      - name: Preserve built-project cleanup diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: built-project-cleanup-diagnostics
+          path: artifacts/built-project-cleanup
       - name: Exercise native application behavior
         run: node scripts/native-release-verification.mjs run native-behavior
       - name: Exercise the native desktop window
@@ -67,7 +111,88 @@ jobs:
         with:
           name: native-release-verification
           path: artifacts/release-verification
-      - name: Publish checked native artifacts
+      - name: Prepare immutable unsigned handoff with all required receipts
+        run: node scripts/prepare-native-release.mjs "$RUNNER_TEMP/unsigned-release"
+      - id: unsigned
+        name: Retain this run's exact unsigned handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unsigned-release
+          if-no-files-found: error
+          compression-level: 0
+  sign:
+    needs: [configuration, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    environment: ${{ needs.configuration.outputs.environment }}
+    outputs:
+      artifact-id: ${{ steps.signed.outputs.artifact-id }}
+    steps:
+      - name: Checkout independently approved signing tooling and public trust
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.configuration.outputs.tooling }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Require one build artifact identity
+        env:
+          RELEASE_ARTIFACT_ID: ${{ needs.build.outputs.artifact-id }}
+        run: node -e "require('node:assert/strict').match(process.env.RELEASE_ARTIFACT_ID || '', /^[1-9][0-9]*$/)"
+      - name: Download only the immutable artifact ID produced by this build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/unsigned-download
+          merge-multiple: true
+      - name: Sign and reverify qualified data with the protected key
+        working-directory: trusted
+        env:
+          NATIVE_RELEASE_SIGNING_KEY_PEM: ${{ secrets.NATIVE_RELEASE_SIGNING_KEY_PEM }}
+        run: node scripts/sign-native-release.mjs "$RUNNER_TEMP/unsigned-download" release/trust "$RUNNER_TEMP/signed-release"
+      - id: signed
+        name: Retain only authenticated public release data
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/signed-release
+          if-no-files-found: error
+          compression-level: 0
+  publish:
+    needs: [configuration, build, sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout independently approved publication tooling and public trust
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.configuration.outputs.tooling }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Require one signed artifact identity
+        env:
+          RELEASE_ARTIFACT_ID: ${{ needs.sign.outputs.artifact-id }}
+        run: node -e "require('node:assert/strict').match(process.env.RELEASE_ARTIFACT_ID || '', /^[1-9][0-9]*$/)"
+      - name: Download only this signing job's immutable public bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.sign.outputs.artifact-id }}
+          path: ${{ runner.temp }}/signed-download
+          merge-multiple: true
+      - name: Authenticate private snapshots before any release operation
+        working-directory: trusted
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/publish-native-release.mjs
+        run: node scripts/publish-native-release.mjs "$RUNNER_TEMP/signed-download" release/trust

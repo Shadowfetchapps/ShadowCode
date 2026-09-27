@@ -1,51 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
+import { writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { publish } from './publish-native-release.mjs';
-import { digest, GATES, REQUIRED_GATES, scriptDigest } from './native-release-verification.mjs';
 
-async function fixture(run) {
-  const root = await mkdtemp(path.join(tmpdir(), 'release-test-'));
-  const files = ['app.AppImage', 'app.deb', 'sources.tar.gz', 'SHA256SUMS', 'RELEASE-MANIFEST.json'].map(name => path.join(root, name));
-  for (const file of files) await writeFile(file, `fixture ${path.basename(file)}`);
-  const artifacts = Object.fromEntries(await Promise.all(files.slice(0, 3).map(async file => [path.basename(file), await digest(file)])));
-  const verification = { schema: 1, commit: 'a'.repeat(40), run_id: '1', run_attempt: '1', artifacts, gates: Object.fromEntries(REQUIRED_GATES.map(gate => [gate, {
-    schema: 1, gate, commit: 'a'.repeat(40), run_id: '1', run_attempt: '1', script_sha256: scriptDigest(gate), status: 'passed', exit_code: 0, required_skips: [], optional_checks: [], ...(GATES[gate].artifacts ? { artifacts } : {}),
-  }])) };
-  const state = { release: null, assets: new Map(), calls: [], failUpload: false, apiFailure: false };
-  const gh = args => {
-    state.calls.push(args);
-    assert(!args.includes('--clobber'));
-    if (args[0] === 'api') {
-      if (state.apiFailure) throw new Error('HTTP 403');
-      if (!state.release) return '[[]]';
-      return JSON.stringify([[{ ...state.release, assets: [...state.assets.keys()].map(name => ({ name })) }]]);
-    }
-    switch (args[1]) {
-      case 'create': assert(args.includes('--draft')); state.release = { draft: true, tag_name: 'v1.0.0' }; break;
-      case 'upload':
-        assert(state.release.draft);
-        if (state.failUpload && state.assets.size === 1) throw new Error('upload interrupted');
-        assert(!state.assets.has(path.basename(args[3])));
-        state.assets.set(path.basename(args[3]), state.corruptUpload ? Buffer.from('corrupt upload') : readFileSync(args[3])); break;
-      case 'download': writeFileSync(args[args.indexOf('--output') + 1], state.assets.get(args[args.indexOf('--pattern') + 1])); break;
-      case 'edit': assert.equal(state.assets.size, files.length); state.release.draft = false; break;
-      default: throw new Error(`Unexpected command: ${args}`);
-    }
-    return '';
-  };
-  const execute = (overrides = {}) => publish({ repo: 'owner/repo', tag: 'v1.0.0', commit: 'a'.repeat(40), files, verification, gh, ...overrides });
-  try { await run({ state, execute, files, verification }); } finally { await rm(root, { recursive: true, force: true }); }
-}
+import { fixture as signedFixture } from './publisher-fixtures.mjs';
+const fixture = run => signedFixture(run, publish);
 
 test('uploads to a draft, verifies all bytes, then publishes', () => fixture(async ({ state, execute }) => {
   assert.equal((await execute()).status, 'published');
   assert.equal(state.release.draft, false);
   const publication = state.calls.findIndex(args => args[1] === 'edit');
-  assert.equal(state.calls.slice(0, publication).filter(args => args[1] === 'download').length, 5);
+  assert.equal(state.calls.slice(0, publication).filter(args => args[1] === 'download').length, 7);
 }));
 test('interrupted upload stays draft and retry resumes without overwrites', () => fixture(async ({ state, execute }) => {
   state.failUpload = true;
@@ -54,23 +20,23 @@ test('interrupted upload stays draft and retry resumes without overwrites', () =
   assert.equal(state.assets.size, 1);
   state.failUpload = false;
   await execute();
-  assert.equal(state.calls.filter(args => args[1] === 'upload' && args[3].endsWith('app.AppImage')).length, 1);
+  assert.equal(state.calls.filter(args => args[1] === 'upload' && args[3].endsWith('_amd64.AppImage')).length, 1);
 }));
 test('published retry verifies bytes without mutations', () => fixture(async ({ state, execute }) => {
   await execute(); state.calls = [];
   assert.equal((await execute()).status, 'already-published');
   assert(state.calls.every(args => args[0] === 'api' || args[1] === 'download'));
 }));
-test('same version with changed local content is refused', () => fixture(async ({ state, execute, files, verification }) => {
+test('same version with changed local content is refused', () => fixture(async ({ state, execute, files, rebuild }) => {
   await execute(); state.calls = [];
   await writeFile(files[0], 'different binary');
-  verification.artifacts['app.AppImage'] = await digest(files[0]);
+  await rebuild();
   await assert.rejects(execute, /Content mismatch/);
   assert(state.calls.every(args => args[0] === 'api' || args[1] === 'download'));
 }));
 test('mismatched draft content is never overwritten or published', () => fixture(async ({ state, execute }) => {
   state.release = { draft: true, tag_name: 'v1.0.0' };
-  state.assets.set('app.AppImage', Buffer.from('wrong bytes'));
+  state.assets.set('ShadowCode_1.0.0_amd64.AppImage', Buffer.from('wrong bytes'));
   await assert.rejects(execute, /Content mismatch/);
   assert(state.release.draft);
   assert(!state.calls.some(args => ['upload', 'edit'].includes(args[1])));
@@ -82,7 +48,7 @@ test('authorization failure cannot create another release', () => fixture(async 
 }));
 test('incomplete published release is refused without repair writes', () => fixture(async ({ state, execute, files }) => {
   state.release = { draft: false, tag_name: 'v1.0.0' };
-  state.assets.set('app.AppImage', readFileSync(files[0]));
+  state.assets.set('ShadowCode_1.0.0_amd64.AppImage', readFileSync(files[0]));
   await assert.rejects(execute, /Incomplete/);
   assert(!state.calls.some(args => ['upload', 'edit'].includes(args[1])));
 }));

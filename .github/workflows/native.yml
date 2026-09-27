@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths: ['native/**', 'vendor/**', 'scripts/fixtures/native-glib-variant.rs', 'src-tauri/**', 'ui/**', 'licenses/native/**', 'packaging/native-runtime/**', 'packaging/native-app-run.sh', 'packaging/llama.cpp/**', 'packaging/shadow-agent.desktop', 'tools/llama.cpp.pin', 'tools/glslc-flatpak.sh', 'scripts/build-llama.cpp.sh', 'scripts/*llama*.mjs', 'scripts/install-appimage.sh', 'scripts/test-install-appimage.sh', 'scripts/*native*.mjs', 'scripts/native-packaging-env.sh', 'scripts/native-release-auth-lib.sh', 'scripts/verify-native-release.sh', 'scripts/check-secrets.mjs', 'scripts/test-check-secrets.mjs', 'scripts/native-mcp-peer/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/native.yml', '.github/workflows/release.yml']
+    paths: ['native/**', 'vendor/**', 'scripts/fixtures/native-glib-variant.rs', 'src-tauri/**', 'ui/**', 'licenses/native/**', 'packaging/native-runtime/**', 'packaging/native-app-run.sh', 'packaging/llama.cpp/**', 'packaging/shadow-agent.desktop', 'tools/llama.cpp.pin', 'tools/glslc-flatpak.sh', 'scripts/build-llama.cpp.sh', 'scripts/*llama*.mjs', 'scripts/install-appimage.sh', 'scripts/test-install-appimage.sh', 'scripts/*native*.mjs', 'scripts/publisher-fixtures.mjs', 'scripts/test-publisher-auth.mjs', 'scripts/native-packaging-env.sh', 'scripts/native-release-auth-lib.sh', 'scripts/verify-native-release.sh', 'scripts/check-secrets.mjs', 'scripts/test-check-secrets.mjs', 'scripts/native-mcp-peer/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/native.yml', '.github/workflows/release.yml']
 permissions:
   contents: read
 jobs:
@@ -21,7 +21,7 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Test release staging and immutable retry behavior
-        run: node --test scripts/test-native-release.mjs scripts/test-native-release-verification.mjs
+        run: node --test scripts/test-native-release.mjs scripts/test-native-release-verification.mjs scripts/test-publisher-auth.mjs scripts/test-native-release-signing.mjs
       - name: Verify publisher authentication and private release snapshots
         run: node --test scripts/test-native-release-auth.mjs scripts/test-check-secrets.mjs
       - name: Package version
@@ -41,7 +41,15 @@ jobs:
       - run: cargo +1.95.0 fmt --all --check
       - run: cargo +1.95.0 clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo +1.95.0 build -p shadowcode-desktop --locked
-      - run: cargo +1.95.0 test --workspace --locked
+      - run: cargo +1.95.0 test --workspace --locked -- --skip worktrees::cleanup::tests::actual_built_project_cleanup_is_bounded_and_completes
+      - name: Qualify cleanup over actual built UI dependencies and output
+        run: node scripts/native-release-verification.mjs run built-project-cleanup
+      - name: Preserve built-project cleanup diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: built-project-cleanup-diagnostics
+          path: artifacts/built-project-cleanup
       - name: Exercise the native CLI without a display
         run: node scripts/test-native-cli.mjs
       - name: Stress repeated native tasks, cancellation, output and cleanup

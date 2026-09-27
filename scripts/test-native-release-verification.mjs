@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -128,4 +128,59 @@ test('every release gate is invoked once by the workflow and every command scrip
     assert.equal(result.status, 0, `${gate}: ${result.stderr}`);
   }
   assert(GATES.packages.script.indexOf('build-native.mjs') < GATES.packages.script.indexOf('test-native-packaging-env.mjs'), 'linuxdeploy qualification must run after the helper is built/cached');
+});
+
+
+test('built-project cleanup has a dedicated required UI scope and unexpected ignores remain refused', () => {
+  const gate = 'built-project-cleanup';
+  assert(REQUIRED_GATES.includes(gate));
+  assert.match(GATES[gate].scope, /node_modules.*dist/);
+  assert.match(GATES[gate].scope, /Cargo.*separate/);
+  const fixture = 'worktrees::cleanup::tests::actual_built_project_cleanup_is_bounded_and_completes';
+  assert(GATES['native-source'].script.endsWith(` -- --skip ${fixture}`));
+  for (const name of ['native-source', gate]) {
+    const skips = new Set(), optional = new Set();
+    inspectLine(name, `test ${fixture} ... ignored, opt-in fixture`, skips, optional);
+    assert.equal(skips.size, 1); assert.equal(optional.size, 0);
+  }
+  const missing = complete(); delete missing.gates[gate];
+  assert.throws(() => validateVerification(missing, commit, artifacts), /gate set mismatch/);
+  for (const status of ['failed', 'skipped']) {
+    const value = complete(); value.gates[gate].status = status;
+    assert.throws(() => validateVerification(value, commit, artifacts), /did not pass: built-project-cleanup/);
+  }
+});
+test('built-project cleanup command requires one executed test and preserves cargo failure', () => scratch(async directory => {
+  const script = GATES['built-project-cleanup']?.script;
+  assert.equal(typeof script, 'string');
+  const cargo = path.join(directory, 'cargo');
+  await writeFile(cargo, '#!/bin/sh\nprintf "%s\\n" "$*" > "$CAPTURE"\nprintf "%s\\n" "$CARGO_TERM_COLOR/$SHADOWCODE_CLEANUP_BUILT_SCOPE/$SHADOWCODE_CLEANUP_BUILT_FIXTURE" >> "$CAPTURE"\nprintf "%s\\n" "$FIXTURE_OUTPUT"\nexit "$FIXTURE_EXIT"\n');
+  await chmod(cargo, 0o755);
+  const passed = 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s';
+  for (const [output, code, succeeds] of [
+    [passed, '0', true], [passed, '7', false],
+    [passed.replace('1 passed', '0 passed'), '0', false],
+    [passed.replace('0 ignored', '1 ignored'), '0', false],
+    ['test result: FAILED. 0 passed; 1 failed; 0 ignored;', '0', false], ['', '0', false],
+  ]) {
+    const result = spawnSync('bash', ['-euo', 'pipefail', '-c', script], { cwd: directory, encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, CAPTURE: path.join(directory, 'arguments'), GITHUB_WORKSPACE: directory, FIXTURE_OUTPUT: output, FIXTURE_EXIT: code },
+    });
+    assert.equal(result.status === 0, succeeds, `${output}: ${result.stderr}`);
+  }
+  const invocation = await readFile(path.join(directory, 'arguments'), 'utf8');
+  assert.equal(invocation, `+1.95.0 test -p shadowcode-core --release --lib worktrees::cleanup::tests::actual_built_project_cleanup_is_bounded_and_completes --locked -- --ignored --exact --nocapture\nnever/ui/${directory}\n`);
+}));
+
+
+test('native CI retains auth-library triggers and runs built-project cleanup only after UI/toolchain setup', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/native.yml', import.meta.url), 'utf8');
+  for (const file of ['scripts/native-release-auth-lib.sh', 'scripts/publisher-fixtures.mjs', 'scripts/test-publisher-auth.mjs']) assert(workflow.includes(`'${file}'`));
+  assert.match(workflow, /run: node --test scripts\/test-native-release\.mjs scripts\/test-native-release-verification\.mjs scripts\/test-publisher-auth\.mjs scripts\/test-native-release-signing\.mjs/);
+  const command = 'run: node scripts/native-release-verification.mjs run built-project-cleanup';
+  const position = workflow.indexOf(command);
+  assert(position > workflow.indexOf('npm --prefix ui ci && npm --prefix ui run build'));
+  assert(position > workflow.indexOf('rustup toolchain install 1.95.0'));
+  assert.equal(workflow.split(command).length, 2);
+  assert.match(workflow, /cargo \+1\.95\.0 test --workspace --locked -- --skip worktrees::cleanup::tests::actual_built_project_cleanup_is_bounded_and_completes\n/);
 });
