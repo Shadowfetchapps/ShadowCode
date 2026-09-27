@@ -1,6 +1,8 @@
 # Publisher authentication contract
 
-The helpers in `scripts/native-release-auth.mjs` and `scripts/verify-native-release.sh` verify offline publisher signatures. It does not install, execute, download or publish an application, update trusted keys, generate production keys, or change existing CI. Production trust is deliberately absent. The current installer and its explicit `--unverified` behavior are unchanged.
+The helpers in `scripts/native-release-auth.mjs` and `scripts/verify-native-release.sh` verify offline publisher signatures. They do not install, execute, download or publish an application, update trusted keys, or generate production keys. CI tests their behavior with disposable fixture keys; production trust is deliberately absent. The current installer and its explicit `--unverified` behavior are unchanged.
+
+The Bash verifier loads `scripts/native-release-auth-lib.sh` from its own script directory. Keep both reviewed code files together in the trusted tooling bundle; do not obtain the library from the candidate download or source metadata as shell code. The shared parser and signature routines also support the separately reviewed installer prototype's historical receipts. Sharing these routines does not integrate the production installer or make its accepted-release state durable.
 
 ## Trust and security contract
 
