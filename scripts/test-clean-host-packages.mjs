@@ -57,9 +57,13 @@ function container(args, label) {
     throw new Error(
       `${label} failed (${result.status}): ${result.error || ""}\n${result.stdout}\n${result.stderr}`,
     );
-  const start = result.stdout.indexOf(`${marker}\n`);
+  return result.stdout;
+}
+function statusContainer(args, label) {
+  const output = container(args, label);
+  const start = output.indexOf(`${marker}\n`);
   assert.ok(start >= 0, `${label} did not print a status receipt`);
-  const receipt = JSON.parse(result.stdout.slice(start + marker.length + 1));
+  const receipt = JSON.parse(output.slice(start + marker.length + 1));
   assert.equal(receipt.workspace, "/tmp/project");
   assert.equal(receipt.permissions.network, false);
   assert.deepEqual(receipt.jobs, []);
@@ -72,7 +76,7 @@ const common = [
   "--mount",
   `type=bind,src=${appimage},dst=/opt/ShadowCode.AppImage,readonly`,
 ];
-container(
+statusContainer(
   [
     "--cap-drop=ALL",
     "--user",
@@ -100,7 +104,7 @@ container(
   "AppImage clean-host",
 );
 
-container(
+statusContainer(
   [
     "--mount",
     `type=bind,src=${deb},dst=/opt/ShadowCode.deb,readonly`,
@@ -124,4 +128,61 @@ container(
   `,
   ],
   "Debian package clean-host",
+);
+
+const guiMarker = "__SHADOW_CLEAN_WINDOW__";
+function windowContainer(args, label) {
+  const output = container(args, label);
+  assert.ok(
+    output.split("\n").includes(guiMarker),
+    `${label} did not open a visible window`,
+  );
+  console.log(`${label}: first GUI window opened with a fresh profile`);
+}
+windowContainer(
+  [
+    "--cap-drop=ALL",
+    "--user",
+    "1000:1000",
+    "--env",
+    "HOME=/tmp",
+    "--env",
+    "GDK_BACKEND=x11",
+    "--env",
+    "APPIMAGE_EXTRACT_AND_RUN=1",
+    "--tmpfs",
+    "/tmp:rw,nosuid,nodev,size=1g,mode=1777",
+    "--shm-size=512m",
+    ...common,
+    image,
+    "timeout",
+    "75s",
+    "xvfb-run",
+    "-a",
+    "-s",
+    "-screen 0 1440x1100x24",
+    "dbus-run-session",
+    "--",
+    "/usr/local/bin/shadowcode-clean-gui-smoke",
+    "/opt/ShadowCode.AppImage",
+  ],
+  "AppImage clean-host GUI",
+);
+windowContainer(
+  [
+    "--env",
+    "HOME=/tmp",
+    "--env",
+    "GDK_BACKEND=x11",
+    "--tmpfs",
+    "/tmp:rw,nosuid,nodev,size=1g,mode=1777",
+    "--shm-size=512m",
+    "--mount",
+    `type=bind,src=${deb},dst=/opt/ShadowCode.deb,readonly`,
+    image,
+    "sh",
+    "-ceu",
+    "dpkg -i /opt/ShadowCode.deb >/dev/null; exec runuser -u nobody -- env HOME=/tmp GDK_BACKEND=x11 timeout 75s xvfb-run -a -s '-screen 0 1440x1100x24' dbus-run-session -- /usr/local/bin/shadowcode-clean-gui-smoke /usr/bin/shadowcode",
+  ],
+  "Debian package clean-host GUI",
 );
