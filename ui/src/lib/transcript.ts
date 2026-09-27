@@ -103,6 +103,12 @@ function lastIndex(items: ChatItem[], test: (item: ChatItem) => boolean) {
   return -1;
 }
 
+function objectFields(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 /** A prompt bubble. A follow-up written after a plan limit is labelled as
  * such: "manual" when it answers an open "Continue on …" card (which it
  * closes), otherwise "auto" (the engine started it). */
@@ -733,11 +739,18 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
         i.taskId === taskId &&
         (p.call_id ? i.callId === p.call_id : i.tool === p.tool),
     );
-    const args = p.arguments as Record<string, unknown> | undefined;
+    // ACP can learn the tool kind and input after tool.started. Completion
+    // carries the final typed input; a display title is never command evidence.
+    const args = objectFields(p.arguments);
+    const completedArgs =
+      objectFields(objectFields(p.output)?.input) ||
+      objectFields(args?.input) ||
+      args;
+    const tool = String(p.tool);
     const previous = index >= 0 ? items[index] : undefined;
     const card: ChatItem = {
       kind: "tool",
-      tool: String(p.tool),
+      tool,
       text: String(p.output_preview || p.error || ""),
       fullOutput: String(
         p.output_full ||
@@ -754,8 +767,9 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
       taskId,
       callId: String(p.call_id || ""),
       path: String(
-        args?.path ||
-          args?.dest ||
+        completedArgs?.path ||
+          completedArgs?.dest ||
+          completedArgs?.file_path ||
           (previous?.kind === "tool" ? previous.path : "") ||
           "",
       ),
@@ -763,7 +777,6 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     items = [...items];
     if (index < 0) items.push(card);
     else items[index] = { ...card, key: items[index].key };
-    const completedArgs = (args || {}) as Record<string, unknown>;
     touch((a) => {
       const at = a.calls.findIndex(
         (call) =>
@@ -773,22 +786,41 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
             : call.tool === p.tool),
       );
       const previousCall = at >= 0 ? a.calls[at] : undefined;
+      const value =
+        completedArgs?.command ??
+        completedArgs?.cmd ??
+        (tool.startsWith("antigravity.")
+          ? completedArgs?.CommandLine
+          : undefined);
+      const command = completedArgs
+        ? Array.isArray(value)
+          ? value.map(String).join(" ")
+          : typeof value === "string"
+            ? value
+            : undefined
+        : previousCall?.command;
       const step =
-        previousCall?.step ?? classifyTool(String(p.tool), completedArgs);
+        completedArgs || previousCall?.tool !== tool
+          ? classifyTool(tool, { ...completedArgs, command })
+          : previousCall.step;
       const path =
         (card.kind === "tool" && card.path) || previousCall?.path || undefined;
       const call = {
         callId: String(
           p.call_id || previousCall?.callId || `call-${a.calls.length}`,
         ),
-        tool: String(p.tool),
+        tool,
         step,
-        label: String(p.headline || previousCall?.label || p.tool),
+        label: String(
+          p.headline ||
+            (previousCall?.tool === tool && previousCall.label) ||
+            tool,
+        ),
         live: false,
         ok: Boolean(p.success),
         output: card.kind === "tool" ? card.fullOutput || card.text : "",
         path,
-        command: previousCall?.command,
+        command,
       };
       const calls = [...a.calls];
       if (at >= 0) calls[at] = call;

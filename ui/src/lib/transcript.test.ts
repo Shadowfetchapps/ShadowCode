@@ -264,6 +264,144 @@ describe("durable transcript", () => {
       fullOutput: JSON.stringify({ path: "src/main.rs", bytes: 42 }, null, 2),
     });
   });
+  it("finalizes generic vendor calls with the completed typed tool input in the same task", () => {
+    const started = replay([
+      event(1, "tool.started", { tool: "grok.tool", call_id: "shared" }),
+      event(
+        2,
+        "tool.started",
+        {
+          tool: "grok.tool",
+          call_id: "shared",
+          arguments: { command: "other task" },
+        },
+        "two",
+      ),
+    ]);
+    const originalKey = started.items[0].key;
+    const completed = applyEvent(
+      started,
+      event(3, "tool.completed", {
+        tool: "grok.execute",
+        call_id: "shared",
+        success: true,
+        output: {
+          title: "A display label is not the executed command",
+          tool_kind: "execute",
+          input: { command: ["python3", "-m", "unittest", "-q"] },
+        },
+      }),
+    );
+    expect(completed.items).toHaveLength(2);
+    expect(completed.items[0]).toMatchObject({
+      key: originalKey,
+      kind: "tool",
+      taskId: "one",
+      callId: "shared",
+      tool: "grok.execute",
+      headline: "grok.execute",
+      live: false,
+      ok: true,
+    });
+    expect(completed.activity.one.calls).toHaveLength(1);
+    expect(completed.activity.one.calls[0]).toMatchObject({
+      callId: "shared",
+      tool: "grok.execute",
+      label: "grok.execute",
+      step: "testing",
+      command: "python3 -m unittest -q",
+      live: false,
+    });
+    expect(completed.activity.two).toEqual(started.activity.two);
+    expect(completed.items[1]).toEqual(started.items[1]);
+  });
+  it("replaces an initial vendor command and category when typed completion input changes", () => {
+    const state = replay([
+      event(1, "tool.started", {
+        tool: "grok.execute",
+        call_id: "check",
+        arguments: { command: "python3 -m unittest -q" },
+      }),
+      event(2, "tool.completed", {
+        tool: "grok.execute",
+        call_id: "check",
+        success: true,
+        output: { input: { command: "pwd" }, title: "Run tests" },
+      }),
+    ]);
+    expect(state.items).toHaveLength(1);
+    expect(state.activity.one.calls).toHaveLength(1);
+    expect(state.activity.one.calls[0]).toMatchObject({
+      step: "commands",
+      command: "pwd",
+      live: false,
+    });
+  });
+  it("does not retain an earlier command when completed vendor input explicitly clears it", () => {
+    const state = replay([
+      event(1, "tool.started", {
+        tool: "grok.execute",
+        call_id: "check",
+        arguments: { command: "npm test" },
+      }),
+      event(2, "tool.completed", {
+        tool: "grok.execute",
+        call_id: "check",
+        success: true,
+        output: { input: {}, title: "npm test" },
+      }),
+    ]);
+    expect(state.activity.one.calls).toHaveLength(1);
+    expect(state.activity.one.calls[0].command).toBeUndefined();
+    expect(state.activity.one.calls[0].step).toBe("commands");
+  });
+  it("keeps the observed category when a completion has no typed input", () => {
+    const state = replay([
+      event(1, "tool.started", {
+        tool: "claude.Bash",
+        call_id: "check",
+        arguments: { input: { command: "python3 -m unittest -q" } },
+      }),
+      event(2, "tool.completed", {
+        tool: "claude.Bash",
+        call_id: "check",
+        success: true,
+        output: {
+          output: "Output mentions pwd; this is not new command input",
+        },
+      }),
+    ]);
+    expect(state.activity.one.calls).toHaveLength(1);
+    expect(state.activity.one.calls[0]).toMatchObject({
+      step: "testing",
+      label: "claude.Bash",
+      live: false,
+    });
+  });
+  it("uses Antigravity's typed CommandLine only for Antigravity tools", () => {
+    for (const vendor of ["antigravity", "grok"]) {
+      const state = replay([
+        event(1, "tool.started", { tool: `${vendor}.tool`, call_id: "check" }),
+        event(2, "tool.completed", {
+          tool: `${vendor}.execute`,
+          call_id: "check",
+          success: true,
+          output: {
+            input: { CommandLine: "python3 -m unittest -q" },
+            title: "A descriptive title",
+          },
+        }),
+      ]);
+      expect(state.activity.one.calls).toHaveLength(1);
+      expect(state.activity.one.calls[0]).toMatchObject({
+        tool: `${vendor}.execute`,
+        command:
+          vendor === "antigravity" ? "python3 -m unittest -q" : undefined,
+        step: vendor === "antigravity" ? "testing" : "commands",
+        live: false,
+      });
+    }
+  });
   it("replays every task once when the event stream reconnects", () => {
     const rows = [
       event(1, "agent.started", { task: "Make it work" }),
