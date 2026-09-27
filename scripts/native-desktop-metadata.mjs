@@ -1,7 +1,14 @@
 // Tauri names the launcher after productName. AppStream and AppImageHub need
 // the desktop entry and metadata to share the application's reverse-DNS ID.
 import assert from "node:assert/strict";
-import { readFile, readlink, rename, symlink, unlink } from "node:fs/promises";
+import {
+  lstat,
+  readFile,
+  readlink,
+  rename,
+  symlink,
+  unlink,
+} from "node:fs/promises";
 import path from "node:path";
 
 export const DESKTOP_ID = "com.shadowfetch.shadowcode";
@@ -18,11 +25,23 @@ export async function normalizeDesktopEntry(packageRoot, appimage = false) {
   assert.match(contents, /^Exec=shadowcode$/m);
   if (appimage) {
     const oldLink = path.join(packageRoot, "ShadowCode.desktop");
-    assert.equal(
-      await readlink(oldLink),
-      "usr/share/applications/ShadowCode.desktop",
-      "Unexpected Tauri AppDir launcher link",
-    );
+    // Fresh bundler output can contain a copy of the launcher; reused AppDirs
+    // can contain a symlink. Validate either before replacing the root entry.
+    const entry = await lstat(oldLink);
+    if (entry.isSymbolicLink()) {
+      assert.equal(
+        await readlink(oldLink),
+        "usr/share/applications/ShadowCode.desktop",
+        "Unexpected Tauri AppDir launcher link",
+      );
+    } else {
+      assert.ok(entry.isFile(), "Unexpected Tauri AppDir launcher type");
+      assert.equal(
+        await readFile(oldLink, "utf8"),
+        contents,
+        "Unexpected Tauri AppDir launcher contents",
+      );
+    }
     await unlink(oldLink);
   }
   await rename(oldDesktop, desktop);
