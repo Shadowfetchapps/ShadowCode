@@ -1034,6 +1034,15 @@ mod tests {
                 "base_model_inference": {"limitId":"base_model_inference","limitName":"gpt-reserve","normalModelSlug":"gpt-5.6-luna","primary":{"usedPercent":5,"windowDurationMins":10080}}
             }
         }));
+        // Usage numbers alone do not establish that the current login uses a
+        // subscription. This fixture models a successful structured probe.
+        assert_eq!(status.to_doctor_json()["billing"], "unknown");
+        assert!(status.usage_for("default", now).remaining_percent.is_none());
+        status.account = Some(AccountInfo {
+            email: None,
+            plan: Some("pro".into()),
+            auth_mode: Some("chatgpt".into()),
+        });
         assert_eq!(
             status.usage_for("default", now).remaining_percent,
             Some(60.0)
@@ -1043,6 +1052,12 @@ mod tests {
             Some(95.0)
         );
         assert!(status.usage_for("gpt-6-astra", now).pool_shared);
+        status.account.as_mut().unwrap().auth_mode = Some("unrecognized-mode".into());
+        assert_eq!(status.to_doctor_json()["billing"], "unknown");
+        assert!(status
+            .usage_for("gpt-5.6-luna", now)
+            .remaining_percent
+            .is_none());
         let cursor = VendorStatus::setup_required(Vendor::Cursor, "cursor-agent", now);
         assert_eq!(cursor.usage_for("auto", now).state, "unavailable");
         let doctor = cursor.to_doctor_json();
