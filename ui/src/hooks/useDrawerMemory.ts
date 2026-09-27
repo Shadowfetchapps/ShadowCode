@@ -271,6 +271,10 @@ export function useDrawerMemory(workspace: string) {
       pending.chain = pending.chain
         .catch(() => undefined)
         .then(async () => {
+          // Keep the in-flight write, but skip snapshots superseded while
+          // waiting behind it. The newest queued write uses its resulting CAS
+          // revision, and a queued delete still waits for that write.
+          if (pending.desired !== desired) return;
           const record = await api.saveEditorDraft(
             workspace,
             path,

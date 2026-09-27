@@ -404,6 +404,57 @@ test("waits for an in-flight recovery write before discarding its draft", async 
   ).toHaveCount(0);
 });
 
+test("coalesces superseded recovery drafts behind an in-flight write", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const drawer = page.getByRole("complementary", { name: "Drawer" });
+  await drawer
+    .locator(".drawer-tabs")
+    .getByRole("button", { name: "Files" })
+    .click();
+  await drawer.getByRole("button", { name: "README.md", exact: true }).click();
+  await page.evaluate(() => {
+    const bridge = window.__SHADOW_TEST_TRANSPORT__!;
+    const request = bridge.request;
+    (window as any).__recoveryWrites = [] as string[];
+    bridge.request = async (path, method, body) => {
+      if (path.startsWith("/api/workspace/editor-draft?") && method === "PUT") {
+        (window as any).__recoveryWrites.push(
+          (body as { draft: string }).draft,
+        );
+        if ((window as any).__recoveryWrites.length === 1)
+          await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+      return request(path, method, body);
+    };
+  });
+  const editor = drawer.getByRole("textbox", { name: "Edit README.md" });
+  await editor.fill("# First draft");
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__recoveryWrites.length))
+    .toBe(1);
+  await editor.fill("# Superseded draft");
+  await editor.fill("# Final draft");
+  await expect(
+    drawer.getByText("Recovery copy saved on this computer"),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          JSON.parse(
+            sessionStorage.getItem("shadow-fake-editor-drafts") || "{}",
+          )["README.md"]?.draft,
+      ),
+    )
+    .toBe("# Final draft");
+  expect(await page.evaluate(() => (window as any).__recoveryWrites)).toEqual([
+    "# First draft",
+    "# Final draft",
+  ]);
+});
+
 test("shows and retries a failed recovery cleanup after file save", async ({
   page,
 }) => {
