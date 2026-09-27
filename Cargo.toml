@@ -1,6 +1,7 @@
 [workspace]
 members = ["native/core", "src-tauri"]
 default-members = ["native/core"]
+exclude = ["vendor/glib-0.18.5"]
 resolver = "2"
 
 [workspace.package]
@@ -9,6 +10,11 @@ edition = "2021"
 rust-version = "1.95"
 license = "Apache-2.0"
 repository = "https://github.com/Shadowfetchapps/ShadowCode"
+
+[patch.crates-io]
+# GTK3/WebKit still require 0.18. Preserve that API with the upstream UB fix.
+# See vendor/glib-0.18.5.README.md for provenance and verification.
+glib = { path = "vendor/glib-0.18.5" }
 
 [profile.release]
 lto = "thin"

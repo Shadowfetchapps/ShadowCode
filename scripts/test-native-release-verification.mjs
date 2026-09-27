@@ -40,6 +40,19 @@ test('missing gate, hidden skip and failed exit cannot be claimed passed', () =>
   const failed = complete(); failed.gates.interface.exit_code = 1;
   assert.throws(() => validateVerification(failed, commit, artifacts), /command failed/);
 });
+test('GLib backport verification is a required release gate with no optional skipped regression', () => {
+  assert(REQUIRED_GATES.includes('glib-backport'));
+  const missing = complete(); delete missing.gates['glib-backport'];
+  assert.throws(() => validateVerification(missing, commit, artifacts), /gate set mismatch/);
+  for (const status of ['failed', 'skipped']) {
+    const value = complete(); value.gates['glib-backport'].status = status;
+    assert.throws(() => validateVerification(value, commit, artifacts), /did not pass: glib-backport/);
+  }
+  const skips = new Set(), optional = new Set();
+  inspectLine('glib-backport', 'test next_and_next_back_share_one_bounded_cursor ... ignored', skips, optional);
+  assert.equal(skips.size, 1);
+  assert.equal(optional.size, 0);
+});
 test('receipts are bound to commit, workflow attempt, exact command and artifact bytes', () => {
   for (const [field, changed, error] of [
     ['commit', 'e'.repeat(40), /Stale/], ['run_id', '999', /Wrong workflow run/],

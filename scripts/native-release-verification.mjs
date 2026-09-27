@@ -16,6 +16,7 @@ test "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)" = "$VERSION"
 test "$(node -p "require('./ui/package.json').version")" = "$VERSION"
 grep -Fxq "X-ShadowCode-Version=$VERSION" packaging/shadow-agent.desktop` },
   interface: { script: 'npm --prefix ui ci\nnpm --prefix ui run build\nnpm --prefix ui test' },
+  'glib-backport': { script: 'rustfmt +1.95.0 --check --edition 2021 scripts/fixtures/native-glib-variant.rs\nnode --test --test-reporter=tap scripts/test-native-glib-backport.mjs\nnode scripts/test-native-glib-variant.mjs', scope: 'Exact vendored GLib source/provenance, packaged-notice fixtures and optimized iterator regression; native package/window qualification is separate.' },
   'native-source': { script: 'cargo +1.95.0 fmt --all --check\ncargo +1.95.0 clippy --workspace --all-targets --locked -- -D warnings\ncargo +1.95.0 build -p shadowcode-desktop --locked\ncargo +1.95.0 test --workspace --locked', scope: 'Default non-ignored Rust suite; opt-in ignored tests are excluded and recorded.' },
   'native-behavior': { script: 'node scripts/test-native-cli.mjs\nnode scripts/test-native-stress.mjs\nnode scripts/test-native-tui.mjs\nnode scripts/test-native-mcp-server.mjs\nSHADOW_MCP_TRANSPORT=http node scripts/test-native-mcp-server.mjs' },
   'native-window': { script: "cargo +1.95.0 install tauri-driver --version 2.0.6 --locked\nxvfb-run -a -s '-screen 0 1440x1100x24' dbus-run-session -- node scripts/test-native-desktop.mjs", scope: 'Native fixture window; authenticated cloud-consent check is optional and reported separately.' },

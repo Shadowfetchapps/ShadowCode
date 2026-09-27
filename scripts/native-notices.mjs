@@ -14,6 +14,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { RUNTIME_LOCATION } from "./llama-runtime.mjs";
+import {
+  GLIB_DIRECTORY,
+  GLIB_PROVENANCE,
+  GLIB_README,
+  requireGlibBackport,
+  verifyGlibBackport,
+} from "./native-glib-backport.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const run = promisify(execFile);
@@ -62,6 +69,36 @@ async function upstreamNotices() {
   return { vendor, files: manifest.files };
 }
 
+export async function glibBackportNotice(metadata, destination, checkout = root) {
+  const pkg = requireGlibBackport(metadata, checkout);
+  const verified = await verifyGlibBackport(checkout);
+  const prefix = `rust/${pkg.name}-${pkg.version}`;
+  return {
+    ecosystem: "cargo",
+    name: pkg.name,
+    version: pkg.version,
+    license: "MIT",
+    source: verified.source,
+    sourceSha256: verified.sourceSha256,
+    sourceKind: "vendored-backport",
+    localPath: GLIB_DIRECTORY,
+    sourceTreeSha256: verified.sourceTreeSha256,
+    modifications: [{
+      advisory: verified.advisory,
+      upstreamCommit: verified.patchCommit,
+      source: `https://github.com/gtk-rs/gtk-rs-core/commit/${verified.patchCommit}`,
+      file: verified.patchedFile,
+      sha256: verified.patchedSha256,
+    }],
+    provenance: await copyNotice(path.join(checkout, GLIB_PROVENANCE), destination, `${prefix}/backport-provenance.json`),
+    notices: [
+      await copyNotice(path.join(checkout, GLIB_DIRECTORY, "LICENSE"), destination, `${prefix}/LICENSE`),
+      await copyNotice(path.join(checkout, GLIB_DIRECTORY, "COPYRIGHT"), destination, `${prefix}/COPYRIGHT`),
+      await copyNotice(path.join(checkout, GLIB_README), destination, `${prefix}/BACKPORT.md`),
+    ],
+  };
+}
+
 export async function applicationNotices(destination, managedRuntime = null) {
   const upstream = await upstreamNotices();
   const compiler = (await run("rustc", ["--version", "--verbose"], options))
@@ -104,6 +141,12 @@ export async function applicationNotices(destination, managedRuntime = null) {
   await rm(destination, { recursive: true, force: true });
   await mkdir(destination, { recursive: true });
   const packages = [];
+
+  // Linux's GTK/WebKit graph requires this third-party path crate. Treat a
+  // missing/replaced patch as an error, rather than dropping its MIT license.
+  if (target.includes("linux") || metadata.packages.some(
+    (pkg) => pkg.name === "glib" && resolved.has(pkg.id),
+  )) packages.push(await glibBackportNotice(metadata, destination));
 
   for (const pkg of metadata.packages.filter(
     (pkg) => pkg.source && resolved.has(pkg.id),

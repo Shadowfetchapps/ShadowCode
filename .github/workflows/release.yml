@@ -33,6 +33,8 @@ jobs:
         run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
       - name: Build and test the embedded interface
         run: node scripts/native-release-verification.mjs run interface
+      - name: Verify the exact GLib backport and optimized iterator behavior
+        run: node scripts/native-release-verification.mjs run glib-backport
       - name: Verify native source
         run: node scripts/native-release-verification.mjs run native-source
       - name: Exercise native application behavior
