@@ -472,9 +472,9 @@ pub(crate) async fn snapshot_for(
     let index = temporary.path().join("index");
     let index_text = index.to_str().context("Index path must be UTF-8")?;
     let env = [("GIT_INDEX_FILE", index_text)];
-    // A copy keeps force-added (ignored but staged) files; a fresh index from
-    // HEAD is the fallback, e.g. for a split index the copy cannot resolve.
-    let copied = if real_index.is_file() {
+    // Keep staged/force-added entries and sparse paths absent from disk. A
+    // failed copy must not silently fall back to HEAD and lose that state.
+    if real_index.is_file() {
         let mut original = fs::File::open(&real_index)?;
         let modified = original.metadata()?.modified()?;
         let mut copy = fs::File::create(&index)?;
@@ -483,19 +483,16 @@ pub(crate) async fn snapshot_for(
         // Giving the copy a fresh timestamp can hide same-size working edits.
         copy.set_modified(modified)?;
         drop(copy);
-        git_env(source, &["add", "--all"], &env, cancel)
-            .await
-            .is_ok()
+        snapshot_index_flags(source, &env, cancel).await?;
+        // Clearing flags rewrites the temporary index. Preserve the source's
+        // racy timestamp for other entries before Git examines working bytes.
+        fs::File::open(&index)?.set_modified(modified)?;
     } else {
-        false
-    };
-    if !copied {
-        let _ = fs::remove_file(&index);
         git_env(source, &["read-tree", "HEAD"], &env, cancel).await?;
-        git_env(source, &["add", "--all"], &env, cancel)
-            .await
-            .context("Could not capture uncommitted work")?;
     }
+    git_env(source, &["add", "--all", "--sparse"], &env, cancel)
+        .await
+        .context("Could not capture uncommitted work")?;
     let tree = git_env(source, &["write-tree"], &env, cancel).await?;
     let head_tree = git(source, &["rev-parse", "HEAD^{tree}"], cancel).await?;
     if tree == head_tree {
@@ -513,6 +510,44 @@ pub(crate) async fn snapshot_for(
         head,
         included_uncommitted: true,
     })
+}
+
+/// These flags optimize the user's index, not a complete working-tree capture.
+/// Change only the temporary copy. An absent skip-worktree path is sparse
+/// content, not a deletion; keep its indexed bytes in the snapshot.
+async fn snapshot_index_flags(
+    source: &Path,
+    env: &[(&str, &str)],
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let entries = git_env(source, &["ls-files", "-v", "-z"], env, cancel).await?;
+    let mut assumed = Vec::new();
+    let mut present = Vec::new();
+    for entry in entries.split('\0').filter(|entry| !entry.is_empty()) {
+        let (flag, name) = entry.split_once(' ').context("Invalid Git index entry")?;
+        if flag.as_bytes().first().is_some_and(u8::is_ascii_lowercase) {
+            assumed.push(name);
+        }
+        if flag.eq_ignore_ascii_case("S") {
+            match fs::symlink_metadata(source.join(name)) {
+                Ok(_) => present.push(name),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("Could not inspect sparse working file"),
+            }
+        }
+    }
+    for (flag, names) in [
+        ("--no-assume-unchanged", assumed),
+        ("--no-skip-worktree", present),
+    ] {
+        // Bound argv size and keep unusual names as literal individual paths.
+        for chunk in names.chunks(64) {
+            let mut args = vec!["update-index", flag, "--"];
+            args.extend_from_slice(chunk);
+            git_env(source, &args, env, cancel).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Diffstat of a lane against its base: committed and uncommitted tracked
@@ -1801,6 +1836,120 @@ mod tests {
         assert_eq!(index(&second, &workspace).unwrap(), vec![created.id]);
     }
     #[tokio::test]
+    async fn snapshot_captures_flagged_files_and_preserves_the_source_index() {
+        for mode in ["normal", "split", "sparse"] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source");
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&source).unwrap();
+            fs::create_dir(&scratch).unwrap();
+            let cancel = CancellationToken::new();
+            git(&source, &["init", "-q"], &cancel).await.unwrap();
+            for name in ["assumed.txt", "present.txt", "absent.txt", "staged.txt"] {
+                fs::write(source.join(name), "base\n").unwrap();
+            }
+            git(&source, &["add", "."], &cancel).await.unwrap();
+            let mut args = IDENTITY.to_vec();
+            args.extend(["commit", "-qm", "Fixture base"]);
+            git(&source, &args, &cancel).await.unwrap();
+            if mode == "sparse" {
+                git(
+                    &source,
+                    &[
+                        "sparse-checkout",
+                        "set",
+                        "--no-cone",
+                        "--",
+                        "/*",
+                        "!/present.txt",
+                        "!/absent.txt",
+                    ],
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            }
+            git(
+                &source,
+                &["update-index", "--assume-unchanged", "assumed.txt"],
+                &cancel,
+            )
+            .await
+            .unwrap();
+            git(
+                &source,
+                &[
+                    "update-index",
+                    "--skip-worktree",
+                    "present.txt",
+                    "absent.txt",
+                ],
+                &cancel,
+            )
+            .await
+            .unwrap();
+            fs::write(source.join("assumed.txt"), "user hidden edit\n").unwrap();
+            fs::write(source.join("present.txt"), "user present edit\n").unwrap();
+            if source.join("absent.txt").exists() {
+                fs::remove_file(source.join("absent.txt")).unwrap();
+            }
+            fs::write(source.join("staged.txt"), "staged user edit\n").unwrap();
+            git(&source, &["add", "staged.txt"], &cancel).await.unwrap();
+            fs::write(source.join("staged.txt"), "unstaged user edit\n").unwrap();
+            fs::write(source.join("intent.txt"), "intent user edit\n").unwrap();
+            git(&source, &["add", "--intent-to-add", "intent.txt"], &cancel)
+                .await
+                .unwrap();
+            if mode == "split" {
+                git(&source, &["update-index", "--split-index"], &cancel)
+                    .await
+                    .unwrap();
+            }
+            let index = source.join(".git/index");
+            let original = fs::read(&index).unwrap();
+            let original_time = fs::metadata(&index).unwrap().modified().unwrap();
+            let captured = snapshot_for(
+                &scratch,
+                &source,
+                "test capture",
+                "Fixture snapshot",
+                &cancel,
+            )
+            .await
+            .unwrap();
+            for (name, expected) in [
+                ("assumed.txt", "user hidden edit"),
+                ("present.txt", "user present edit"),
+                ("absent.txt", "base"),
+                ("staged.txt", "unstaged user edit"),
+                ("intent.txt", "intent user edit"),
+            ] {
+                assert_eq!(
+                    git(
+                        &source,
+                        &["show", &format!("{}:{name}", captured.commit)],
+                        &cancel
+                    )
+                    .await
+                    .unwrap(),
+                    expected,
+                    "mode={mode}, {name}"
+                );
+            }
+            assert_eq!(
+                fs::read(&index).unwrap(),
+                original,
+                "Source index bytes changed"
+            );
+            assert_eq!(
+                fs::metadata(&index).unwrap().modified().unwrap(),
+                original_time
+            );
+            assert!(!source.join("absent.txt").exists());
+        }
+    }
+
+    #[tokio::test]
     async fn snapshot_preserves_racy_index_timestamp_and_captures_same_stat_edit() {
         use std::time::{Duration, SystemTime};
         let root = tempfile::tempdir().unwrap();
@@ -1832,6 +1981,15 @@ mod tests {
         git(&source, &["add", "-f", "forced.txt"], &cancel)
             .await
             .unwrap();
+        // Snapshot flag normalization rewrites the copied index; it must not
+        // make the other same-stat entry look safely older than that index.
+        git(
+            &source,
+            &["update-index", "--assume-unchanged", "forced.txt"],
+            &cancel,
+        )
+        .await
+        .unwrap();
         let index = source.join(".git/index");
         fs::File::open(&index)
             .unwrap()

@@ -244,6 +244,75 @@ fn managed_branches(project: &Path) -> String {
 }
 
 #[tokio::test]
+async fn compare_preserves_flagged_index_and_captures_hidden_working_edits() {
+    let f = fixture().await;
+    let project = &f.project;
+    git(
+        project,
+        &["update-index", "--assume-unchanged", "tracked.txt"],
+    );
+    git(project, &["update-index", "--skip-worktree", "lib.txt"]);
+    fs::write(project.join("tracked.txt"), "hidden user edit\n").unwrap();
+    fs::write(project.join("lib.txt"), "value = 1\nuser annotation\n").unwrap();
+    fs::write(project.join("intent.txt"), "intent-to-add user file\n").unwrap();
+    git(project, &["add", "--intent-to-add", "intent.txt"]);
+    let index = project.join(".git/index");
+    let index_bytes = fs::read(&index).unwrap();
+    let head = git(project, &["rev-parse", "HEAD"]);
+
+    let started = start(&f).await;
+    let id = started["id"].as_str().unwrap();
+    let done = finished(&f, id).await;
+    for model in ["lane-alpha", "lane-beta"] {
+        let path = Path::new(lane(&done, model)["worktree"].as_str().unwrap());
+        assert_eq!(
+            fs::read_to_string(path.join("tracked.txt")).unwrap(),
+            "hidden user edit\n"
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("intent.txt")).unwrap(),
+            "intent-to-add user file\n"
+        );
+        assert!(fs::read_to_string(path.join("lib.txt"))
+            .unwrap()
+            .contains("user annotation\n"));
+    }
+    assert_eq!(fs::read(&index).unwrap(), index_bytes);
+    let kept = call(
+        &f.service,
+        "POST",
+        &format!("/api/compare/{id}/keep"),
+        json!({"model":"lane-alpha"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(kept["state"], "applied");
+    assert_eq!(
+        fs::read_to_string(project.join("lib.txt")).unwrap(),
+        "value = 2 (alpha)\nuser annotation\n"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("tracked.txt")).unwrap(),
+        "hidden user edit\n"
+    );
+    assert_eq!(
+        fs::read(&index).unwrap(),
+        index_bytes,
+        "Keep must preserve original index flags, intent and staged bytes"
+    );
+    assert_eq!(git(project, &["rev-parse", "HEAD"]), head);
+    f.service.engine.shutdown().await.unwrap();
+    drop(f.service);
+    let reopened = Service::open(f.paths.clone(), Some(project.clone())).unwrap();
+    let recovered = call(&reopened, "GET", &format!("/api/compare/{id}"), Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(recovered["state"], "applied");
+    assert_eq!(fs::read(&index).unwrap(), index_bytes);
+    reopened.engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn lanes_start_from_uncommitted_work_and_keep_applies_one_result() {
     let f = fixture().await;
     let project = &f.project;
