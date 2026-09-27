@@ -748,6 +748,7 @@ pub async fn discard(engine: &Engine, id: &str) -> Result<Record> {
             let state = record.state.clone();
             close(engine, &mut record, &state).await;
             save(&store, &record)?;
+            return load(&store, id);
         }
         return Ok(record);
     }
@@ -759,7 +760,7 @@ pub async fn discard(engine: &Engine, id: &str) -> Result<Record> {
         .reserve_idle_workspace(&record.worktree)?;
     close(engine, &mut record, "discarded").await;
     save(&store, &record)?;
-    Ok(record)
+    load(&store, id)
 }
 
 /// Remove the worktree (keeping its branch for `branch`), stop trusting its
