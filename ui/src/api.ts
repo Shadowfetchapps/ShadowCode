@@ -811,6 +811,14 @@ export type LocalModelProvenance = {
     reported_generation_defaults?: Record<string, number | string[]> | null;
     reported_chat_template?: LocalStringIdentity | null;
   };
+  template_override?: {
+    profile?: string;
+    source?: string;
+    source_commit?: string;
+    source_sha256?: string;
+    template?: LocalStringIdentity;
+    runtime_template_verified?: boolean;
+  } | null;
   context: { requested_tokens?: number; reported_tokens?: number | null };
   gpu: {
     requested_mode?: string;

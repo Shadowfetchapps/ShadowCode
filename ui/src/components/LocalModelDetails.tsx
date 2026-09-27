@@ -26,6 +26,8 @@ export function LocalModelDetails({ receipt }: { receipt?: unknown }) {
   const quantization = obj(model.quantization);
   const template = obj(model.chat_template);
   const runtimeTemplate = obj(runtime.reported_chat_template);
+  const override = obj(p.template_override);
+  const appliedTemplate = obj(override.template);
   const policy = obj(parsed.request_policy);
   const thinking = obj(policy.chat_template_kwargs).enable_thinking;
   const rows: [string, ReactNode][] = [];
@@ -96,6 +98,28 @@ export function LocalModelDetails({ receipt }: { receipt?: unknown }) {
     "Runtime template bytes hashed",
     number(runtimeTemplate.bytes)?.toLocaleString(),
   );
+  if (
+    override.profile === "hermes-2-pro-llama-3-8b-tool-use-v1" &&
+    override.source === "bundled_llama_cpp_template"
+  ) {
+    add("Tool compatibility", "Bundled Hermes 2 Pro template");
+    const confirmed =
+      override.runtime_template_verified === true &&
+      hash(appliedTemplate.sha256) !== undefined &&
+      appliedTemplate.sha256 === runtimeTemplate.sha256 &&
+      number(appliedTemplate.bytes) !== undefined &&
+      appliedTemplate.bytes === runtimeTemplate.bytes;
+    add(
+      "Template confirmation",
+      confirmed ? "Matched runtime-reported template" : "Not confirmed",
+    );
+    add("Bundled template SHA-256", hash(appliedTemplate.sha256));
+    if (
+      typeof override.source_commit === "string" &&
+      /^[a-f0-9]{40}$/.test(override.source_commit)
+    )
+      add("Template source commit", override.source_commit);
+  }
   const sampling = obj(runtime.reported_generation_defaults);
   for (const [name, value] of Object.entries(sampling)) {
     if (typeof value === "number" && Number.isFinite(value))

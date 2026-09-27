@@ -31,6 +31,7 @@ pub mod issues;
 pub mod lifecycle;
 pub mod local_engine;
 pub mod local_runtime;
+pub mod local_templates;
 pub mod lsp;
 #[cfg(unix)]
 pub mod mcp;

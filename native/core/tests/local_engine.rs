@@ -117,10 +117,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return self.reply(401, {"error": "Invalid API Key"})
         if self.path == "/props":
+            reported_template = opt("--chat-template", "runtime template fixture")
+            if os.path.exists(os.path.join(HERE, "wrong-template")):
+                reported_template = "runtime ignored the requested template"
+            if os.path.exists(os.path.join(HERE, "missing-template")):
+                reported_template = None
             return self.reply(200, {"default_generation_settings": {"n_ctx": ctx,
                                     "params": {"temperature":0.8,"top_k":40,"top_p":0.95,"seed":4294967295,
                                                "prompt":"must not appear in provenance"}},
-                                    "chat_template": "runtime template fixture",
+                                    "chat_template": reported_template,
                                     "modalities": {"vision": mmproj is not None}})
         self.reply(404, {})
     def do_POST(self):
@@ -143,6 +148,16 @@ class Handler(BaseHTTPRequestHandler):
             return sse(self, text("The image is red." if has_image else "No image arrived."))
         if not body.get("tools"):
             return sse(self, text("Chat only reply."))
+        if "hermes-partial" in name:
+            chunks = tool_call("write_file", {"path": "unexpected.txt", "content": "never"})
+            chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] = '{"path":"unexpected.txt","content":'
+            return sse(self, chunks)
+        if "hermes-cut-short" in name:
+            chunks = tool_call("write_file", {"path": "unexpected.txt", "content": "never"})
+            chunks[1]["choices"][0]["finish_reason"] = "length"
+            return sse(self, chunks)
+        if "hermes-prose" in name:
+            return sse(self, text('<tool_call>{"name":"write_file","arguments":{"path":"unexpected.txt","content":"never"}}</tool_call>'))
         if not tool_results:
             return sse(self, tool_call("read_file", {"path": "hello.txt"}))
         return sse(self, text("The file says hello from the fake model."))
@@ -193,6 +208,37 @@ fn projector(path: &Path) {
 
 const TOOLS_TEMPLATE: &str =
     "{% if tools %}<tool_call>{% endif %}{% if enable_thinking %}{% endif %}";
+
+const HERMES_DEFAULT_TEMPLATE: &str = r#"{{bos_token}}{% for message in messages %}{{'<|im_start|>' + message['role'] + '
+' + message['content'] + '<|im_end|>' + '
+'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant
+' }}{% endif %}"#;
+
+fn hermes_like(path: &Path, name: &str, template: &str) {
+    assert_eq!(
+        shadowcode_core::gguf::string_identity(HERMES_DEFAULT_TEMPLATE).sha256,
+        "a805e50fed68938a076b07e2e602639611b50b1ced0e50f11eb92f1ba25be4dc"
+    );
+    write_gguf(
+        path,
+        &[
+            ("general.architecture", V::Str("llama")),
+            ("general.name", V::Str(name)),
+            ("llama.context_length", V::U32(32768)),
+            ("llama.embedding_length", V::U32(1024)),
+            ("llama.block_count", V::U32(8)),
+            ("llama.attention.head_count", V::U32(16)),
+            ("llama.attention.head_count_kv", V::U32(4)),
+            ("tokenizer.ggml.model", V::Str("gpt2")),
+            ("tokenizer.ggml.pre", V::Str("llama-bpe")),
+            ("tokenizer.ggml.bos_token_id", V::U32(128000)),
+            ("tokenizer.ggml.eos_token_id", V::U32(128003)),
+            ("tokenizer.ggml.padding_token_id", V::U32(128001)),
+            ("tokenizer.chat_template", V::Str(template)),
+        ],
+        &["token_embd.weight", "output.weight"],
+    );
+}
 
 fn fixture(devices: &str) -> Fixture {
     let root = tempfile::tempdir().unwrap();
@@ -296,6 +342,275 @@ fn model_for(id: &str) -> ModelConfig {
         api_key_env: "UNUSED".into(),
         keep_alive: "30m".into(),
         context_limit: entry.context_tokens as usize,
+    }
+}
+
+#[test]
+fn hermes_capability_comes_from_metadata_and_template_not_the_label() {
+    let f = fixture(GPU);
+    let matched = f.models.join("unrelated-label.gguf");
+    hermes_like(&matched, "Hermes-2-Pro-Llama-3-8B", HERMES_DEFAULT_TEMPLATE);
+    let label_only = f.models.join("Hermes-2-Pro-Llama-3-8B.gguf");
+    hermes_like(&label_only, "Different model", HERMES_DEFAULT_TEMPLATE);
+    let changed = f.models.join("changed.gguf");
+    hermes_like(
+        &changed,
+        "Hermes-2-Pro-Llama-3-8B",
+        &format!("{HERMES_DEFAULT_TEMPLATE} "),
+    );
+    let rhea = f.models.join("Rhea-4B-Coding-max.gguf");
+    write_gguf(
+        &rhea,
+        &[
+            ("general.architecture", V::Str("qwen3")),
+            ("general.name", V::Str("Rhea-4B-Coding-max")),
+            ("qwen3.context_length", V::U32(32768)),
+            ("tokenizer.ggml.eos_token_id", V::U32(151645)),
+        ],
+        &["token_embd.weight", "output.weight"],
+    );
+    let config = local_engine::LocalEngineConfig {
+        files: [&matched, &label_only, &changed, &rhea]
+            .map(|p| p.display().to_string())
+            .into(),
+        llama_binary: f.bin.join("llama-server").display().to_string(),
+        ..Default::default()
+    };
+    let entries = local_engine::scan(&config);
+    assert_eq!(entries.len(), 4);
+    for entry in entries {
+        assert_eq!(
+            entry.tools,
+            entry.id == local_engine::entry_id(&matched),
+            "{entry:?}"
+        );
+        if entry.tools {
+            assert!(entry.tools_reason.contains("verified when the model loads"));
+        }
+    }
+    assert!(lines(&f.bin.join("launches.jsonl")).is_empty());
+}
+
+#[tokio::test]
+async fn hermes_verified_template_enables_structured_tools_and_retains_provenance() {
+    let f = fixture(GPU);
+    let model = f.models.join("unrelated-label.gguf");
+    hermes_like(&model, "Hermes-2-Pro-Llama-3-8B", HERMES_DEFAULT_TEMPLATE);
+    let original = fs::read(&model).unwrap();
+    Config::patch(&f.paths, json!({"local_engine":{"files":[model]}})).unwrap();
+    fs::write(f.project.join("hello.txt"), "hello\n").unwrap();
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let job = call(
+        &service,
+        "POST",
+        "/api/jobs",
+        json!({"workspace":f.project,"task":"What does hello.txt say?","model":local_engine::entry_id(&model)}),
+    ).await.unwrap();
+    let done = wait_job(&service, job["id"].as_str().unwrap()).await;
+    assert_eq!(done["status"], "completed", "{done}");
+    let requests = lines(&f.bin.join("requests.jsonl"));
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool == "read_file"));
+    let events = service
+        .engine
+        .store()
+        .events_after(done["session_id"].as_str().unwrap(), 0, None, 2000)
+        .unwrap();
+    assert!(events.iter().any(|e| e["task_id"] == done["task_id"]
+        && e["type"] == "tool.completed"
+        && e["payload"]["tool"] == "read_file"
+        && e["payload"]["success"] == true));
+    let profile = shadowcode_core::local_templates::Profile::Hermes2ProLlama3;
+    let launches = lines(&f.bin.join("launches.jsonl"));
+    assert_eq!(launches.len(), 1);
+    let args = launches[0]["argv"].as_array().unwrap();
+    let option = args.iter().position(|v| v == "--chat-template").unwrap();
+    assert_eq!(args[option + 1], profile.template());
+    assert!(args.iter().position(|v| v == "--jinja").unwrap() < option);
+    let loaded = service.engine.local_runtime().loaded().unwrap();
+    let receipt = &loaded.provenance;
+    assert_eq!(
+        receipt["model"]["chat_template"],
+        json!(shadowcode_core::gguf::string_identity(
+            HERMES_DEFAULT_TEMPLATE
+        ))
+    );
+    assert_eq!(receipt["template_override"]["profile"], profile.id());
+    assert_eq!(
+        receipt["template_override"]["template"],
+        json!(profile.identity())
+    );
+    assert_eq!(
+        receipt["template_override"]["runtime_template_verified"],
+        true
+    );
+    assert_eq!(
+        receipt["runtime"]["reported_chat_template"],
+        json!(profile.identity())
+    );
+    assert_eq!(
+        fs::read(model).unwrap(),
+        original,
+        "weights and metadata stay untouched"
+    );
+    service.engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn hermes_unconfirmed_runtime_template_is_refused_and_reaped() {
+    for sentinel in ["wrong-template", "missing-template"] {
+        let f = fixture(GPU);
+        let path = f.models.join("hermes.gguf");
+        hermes_like(&path, "Hermes-2-Pro-Llama-3-8B", HERMES_DEFAULT_TEMPLATE);
+        fs::write(f.bin.join(sentinel), b"").unwrap();
+        Config::patch(&f.paths, json!({"local_engine":{"files":[path]}})).unwrap();
+        let cfg = Config::load(&f.paths, None).unwrap();
+        local_engine::scan(&cfg.local_engine);
+        let engine = Engine::open(f.paths.clone()).unwrap();
+        let error = engine
+            .prepare_model_client(
+                &cfg,
+                &model_for(&local_engine::entry_id(&path)),
+                &CancellationToken::new(),
+            )
+            .await
+            .err()
+            .expect("unconfirmed templates cannot prepare tools");
+        assert!(
+            error.to_string().contains("did not confirm the expected"),
+            "{error}"
+        );
+        assert!(engine.local_runtime().loaded().is_none());
+        assert_eq!(engine.local_runtime().in_use(), 0);
+        assert!(lines(&f.bin.join("requests.jsonl")).is_empty());
+        let launches = lines(&f.bin.join("launches.jsonl"));
+        assert_eq!(
+            launches.len(),
+            1,
+            "template failure does not fall back to CPU"
+        );
+        assert!(!pid_alive(launches[0]["pid"].as_u64().unwrap()));
+        engine.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn hermes_override_requires_matching_metadata_before_server_spawn() {
+    use shadowcode_core::local_runtime::{GpuMode, LaunchSpec, LocalRuntime};
+    let f = fixture(GPU);
+    let path = f.models.join("Hermes-2-Pro-Llama-3-8B.gguf");
+    hermes_like(&path, "Different model", HERMES_DEFAULT_TEMPLATE);
+    let local = LocalRuntime::new();
+    let result = local
+        .acquire(
+            LaunchSpec {
+                id: local_engine::entry_id(&path),
+                name: "Hermes-2-Pro-Llama-3-8B".into(),
+                binary: f.bin.join("llama-server"),
+                model: path,
+                mmproj: None,
+                ctx: 4096,
+                gpu: GpuMode::All,
+                backend: "vulkan".into(),
+                template_profile: Some(shadowcode_core::local_templates::Profile::Hermes2ProLlama3),
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(result
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("metadata no longer matches"));
+    assert!(local.loaded().is_none());
+    assert!(lines(&f.bin.join("launches.jsonl")).is_empty());
+    local.stop().await;
+}
+
+#[tokio::test]
+async fn hermes_template_change_cannot_reuse_or_wait_on_its_own_lease() {
+    use shadowcode_core::local_runtime::{GpuMode, LaunchSpec, LocalRuntime};
+    let f = fixture(GPU);
+    let path = f.models.join("hermes.gguf");
+    hermes_like(&path, "Hermes-2-Pro-Llama-3-8B", HERMES_DEFAULT_TEMPLATE);
+    let local = LocalRuntime::new();
+    let cancel = CancellationToken::new();
+    let mut spec = LaunchSpec {
+        id: local_engine::entry_id(&path),
+        name: "hermes".into(),
+        binary: f.bin.join("llama-server"),
+        model: path,
+        mmproj: None,
+        ctx: 4096,
+        gpu: GpuMode::All,
+        backend: "vulkan".into(),
+        template_profile: None,
+    };
+    let (original, lease) = local.acquire(spec.clone(), &cancel).await.unwrap();
+    spec.template_profile = Some(shadowcode_core::local_templates::Profile::Hermes2ProLlama3);
+    let refused =
+        tokio::time::timeout(Duration::from_secs(1), local.acquire(spec.clone(), &cancel))
+            .await
+            .expect("same-ID template conflicts must not deadlock");
+    assert!(refused
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("launch configuration changed"));
+    drop(lease);
+    let (selected, lease) = local.acquire(spec.clone(), &cancel).await.unwrap();
+    assert_ne!(selected.pid, original.pid);
+    assert!(!pid_alive(u64::from(original.pid.unwrap())));
+    let (warm, second_lease) = local.acquire(spec, &cancel).await.unwrap();
+    assert_eq!(warm.pid, selected.pid);
+    assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 2);
+    assert_eq!(
+        warm.provenance["template_override"]["runtime_template_verified"],
+        true
+    );
+    drop(second_lease);
+    drop(lease);
+    local.stop().await;
+}
+
+#[tokio::test]
+async fn hermes_incomplete_calls_and_prose_xml_never_execute_tools() {
+    for variant in ["hermes-partial", "hermes-cut-short", "hermes-prose"] {
+        let f = fixture(GPU);
+        let model = f.models.join(format!("{variant}.gguf"));
+        hermes_like(&model, "Hermes-2-Pro-Llama-3-8B", HERMES_DEFAULT_TEMPLATE);
+        Config::patch(
+            &f.paths,
+            json!({"local_engine":{"files":[model]},"agent":{"max_fix_retries":0}}),
+        )
+        .unwrap();
+        let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+        let job = call(&service, "POST", "/api/jobs", json!({"workspace":f.project,"task":"Write a note to unexpected.txt.","model":local_engine::entry_id(&model)})).await.unwrap();
+        let done = wait_job(&service, job["id"].as_str().unwrap()).await;
+        if variant != "hermes-prose" {
+            assert_eq!(done["status"], "failed", "{variant}: {done}");
+        }
+        assert!(!f.project.join("unexpected.txt").exists());
+        let events = service
+            .engine
+            .store()
+            .events_after(done["session_id"].as_str().unwrap(), 0, None, 2000)
+            .unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| e["task_id"] == done["task_id"] && e["type"] == "tool.started"),
+            "{variant}: {events:?}"
+        );
+        assert!(!lines(&f.bin.join("requests.jsonl"))[0]["tools"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        service.engine.shutdown().await.unwrap();
     }
 }
 
@@ -489,6 +804,7 @@ async fn cancel_or_unload_during_provenance_probe_never_launches_a_server() {
             ctx: 4096,
             gpu: shadowcode_core::local_runtime::GpuMode::All,
             backend: "vulkan".into(),
+            template_profile: None,
         };
         let loading =
             tokio::spawn(async move { request_local.acquire(spec, &request_cancel).await });
@@ -748,6 +1064,7 @@ async fn load_switch_lease_unload_and_shutdown_stop_the_server() {
                     ctx,
                     gpu,
                     backend: backend.into(),
+                    template_profile: None,
                 },
                 &cancel,
             ),
@@ -1665,6 +1982,7 @@ async fn live_qwen3_agent_and_gemma4_vision_from_the_ollama_store() {
             ctx: entry["context_tokens"].as_u64().unwrap(),
             gpu: shadowcode_core::local_runtime::GpuMode::All,
             backend: "vulkan".into(),
+            template_profile: None,
         })
         .await;
     }

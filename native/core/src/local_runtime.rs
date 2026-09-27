@@ -57,6 +57,8 @@ pub struct LaunchSpec {
     pub gpu: GpuMode,
     /// Backend reported by `--list-devices` (e.g. `vulkan`, `cpu`).
     pub backend: String,
+    /// A bundled, metadata-matched compatibility template, verified on load.
+    pub template_profile: Option<crate::local_templates::Profile>,
 }
 
 impl LaunchSpec {
@@ -67,6 +69,7 @@ impl LaunchSpec {
             && self.ctx == other.ctx
             && self.gpu == other.gpu
             && self.backend == other.backend
+            && self.template_profile == other.template_profile
     }
 }
 
@@ -548,6 +551,11 @@ pub fn server_args(spec: &LaunchSpec, port: u16, gpu: GpuMode) -> Vec<String> {
         "--parallel".into(),
         "1".into(),
     ];
+    if let Some(profile) = spec.template_profile {
+        // --jinja must precede a literal custom template. No installed model
+        // or Ollama template is modified, and no mutable sidecar is loaded.
+        args.extend(["--chat-template".into(), profile.template().into()]);
+    }
     if let Some(mmproj) = &spec.mmproj {
         args.push("--mmproj".into());
         args.push(mmproj.display().to_string());
@@ -584,8 +592,16 @@ async fn launch(
     sources.validate(spec).map_err(other)?;
     let model_path = spec.model.clone();
     let runtime_path = spec.binary.clone();
+    let template_profile = spec.template_profile;
     let metadata = tokio::task::spawn_blocking(move || -> Result<_> {
-        let model = crate::local_engine::header(&model_path)?.provenance();
+        let header = crate::local_engine::header(&model_path)?;
+        if let Some(profile) = template_profile {
+            ensure!(
+                crate::local_templates::select(&header) == Some(profile),
+                "Model metadata no longer matches the selected local tool template"
+            );
+        }
+        let model = header.provenance();
         let probe = crate::local_engine::probe(&runtime_path);
         ensure!(
             probe.ok,
@@ -710,6 +726,15 @@ async fn launch(
         terminate(&mut child).await;
         return Err(other(error));
     }
+    if let Some(profile) = spec.template_profile {
+        if !profile.reported_matches(&props) {
+            terminate(&mut child).await;
+            return Err(other(anyhow!(
+                "llama-server did not confirm the expected {} tool template; tools were not enabled",
+                profile.id()
+            )));
+        }
+    }
     let n_ctx = props
         .pointer("/default_generation_settings/n_ctx")
         .and_then(Value::as_u64);
@@ -756,6 +781,7 @@ async fn launch(
                 "identity_kind": "filesystem_metadata",
                 "files": sources,
                 "model": model_provenance,
+                "template_override": spec.template_profile.map(|profile| profile.provenance()),
                 "runtime": {
                     "reported_version": runtime_probe.version,
                     "reported_commit": runtime_probe.commit,
@@ -908,6 +934,7 @@ mod tests {
             ctx: 8192,
             gpu: GpuMode::All,
             backend: "vulkan".into(),
+            template_profile: None,
         };
         let args = server_args(&spec, 5555, GpuMode::All).join(" ");
         assert!(args.contains("--host 127.0.0.1 --port 5555"));
@@ -923,6 +950,17 @@ mod tests {
         changed = spec.clone();
         changed.backend = "cuda".into();
         assert!(!spec.same_model(&changed));
+        changed = spec.clone();
+        let profile = crate::local_templates::Profile::Hermes2ProLlama3;
+        changed.template_profile = Some(profile);
+        assert!(!spec.same_model(&changed));
+        let template_args = server_args(&changed, 5555, GpuMode::All);
+        let option = template_args
+            .iter()
+            .position(|s| s == "--chat-template")
+            .unwrap();
+        assert_eq!(template_args[option + 1], profile.template());
+        assert!(template_args.iter().position(|s| s == "--jinja").unwrap() < option);
         let mut ring = Ring::default();
         ring.push(&vec![b'a'; STDERR_RING_BYTES]);
         ring.push(b"tail");

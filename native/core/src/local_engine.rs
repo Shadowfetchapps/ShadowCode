@@ -975,11 +975,13 @@ pub fn inspect(candidate: &Candidate, budget: &Budget) -> Result<GgufEntry> {
         _ => (true, String::new()),
     };
     let (context_tokens, memory, fits) = plan_context(&header, bytes, projector_bytes, budget);
-    let tools = header.template_supports_tools();
-    let tools_reason = match header.chat_template() {
-        None => "No chat template in the file · Chat only".to_owned(),
-        Some(_) if tools => "Chat template supports tool calls".to_owned(),
-        Some(_) => "Chat template has no tool-call support · Chat only".to_owned(),
+    let template_profile = crate::local_templates::select(&header);
+    let tools = template_profile.is_some() || header.template_supports_tools();
+    let tools_reason = match (template_profile, header.chat_template()) {
+        (Some(_), _) => "Bundled Hermes tool template · verified when the model loads".to_owned(),
+        (None, None) => "No chat template in the file · Chat only".to_owned(),
+        (None, Some(_)) if tools => "Chat template supports tool calls".to_owned(),
+        (None, Some(_)) => "Chat template has no tool-call support · Chat only".to_owned(),
     };
     let availability = if !compatible || fits == "no" {
         if compatible {
@@ -1571,9 +1573,11 @@ pub async fn prepare_with_progress(
             },
             &budget,
         )?;
-        Ok((runtime, entry, sources))
+        let template_profile =
+            crate::local_templates::select(header(Path::new(&entry.path))?.as_ref());
+        Ok((runtime, entry, sources, template_profile))
     });
-    let (runtime, entry, sources) = tokio::select! {
+    let (runtime, entry, sources, template_profile) = tokio::select! {
         biased;
         _ = cancel.cancelled() => bail!("Model preparation cancelled"),
         result = scan => result.context("Local catalog scan stopped")??,
@@ -1615,6 +1619,7 @@ pub async fn prepare_with_progress(
         ctx,
         gpu,
         backend: runtime.backend(),
+        template_profile,
     };
     let (loaded, lease) = local
         .acquire_checked_with_progress(spec, cancel, allow_cpu_fallback, progress, Some(sources))

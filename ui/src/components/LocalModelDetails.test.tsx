@@ -114,6 +114,28 @@ it("does not manufacture provenance for old, unknown or malformed receipts", () 
   expect(screen.queryByText("Architecture")).toBeNull();
 });
 
+it("confirms a compatibility template only against its recorded runtime identity", () => {
+  const applied = structuredClone(receipt);
+  applied.runtime!.provenance!.template_override = {
+    profile: "hermes-2-pro-llama-3-8b-tool-use-v1",
+    source: "bundled_llama_cpp_template",
+    source_commit: "d".repeat(40),
+    template: { sha256: "c".repeat(64), bytes: 70000 },
+    runtime_template_verified: true,
+  };
+  const { rerender } = render(<LocalModelDetails receipt={applied} />);
+  expect(screen.getByText("Bundled Hermes 2 Pro template")).toBeTruthy();
+  expect(screen.getByText("Matched runtime-reported template")).toBeTruthy();
+  expect(screen.getByText("b".repeat(64))).toBeTruthy();
+  applied.runtime!.provenance!.runtime.reported_chat_template!.sha256 = "e".repeat(64);
+  rerender(<LocalModelDetails receipt={applied} />);
+  expect(screen.getByText("Not confirmed")).toBeTruthy();
+  expect(screen.queryByText("Matched runtime-reported template")).toBeNull();
+  delete applied.runtime!.provenance!.template_override;
+  rerender(<LocalModelDetails receipt={applied} />);
+  expect(screen.queryByText("Tool compatibility")).toBeNull();
+});
+
 it("replays provenance only for its task and preserves the historical receipt", () => {
   const state = replay([
     {
