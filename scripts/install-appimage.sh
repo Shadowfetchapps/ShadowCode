@@ -10,7 +10,9 @@
 #   * The runtime is taken from the AppImage itself (usr/lib/shadowcode) and
 #     installed into ~/.local/lib/shadowcode by rename; the previous runtime
 #     stays as ~/.local/lib/shadowcode.previous until the install succeeds and
-#     is restored if a later step fails.
+#     is restored if a later step fails or a handled signal interrupts install.
+#   * Installers are serialized. Different bytes cannot replace an already
+#     installed version, and an interrupted runtime backup is never discarded.
 #   * Settings and task history are never touched. Previous ShadowCode
 #     AppImages are removed only after success.
 set -euo pipefail
@@ -65,27 +67,79 @@ LIB="$HOME/.local/lib/shadowcode"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$APPS" "$BIN" "$(dirname "$LIB")" "$DATA/applications" "$DATA/icons/hicolor/scalable/apps"
 
+# Keep one stable lock inode, including between failed attempts. Two installers
+# must not move or restore each other's runtime and AppImage.
+LOCK="$(dirname "$LIB")/.shadowcode-install-lock"
+[[ ! -L "$LOCK" ]] || fail 'Installer lock must not be a symlink.'
+exec {INSTALL_LOCK}>"$LOCK"
+flock -n "$INSTALL_LOCK" || fail 'Another ShadowCode install is already running.'
+[[ ! -e "$LIB.previous" && ! -L "$LIB.previous" ]] \
+  || fail "A previous install was interrupted; preserve and recover $LIB.previous before retrying."
+[[ ! -e "$APPS/ShadowCode.AppImage" || -L "$APPS/ShadowCode.AppImage" ]] \
+  || fail 'ShadowCode.AppImage is not a symlink; refusing to replace it.'
+# A retry may reuse identical bytes, but must not destroy the only rollback
+# copy by replacing a versioned path with different content.
+DEST_EXISTED=0
+if [[ -e "$DEST" || -L "$DEST" ]]; then
+  [[ -f "$DEST" && ! -L "$DEST" ]] || fail 'The versioned AppImage is not a regular file.'
+  cmp -s -- "$SOURCE" "$DEST" \
+    || fail "Different AppImage bytes are already installed as $VERSION; refusing to overwrite that version."
+  DEST_EXISTED=1
+fi
+
 # Stage next to the destination so the final step is a rename.
 STAGE="$(mktemp -d "$(dirname "$LIB")/.shadowcode-install.XXXXXX")"
-SWAPPED=0
+RUNTIME_REPLACING=0
+HAD_RUNTIME=0
+[[ -e "$LIB" || -L "$LIB" ]] && HAD_RUNTIME=1
+LINK_REPLACING=0
+DEST_CREATING=0
 PREVIOUS_LINK="$(readlink "$APPS/ShadowCode.AppImage" 2>/dev/null || true)"
 finish() {
   local status=$?
-  if [[ "$status" != 0 && "$SWAPPED" == 1 ]]; then
-    # A later step failed: put the previous runtime and AppImage link back.
-    rm -rf -- "$LIB"
-    [[ -d "$LIB.previous" ]] && mv -T -- "$LIB.previous" "$LIB"
-    if [[ -n "$PREVIOUS_LINK" ]]; then
-      ln -sfn -- "$PREVIOUS_LINK" "$APPS/.ShadowCode.AppImage.pending"
-      mv -Tf -- "$APPS/.ShadowCode.AppImage.pending" "$APPS/ShadowCode.AppImage"
+  local restored=1
+  trap - EXIT INT TERM
+  if [[ "$status" != 0 ]]; then
+    if [[ "$RUNTIME_REPLACING" == 1 ]]; then
+      if [[ -e "$LIB.previous" || -L "$LIB.previous" ]]; then
+        if rm -rf -- "$LIB"; then
+          mv -T -- "$LIB.previous" "$LIB" || restored=0
+        else
+          restored=0
+        fi
+      elif [[ "$HAD_RUNTIME" == 0 ]]; then
+        rm -rf -- "$LIB" || restored=0
+      fi
     fi
-    [[ "$SOURCE" == "$DEST" || "$(basename "$DEST")" == "$PREVIOUS_LINK" ]] || rm -f -- "$DEST"
-    echo 'Install failed; the previous runtime and AppImage were restored.' >&2
+    if [[ "$LINK_REPLACING" == 1 ]]; then
+      if [[ -n "$PREVIOUS_LINK" ]]; then
+        if ln -sfn -- "$PREVIOUS_LINK" "$APPS/.ShadowCode.AppImage.pending"; then
+          mv -Tf -- "$APPS/.ShadowCode.AppImage.pending" "$APPS/ShadowCode.AppImage" || restored=0
+        else
+          restored=0
+        fi
+      else
+        rm -f -- "$APPS/ShadowCode.AppImage" || restored=0
+      fi
+    fi
+    if [[ "$DEST_CREATING" == 1 && "$restored" == 1 ]]; then
+      rm -f -- "$DEST" || restored=0
+    fi
+    if [[ "$RUNTIME_REPLACING" == 1 || "$LINK_REPLACING" == 1 ]]; then
+      if [[ "$restored" == 1 ]]; then
+        echo 'Install failed; the previous runtime and AppImage were restored.' >&2
+      else
+        echo "Install failed and rollback needs attention; preserve $LIB.previous and $STAGE." >&2
+      fi
+    fi
   fi
-  rm -rf -- "$STAGE"
+  rm -f -- "$DEST.pending" "$APPS/.ShadowCode.AppImage.pending"
+  [[ "$restored" == 0 ]] || rm -rf -- "$STAGE"
   exit "$status"
 }
 trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # The llama.cpp runtime shipped inside this AppImage.
 (cd "$STAGE" && "$SOURCE" --appimage-extract usr/lib/shadowcode >/dev/null) \
@@ -109,14 +163,17 @@ RUNTIME_VERSION="$(cd / && env -u LD_LIBRARY_PATH "$NEW_RUNTIME/llama-server" --
   || fail "The bundled llama-server does not report commit ${RUNTIME_COMMIT:0:7}."
 
 # Everything verified: replace.
-if [[ "$SOURCE" != "$DEST" ]]; then
+if [[ "$DEST_EXISTED" == 0 ]]; then
   install -m 755 "$SOURCE" "$DEST.pending"
+  DEST_CREATING=1
   mv -f "$DEST.pending" "$DEST"
 fi
-rm -rf -- "$LIB.previous"
-[[ -e "$LIB" ]] && mv -T -- "$LIB" "$LIB.previous"
+# Record intent before either rename: an error or handled signal can occur
+# after the old runtime moved but before the candidate reaches its destination.
+RUNTIME_REPLACING=1
+[[ "$HAD_RUNTIME" == 0 ]] || mv -T -- "$LIB" "$LIB.previous"
 mv -T -- "$NEW_RUNTIME" "$LIB"
-SWAPPED=1
+LINK_REPLACING=1
 ln -sfn "$(basename "$DEST")" "$APPS/.ShadowCode.AppImage.pending"
 mv -Tf "$APPS/.ShadowCode.AppImage.pending" "$APPS/ShadowCode.AppImage"
 # Desktop launch uses extraction mode so libfuse2 is not required.
@@ -139,7 +196,9 @@ if [[ "$GIT_SHA" =~ ^[[:xdigit:]]{40}$ ]]; then
 fi
 mv -f "$DATA/applications/shadow-agent.desktop.pending" "$DATA/applications/shadow-agent.desktop"
 # Success: drop the previous runtime and older AppImages.
-SWAPPED=0
+RUNTIME_REPLACING=0
+LINK_REPLACING=0
+DEST_CREATING=0
 rm -rf -- "$LIB.previous"
 for old in "$APPS"/ShadowCode-*-x86_64.AppImage; do
   [[ "$old" == "$DEST" || ! -f "$old" ]] || rm -- "$old"

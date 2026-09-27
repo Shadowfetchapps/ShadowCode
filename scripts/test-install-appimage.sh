@@ -181,5 +181,112 @@ if [[ -x "$REAL_BIN/llama-server" && -f "$REAL_BIN/NOTICES/llama.cpp-LICENSE" ]]
   test -z "$(find "$LIB" -type l -lname '/*' -print -quit)"
   env -u LD_LIBRARY_PATH "$LIB/llama-server" --version 2>&1 | grep -Fq "commit ${REAL_COMMIT:0:9}"
   printf 'Real llama.cpp runtime %s installed and started from %s.\n' "${REAL_COMMIT:0:9}" "$LIB"
+else
+  printf 'SKIP installer-real-runtime: packaging/llama.cpp/bin is not built.\n'
 fi
+
+# 8. Failure between the two runtime renames must restore the live runtime.
+# Command wrappers fail at actual filesystem boundaries; the installer has no
+# test-only switches and all mutations still happen inside the isolated HOME.
+PRIOR_LINK="$(readlink "$HOME/Applications/ShadowCode.AppImage")"
+PRIOR_COMMIT="$(awk -F= '$1 == "commit" { print $2; exit }' "$LIB/COMMIT")"
+FAULT_BIN="$SCRATCH/fault-bin"
+mkdir -p "$FAULT_BIN"
+REAL_MV="$(command -v mv)"
+cat > "$FAULT_BIN/mv" <<'WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+source_path="${@: -2:1}"
+target_path="${@: -1}"
+case "$SHADOW_TEST_FAULT" in
+  old-runtime-failure)
+    if [[ "$source_path" == "$HOME/.local/lib/shadowcode" ]]; then
+      echo 'Injected old runtime rename failure' >&2
+      exit 74
+    fi ;;
+  new-runtime-failure|rollback-failure)
+    if [[ "$source_path" == */squashfs-root/usr/lib/shadowcode ]]; then
+      echo 'Injected candidate runtime rename failure' >&2
+      exit 74
+    fi
+    if [[ "$SHADOW_TEST_FAULT" == rollback-failure && "$source_path" == "$HOME/.local/lib/shadowcode.previous" ]]; then
+      echo 'Injected rollback rename failure' >&2
+      exit 75
+    fi ;;
+  after-old-runtime-term|after-new-runtime-term|after-old-runtime-kill)
+    if [[ ( "$SHADOW_TEST_FAULT" == after-old-runtime-* && "$target_path" == "$HOME/.local/lib/shadowcode.previous" ) ||
+          ( "$SHADOW_TEST_FAULT" == after-new-runtime-term && "$source_path" == */squashfs-root/usr/lib/shadowcode ) ]]; then
+      "$SHADOW_TEST_REAL_MV" "$@"
+      signal=TERM
+      [[ "$SHADOW_TEST_FAULT" == after-old-runtime-kill ]] && signal=KILL
+      echo "Injected $signal after runtime rename" >&2
+      kill -"$signal" "$PPID"
+      exit 0
+    fi ;;
+esac
+exec "$SHADOW_TEST_REAL_MV" "$@"
+WRAPPER
+chmod +x "$FAULT_BIN/mv"
+NEXT="$SCRATCH/release/ShadowCode_0.28.4_amd64.AppImage"
+rm -f "$SCRATCH/release/SHA256SUMS"
+fake_appimage "$NEXT" 0.28.4 "$COMMIT_A" good
+checksum "$NEXT"
+for fault in old-runtime-failure new-runtime-failure after-old-runtime-term after-new-runtime-term; do
+  expect_refusal "$fault" env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT="$fault" "$INSTALLER" "$NEXT"
+  grep -Fq 'Injected' "$SCRATCH/refused.txt"
+  grep -Fq 'previous runtime and AppImage were restored' "$SCRATCH/refused.txt"
+  test -f "$LIB/COMMIT" || { echo 'Prior live runtime disappeared after failed replacement.' >&2; exit 1; }
+  assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
+  test ! -e "$HOME/Applications/ShadowCode-0.28.4-x86_64.AppImage"
+  test ! -e "$HOME/Applications/ShadowCode-0.28.4-x86_64.AppImage.pending"
+done
+
+# 9. Same-version retries are byte-immutable, even with a valid new checksum.
+PRIOR_VERSION="${PRIOR_LINK#ShadowCode-}"
+PRIOR_VERSION="${PRIOR_VERSION%-x86_64.AppImage}"
+SAME_VERSION="$SCRATCH/release/ShadowCode_${PRIOR_VERSION}_amd64.AppImage"
+fake_appimage "$SAME_VERSION" "$PRIOR_VERSION" "$COMMIT_A" good
+printf '# changed bytes under the same version\n' >> "$SAME_VERSION"
+checksum "$SAME_VERSION"
+PRIOR_HASH="$(sha256sum "$HOME/Applications/$PRIOR_LINK")"
+expect_refusal 'same-version changed bytes' "$INSTALLER" "$SAME_VERSION"
+grep -Fq 'refusing to overwrite that version' "$SCRATCH/refused.txt"
+test "$(sha256sum "$HOME/Applications/$PRIOR_LINK")" = "$PRIOR_HASH"
+assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
+
+# 10. Another installer cannot enter the transaction while its lock is held.
+exec {TEST_LOCK}>"$HOME/.local/lib/.shadowcode-install-lock"
+flock -n "$TEST_LOCK"
+expect_refusal 'concurrent installer' "$INSTALLER" "$NEXT"
+grep -Fq 'Another ShadowCode install is already running' "$SCRATCH/refused.txt"
+exec {TEST_LOCK}>&-
+assert_state_unchanged "$PRIOR_LINK" "$PRIOR_COMMIT"
+
+# 11. A failed rollback retains its recovery copy. Retrying must never delete
+# that backup as the old installer did, nor claim restoration succeeded.
+expect_refusal 'rollback rename failure' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=rollback-failure "$INSTALLER" "$NEXT"
+grep -Fq 'rollback needs attention' "$SCRATCH/refused.txt"
+grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
+test -n "$(find "$HOME/.local/lib" -maxdepth 1 -type d -name '.shadowcode-install.*' -print -quit)"
+expect_refusal 'unresolved interrupted install' "$INSTALLER" "$NEXT"
+grep -Fq 'previous install was interrupted' "$SCRATCH/refused.txt"
+grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
+test "$(sha256sum "$HOME/Applications/$PRIOR_LINK")" = "$PRIOR_HASH"
+test "$(cat "$XDG_DATA_HOME/shadow-agent/profile.txt")" = 'keep this profile data'
+
+# 12. SIGKILL cannot run shell traps. Keep the old runtime and refuse a retry
+# rather than silently deleting the recovery copy. This checks preservation,
+# not automatic crash recovery or power-loss durability.
+mv -T -- "$LIB.previous" "$LIB"
+find "$HOME/.local/lib" -maxdepth 1 -type d -name '.shadowcode-install.*' -exec rm -rf -- {} +
+rm -f "$HOME/Applications/ShadowCode-0.28.4-x86_64.AppImage"
+expect_refusal 'killed between runtime renames' env PATH="$FAULT_BIN:$PATH" SHADOW_TEST_REAL_MV="$REAL_MV" SHADOW_TEST_FAULT=after-old-runtime-kill "$INSTALLER" "$NEXT"
+grep -Fq 'Injected KILL' "$SCRATCH/refused.txt"
+grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
+test ! -e "$LIB"
+expect_refusal 'retry after killed install' "$INSTALLER" "$NEXT"
+grep -Fq 'previous install was interrupted' "$SCRATCH/refused.txt"
+grep -Fxq "commit=$PRIOR_COMMIT" "$LIB.previous/COMMIT"
+test "$(sha256sum "$HOME/Applications/$PRIOR_LINK")" = "$PRIOR_HASH"
+test "$(cat "$XDG_DATA_HOME/shadow-agent/profile.txt")" = 'keep this profile data'
 printf 'AppImage installer checks passed.\n'
