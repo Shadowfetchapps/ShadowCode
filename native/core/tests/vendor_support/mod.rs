@@ -30,7 +30,7 @@ def send(o):
 args = sys.argv[1:]
 KEYS = ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY","ANTHROPIC_AUTH_TOKEN","OPENAI_API_KEY","CODEX_API_KEY","CURSOR_API_KEY","XAI_API_KEY","GROK_API_KEY","GEMINI_API_KEY","GOOGLE_API_KEY"]
 if "--version" in args:
-    print("codex-cli 0.155.0-fake"); sys.exit(0)
+    print("codex-cli 0.158.0-fake"); sys.exit(0)
 if args[:1] == ["--help"]:
     print("Commands:\n  exec\n  app-server\n  login\n  logout"); sys.exit(0)
 if args[:2] == ["login", "status"]:
@@ -66,6 +66,9 @@ def snapshot(used=None, reached=None):
 def rate_limits():
     s = snapshot(reached=C.get("reached"))
     return {"rateLimits":s,"rateLimitsByLimitId":{"codex":s,"base_model_inference":{"limitId":"base_model_inference","limitName":"gpt-reserve","normalModelSlug":"gpt-5.6-luna","primary":{"usedPercent":5,"windowDurationMins":10080}}},"ordinaryUsageAllowed":True}
+active_thread = None
+active_turn = None
+turn_count = 0
 for raw in sys.stdin:
     m = json.loads(raw)
     method = m.get("method"); mid = m.get("id"); params = m.get("params") or {}
@@ -109,13 +112,14 @@ for raw in sys.stdin:
             {"id":"gpt-6-astra","displayName":"GPT-6-Astra","isDefault":True,"inputModalities":["text","image"] if C.get("images", True) else ["text"]},
             {"id":"gpt-5.6-luna","displayName":"GPT-5.6-Luna","isDefault":False,"inputModalities":["text","image"] if C.get("images", True) else ["text"]}]}})
     elif method in ("thread/start", "thread/resume"):
+        active_thread = params.get("threadId") or "thr-1"
         mark("threads.log", method + " " + json.dumps(params.get("model")) + " " + json.dumps(params.get("threadId")))
         if C.get("block_stdin"):
             import fcntl
             fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETPIPE_SZ, 4096)
         if C.get("close_stdin_after_thread"):
             os.close(sys.stdin.fileno())
-        send({"jsonrpc":"2.0","id":mid,"result":{"thread":{"id": params.get("threadId") or "thr-1"}}})
+        send({"jsonrpc":"2.0","id":mid,"result":{"thread":{"id":active_thread}}})
         if C.get("close_stdin_after_thread"):
             time.sleep(20)
             sys.exit(0)
@@ -126,9 +130,12 @@ for raw in sys.stdin:
                 time.sleep(0.01)
             sys.exit(0)
     elif method == "turn/start":
+        assert params["threadId"] == active_thread
+        turn_count += 1
+        active_turn = "turn-" + str(turn_count)
         text = "".join(i.get("text","") for i in params.get("input", []) if i.get("type") == "text")
         mark("prompts.log", json.dumps(text))
-        send({"jsonrpc":"2.0","id":mid,"result":{"turn":{"id":"turn-1"}}})
+        send({"jsonrpc":"2.0","id":mid,"result":{"turn":{"id":active_turn}}})
         mode = C.get("turn", "ok")
         if mode == "pause_budget" and not os.path.exists(os.path.join(HERE, "interrupted")):
             mark("pause_ready")
@@ -140,53 +147,53 @@ for raw in sys.stdin:
                 # Both ignored frames and meaningful accounting frames are
                 # valid protocol traffic; neither should extend a run forever.
                 send({"jsonrpc":"2.0","method":"future/heartbeat","params":{}})
-                send({"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":1,"outputTokens":1}}}})
+                send({"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":active_thread,"turnId":active_turn,"tokenUsage":{"last":{"inputTokens":1,"outputTokens":1}}}})
                 time.sleep(0.01)
             continue
         if mode == "aggregate_protocol":
             mark("transport.pid", str(os.getpid()))
             for _ in range(34):
                 send({"jsonrpc":"2.0","method":"future/heartbeat","params":{"padding":"x" * (2 * 1024 * 1024)}})
-            send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":active_thread,"turn":{"id":active_turn,"status":"completed"}}})
             continue
         if mode == "aggregate_text":
             mark("transport.pid", str(os.getpid()))
             for n in range(72):
-                send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"x" * (128 * 1024)}})
-            send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}})
+                send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":active_thread,"turnId":active_turn,"itemId":"m1","delta":"x" * (128 * 1024)}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":active_thread,"turn":{"id":active_turn,"status":"completed"}}})
             continue
         if mode == "stream_approval":
             for _ in range(300):
-                send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"x"}})
-            send({"jsonrpc":"2.0","id":77,"method":"item/commandExecution/requestApproval","params":{"command":"printf fixture","reason":"fixture approval"}})
+                send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":active_thread,"turnId":active_turn,"itemId":"m1","delta":"x"}})
+            send({"jsonrpc":"2.0","id":77,"method":"item/commandExecution/requestApproval","params":{"threadId":active_thread,"turnId":active_turn,"itemId":"command-" + str(turn_count),"startedAtMs":0,"command":"printf fixture","reason":"fixture approval"}})
             continue
         if mode == "stream_wait":
-            send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"live prefix"}})
+            send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":active_thread,"turnId":active_turn,"itemId":"m1","delta":"live prefix"}})
             mark("stream_waiting")
             until = time.monotonic() + 5
             while not os.path.exists(os.path.join(HERE, "observed_stream")) and time.monotonic() < until:
                 time.sleep(0.01)
-            send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":" and end"}})
-            send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}})
+            send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":active_thread,"turnId":active_turn,"itemId":"m1","delta":" and end"}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":active_thread,"turn":{"id":active_turn,"status":"completed"}}})
             continue
         if mode == "limit":
             send({"jsonrpc":"2.0","method":"account/rateLimits/updated","params":{"rateLimits":snapshot(used=100, reached="rate_limit_reached")}})
             time.sleep(10)
             continue
         if mode == "fail":
-            send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"failed","error":{"message":"No such file or directory (os error 2)"}}}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":active_thread,"turn":{"id":active_turn,"status":"failed","error":{"message":"No such file or directory (os error 2)"}}}})
             continue
         if mode == "approval":
-            send({"jsonrpc":"2.0","id":77,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf build","reason":"clean"}})
+            send({"jsonrpc":"2.0","id":77,"method":"item/commandExecution/requestApproval","params":{"threadId":active_thread,"turnId":active_turn,"itemId":"command-" + str(turn_count),"startedAtMs":0,"command":"rm -rf build","reason":"clean"}})
             continue
         if mode == "slow":
             time.sleep(float(C.get("slow", 2)))
         if mode == "fragmented":
-            frame = json.dumps({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"complete fragmented reply"}})
+            frame = json.dumps({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":active_thread,"turnId":active_turn,"itemId":"m1","delta":"complete fragmented reply"}})
             sys.stdout.write(frame[:45]); sys.stdout.flush()
             time.sleep(0.7)  # crosses the runner's 250 ms cancellation poll
             sys.stdout.write(frame[45:] + "\n"); sys.stdout.flush()
-            send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":active_thread,"turn":{"id":active_turn,"status":"completed"}}})
             continue
         if mode == "oversized_stdout":
             mark("transport.pid", str(os.getpid()))
@@ -205,18 +212,18 @@ for raw in sys.stdin:
         if mode == "env":
             reply = "API keys visible: " + (",".join(k for k in KEYS if k in os.environ) or "none") + "; marker=" + os.environ.get("SHADOWCODE_FAKE_MARKER", "absent")
         for n in (1, 2):
-            send({"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"thr-1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":10,"outputTokens":5,"totalTokens":15},"total":{"inputTokens":1000*n,"outputTokens":500*n,"totalTokens":1500*n}}}})
+            send({"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":active_thread,"turnId":active_turn,"tokenUsage":{"last":{"inputTokens":10,"outputTokens":5,"totalTokens":15},"total":{"inputTokens":1000*n,"outputTokens":500*n,"totalTokens":1500*n}}}})
         send({"jsonrpc":"2.0","method":"account/rateLimits/updated","params":{"rateLimits":snapshot(used=41)}})
-        send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":reply}})
-        send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}})
+        send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":active_thread,"turnId":active_turn,"itemId":"m1","delta":reply}})
+        send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":active_thread,"turn":{"id":active_turn,"status":"completed"}}})
     elif mid == 77:
         decision = (m.get("result") or {}).get("decision")
-        send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"decision=" + str(decision)}})
-        send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}})
+        send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":active_thread,"turnId":active_turn,"itemId":"m1","delta":"decision=" + str(decision)}})
+        send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":active_thread,"turn":{"id":active_turn,"status":"completed"}}})
     elif method == "turn/interrupt":
         mark("interrupted")
         if C.get("turn") == "pause_budget":
-            send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"interrupted"}}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":active_thread,"turn":{"id":active_turn,"status":"interrupted"}}})
         send({"jsonrpc":"2.0","id":mid,"result":{}})
 "#;
 

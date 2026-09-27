@@ -27,6 +27,11 @@ use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
 const OUTPUT_PREVIEW: usize = 8000;
+// Only the matching turn/start response establishes turn identity. Some peers
+// can interleave scoped notifications before that response; retain a bounded
+// prefix, then validate every envelope before publishing it to the host task.
+const MAX_EARLY_FRAMES: usize = 128;
+const MAX_EARLY_BYTES: usize = 1024 * 1024;
 
 fn rpc_request(id: u64, method: &str, params: Value) -> String {
     json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string()
@@ -78,6 +83,8 @@ pub struct CodexAppServerAdapter {
     options: Option<LaunchOptions>,
     turn_active: bool,
     resume_failed: bool,
+    early_frames: std::collections::VecDeque<Value>,
+    early_bytes: usize,
 }
 impl CodexAppServerAdapter {
     fn id(&mut self) -> u64 {
@@ -88,6 +95,7 @@ impl CodexAppServerAdapter {
         let Some(thread) = self.thread_id.clone() else {
             bail!("Codex thread is not ready")
         };
+        let mut send = self.retire_turn("The Codex turn was replaced");
         let id = self.id();
         self.turn_start_id = Some(id);
         self.turn_active = true;
@@ -102,15 +110,170 @@ impl CodexAppServerAdapter {
         if let Some(options) = &self.options {
             params["cwd"] = json!(options.workspace);
         }
-        Ok(vec![rpc_request(id, "turn/start", params)])
+        send.push(rpc_request(id, "turn/start", params));
+        Ok(send)
+    }
+    fn retire_turn(&mut self, reason: &str) -> Vec<String> {
+        self.turn_id = None;
+        self.turn_start_id = None;
+        self.turn_active = false;
+        self.streamed_message_ids.clear();
+        self.early_bytes = 0;
+        let mut send: Vec<_> = self
+            .early_frames
+            .drain(..)
+            .filter_map(|frame| frame.get("id").cloned())
+            .map(|id| rpc_error(&id, -32602, reason))
+            .collect();
+        send.extend(
+            self.pending_approvals
+                .drain()
+                .map(|(id, _)| rpc_error(&request_id_value(&id), -32602, reason)),
+        );
+        send
+    }
+    fn reject_scope(message: &Value) -> Step {
+        Step {
+            send: message
+                .get("id")
+                .filter(|id| !id.is_null())
+                .map(|id| {
+                    vec![rpc_error(
+                        id,
+                        -32602,
+                        "Codex event does not match the active thread and turn",
+                    )]
+                })
+                .unwrap_or_default(),
+            updates: vec![Update::Warning(
+                "Ignored a Codex event outside the active thread and turn".into(),
+            )],
+        }
+    }
+    /// Validate only identity fields from the installed v2 schema. Account
+    /// notices remain global; this is not a complete schema validator.
+    fn scope_message(&mut self, message: &Value) -> Option<Step> {
+        let method = message["method"].as_str()?;
+        let params = &message["params"];
+        let modern = matches!(
+            method,
+            "item/agentMessage/delta"
+                | "item/started"
+                | "item/completed"
+                | "thread/tokenUsage/updated"
+                | "error"
+                | "turn/started"
+                | "turn/completed"
+                | "item/commandExecution/requestApproval"
+                | "item/fileChange/requestApproval"
+                | "item/permissions/requestApproval"
+        );
+        let legacy = matches!(method, "execCommandApproval" | "applyPatchApproval");
+        let thread_warning =
+            method == "guardianWarning" || (method == "warning" && !params["threadId"].is_null());
+        if !modern && !legacy && !thread_warning {
+            return None;
+        }
+        let thread = params[if legacy { "conversationId" } else { "threadId" }]
+            .as_str()
+            .filter(|id| !id.is_empty());
+        if thread.is_none() || thread != self.thread_id.as_deref() {
+            return Some(Self::reject_scope(message));
+        }
+        if thread_warning {
+            return None;
+        }
+        if !self.turn_active {
+            return Some(Self::reject_scope(message));
+        }
+        // Legacy approvals have no turn field. Accept only after a current
+        // turn is authoritatively bound, and only for its matching thread.
+        if legacy {
+            return self.turn_id.is_none().then(|| Self::reject_scope(message));
+        }
+        let turn = if matches!(method, "turn/started" | "turn/completed") {
+            &params["turn"]["id"]
+        } else {
+            &params["turnId"]
+        };
+        let Some(turn) = turn.as_str().filter(|id| !id.is_empty()) else {
+            return Some(Self::reject_scope(message));
+        };
+        if let Some(owned) = self.turn_id.as_deref() {
+            return (turn != owned).then(|| Self::reject_scope(message));
+        }
+        if self.turn_start_id.is_none() {
+            return Some(Self::reject_scope(message));
+        }
+        let bytes = message.to_string().len();
+        if self.early_frames.len() >= MAX_EARLY_FRAMES
+            || bytes > MAX_EARLY_BYTES.saturating_sub(self.early_bytes)
+        {
+            let mut send = self.retire_turn("Codex early-event buffer exceeded its limit");
+            if let Some(id) = message.get("id").filter(|id| !id.is_null()) {
+                send.push(rpc_error(
+                    id,
+                    -32602,
+                    "Codex early-event buffer exceeded its limit",
+                ));
+            }
+            return Some(Step {send, updates: vec![Update::TurnFailed(
+                "Codex sent too many events before identifying the active turn (128 frames / 1 MiB limit)".into())]});
+        }
+        self.early_bytes += bytes;
+        self.early_frames.push_back(message.clone());
+        Some(Step::default())
+    }
+    fn dispatch_scoped(&mut self, message: &Value) -> Step {
+        if let Some(id) = message.get("id").filter(|id| !id.is_null()) {
+            let key = request_id_key(id);
+            if self.pending_approvals.contains_key(&key)
+                || self
+                    .early_frames
+                    .iter()
+                    .any(|frame| frame.get("id") == Some(id))
+            {
+                return Step {
+                    send: self.retire_turn("Codex reused an outstanding server request id"),
+                    updates: vec![Update::TurnFailed(
+                        "Codex reused an outstanding server request id; approval authority was retired".into()
+                    )],
+                };
+            }
+        }
+        if let Some(step) = self.scope_message(message) {
+            return step;
+        }
+        let Some(method) = message["method"].as_str() else {
+            return Step::default();
+        };
+        match message.get("id").filter(|id| !id.is_null()) {
+            Some(id) => self.handle_server_request(id, method, &message["params"]),
+            None => self.handle_notification(method, &message["params"]),
+        }
     }
     fn handle_response(&mut self, id: u64, message: &Value) -> Result<Step> {
+        let kind = if self.init_id == Some(id) {
+            self.init_id = None;
+            "initialize"
+        } else if self.thread_start_id == Some(id) {
+            self.thread_start_id = None;
+            "thread"
+        } else if self.turn_start_id == Some(id) {
+            self.turn_start_id = None;
+            "turn"
+        } else if self.interrupt_id == Some(id) {
+            self.interrupt_id = None;
+            "interrupt"
+        } else {
+            return Ok(Step::default());
+        };
         if let Some(error) = message.get("error").filter(|e| !e.is_null()) {
             let text = error["message"].as_str().unwrap_or("unknown error");
-            if Some(id) == self.init_id {
+            if kind == "initialize" {
                 bail!("Codex app-server rejected the handshake: {text}");
             }
-            if Some(id) == self.thread_start_id {
+            if kind == "thread" {
                 if self.options.as_ref().is_some_and(|o| o.resume.is_some()) && !self.resume_failed
                 {
                     // The stored thread is gone (archived, deleted, other
@@ -144,17 +307,20 @@ impl CodexAppServerAdapter {
                 }
                 bail!("Codex app-server rejected the handshake: {text}");
             }
-            if Some(id) == self.turn_start_id {
-                return Ok(Step::update(Update::TurnFailed(format!(
-                    "Codex could not start the turn: {text}"
-                ))));
+            if kind == "turn" {
+                return Ok(Step {
+                    send: self.retire_turn("Codex could not start the turn"),
+                    updates: vec![Update::TurnFailed(format!(
+                        "Codex could not start the turn: {text}"
+                    ))],
+                });
             }
             return Ok(Step::update(Update::Warning(format!(
                 "Codex error: {text}"
             ))));
         }
         let result = &message["result"];
-        if Some(id) == self.init_id {
+        if kind == "initialize" {
             self.phase = Phase::Initialized;
             let mut step = Step::send(rpc_notification("initialized", None));
             let thread_id = self.id();
@@ -182,8 +348,8 @@ impl CodexAppServerAdapter {
             step.send.push(rpc_request(thread_id, method, params));
             return Ok(step);
         }
-        if Some(id) == self.thread_start_id {
-            let Some(thread) = result["thread"]["id"].as_str() else {
+        if kind == "thread" {
+            let Some(thread) = result["thread"]["id"].as_str().filter(|id| !id.is_empty()) else {
                 bail!("Codex thread/start response has no thread id")
             };
             self.thread_id = Some(thread.to_owned());
@@ -196,13 +362,27 @@ impl CodexAppServerAdapter {
             }
             return Ok(step);
         }
-        if Some(id) == self.turn_start_id {
-            if let Some(turn) = result["turn"]["id"].as_str() {
-                self.turn_id = Some(turn.to_owned());
+        if kind == "turn" {
+            let Some(turn) = result["turn"]["id"].as_str().filter(|id| !id.is_empty()) else {
+                return Ok(Step {
+                    send: self.retire_turn("Codex turn/start response has no valid turn id"),
+                    updates: vec![Update::TurnFailed(
+                        "Codex turn/start response has no valid turn id".into(),
+                    )],
+                });
+            };
+            self.turn_id = Some(turn.to_owned());
+            self.early_bytes = 0;
+            let frames = std::mem::take(&mut self.early_frames);
+            let mut result = Step::default();
+            for frame in frames {
+                let step = self.dispatch_scoped(&frame);
+                result.send.extend(step.send);
+                result.updates.extend(step.updates);
             }
-            return Ok(Step::default());
+            return Ok(result);
         }
-        if Some(id) == self.interrupt_id {
+        if kind == "interrupt" {
             return Ok(Step::default());
         }
         Ok(Step::default())
@@ -221,9 +401,9 @@ impl CodexAppServerAdapter {
             "item/started" => item_started(&params["item"]),
             "item/completed" => self.item_completed(&params["item"]),
             "turn/completed" => {
-                self.turn_active = false;
+                let send = self.retire_turn("The Codex turn completed");
                 let status = params["turn"]["status"].as_str().unwrap_or("completed");
-                match status {
+                let mut step = match status {
                     "failed" if usage_limit_error(&params["turn"]["error"]) => {
                         Step::update(Update::LimitReached(
                             params["turn"]["error"]["message"]
@@ -246,7 +426,9 @@ impl CodexAppServerAdapter {
                         text: None,
                         interrupted: false,
                     }),
-                }
+                };
+                step.send.extend(send);
+                step
             }
             "thread/tokenUsage/updated" => {
                 // `total` is cumulative for the thread; `last` is the latest
@@ -611,10 +793,7 @@ impl CliAdapter for CodexAppServerAdapter {
         let method = message["method"].as_str();
         let id = message.get("id").filter(|id| !id.is_null());
         match (method, id) {
-            (Some(method), Some(id)) => {
-                Ok(self.handle_server_request(id, method, &message["params"]))
-            }
-            (Some(method), None) => Ok(self.handle_notification(method, &message["params"])),
+            (Some(_), _) => Ok(self.dispatch_scoped(&message)),
             (None, Some(id)) => match id.as_u64() {
                 Some(id) => self.handle_response(id, &message),
                 None => Ok(Step::update(Update::Warning(

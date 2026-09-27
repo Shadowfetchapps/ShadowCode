@@ -550,12 +550,25 @@ fn approval_id(updates: &[Update]) -> String {
 
 #[test]
 fn allow_for_task_maps_to_the_vendors_session_choice_and_notes_to_claude() {
+    let root = tempfile::tempdir().unwrap();
     let mut codex = adapter_for(Vendor::Codex, false);
+    codex.on_start(&launch(root.path(), None));
+    codex.prompt("approval mapping", &[]).unwrap();
+    // Approval choices belong to this established thread and active turn.
+    for (id, result) in [
+        (1, json!({"userAgent":"fixture"})),
+        (2, json!({"thread":{"id":"thr-1"}})),
+        (3, json!({"turn":{"id":"turn-1"}})),
+    ] {
+        codex
+            .on_line(&json!({"jsonrpc":"2.0","id":id,"result":result}).to_string())
+            .unwrap();
+    }
     let step = codex
         .on_line(&rpc(
             7,
             "item/commandExecution/requestApproval",
-            json!({"command":"cargo test","itemId":"c1"}),
+            json!({"threadId":"thr-1","turnId":"turn-1","startedAtMs":0,"command":"cargo test","itemId":"c1"}),
         ))
         .unwrap();
     let id = approval_id(&step.updates);
@@ -577,7 +590,7 @@ fn allow_for_task_maps_to_the_vendors_session_choice_and_notes_to_claude() {
         .on_line(&rpc(
             8,
             "execCommandApproval",
-            json!({"command":["cargo","test"]}),
+            json!({"conversationId":"thr-1","callId":"c2","command":["cargo","test"],"cwd":root.path(),"parsedCmd":[]}),
         ))
         .unwrap();
     let id = approval_id(&step.updates);
@@ -596,7 +609,7 @@ fn allow_for_task_maps_to_the_vendors_session_choice_and_notes_to_claude() {
         .on_line(&rpc(
             9,
             "applyPatchApproval",
-            json!({"fileChanges":{"a.txt":{"add":{"content":"x\n"}}}}),
+            json!({"conversationId":"thr-1","callId":"f1","fileChanges":{"a.txt":{"add":{"content":"x\n"}}}}),
         ))
         .unwrap();
     // The patch travels with the prompt, for the approval card's diff.

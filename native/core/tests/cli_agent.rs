@@ -96,28 +96,28 @@ fn codex_app_server_streams_tools_and_approves() {
             &rpc_result(3, json!({"turn":{"id":"turn-1"}})),
             &note(
                 "item/agentMessage/delta",
-                json!({"itemId":"m1","delta":"Hello "}),
+                json!({"threadId":"thr-1","turnId":"turn-1","itemId":"m1","delta":"Hello "}),
             ),
             &note(
                 "item/agentMessage/delta",
-                json!({"itemId":"m1","delta":"world"}),
+                json!({"threadId":"thr-1","turnId":"turn-1","itemId":"m1","delta":"world"}),
             ),
             &note(
                 "item/started",
-                json!({"item":{"id":"c1","type":"commandExecution","command":"ls"}}),
+                json!({"threadId":"thr-1","turnId":"turn-1","startedAtMs":0,"item":{"id":"c1","type":"commandExecution","command":"ls","cwd":root.path(),"commandActions":[],"status":"inProgress"}}),
             ),
             &note(
                 "item/completed",
-                json!({"item":{"id":"c1","type":"commandExecution","status":"completed","exitCode":0,"aggregatedOutput":"ok","command":"ls"}}),
+                json!({"threadId":"thr-1","turnId":"turn-1","completedAtMs":1,"item":{"id":"c1","type":"commandExecution","status":"completed","exitCode":0,"aggregatedOutput":"ok","command":"ls","cwd":root.path(),"commandActions":[]}}),
             ),
             &note(
                 "item/completed",
-                json!({"item":{"id":"f1","type":"fileChange","status":"completed","changes":[{"path":"src/main.rs","kind":{"type":"update"}}]}}),
+                json!({"threadId":"thr-1","turnId":"turn-1","completedAtMs":2,"item":{"id":"f1","type":"fileChange","status":"completed","changes":[{"path":"src/main.rs","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n-old\n+new\n"}]}}),
             ),
             &rpc(
                 99,
                 "item/commandExecution/requestApproval",
-                json!({"command":"rm -rf /tmp/demo","reason":"outside sandbox","itemId":"c2"}),
+                json!({"threadId":"thr-1","turnId":"turn-1","startedAtMs":3,"command":"rm -rf /tmp/demo","reason":"outside sandbox","itemId":"c2"}),
             ),
         ],
     );
@@ -152,7 +152,7 @@ fn codex_app_server_streams_tools_and_approves() {
             .on_line(&rpc(
                 100,
                 "item/fileChange/requestApproval",
-                json!({"reason":"write","itemId":"f2"}),
+                json!({"threadId":"thr-1","turnId":"turn-1","startedAtMs":4,"reason":"write","itemId":"f2"}),
             ))
             .unwrap();
         let id = more
@@ -170,7 +170,7 @@ fn codex_app_server_streams_tools_and_approves() {
         &mut *adapter,
         &[&note(
             "turn/completed",
-            json!({"turn":{"id":"turn-1","status":"completed"}}),
+            json!({"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}),
         )],
     );
     assert!(matches!(
@@ -724,12 +724,12 @@ for raw in sys.stdin:
         send({"jsonrpc":"2.0","id":mid,"result":{"thread":{"id":"thr"}}})
     elif method == "turn/start":
         send({"jsonrpc":"2.0","id":mid,"result":{"turn":{"id":"tn"}}})
-        send({"jsonrpc":"2.0","id":7,"method":"item/commandExecution/requestApproval","params":{"command":"echo approved","reason":"test"}})
+        send({"jsonrpc":"2.0","id":7,"method":"item/commandExecution/requestApproval","params":{"threadId":"thr","turnId":"tn","itemId":"c1","startedAtMs":0,"command":"echo approved","reason":"test"}})
         pending = True
     elif "result" in msg and pending:
         pending = False
-        send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"m","delta":"Hello from fake Codex"}})
-        send({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"tn","status":"completed"}}})
+        send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"thr","turnId":"tn","itemId":"m","delta":"Hello from fake Codex"}})
+        send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr","turn":{"id":"tn","status":"completed"}}})
 "#;
 
 const FAKE_SLOW_CODEX: &str = r#"#!/usr/bin/env python3
