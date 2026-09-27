@@ -176,6 +176,7 @@ async fn call(service: &Service, method: &str, path: &str, body: Value) -> anyho
 
 #[tokio::test]
 async fn goal_verification_on_4096_tester_survives_a_long_workspace_path() {
+    const CHECK: &str = "test \"$(cat acceptance.txt)\" = verified";
     let primary = support::server(|_, _| {
         (
             response("Implementation milestone complete", json!([])),
@@ -190,11 +191,18 @@ async fn goal_verification_on_4096_tester_survives_a_long_workspace_path() {
                     response(
                         "Running acceptance",
                         json!([{
-                            "id":"acceptance",
+                            "id":"acceptance-write",
                             "type":"function",
                             "function":{
                                 "name":"exec",
                                 "arguments":json!({"command":"printf verified > acceptance.txt"}).to_string()
+                            }
+                        }, {
+                            "id":"acceptance-check",
+                            "type":"function",
+                            "function":{
+                                "name":"exec",
+                                "arguments":json!({"command":CHECK}).to_string()
                             }
                         }]),
                     )
@@ -210,7 +218,7 @@ async fn goal_verification_on_4096_tester_survives_a_long_workspace_path() {
     let project = long_project(root.path());
     fs::create_dir_all(&project).unwrap();
     let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
-    Config::patch(&paths, json!({"model":{"default":"primary","name":"shared","provider":"local","endpoint":primary.endpoint,"context_limit":8192},"trusted_workspaces":[&project],"permissions":{"approve_shell":false},"agent":{"retry_attempts":0}})).unwrap();
+    Config::patch(&paths, json!({"model":{"default":"primary","name":"shared","provider":"local","endpoint":primary.endpoint,"context_limit":8192},"trusted_workspaces":[&project],"permissions":{"approve_shell":false},"agent":{"retry_attempts":0},"verification":{"commands":[CHECK]}})).unwrap();
     let service = Service::open(paths, Some(project.clone())).unwrap();
     call(
         &service,
@@ -244,6 +252,24 @@ async fn goal_verification_on_4096_tester_survives_a_long_workspace_path() {
     .unwrap()
     .unwrap();
     assert_eq!(result["status"], "completed", "{result}");
+    let jobs = service.engine.store().jobs(10).unwrap();
+    let tester_job = jobs
+        .iter()
+        .find(|job| job["routing"]["model_id"] == "tester-model")
+        .expect("tester route executed");
+    let verification = &tester_job["result"]["verification"];
+    assert_eq!(verification["status"], "passed");
+    let check = verification["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|receipt| receipt["command"] == CHECK)
+        .expect("configured acceptance command recorded");
+    assert_eq!(check["kind"], "configured_check");
+    assert_eq!(check["state"], "passed");
+    assert_eq!(check["exit_code"], 0);
+    assert_eq!(check["provenance"], "locally_observed");
+    assert_eq!(check["task_id"], tester_job["task_id"]);
     assert_eq!(
         fs::read_to_string(project.join("acceptance.txt")).unwrap(),
         "verified"
