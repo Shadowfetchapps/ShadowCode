@@ -309,6 +309,25 @@ fn assemble_context(workspace: &Workspace, mentions: &[Mention]) -> ContextAssem
             continue;
         }
         out.push_str(&format!("\n<file path=\"{}\">\n", mention.path));
+        // A mentioned secret file (by name, spelling or symlink) is never put
+        // into model context, like read_file.
+        if workspace.is_secret_target(&mention.path) {
+            out.push_str("[Not included: secret files are not sent to the model]\n");
+            out.push_str("</file>\n");
+            preview.items.push(ContextItem {
+                path: mention.path.clone(),
+                kind: "file".into(),
+                included: false,
+                reason: "Secret files (.env, credentials, keys) are never attached.".into(),
+                bytes: 0,
+                total_bytes: None,
+                from_line: None,
+                to_line: None,
+                entries: Vec::new(),
+                truncated: false,
+            });
+            continue;
+        }
         match workspace.read(&mention.path) {
             Ok(_file) if budget == 0 => {
                 out.push_str("[Not included: the attached context is full; read the file]\n");
@@ -330,7 +349,9 @@ fn assemble_context(workspace: &Workspace, mentions: &[Mention]) -> ContextAssem
                 let take = FILE_BYTES.min(budget);
                 let text = crate::tools::truncate(&file.content, take);
                 budget -= text.len();
-                out.push_str(text);
+                // Secret-looking tokens are replaced before model context, as
+                // read_file does.
+                out.push_str(&crate::redaction::redact_text(text).text);
                 let truncated = text.len() < file.content.len();
                 let line_count = text.lines().count();
                 if !text.ends_with('\n') {
@@ -500,5 +521,38 @@ mod tests {
             }]
         )
         .is_err());
+    }
+
+    #[test]
+    fn mentioned_secret_files_are_not_attached_and_tokens_are_redacted() {
+        let dir = project();
+        fs::write(dir.path().join(".env"), "DB_PASSWORD=hunter2plaintext\n").unwrap();
+        std::os::unix::fs::symlink(".env", dir.path().join("notes.txt")).unwrap();
+        let token = format!("{}{}", "ghp_", "A".repeat(36));
+        fs::write(dir.path().join("deploy.md"), format!("push {token}\n")).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let mentions = validate(
+            &ws,
+            vec![
+                Mention {
+                    path: ".env".into(),
+                    kind: "file".into(),
+                },
+                Mention {
+                    path: "notes.txt".into(),
+                    kind: "file".into(),
+                },
+                Mention {
+                    path: "deploy.md".into(),
+                    kind: "file".into(),
+                },
+            ],
+        )
+        .unwrap();
+        let text = context(&ws, &mentions).unwrap();
+        assert!(!text.contains("hunter2plaintext"), "secret leaked: {text}");
+        assert!(!text.contains(&token), "token leaked: {text}");
+        assert!(text.contains("secret files are not sent"), "{text}");
+        assert!(text.contains("[redacted secret]"), "{text}");
     }
 }

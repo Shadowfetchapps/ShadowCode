@@ -314,6 +314,17 @@ fn copy_attachments(source: &Path, worktree: &Path, task: &str, images: &[String
         wanted.push(tail[..end].to_owned());
         rest = &tail[end..];
     }
+    // The attachments folder must be a real directory inside the project; a
+    // symlinked `.shadow/attachments` (or a symlink inside it) pointing at, say,
+    // ~/.ssh must never be read, and must never be copied onto through the same
+    // symlink in the worktree (which would truncate the target).
+    let base = source.join(PREFIX);
+    let (Ok(canon_base), Ok(canon_source)) = (base.canonicalize(), source.canonicalize()) else {
+        return Ok(());
+    };
+    if !canon_base.starts_with(&canon_source) || !canon_base.is_dir() {
+        return Ok(());
+    }
     for relative in wanted {
         let path = Path::new(&relative);
         if !relative.starts_with(PREFIX)
@@ -324,17 +335,30 @@ fn copy_attachments(source: &Path, worktree: &Path, task: &str, images: &[String
             continue;
         }
         let from = source.join(path);
-        let Ok(meta) = fs::symlink_metadata(&from) else {
+        // Resolve every component: a symlink anywhere in the path that leaves
+        // the attachments folder is refused.
+        let Ok(canon_from) = from.canonicalize() else {
             continue;
         };
-        if !meta.is_file() {
+        if !canon_from.starts_with(&canon_base) {
             continue;
+        }
+        match fs::symlink_metadata(&canon_from) {
+            Ok(meta) if meta.is_file() => {}
+            _ => continue,
         }
         let to = worktree.join(path);
         if let Some(parent) = to.parent() {
             fs::create_dir_all(parent)?;
+            // The destination folder must resolve inside the worktree, so the
+            // copy cannot follow a symlink out of it.
+            match (parent.canonicalize(), worktree.canonicalize()) {
+                (Ok(canon_parent), Ok(canon_worktree))
+                    if canon_parent.starts_with(&canon_worktree) => {}
+                _ => continue,
+            }
         }
-        fs::copy(&from, &to)
+        fs::copy(&canon_from, &to)
             .with_context(|| format!("Could not copy the attachment {relative}"))?;
     }
     Ok(())
@@ -842,6 +866,34 @@ mod tests {
         assert!(worktree.join(".shadow/attachments/a-notes.txt").is_file());
         assert!(worktree.join(".shadow/attachments/b-shot.png").is_file());
         assert!(!worktree.join("secret.txt").exists());
+    }
+
+    #[test]
+    fn attachments_never_follow_a_symlink_out_of_the_project() {
+        let root = tempfile::tempdir().unwrap();
+        let (source, worktree) = (root.path().join("s"), root.path().join("w"));
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("id_rsa");
+        fs::write(&secret, "PRIVATE KEY CONTENT").unwrap();
+
+        // (a) the whole attachments folder is a symlink to a folder outside.
+        fs::create_dir_all(source.join(".shadow")).unwrap();
+        std::os::unix::fs::symlink(&outside, source.join(".shadow/attachments")).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        copy_attachments(&source, &worktree, "read .shadow/attachments/id_rsa", &[]).unwrap();
+        assert!(!worktree.join(".shadow/attachments/id_rsa").exists());
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "PRIVATE KEY CONTENT");
+
+        // (b) a symlink inside a real attachments folder points outside.
+        fs::remove_file(source.join(".shadow/attachments")).unwrap();
+        fs::create_dir_all(source.join(".shadow/attachments")).unwrap();
+        std::os::unix::fs::symlink(&secret, source.join(".shadow/attachments/key")).unwrap();
+        let worktree2 = root.path().join("w2");
+        fs::create_dir_all(&worktree2).unwrap();
+        copy_attachments(&source, &worktree2, "use .shadow/attachments/key", &[]).unwrap();
+        assert!(!worktree2.join(".shadow/attachments/key").exists());
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "PRIVATE KEY CONTENT");
     }
 
     #[test]
