@@ -572,6 +572,11 @@ impl Workspace {
                 .strip_prefix(&self.path)?
                 .to_string_lossy()
                 .into_owned();
+            // A glob override outranks the hidden-file rule, so it could reach
+            // `.env` and other secret files: never return their contents.
+            if crate::redaction::is_secret_path(&rel) {
+                continue;
+            }
             let Ok(file) = self.read(&rel) else { continue };
             scanned_bytes += file.bytes;
             if scanned_bytes > 128_000_000 {

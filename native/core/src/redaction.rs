@@ -64,12 +64,22 @@ fn patterns() -> &'static [Regex] {
     PATTERNS.get_or_init(|| {
         let sources = [
             r"(?i)\bgh[pousr]_[A-Za-z0-9_]{20,}",
+            r"\bgithub_pat_[A-Za-z0-9_]{20,}",
+            r"\bglpat-[A-Za-z0-9_-]{16,}",
             r"(?i)\bxox[baprs]-[A-Za-z0-9-]{10,}",
             r"(?i)\bAKIA[0-9A-Z]{16}\b",
             r"(?i)\bASIA[0-9A-Z]{16}\b",
             r"(?i)\bsk-(?:live|test|proj)?[A-Za-z0-9_-]{16,}",
+            // Stripe (underscore form), Google, xAI, Hugging Face, npm and
+            // ShadowCode's own remote access token: distinctive prefixes.
+            r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}",
+            r"\bAIza[0-9A-Za-z_-]{20,}",
+            r"\bxai-[A-Za-z0-9]{16,}",
+            r"\bhf_[A-Za-z0-9]{16,}",
+            r"\bnpm_[A-Za-z0-9]{20,}",
+            r"\bscr_[A-Za-z0-9_-]{40,}",
             r"(?i)\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
-            r"(?i)\b(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*\S{16,}",
+            r"(?i)(?:^|[^A-Za-z0-9])(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*\S{16,}",
             r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{20,}",
         ];
         sources
@@ -156,9 +166,22 @@ pub fn is_secret_path(path: &str) -> bool {
             | ".secrets"
             | "credentials.json"
             | "service-account.json"
+            | ".netrc"
+            | ".git-credentials"
+            | ".pypirc"
+            | ".pgpass"
+            | ".htpasswd"
+            | "id_rsa"
+            | "id_dsa"
+            | "id_ecdsa"
+            | "id_ed25519"
+            | ".credentials.json"
     ) || name.starts_with(".env.")
         || name.ends_with(".pem")
         || name.ends_with(".p12")
+        || name.ends_with(".pfx")
+        || name.ends_with(".p8")
+        || name.ends_with(".key")
 }
 
 pub struct Redaction {
@@ -482,6 +505,18 @@ mod tests {
         assert!(!is_secret_path(".env.template"));
         assert!(!is_secret_path("src/config.rs"));
         assert!(!is_secret_path("README.md"));
+        for secret in [
+            "home/.ssh/id_rsa",
+            "id_ed25519",
+            "tls/server.key",
+            "certs/bundle.pfx",
+            ".netrc",
+            ".git-credentials",
+            ".pgpass",
+            "profile/.credentials.json",
+        ] {
+            assert!(is_secret_path(secret), "{secret}");
+        }
         // Attachment storage prefix does not hide the original name.
         assert!(is_secret_path(
             ".shadow/attachments/0123456789abcdef0123456789abcdef-.env"
@@ -502,6 +537,44 @@ mod tests {
         assert_eq!(redact_value(&mut event), 2);
         assert!(!event.to_string().contains(&token));
         assert_eq!(event["output"]["exit_code"], 0);
+    }
+
+    #[test]
+    fn known_secrets_cover_prefixed_provider_tokens() {
+        // Fixture strings assembled at runtime; no real credentials.
+        let github_pat = format!("github_pat_{}", "A".repeat(30));
+        let gitlab = format!("glpat-{}", "B".repeat(20));
+        let google = format!("AIza{}", "C".repeat(30));
+        let xai = format!("xai-{}", "D".repeat(24));
+        let hf = format!("hf_{}", "E".repeat(30));
+        let npm = format!("npm_{}", "F".repeat(30));
+        let stripe = format!("sk_live_{}", "G".repeat(24));
+        let remote = format!("scr_{}", "H".repeat(43));
+        let openai_key = format!("OPENAI_API_KEY={}", "I".repeat(40));
+        for secret in [
+            &github_pat,
+            &gitlab,
+            &google,
+            &xai,
+            &hf,
+            &npm,
+            &stripe,
+            &remote,
+            &openai_key,
+        ] {
+            let text = format!("value is {secret} here");
+            // Both the model-context path and the remote-response path redact.
+            assert!(redact_text(&text).redacted, "redact_text missed {secret}");
+            let mut value = serde_json::json!({ "note": text });
+            assert!(
+                redact_known_secrets(&mut value) > 0,
+                "redact_known_secrets missed {secret}"
+            );
+            assert!(
+                !value["note"].as_str().unwrap().contains(secret.as_str()),
+                "still present: {secret}"
+            );
+        }
     }
 
     #[test]
