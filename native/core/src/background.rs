@@ -300,7 +300,10 @@ impl BackgroundManager {
                 result=&mut process=>break result,
                 _=interval.tick()=>{
                     let next=running.monitor.snapshot()?.revision;
-                    if next!=revision { store.save_background(&running.snapshot()?)?; revision=next; }
+                    // A failed progress save (a busy or briefly failing
+                    // database) is retried on the next tick; it must never
+                    // end, and so kill, the user's process.
+                    if next!=revision && store.save_background(&running.snapshot()?).is_ok() { revision=next; }
                 }
             }
         };
