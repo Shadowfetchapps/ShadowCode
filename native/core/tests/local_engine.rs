@@ -21,11 +21,15 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 const FAKE: &str = r#"#!/usr/bin/env python3
-import json, os, signal, sys, time
+import json, os, signal, socket, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
+if args == ["--post-ready-sentinel"]:
+    open(os.path.join(HERE, "post-ready-sentinel-ready"), "w").close()
+    while True:
+        signal.pause()
 
 def log(name, value):
     with open(os.path.join(HERE, name), "a") as f:
@@ -174,7 +178,20 @@ class Handler(BaseHTTPRequestHandler):
             return sse(self, tool_call("read_file", {"path": "hello.txt"}))
         return sse(self, text("The file says hello from the fake model."))
 
-ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+if name == "postready.gguf":
+    barrier = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    barrier.bind(os.path.join(HERE, "post-ready-exit-%s.sock" % os.getpid()))
+    barrier.listen(1)
+    def exit_after_command():
+        connection, _ = barrier.accept()
+        with connection, connection.makefile("rb") as stream:
+            if stream.read(4) == b"exit":
+                sys.stderr.write("post-ready fixture exit\n")
+                sys.stderr.flush()
+                os._exit(23)
+    threading.Thread(target=exit_after_command, daemon=True).start()
+server.serve_forever()
 "#;
 
 struct Fixture {
@@ -3069,4 +3086,243 @@ async fn runtime_tool_report_missing_and_malformed_preserve_schema_compatibility
         );
         assert!(runtime["reported_chat_template_tool_use"].is_null());
     }
+}
+
+// Linux fixture: the real fake-runtime child exits only after the test sends
+// an explicit command over its private socket, after managed readiness.
+#[cfg(target_os = "linux")]
+async fn post_ready_crash_observation(first_observer: &str) {
+    use anyhow::Context;
+    use tokio::io::AsyncWriteExt;
+
+    // Observe exact start ticks, allowing a zombie to establish that the owned
+    // child has exited before the first catalog/loaded API observation.
+    fn process(pid: u64) -> Option<(u64, char)> {
+        let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let fields: Vec<_> = text.rsplit_once(") ")?.1.split_whitespace().collect();
+        Some((
+            fields.get(19)?.parse().ok()?,
+            fields.first()?.chars().next()?,
+        ))
+    }
+    async fn exited(pid: u64, start: u64) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if process(pid).is_none_or(|(now, state)| now != start || state == 'Z') {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("owned fake runtime did not exit after its explicit command")
+    }
+
+    let f = fixture(GPU);
+    let model = f.models.join("postready.gguf");
+    qwen_like(&model, "qwen3", TOOLS_TEMPLATE);
+    fs::write(f.project.join("hello.txt"), "original project bytes\n").unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "base",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&f.project)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let original_index = fs::read(f.project.join(".git/index")).unwrap();
+    Config::patch(
+        &f.paths,
+        json!({
+            "local_engine":{"files":[model]},
+            "network":{"mode":"offline"},
+            "cli_agents":{"enabled":false}
+        }),
+    )
+    .unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let id = local_engine::scan(&cfg.local_engine)[0].id.clone();
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    // Same executable, outside LocalRuntime ownership. It must survive both
+    // observation and runtime shutdown; the fixture itself reaps it afterward.
+    let mut sentinel = tokio::process::Command::new(f.bin.join("llama-server"))
+        .arg("--post-ready-sentinel")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    let observed: anyhow::Result<Value> = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !f.bin.join("post-ready-sentinel-ready").is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.context("sentinel did not reach its explicit ready barrier")?;
+        let before = call(&service, "POST", "/api/local-models/load", json!({"id":id})).await?;
+        anyhow::ensure!(before["loaded"]["id"] == id, "managed runtime was not ready: {before}");
+        let warm_picker = call(&service, "GET", "/api/picker?cached=1", Value::Null).await?;
+        let warm_reason = warm_picker["targets"].as_array().context("missing cached picker targets")?.iter().find(|row| row["id"] == id).context("missing cached local row")?["reason"].clone();
+        anyhow::ensure!(warm_reason.as_str().is_some_and(|s| s.starts_with("Loaded")), "cached picker was not primed with loaded state: {warm_picker}");
+        let pid = service.engine.local_runtime().loaded().context("missing ready runtime")?.pid.context("missing owned PID")? as u64;
+        let (start, state) = process(pid).context("ready child is absent")?;
+        anyhow::ensure!(state != 'Z', "ready child already exited");
+        let mut exit = tokio::time::timeout(Duration::from_secs(2), tokio::net::UnixStream::connect(f.bin.join(format!("post-ready-exit-{pid}.sock"))))
+            .await.context("exit barrier connect timed out")??;
+        exit.write_all(b"exit").await?;
+        drop(exit);
+        exited(pid, start).await?;
+
+        // Each public observation gets an independent first-observer fixture;
+        // neither is allowed to rely on another acquire discovering the crash.
+        let direct_first = (first_observer == "loaded").then(|| service.engine.local_runtime().loaded().is_none());
+        let picker_first = if first_observer == "picker" {
+            call(&service, "GET", "/api/picker?cached=1", Value::Null).await?
+        } else { Value::Null };
+        let first = call(&service, "GET", "/api/local-models", Value::Null).await?;
+        let first_row = first["models"].as_array().context("missing rows")?.iter().find(|row| row["id"] == id).context("model disappeared")?.clone();
+        let again = call(&service, "GET", "/api/local-models", Value::Null).await?;
+        let picker = call(&service, "GET", "/api/picker?cached=1", Value::Null).await?;
+        let picker_row = picker["targets"].as_array().context("missing cached picker targets")?.iter().find(|row| row["id"] == id).context("picker row disappeared")?.clone();
+        let before_restart_launches = lines(&f.bin.join("launches.jsonl")).len();
+        // Final stderr draining is asynchronous. Poll its actual evidence, not
+        // a fixed sleep, and preserve the first catalog response independently.
+        let tail_visible = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if service.engine.local_runtime().last_error(&id).is_some_and(|error| error.contains("post-ready fixture exit")) { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.is_ok();
+        let restarted = call(&service, "POST", "/api/local-models/load", json!({"id":id})).await?;
+        let new_pid = service.engine.local_runtime().loaded().context("restart missing")?.pid.context("restart PID missing")? as u64;
+        let new_start = process(new_pid).context("restarted child missing")?.0;
+        let restart_error = service.engine.local_runtime().last_error(&id);
+        service.engine.shutdown().await?;
+        exited(new_pid, new_start).await?;
+        Ok(json!({
+            "first_observer":first_observer,"direct_first":direct_first,"picker_first":picker_first,"warm_reason":warm_reason,
+            "first_loaded":first["loaded"],"first_error":first_row["last_error"],
+            "second_loaded":again["loaded"],"picker_reason":picker_row["reason"],
+            "tail_visible":tail_visible,"before_restart_launches":before_restart_launches,
+            "launches":lines(&f.bin.join("launches.jsonl")).len(),
+            "restarted":restarted,"restart_error":restart_error,
+            "old_pid":pid,"new_pid":new_pid,"sentinel_alive":sentinel.try_wait()?.is_none(),
+            "index_unchanged":fs::read(f.project.join(".git/index"))? == original_index,
+            "project_unchanged":fs::read_to_string(f.project.join("hello.txt"))? == "original project bytes\n"
+        }))
+    }.await;
+
+    // Finish all owned cleanup before any expected baseline assertion fails.
+    let shutdown = service.engine.shutdown().await;
+    let sentinel_survived_shutdown = sentinel.try_wait().unwrap().is_none();
+    let _ = sentinel.start_kill();
+    let sentinel_reaped = tokio::time::timeout(Duration::from_secs(5), sentinel.wait()).await;
+    assert!(shutdown.is_ok(), "{shutdown:?}");
+    assert!(
+        matches!(sentinel_reaped, Ok(Ok(_))),
+        "sentinel fixture cleanup failed: {sentinel_reaped:?}"
+    );
+    let observed = observed.expect("post-ready fixture setup/cleanup failed");
+    eprintln!("POST_READY_CRASH {observed}");
+    assert!(
+        sentinel_survived_shutdown && observed["sentinel_alive"] == true,
+        "unrelated same-executable child was disturbed: {observed}"
+    );
+    assert_eq!(
+        observed["before_restart_launches"], 1,
+        "observation must not restart the runtime: {observed}"
+    );
+    assert_eq!(
+        observed["launches"], 2,
+        "explicit retry launches exactly once: {observed}"
+    );
+    assert_ne!(observed["old_pid"], observed["new_pid"]);
+    assert_eq!(observed["restarted"]["loaded"]["id"], id);
+    assert!(
+        observed["restart_error"].is_null(),
+        "successful explicit retry clears the old failure: {observed}"
+    );
+    assert_eq!(observed["index_unchanged"], true);
+    assert_eq!(observed["project_unchanged"], true);
+    if first_observer == "loaded" {
+        assert_eq!(
+            observed["direct_first"], true,
+            "direct loaded() retained a dead child: {observed}"
+        );
+    }
+    if first_observer == "picker" {
+        assert!(
+            observed["picker_first"]["local_engine"]["loaded"].is_null(),
+            "cached picker retained a dead runtime as first observer: {observed}"
+        );
+        let row = observed["picker_first"]["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap();
+        assert!(
+            row["reason"]
+                .as_str()
+                .is_some_and(|s| !s.starts_with("Loaded") && s.contains("stopped unexpectedly")),
+            "first cached picker lost crash evidence: {observed}"
+        );
+    }
+    assert!(
+        observed["first_loaded"].is_null(),
+        "first catalog retained a dead child: {observed}"
+    );
+    assert!(
+        observed["second_loaded"].is_null(),
+        "repeat catalog retained a dead child: {observed}"
+    );
+    assert!(
+        observed["first_error"]
+            .as_str()
+            .is_some_and(|s| s.contains("stopped unexpectedly")),
+        "first catalog lost crash evidence: {observed}"
+    );
+    assert!(
+        observed["picker_reason"]
+            .as_str()
+            .is_some_and(|s| !s.starts_with("Loaded") && s.contains("stopped unexpectedly")),
+        "picker did not retain crash evidence: {observed}"
+    );
+    assert_eq!(
+        observed["tail_visible"], true,
+        "bounded stderr crash tail lost: {observed}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn post_ready_crash_clears_first_catalog_and_allows_explicit_restart() {
+    post_ready_crash_observation("catalog").await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn post_ready_crash_clears_direct_loaded_observation() {
+    post_ready_crash_observation("loaded").await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn post_ready_crash_refreshes_primed_cached_picker_without_acquire() {
+    post_ready_crash_observation("picker").await;
 }

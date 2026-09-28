@@ -264,15 +264,46 @@ impl LocalRuntime {
         }
     }
 
+    /// Observe only the Child this slot owns, without awaiting a busy slot.
+    /// Existing state mutexes remain synchronous; reads never restart or signal.
+    fn observe_exit(&self) {
+        let Ok(mut slot) = self.slot.try_lock() else {
+            return;
+        };
+        if let Some(server) = slot.as_mut() {
+            if matches!(server.child.try_wait(), Ok(Some(_))) {
+                self.record_exit(server);
+            }
+        }
+    }
+
+    fn record_exit(&self, server: &Server) {
+        let tail = server
+            .stderr
+            .lock()
+            .map(|r| r.tail(ERROR_TAIL_BYTES))
+            .unwrap_or_default();
+        if let Ok(mut errors) = self.errors.lock() {
+            errors.insert(
+                server.info.id.clone(),
+                format!("llama-server stopped unexpectedly. Last output:\n{tail}"),
+            );
+        }
+        self.clear_snapshot();
+    }
+
     pub fn last_error(&self, id: &str) -> Option<String> {
+        self.observe_exit();
         self.errors.lock().ok()?.get(id).cloned()
     }
 
     pub fn loaded(&self) -> Option<Loaded> {
+        self.observe_exit();
         self.snapshot.lock().ok()?.as_ref().map(|(l, _)| l.clone())
     }
 
     pub fn in_use(&self) -> usize {
+        self.observe_exit();
         self.snapshot
             .lock()
             .ok()
@@ -384,18 +415,7 @@ impl LocalRuntime {
                     ));
                 }
                 if !alive {
-                    // Keep the crash visible on the row instead of silently restarting.
-                    let tail = current
-                        .stderr
-                        .lock()
-                        .map(|r| r.tail(ERROR_TAIL_BYTES))
-                        .unwrap_or_default();
-                    if let Ok(mut errors) = self.errors.lock() {
-                        errors.insert(
-                            current.info.id.clone(),
-                            format!("llama-server stopped unexpectedly. Last output:\n{tail}"),
-                        );
-                    }
+                    self.record_exit(current);
                 }
                 let busy = current.leases.load(Ordering::Acquire);
                 if busy > 0 && alive {
