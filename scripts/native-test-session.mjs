@@ -184,7 +184,17 @@ export async function inspectPrivateActivations(session, { io = linuxProc } = {}
     if (excluded.has(pid) || await io.uid(pid) !== self.uid) return;
     const info = await (io.basic ? io.basic(pid) : io.identity(pid));
     if (!alive(info) || BigInt(info.start) < BigInt(daemon.start)) return;
-    const env = await io.activation(pid);
+    let env;
+    try { env = await io.activation(pid); }
+    catch (error) {
+      if (!['EACCES', 'EPERM'].includes(error.code)) throw error;
+      // Linux may revoke environ access during exit after the live basic read.
+      // Disregard only a proven exit; unreadable live or reused PIDs still fail.
+      const current = await (io.basic ? io.basic(pid) : io.identity(pid));
+      if (!current || (current.pid === info.pid && current.start === info.start
+        && current.uid === info.uid && ['Z', 'X'].includes(current.state))) return;
+      throw error;
+    }
     if (!(env?.DBUS_SESSION_BUS_ADDRESS === address && env.DBUS_STARTER_ADDRESS === address && env.DBUS_STARTER_BUS_TYPE === 'session')) return;
     const value = await io.identity(pid);
     if (!alive(value)) return;

@@ -97,6 +97,74 @@ test('disappeared service is already gone and not signaled', async () => {
   f.rows.delete(4);
   assert.equal((await session.cleanup()).ok, true); assert.deepEqual(f.signals, []);
 });
+for (const code of ['EACCES', 'EPERM']) {
+  for (const after of ['missing', 'Z', 'X']) {
+    test(`activation ${code} after candidate exits to ${after} does not obstruct owned cleanup`, async () => {
+      const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
+      f.rows.set(5, f.proc(5, 0, 14, '/fixture/unrelated'));
+      let basicReads = 0, activationReads = 0;
+      f.io.basic = async pid => { if (pid === 5) basicReads++; return f.io.identity(pid); };
+      const activation = f.io.activation;
+      f.io.activation = async pid => {
+        if (pid !== 5) return activation(pid);
+        activationReads++;
+        assert.equal(basicReads, 1, 'the candidate was observed live before its environment read');
+        // Deterministic kernel-exit boundary: no timing or process sleeps.
+        if (after === 'missing') f.rows.delete(5);
+        else f.rows.get(5).state = after;
+        throw Object.assign(new Error('fixture environment denied'), { code });
+      };
+      const result = await session.cleanup();
+      assert.equal(result.ok, true, JSON.stringify(result.failures));
+      assert(basicReads >= 2, 'a fresh basic identity must establish exit');
+      assert.equal(activationReads, 1, 'permission failures are not retried');
+      assert.deepEqual(result.services.map(service => service.pid), [4]);
+      assert.deepEqual(f.signals, [{ pid: 4, signal: 'SIGTERM' }], 'the vanished or terminal candidate never acquires signal authority');
+    });
+  }
+  for (const after of ['live', 'changed-start-Z', 'changed-uid-X', 'changed-pid-Z', 'recheck-error']) {
+    test(`activation ${code} with ${after} still fails before any signal`, async () => {
+      const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
+      f.rows.set(5, f.proc(5, 0, 14, '/fixture/unrelated'));
+      let denied = false;
+      f.io.basic = async pid => {
+        if (pid === 5 && denied && after === 'recheck-error') {
+          throw Object.assign(new Error('fixture recheck denied'), { code: 'EACCES' });
+        }
+        return f.io.identity(pid);
+      };
+      const activation = f.io.activation;
+      f.io.activation = async pid => {
+        if (pid !== 5) return activation(pid);
+        denied = true;
+        if (after === 'changed-start-Z') Object.assign(f.rows.get(5), { start: '99', state: 'Z' });
+        if (after === 'changed-uid-X') Object.assign(f.rows.get(5), { uid: 1001, state: 'X' });
+        if (after === 'changed-pid-Z') Object.assign(f.rows.get(5), { pid: 99, state: 'Z' });
+        throw Object.assign(new Error('fixture environment denied'), { code });
+      };
+      const result = await session.cleanup();
+      assert.equal(result.ok, false);
+      assert.match(result.failures.join(' '), /fixture (environment|recheck) denied/);
+      assert.deepEqual(f.signals, [], 'one unverified candidate invalidates the full inventory, including the readable owned service');
+      assert(f.rows.has(4));
+    });
+  }
+}
+test('activation errors other than permission denial remain fatal even if the candidate exits', async () => {
+  const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
+  f.rows.set(5, f.proc(5, 0, 14, '/fixture/unrelated'));
+  let basicReads = 0;
+  f.io.basic = async pid => { if (pid === 5) basicReads++; return f.io.identity(pid); };
+  const activation = f.io.activation;
+  f.io.activation = async pid => {
+    if (pid !== 5) return activation(pid);
+    f.rows.delete(5);
+    throw Object.assign(new Error('fixture environment IO failure'), { code: 'EIO' });
+  };
+  const result = await session.cleanup();
+  assert.equal(result.ok, false); assert.match(result.failures.join(' '), /fixture environment IO failure/);
+  assert.equal(basicReads, 1); assert.deepEqual(f.signals, []);
+});
 for (const field of ['start', 'exe']) {
   test(`signal-time ${field} mutation during routing read is refused`, async () => {
     const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
