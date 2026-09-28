@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 import { installFakeBackend, type FakeOptions } from "./fakeBackend";
 
 // Settings › About and the status-bar update notice (fake engine).
@@ -76,6 +77,17 @@ test("a newer release shows a quiet notice that opens About with the steps", asy
     .locator("footer.statusline")
     .getByRole("button", { name: "Update available: 0.34.0" });
   await expect(notice).toBeVisible();
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate(
+      (t) => (document.documentElement.dataset.theme = t),
+      theme,
+    );
+    const results = await new AxeBuilder({ page })
+      .include("footer.statusline")
+      .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+      .analyze();
+    expect(results.violations).toEqual([]);
+  }
   await notice.click();
   const settings = page.getByRole("dialog", { name: "Settings" });
   const card = settings.getByRole("region", { name: "ShadowCode 0.34.0" });
@@ -88,7 +100,20 @@ test("a newer release shows a quiet notice that opens About with the steps", asy
   );
   await expect(card).toContainText("install-appimage.sh");
   await expect(card).toContainText("RELEASE-AUTH.sig");
-  await page.screenshot({ path: "test-results/about-update.png" });
+  // The notice and the About page meet WCAG AA in both themes.
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate(
+      (t) => (document.documentElement.dataset.theme = t),
+      theme,
+    );
+    const results = await new AxeBuilder({ page })
+      .include('[role="dialog"]')
+      .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+      .analyze();
+    expect(results.violations).toEqual([]);
+    await page.screenshot({ path: `test-results/about-update-${theme}.png` });
+  }
+  await page.evaluate(() => (document.documentElement.dataset.theme = "light"));
   // Hiding it clears the status bar until a newer version appears.
   await card
     .getByRole("button", { name: "Hide the notice until the next version" })

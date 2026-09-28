@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 import {
   applyPackagingPath,
+  bundleEnvironment,
   isUnsafePackagingDir,
   packagingDirs,
   packagingPath,
@@ -165,4 +166,16 @@ test("linuxdeploy plugin scan survives a dirty caller PATH", async (t) => {
   } finally {
     process.env.PATH = previous;
   }
+});
+
+test("the AppImage bundle uses the pinned runtime, not upstream's newest", () => {
+  // Upstream's "continuous" type2-runtime moved from 75849dc, which made
+  // build-native.mjs stop at its runtime check.
+  assert.deepEqual(
+    bundleEnvironment("appimage", "/work/target/native-runtime/runtime-x86_64"),
+    { LDAI_RUNTIME_FILE: "/work/target/native-runtime/runtime-x86_64" },
+  );
+  assert.deepEqual(bundleEnvironment("deb", undefined), {});
+  assert.throws(() => bundleEnvironment("appimage", "runtime-x86_64"));
+  assert.throws(() => bundleEnvironment("appimage", ""));
 });

@@ -46,7 +46,8 @@
     "linux": {
       "deb": {
         "depends": ["git", "libgomp1", "libssl3", "libasound2"],
-        "recommends": ["libvulkan1"]
+        "recommends": ["libvulkan1", "bubblewrap"],
+        "section": "devel"
       }
     }
   }

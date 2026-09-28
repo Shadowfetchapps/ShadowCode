@@ -398,7 +398,8 @@ pub fn automatic(config: &Config, policy: &Policy) -> bool {
 pub enum InstallKind {
     Appimage,
     Deb,
-    /// Under /usr or /opt, installed by something other than dpkg.
+    /// Under /usr or /opt without the bundler's package marker: a
+    /// distribution's own build or another package format.
     System,
     /// Built from a source checkout (`target/debug` or `target/release`).
     Source,
@@ -425,14 +426,13 @@ pub fn set_bundle(kind: InstallKind) {
     let _ = BUNDLE.set(kind);
 }
 
-/// What [`detect_install`] looks at.
-pub struct InstallProbe<'a> {
+/// What [`detect_install`] looks at. The package manager's database is not
+/// read: the bundler's marker already says "Debian package".
+pub struct InstallProbe {
     pub bundle: Option<InstallKind>,
     pub appimage: Option<PathBuf>,
     pub appdir: Option<PathBuf>,
     pub exe: Option<PathBuf>,
-    /// True when dpkg's file list for `shadow-code` names this path.
-    pub dpkg_owns: &'a dyn Fn(&Path) -> bool,
 }
 
 pub fn install_kind() -> InstallKind {
@@ -442,7 +442,6 @@ pub fn install_kind() -> InstallKind {
         appimage: var("APPIMAGE"),
         appdir: var("APPDIR"),
         exe: std::env::current_exe().ok(),
-        dpkg_owns: &dpkg_owns,
     })
 }
 
@@ -469,27 +468,10 @@ pub fn detect_install(probe: &InstallProbe) -> InstallKind {
     {
         return InstallKind::Source;
     }
-    if exe.starts_with("/usr") || exe.starts_with("/opt") {
-        if (probe.dpkg_owns)(exe) {
-            return InstallKind::Deb;
-        }
-        if !exe.starts_with("/usr/local") {
-            return InstallKind::System;
-        }
+    if (exe.starts_with("/usr") && !exe.starts_with("/usr/local")) || exe.starts_with("/opt") {
+        return InstallKind::System;
     }
     InstallKind::Unknown
-}
-
-fn dpkg_owns(exe: &Path) -> bool {
-    let Ok(file) = fs::File::open("/var/lib/dpkg/info/shadow-code.list") else {
-        return false;
-    };
-    let mut text = String::new();
-    if file.take(4_000_000).read_to_string(&mut text).is_err() {
-        return false;
-    }
-    let exe = exe.to_string_lossy();
-    text.lines().any(|line| line == exe)
 }
 
 /// The commit this executable was built from, when the build recorded it
@@ -1017,130 +999,77 @@ mod tests {
 
     #[test]
     fn install_type_is_detected_from_the_environment() {
-        let never = |_: &Path| false;
-        let always = |_: &Path| true;
-        let probe = |bundle, appimage: Option<&str>, appdir: Option<&str>, exe: Option<&str>| {
-            (
-                bundle,
-                appimage.map(PathBuf::from),
-                appdir.map(PathBuf::from),
-                exe.map(PathBuf::from),
-            )
-        };
-        let check = |(bundle, appimage, appdir, exe): (
-            Option<InstallKind>,
-            Option<PathBuf>,
-            Option<PathBuf>,
-            Option<PathBuf>,
-        ),
-                     owns: &dyn Fn(&Path) -> bool| {
+        let detect = |bundle, appimage: Option<&str>, appdir: Option<&str>, exe: Option<&str>| {
             detect_install(&InstallProbe {
                 bundle,
-                appimage,
-                appdir,
-                exe,
-                dpkg_owns: owns,
+                appimage: appimage.map(PathBuf::from),
+                appdir: appdir.map(PathBuf::from),
+                exe: exe.map(PathBuf::from),
             })
         };
-        let appimage = probe(
-            None,
-            Some("/home/u/Applications/ShadowCode.AppImage"),
-            Some("/tmp/appimage_extracted_1"),
-            Some("/tmp/appimage_extracted_1/usr/bin/shadowcode"),
-        );
-        assert_eq!(check(appimage, &never), InstallKind::Appimage);
-        // APPIMAGE left in the environment of a different executable.
-        let stale = probe(
-            None,
-            Some("/home/u/Applications/ShadowCode.AppImage"),
-            Some("/tmp/appimage_extracted_1"),
-            Some("/usr/bin/shadowcode"),
-        );
-        assert_eq!(check(stale, &always), InstallKind::Deb);
+        let image = Some("/home/u/Applications/ShadowCode.AppImage");
+        let extracted = Some("/tmp/appimage_extracted_1");
         assert_eq!(
-            check(
-                probe(
-                    Some(InstallKind::Deb),
-                    None,
-                    None,
-                    Some("/usr/bin/shadowcode")
-                ),
-                &never
-            ),
-            InstallKind::Deb
-        );
-        assert_eq!(
-            check(
-                probe(
-                    Some(InstallKind::Appimage),
-                    None,
-                    None,
-                    Some("/tmp/x/usr/bin/shadowcode")
-                ),
-                &never
+            detect(
+                None,
+                image,
+                extracted,
+                Some("/tmp/appimage_extracted_1/usr/bin/shadowcode")
             ),
             InstallKind::Appimage
         );
+        // APPIMAGE left in the environment of a different executable.
         assert_eq!(
-            check(
-                probe(None, None, None, Some("/usr/bin/shadowcode")),
-                &always
+            detect(
+                Some(InstallKind::Deb),
+                image,
+                extracted,
+                Some("/usr/bin/shadowcode")
             ),
             InstallKind::Deb
         );
         assert_eq!(
-            check(probe(None, None, None, Some("/usr/bin/shadowcode")), &never),
+            detect(None, image, extracted, Some("/usr/bin/shadowcode")),
             InstallKind::System
         );
+        // The bundler's marker in the executable.
         assert_eq!(
-            check(
-                probe(None, None, None, Some("/opt/shadowcode/bin/shadowcode")),
-                &never
+            detect(
+                Some(InstallKind::Deb),
+                None,
+                None,
+                Some("/usr/bin/shadowcode")
             ),
-            InstallKind::System
+            InstallKind::Deb
         );
         assert_eq!(
-            check(
-                probe(None, None, None, Some("/usr/local/bin/shadowcode")),
-                &never
+            detect(
+                Some(InstallKind::Appimage),
+                None,
+                None,
+                Some("/tmp/x/usr/bin/shadowcode")
             ),
-            InstallKind::Unknown
+            InstallKind::Appimage
         );
-        assert_eq!(
-            check(
-                probe(
-                    None,
-                    None,
-                    None,
-                    Some("/home/u/src/ShadowCode/target/debug/shadowcode")
-                ),
-                &never
+        // No marker: where the executable lives.
+        for (exe, kind) in [
+            ("/usr/bin/shadowcode", InstallKind::System),
+            ("/opt/shadowcode/bin/shadowcode", InstallKind::System),
+            ("/usr/local/bin/shadowcode", InstallKind::Unknown),
+            (
+                "/home/u/src/ShadowCode/target/debug/shadowcode",
+                InstallKind::Source,
             ),
-            InstallKind::Source
-        );
-        assert_eq!(
-            check(
-                probe(
-                    None,
-                    None,
-                    None,
-                    Some("/home/u/src/ShadowCode/target/release/shadowcode")
-                ),
-                &always
+            (
+                "/home/u/src/ShadowCode/target/release/shadowcode",
+                InstallKind::Source,
             ),
-            InstallKind::Source
-        );
-        assert_eq!(
-            check(
-                probe(None, None, None, Some("/home/u/bin/shadowcode")),
-                &never
-            ),
-            InstallKind::Unknown
-        );
-        assert_eq!(
-            check(probe(None, None, None, None), &never),
-            InstallKind::Unknown
-        );
+            ("/home/u/bin/shadowcode", InstallKind::Unknown),
+        ] {
+            assert_eq!(detect(None, None, None, Some(exe)), kind, "{exe}");
+        }
+        assert_eq!(detect(None, None, None, None), InstallKind::Unknown);
+        assert_eq!(InstallKind::System.label(), "System package");
     }
 
     #[test]
