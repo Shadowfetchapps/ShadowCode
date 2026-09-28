@@ -804,33 +804,139 @@ impl Store {
         Ok(result)
     }
     pub fn delete_session(&self, sid: &str) -> Result<bool> {
+        Ok(self.delete_session_tree(sid)?.is_some())
+    }
+    /// Delete a conversation together with its subagent conversations (at
+    /// any depth) and their run records, in one transaction. Subagent
+    /// conversations are hidden from the sidebar, so they would otherwise be
+    /// left unreachable. A subagent conversation that a fork of this
+    /// conversation still shows (its `subagent.started` card was copied into
+    /// the fork) moves to that fork instead. Forks themselves are kept.
+    /// Returns the deleted subagent run ids (their saved patches are files
+    /// the caller removes), or `None` when the conversation did not exist.
+    pub fn delete_session_tree(&self, sid: &str) -> Result<Option<Vec<String>>> {
         let mut db = self.lock()?;
         let tx = db.transaction()?;
-        let active: i64 = tx.query_row("SELECT count(*) FROM desktop_jobs WHERE json_extract(payload,'$.session_id')=? AND json_extract(payload,'$.status') IN ('queued','running','paused','cancelling')",[sid],|r|r.get(0))?;
-        ensure!(
-            active == 0,
-            "Stop the running task before deleting this session"
-        );
-        for table in ["events", "pins", "session_meta", "queued_tasks"] {
-            tx.execute(&format!("DELETE FROM {table} WHERE session_id=?"), [sid])?;
+        let mut doomed = vec![sid.to_owned()];
+        let mut next = 0;
+        while next < doomed.len() {
+            let parent = doomed[next].clone();
+            next += 1;
+            let children: Vec<String> = tx
+                .prepare("SELECT session_id FROM session_meta WHERE key=? AND value=?")?
+                .query_map(params![keys::SUBAGENT_PARENT, parent], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for child in children {
+                if doomed.contains(&child) {
+                    continue;
+                }
+                let adopters: Vec<String> = tx
+                    .prepare(
+                        "SELECT session_id FROM events WHERE type='subagent.started'
+                         AND json_extract(payload,'$.session_id')=? AND session_id<>?
+                         AND session_id IN (SELECT id FROM sessions) ORDER BY id DESC",
+                    )?
+                    .query_map(params![child, parent], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                let adopter = adopters.into_iter().find(|s| !doomed.contains(s));
+                match adopter {
+                    Some(fork) => {
+                        tx.execute(
+                            "UPDATE session_meta SET value=? WHERE session_id=? AND key=?",
+                            params![fork, child, keys::SUBAGENT_PARENT],
+                        )?;
+                        // The run record moves too, so deleting the fork
+                        // later removes it.
+                        let run: Option<String> = tx
+                            .query_row(
+                                "SELECT value FROM session_meta WHERE session_id=? AND key=?",
+                                params![child, keys::SUBAGENT_RUN],
+                                |r| r.get(0),
+                            )
+                            .optional()?;
+                        if let Some(run) = run {
+                            let index = keys::subagent_index(&fork);
+                            let mut ids: Vec<String> = tx
+                                .query_row(
+                                    "SELECT value FROM native_meta WHERE key=?",
+                                    [&index],
+                                    |r| r.get::<_, String>(0),
+                                )
+                                .optional()?
+                                .and_then(|text| serde_json::from_str(&text).ok())
+                                .unwrap_or_default();
+                            if !ids.contains(&run) {
+                                ids.push(run);
+                                tx.execute(
+                                    "INSERT INTO native_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                                    params![index, serde_json::to_string(&ids)?],
+                                )?;
+                            }
+                        }
+                    }
+                    None => doomed.push(child),
+                }
+            }
         }
-        tx.execute(
-            "DELETE FROM file_changes WHERE task_id IN (SELECT id FROM tasks WHERE session_id=?)",
-            [sid],
-        )?;
-        tx.execute("DELETE FROM job_messages WHERE job_id IN (SELECT id FROM desktop_jobs WHERE json_extract(payload,'$.session_id')=?)",[sid])?;
-        tx.execute(
-            "DELETE FROM desktop_jobs WHERE json_extract(payload,'$.session_id')=?",
-            [sid],
-        )?;
-        tx.execute("DELETE FROM tasks WHERE session_id=?", [sid])?;
-        tx.execute(
-            "UPDATE sessions SET parent_id=NULL WHERE parent_id=?",
-            [sid],
-        )?;
+        let mut runs = Vec::new();
+        for session in &doomed {
+            let active: i64 = tx.query_row("SELECT count(*) FROM desktop_jobs WHERE json_extract(payload,'$.session_id')=? AND json_extract(payload,'$.status') IN ('queued','running','paused','cancelling')",[session],|r|r.get(0))?;
+            ensure!(
+                active == 0,
+                "Stop the running task before deleting this session"
+            );
+            let index = keys::subagent_index(session);
+            let ids: Vec<String> = tx
+                .query_row("SELECT value FROM native_meta WHERE key=?", [&index], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default();
+            for id in ids {
+                let key = keys::subagent_run(&id);
+                let run_session = tx
+                    .query_row("SELECT value FROM native_meta WHERE key=?", [&key], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .optional()?
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .and_then(|run| run["session_id"].as_str().map(str::to_owned));
+                // A run whose conversation moved to a fork stays readable.
+                if run_session.is_some_and(|s| !s.is_empty() && !doomed.contains(&s)) {
+                    continue;
+                }
+                tx.execute("DELETE FROM native_meta WHERE key=?", [&key])?;
+                runs.push(id);
+            }
+            tx.execute("DELETE FROM native_meta WHERE key=?", [&index])?;
+            for table in ["events", "pins", "session_meta", "queued_tasks"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE session_id=?"),
+                    [session],
+                )?;
+            }
+            tx.execute(
+                "DELETE FROM file_changes WHERE task_id IN (SELECT id FROM tasks WHERE session_id=?)",
+                [session],
+            )?;
+            tx.execute("DELETE FROM job_messages WHERE job_id IN (SELECT id FROM desktop_jobs WHERE json_extract(payload,'$.session_id')=?)",[session])?;
+            tx.execute(
+                "DELETE FROM desktop_jobs WHERE json_extract(payload,'$.session_id')=?",
+                [session],
+            )?;
+            tx.execute("DELETE FROM tasks WHERE session_id=?", [session])?;
+            tx.execute(
+                "UPDATE sessions SET parent_id=NULL WHERE parent_id=?",
+                [session],
+            )?;
+        }
         let deleted = tx.execute("DELETE FROM sessions WHERE id=?", [sid])? != 0;
+        for child in &doomed[1..] {
+            tx.execute("DELETE FROM sessions WHERE id=?", [child])?;
+        }
         tx.commit()?;
-        Ok(deleted)
+        Ok(deleted.then_some(runs))
     }
     pub fn create_task(&self, sid: &str, prompt: &str) -> Result<String> {
         let task = id();

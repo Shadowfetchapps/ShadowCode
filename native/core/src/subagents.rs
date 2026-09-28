@@ -341,6 +341,14 @@ fn patch_path(engine: &Engine, id: &str) -> Result<PathBuf> {
     crate::paths::private_directory(&dir)?;
     Ok(dir.join(format!("{id}.patch")))
 }
+/// Remove the saved patches of deleted runs (their conversation was
+/// deleted). A patch that is already gone is fine.
+pub fn remove_patches(paths: &crate::paths::AppPaths, runs: &[String]) {
+    let dir = paths.data.join("subagents");
+    for id in runs.iter().filter(|id| valid_id(id).is_ok()) {
+        let _ = std::fs::remove_file(dir.join(format!("{id}.patch")));
+    }
+}
 
 struct TaskArgs {
     agent: String,
@@ -664,10 +672,23 @@ impl SubagentHost {
                     "prompt_tokens": job.usage.prompt_tokens,
                     "completion_tokens": job.usage.completion_tokens,
                     "total_tokens": job.usage.total_tokens,
+                    "cost_usd": job.usage.cost_usd,
                     "estimated": job.usage_is_estimated,
                 });
                 if job.status != "completed" {
                     record.error = Some(job.summary.clone());
+                }
+                // The parent task's usage covers its subagents, whatever
+                // their outcome: a failed child still used tokens.
+                if let Err(error) = self.engine.add_child_usage(
+                    &self.parent.job_id,
+                    &self.parent.events,
+                    &job.usage,
+                    job.usage_is_estimated,
+                ) {
+                    record.notes.push(format!(
+                        "Could not add this run's usage to the task: {error:#}"
+                    ));
                 }
             }
             Err(error) => {

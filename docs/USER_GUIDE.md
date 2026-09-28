@@ -465,7 +465,9 @@ keep or discard it.
   hand when it **needs your approval**, a warning sign when it **failed**, and
   a dot when it **finished** while you were elsewhere (until you open it).
 - **Right-click** a conversation (or press the menu key) to **Rename**,
-  **Pin**, **Fork**, **Export** or **Delete** it.
+  **Pin**, **Fork**, **Export** or **Delete** it. Deleting a conversation
+  also deletes its subagents' conversations, unless a fork of it still
+  shows them.
 - `Alt+↑` / `Alt+↓` open the previous or next conversation in the list;
   `Ctrl+Tab` goes back to the one you had open before.
 

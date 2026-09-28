@@ -41,7 +41,11 @@ conversation. It can start one, or several at once with `tasks`.
 Each subagent run appears in the conversation as a card. Click it to see the
 task, the result, changed files and token use. **Open transcript** shows the
 subagent's own conversation. Subagent conversations are hidden from the
-sidebar.
+sidebar. A subagent's tokens and cost also count toward the parent task's
+usage (and its conversation's total and token budget). Deleting the parent
+conversation deletes its subagent conversations and their saved diffs; if a
+fork of the conversation still shows a subagent's card, that subagent's
+conversation moves to the fork instead.
 
 ## Asking for an agent
 

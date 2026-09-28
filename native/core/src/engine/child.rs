@@ -148,6 +148,45 @@ impl Engine {
         running.snapshot()
     }
 
+    /// Add a finished child's tokens and cost to its parent job, so the
+    /// parent task and its conversation show what the whole task used. The
+    /// child's turns were priced when they ran; they are added as they are.
+    /// The child's own job keeps its own usage too.
+    pub(crate) fn add_child_usage(
+        &self,
+        parent_job: &str,
+        events: &TaskEvents,
+        child: &Usage,
+        estimated: bool,
+    ) -> Result<()> {
+        if child.turns == 0 && child.total_tokens == 0 {
+            return Ok(());
+        }
+        let Some(parent) = self.running(parent_job)? else {
+            return Ok(());
+        };
+        let (total, session_id, task_id) = {
+            let mut record = parent
+                .record
+                .lock()
+                .map_err(|_| anyhow!("Job lock poisoned"))?;
+            record.usage.add(child);
+            record.usage_is_estimated |= estimated;
+            self.0.store.save_job(&json!(*record))?;
+            (
+                record.usage.clone(),
+                record.session_id.clone(),
+                record.task_id.clone(),
+            )
+        };
+        let session = crate::usage::session_total(&self.0.store, &session_id, &task_id, &total)?;
+        events.emit(
+            "usage.updated",
+            crate::usage::event(child, &total, &session, "subagent"),
+        )?;
+        Ok(())
+    }
+
     /// Subagents, skills, nested guidance and child limits for one job's tools.
     pub(super) fn tool_extensions(
         &self,

@@ -665,8 +665,11 @@ Usage = {
   status, usage}], usage, cost, cost_estimated, note}`.
 - Event `usage.updated {purpose, turn, job, session}` after every counted
   request: `purpose` is `"turn"` (an agent step), `"compaction"` (a summary
-  request) or `"vendor"` (a finished subscription CLI turn); `turn`, `job` and
-  `session` are `Usage` (`session` includes the running job). The older
+  request), `"vendor"` (a finished subscription CLI turn), `"failed_attempt"`
+  (a failed request whose tokens the provider reported) or `"subagent"` (a
+  finished subagent's whole usage, added to its parent job; `turn` is the
+  subagent's total); `turn`, `job` and `session` are `Usage` (`session`
+  includes the running job). The older
   `usage.updated {vendor, usage}` from a vendor's rate-limit push (Codex) still
   exists and has no `turn`; tell them apart by `vendor`.
 - Event `model.retry {attempt, max_attempts, reason, status, delay_ms,
@@ -721,6 +724,10 @@ See [SUBAGENTS.md](SUBAGENTS.md) for behaviour and definition files.
   usage, steps, depth, notes, created_at, finished_at}`.
 - `GET /api/sessions` hides subagent conversations unless
   `include_subagents=true`; rows carry `subagent_parent`.
+  `DELETE /api/sessions/{id}` also deletes the conversation's subagent
+  conversations (at any depth), their run records and saved patches. One
+  whose `subagent.started` card a fork still shows moves to that fork
+  (`subagent_parent` becomes the fork's id).
   `GET /api/sessions/{id}` adds `subagent_parent` and `subagent_run`.
 - Events (parent conversation): `subagent.started {run_id, agent, description,
   prompt, mode, model, job_id, session_id, depth}`, `subagent.finished {run_id,

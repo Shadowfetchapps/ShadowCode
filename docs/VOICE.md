@@ -40,7 +40,9 @@ match its recorded size and SHA-256 before it is used (the same checked
 download as the embedding models). They are MIT licensed and are stored in
 `~/.local/share/shadow-agent/voice/models/` (the profile's data directory).
 **Remove** deletes the file. If the chosen model is not installed, any
-installed one is used. Installs are refused in offline mode.
+installed one is used. Installs are refused in offline mode. A model stays
+in memory after a dictation, so the next one starts at once, and is freed
+after five minutes without dictation.
 
 Other settings: language (fixed to English for the English-only models),
 voice commands, live preview (re-reads the recording about once a second

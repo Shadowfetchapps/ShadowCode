@@ -309,7 +309,13 @@ impl Engine {
             "Wait for the manual operation to finish before deleting this session"
         );
         crate::worktree_tasks::ensure_deletable(&self.0.store, id)?;
-        self.0.store.delete_session(id)
+        // Its subagent conversations and run records go with it.
+        let Some(runs) = self.0.store.delete_session_tree(id)? else {
+            return Ok(false);
+        };
+        drop(queues);
+        crate::subagents::remove_patches(self.paths(), &runs);
+        Ok(true)
     }
     pub fn reserve_workspace(&self, workspace: &Path) -> Result<WorkspaceReservation> {
         let workspace = crate::workspace::reservation_path(workspace)?;
