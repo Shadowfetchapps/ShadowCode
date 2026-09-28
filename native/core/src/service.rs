@@ -46,6 +46,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
+mod about;
 mod accounts;
 mod agents;
 mod automations;
@@ -304,6 +305,7 @@ impl Service {
             "workspace" => self.workspace_routes(&call).await,
             "config" | "routing" | "onboarding" | "health" | "version" | "doctor"
             | "diagnostic-exports" | "guardian" => self.settings_routes(&call).await,
+            "about" | "updates" => self.about_routes(&call).await,
             "accounts" | "cli-agents" | "openrouter" | "allowance" => {
                 self.account_routes(&call).await
             }

@@ -21,6 +21,7 @@ import {
   verifyRuntimeDirectory,
 } from "./llama-runtime.mjs";
 import { DESKTOP_FILE, METAINFO_FILE } from "./native-desktop-metadata.mjs";
+import { lintDebianPackage, verifyDebianPackage } from "./native-deb.mjs";
 const run = promisify(execFile);
 const [appimagePath, debPath] = process.argv
   .slice(2)
@@ -337,6 +338,33 @@ try {
     (await run(debExecutable, ["--version"], options)).stdout.trim(),
     version,
   );
+  // What distributions check: modes, no maintainer scripts, copyright and
+  // changelog, manual page and completions, icons, stripped runtime, libc.
+  const debian = await verifyDebianPackage({
+    debPath,
+    extracted: deb,
+    exec: (binary, args, extra = {}) => runWith(binary, args, extra),
+  });
+  const lintian = await lintDebianPackage(debPath, {
+    exec: (binary, args) =>
+      runWith(binary, args, { timeout: 900000, maxBuffer: 64000000 }),
+    required: process.env.SHADOWCODE_REQUIRE_LINTIAN === "1",
+  });
+  if (!lintian.available)
+    console.log(
+      "lintian is not installed; skipped (SHADOWCODE_REQUIRE_LINTIAN=1 requires it)",
+    );
+  const desktopValidator = await run("desktop-file-validate", [
+    path.join(deb, "usr/share/applications", DESKTOP_FILE),
+  ]).then(
+    () => "passed",
+    (error) => {
+      if (error.code === "ENOENT") return "not installed";
+      throw new Error(
+        `desktop-file-validate rejected the launcher:\n${error.stdout}${error.stderr}`,
+      );
+    },
+  );
   // Tauri patches the bundle type and linuxdeploy may change ELF rpaths, so
   // comparing entire executable hashes across formats would reject valid builds.
   await run(
@@ -384,7 +412,11 @@ try {
       "validated matching AppStream metadata and desktop launcher in both packages",
       "patched AppImage runtime machine code, notices, and matching source archive",
       "managed llama.cpp in usr/lib/shadowcode of both packages: pinned commit, relative symlinks, bundled libraries resolved inside the directory, llama-server --version with LD_LIBRARY_PATH unset, llama.cpp MIT notice",
+      "Debian package: root-owned 0755/0644 modes, no maintainer scripts or conffiles, DEP-5 copyright with the NOTICE, changelog, manual page and bash/zsh/fish completions matching the executable, hicolor icons at standard sizes, lintian overrides, stripped runtime, libc6 floor in Depends",
     ],
+    debian,
+    lintian,
+    desktopFileValidate: desktopValidator,
     packages: await Promise.all(
       [appimagePath, debPath, sourcesPath].map(async (file) => ({
         file: path.basename(file),

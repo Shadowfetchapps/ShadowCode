@@ -271,6 +271,17 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    // The bundler records the package format in the executable; Settings ›
+    // About and the update notice use it to name the right update steps.
+    {
+        use shadowcode_core::updates::{set_bundle, InstallKind};
+        use tauri::utils::{config::BundleType, platform::bundle_type};
+        match bundle_type() {
+            Some(BundleType::AppImage) => set_bundle(InstallKind::Appimage),
+            Some(BundleType::Deb) => set_bundle(InstallKind::Deb),
+            _ => {}
+        }
+    }
     let extraction_parent = shadowcode_core::lifecycle::extraction_parent();
     // Built once: the window and remote access (`shadowcode serve --remote`
     // and Settings › Remote access) serve the same embedded interface.

@@ -133,8 +133,27 @@ This manual Debian verification does not provide the AppImage installer's durabl
 accepted-version and rollback state. Checksums alone do not authenticate a publisher.
 
 The deb installs `shadowcode` and the same llama.cpp runtime in
-`/usr/lib/shadowcode`. It depends on `git`, `libgomp1` and `libssl3`, and
-recommends `libvulkan1`, which is needed for GPU inference.
+`/usr/lib/shadowcode`, with a manual page (`man shadowcode`) and bash, zsh and
+fish completions. It depends on `git`, `libgomp1`, `libssl3`, `libasound2`,
+WebKitGTK and `libc6 (>= 2.39)`, and recommends `libvulkan1`, which is needed
+for GPU inference, and `bubblewrap`, which the shell sandbox uses. Removing or
+purging it leaves your settings and history in place.
+For the AppImage, `shadowcode completions bash|zsh|fish` prints the
+completion script.
+
+Distributions and administrators: see [Distributing ShadowCode](docs/DISTRIBUTING.md)
+for verification, dependencies, default settings and the update-check switch.
+
+### Updates
+
+At most once a day, and when you press **Check now** in **Settings ›
+About**, ShadowCode asks GitHub for the latest release. The request carries
+no version or identifier, and nothing is downloaded or installed for you.
+When a newer version exists, **Update available** appears in the status bar;
+**Settings › About** links the release notes and shows how to update this
+installation (the authenticated installer for the AppImage, your package
+manager for the deb). Turn it off there with **Check for updates once a
+day**; Offline mode pauses it. Distributions can turn it off for everyone.
 
 ## First run
 
@@ -487,6 +506,7 @@ The editor's project must be trusted in ShadowCode (or start the agent with
 | Remote access: switches, paired devices (token digests only), phone notifications | `~/.config/shadow-agent/remote.json` (mode 600) |
 | Conversations, jobs, events, goals, usage snapshots | `~/.local/state/shadow-agent/shadow-agent.db` (SQLite, schema version 26; backed up as `shadow-agent.pre-native-<id>.sqlite` before a migration) |
 | OpenRouter model list (cache) | `~/.local/state/shadow-agent/openrouter-models.json` |
+| The update check's last answer | `~/.local/state/shadow-agent/update-check.json` |
 | Webview storage | `~/.local/share/shadow-agent/webview` |
 | llama.cpp runtime (AppImage install) | `~/.local/lib/shadowcode` |
 | Voice models (installed from Settings › Voice) | `~/.local/share/shadow-agent/voice/models` |
@@ -599,7 +619,8 @@ throwaway profile has no `secrets.env`.
   `shadowcode acp`): [native CLI](docs/NATIVE_CLI.md), [terminal
   UI](docs/NATIVE_TUI.md), [MCP](docs/NATIVE_MCP.md), [editors over
   ACP](docs/ACP_SERVER.md).
-- Package notices: [licenses/native](licenses/native/README.md).
+- Package notices: [licenses/native](licenses/native/README.md). Packaging
+  for distributions: [Distributing ShadowCode](docs/DISTRIBUTING.md).
 
 ## License
 
