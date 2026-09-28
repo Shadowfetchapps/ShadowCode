@@ -265,3 +265,141 @@ test('both required CI paths install D-Bus before session fixtures and preserve 
     }
   }
 });
+
+
+for (const phase of ['capture', 'inventory']) {
+  test(`${phase} discovery admits at most eight read-only candidates and scans every PID in stable order`, async () => {
+    const f = fixture();
+    const session = await capturePrivateSession({ address, io: f.io });
+    const ids = Array.from({ length: 24 }, (_, i) => 123 - i);
+    for (const pid of ids) {
+      f.rows.set(pid, f.proc(pid, 0, 13, '/fixture/service'));
+      f.environments.set(pid, f.marker(address));
+    }
+    f.io.pids = async () => phase === 'capture' ? [...ids, 1, 2, 3] : ids;
+    let release, reached, active = 0, maximum = 0;
+    const barrier = new Promise(resolve => { release = resolve; });
+    const eighth = new Promise(resolve => { reached = resolve; });
+    const seen = [];
+    f.io.uid = async pid => {
+      seen.push(pid); active++; maximum = Math.max(maximum, active);
+      if (seen.length === 8) reached();
+      await barrier;
+      active--;
+      return f.rows.get(pid)?.uid;
+    };
+    const pending = phase === 'capture'
+      ? capturePrivateSession({ address, io: f.io })
+      : inspectPrivateActivations(session.identity, { io: f.io });
+    let timer, admitted = false, result;
+    try {
+      admitted = await Promise.race([eighth.then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 1000); })]);
+      assert.equal(seen.length, 8, 'fixed pool admits eight blocked readers, not one serial reader or an unbounded inventory');
+    } finally { clearTimeout(timer); release(); result = await pending; }
+    assert(admitted, 'eight reads must reach the explicit admission barrier');
+    assert.equal(maximum, 8);
+    assert.deepEqual(seen, phase === 'capture' ? [...ids, 1, 2, 3] : ids);
+    if (phase === 'capture') assert.equal(result.identity.daemon.pid, 2);
+    else assert.deepEqual(result.map(value => value.pid), ids, 'completion scheduling cannot reorder the result inventory');
+    assert.deepEqual(f.signals, []);
+  });
+}
+
+test('discovery propagates an unreadable candidate and retires every admitted reader before rejecting', async () => {
+  const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
+  const ids = Array.from({ length: 24 }, (_, i) => 100 + i);
+  f.io.pids = async () => ids;
+  let release, failureReached, active = 0, maximum = 0;
+  const barrier = new Promise(resolve => { release = resolve; });
+  const failed = new Promise(resolve => { failureReached = resolve; });
+  const seen = [];
+  f.io.uid = async pid => {
+    seen.push(pid); active++; maximum = Math.max(maximum, active);
+    try {
+      if (pid === 100) { failureReached(); throw Object.assign(new Error('fixture proc denied'), { code: 'EACCES' }); }
+      await barrier; return 1001;
+    } finally { active--; }
+  };
+  let settled = false;
+  const pending = inspectPrivateActivations(session.identity, { io: f.io }).then(
+    result => ({ result }), error => ({ error }),
+  ).finally(() => { settled = true; });
+  await failed;
+  // Flush the rejecting UID's microtasks while its other admitted readers
+  // stay blocked. No wall-clock sleeps or real process operations are used.
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  const beforeRelease = { settled, active, seen: seen.length };
+  release(); const outcome = await pending;
+  assert.equal(beforeRelease.settled, false, 'read-only work must be joined before rejection');
+  assert.equal(beforeRelease.active, 7);
+  assert.equal(beforeRelease.seen, 8);
+  assert.equal(active, 0); assert.equal(maximum, 7);
+  assert.match(outcome.error.message, /fixture proc denied/);
+  assert.deepEqual(seen, ids.slice(0, 8), 'no new readers admitted after a discovery failure');
+  assert.deepEqual(f.signals, []);
+});
+
+test('discovery still refuses more than 32 matching private activations without signaling', async () => {
+  const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
+  const ids = Array.from({ length: 48 }, (_, i) => 100 + i);
+  for (const pid of ids) {
+    f.rows.set(pid, f.proc(pid, 0, 13, '/fixture/service'));
+    f.environments.set(pid, f.marker(address));
+  }
+  f.io.pids = async () => ids;
+  await assert.rejects(inspectPrivateActivations(session.identity, { io: f.io }), /service count exceeds/);
+  assert.deepEqual(f.signals, []);
+});
+
+test('discovery preserves PID inventory order when matching reads finish in reverse', async () => {
+  const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
+  const ids = Array.from({ length: 8 }, (_, i) => 100 + i);
+  for (const pid of ids) {
+    f.rows.set(pid, f.proc(pid, 0, 13, '/fixture/service'));
+    f.environments.set(pid, f.marker(address));
+  }
+  f.io.pids = async () => ids;
+  let reached; const allAdmitted = new Promise(resolve => { reached = resolve; });
+  const releases = new Map(), completions = new Map(), completionOrder = [];
+  f.io.activation = pid => new Promise(resolve => { releases.set(pid, resolve); if (releases.size === ids.length) reached(); });
+  const counts = new Map(), identity = f.io.identity;
+  const done = new Map(ids.map(pid => [pid, new Promise(resolve => { completions.set(pid, resolve); })]));
+  f.io.identity = async pid => {
+    const count = (counts.get(pid) || 0) + 1; counts.set(pid, count);
+    if (count === 3) { completionOrder.push(pid); completions.get(pid)(); }
+    return identity(pid);
+  };
+  const pending = inspectPrivateActivations(session.identity, { io: f.io });
+  let timer;
+  try {
+    await Promise.race([allAdmitted, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('readers did not reach activation barrier')), 1000); })]);
+    clearTimeout(timer);
+    for (const pid of [...ids].reverse()) { releases.get(pid)(f.marker(address)); await done.get(pid); }
+    const found = await pending;
+    assert.deepEqual(completionOrder, [...ids].reverse());
+    assert.deepEqual(found.map(value => value.pid), ids);
+    assert.deepEqual(f.signals, []);
+  } finally { clearTimeout(timer); for (const [pid, release] of releases) release(f.marker(address)); }
+});
+
+test('concurrent discovery deadline joins eight readers and late IO cannot signal or admit more work', async () => {
+  const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
+  let clock = 0;
+  f.io.now = () => clock;
+  const ids = Array.from({ length: 24 }, (_, i) => 100 + i);
+  for (const pid of ids) f.rows.set(pid, f.proc(pid, 0, 13, '/fixture/service'));
+  f.io.pids = async () => { clock = 4990; return ids; };
+  const seen = [], releases = [];
+  f.io.uid = pid => new Promise(resolve => { seen.push(pid); releases.push(resolve); });
+  let deeperReads = 0;
+  f.io.basic = async pid => { deeperReads++; return f.io.identity(pid); };
+  const result = await session.cleanup();
+  assert.equal(result.ok, false); assert.match(result.failures.join(' '), /deadline/);
+  assert.deepEqual(seen, ids.slice(0, 8));
+  assert.equal(deeperReads, 0); assert.deepEqual(f.signals, []);
+  for (const release of releases) release(1000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(seen, ids.slice(0, 8), 'expired workers cannot admit queued candidates');
+  assert.equal(deeperReads, 0, 'late UID reads cannot continue to candidate identity checks');
+  assert.deepEqual(f.signals, [], 'late results cannot become partial signal authority');
+});

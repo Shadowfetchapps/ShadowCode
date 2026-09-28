@@ -68,6 +68,25 @@ export const linuxProc = {
   now: Date.now,
 };
 
+// Only discovery reads overlap. Keep the full inventory and its input order;
+// anchors, identity revalidation and every signal remain sequential below.
+async function discoverProcesses(pids, inspect) {
+  const results = new Array(pids.length);
+  let next = 0, failure;
+  await Promise.all(Array.from({ length: Math.min(8, pids.length) }, async () => {
+    while (!failure) {
+      const index = next++;
+      if (index >= pids.length) return;
+      try { results[index] = await inspect(pids[index]); }
+      catch (error) { failure ??= { error }; }
+    }
+  }));
+  // Join already-admitted reads before reporting an error. A failure never
+  // becomes a partial inventory or permits subsequent cleanup signals.
+  if (failure) throw failure.error;
+  return results.filter(Boolean);
+}
+
 export async function capturePrivateSession({ address = process.env.DBUS_SESSION_BUS_ADDRESS, io = linuxProc,
   launcherExe = '/usr/bin/dbus-run-session', daemonExe = '/usr/bin/dbus-daemon' } = {}) {
   addressPath(address || '');
@@ -76,14 +95,13 @@ export async function capturePrivateSession({ address = process.env.DBUS_SESSION
   const launcher = await io.identity(self.parent);
   assert(alive(launcher) && launcher.exe === launcherExe && launcher.uid === self.uid, 'Test must be a direct child of the expected dbus-run-session');
   const basic = pid => io.basic ? io.basic(pid) : io.identity(pid);
-  const candidates = [];
-  for (const pid of await io.pids()) {
-    if (await io.uid(pid) !== self.uid) continue;
+  const candidates = await discoverProcesses(await io.pids(), async pid => {
+    if (await io.uid(pid) !== self.uid) return;
     const info = await basic(pid);
-    if (!alive(info) || info.parent !== launcher.pid || BigInt(info.start) < BigInt(launcher.start) || BigInt(info.start) > BigInt(self.start)) continue;
+    if (!alive(info) || info.parent !== launcher.pid || BigInt(info.start) < BigInt(launcher.start) || BigInt(info.start) > BigInt(self.start)) return;
     const value = await io.identity(pid);
-    if (alive(value) && value.exe === daemonExe && await io.ownsAddress(pid, address)) candidates.push(value);
-  }
+    if (alive(value) && value.exe === daemonExe && await io.ownsAddress(pid, address)) return value;
+  });
   assert.equal(candidates.length, 1, 'Private bus address is not owned by exactly one child of this test session');
   const daemon = candidates[0];
   async function anchored(client = io) {
@@ -161,20 +179,19 @@ export async function inspectPrivateActivations(session, { io = linuxProc } = {}
   const { address, self, launcher, daemon } = session;
   addressPath(address);
   const excluded = new Set([self.pid, launcher.pid, daemon.pid]);
-  const owned = [];
-  for (const pid of await io.pids()) {
-    if (excluded.has(pid) || await io.uid(pid) !== self.uid) continue;
+  let matched = 0;
+  return discoverProcesses(await io.pids(), async pid => {
+    if (excluded.has(pid) || await io.uid(pid) !== self.uid) return;
     const info = await (io.basic ? io.basic(pid) : io.identity(pid));
-    if (!alive(info) || BigInt(info.start) < BigInt(daemon.start)) continue;
+    if (!alive(info) || BigInt(info.start) < BigInt(daemon.start)) return;
     const env = await io.activation(pid);
-    if (!(env?.DBUS_SESSION_BUS_ADDRESS === address && env.DBUS_STARTER_ADDRESS === address && env.DBUS_STARTER_BUS_TYPE === 'session')) continue;
+    if (!(env?.DBUS_SESSION_BUS_ADDRESS === address && env.DBUS_STARTER_ADDRESS === address && env.DBUS_STARTER_BUS_TYPE === 'session')) return;
     const value = await io.identity(pid);
-    if (!alive(value)) continue;
+    if (!alive(value)) return;
     assert(info.start === value.start && info.uid === value.uid && same(value, await io.identity(pid)), 'Activated service identity changed while recording');
-    owned.push(value);
-    assert(owned.length <= 32, 'Private activated service count exceeds test cleanup limit');
-  }
-  return owned;
+    assert(++matched <= 32, 'Private activated service count exceeds test cleanup limit');
+    return value;
+  });
 }
 
 export async function writePrivateSessionReport(session, cleanup) {
