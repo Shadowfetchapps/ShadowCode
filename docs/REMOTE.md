@@ -71,16 +71,20 @@ service.
 
 The same as the desktop window, with these exceptions:
 
-- **Terminals are off.** Interactive terminals and **Run** (a command typed
-  in the drawer) are refused unless you turn on **Allow terminals over remote
-  access**. Tasks still run commands through the usual approvals.
+- **Terminals are off.** Interactive terminals, **Run** (a command typed
+  in the drawer) and the `/run`, `/test <command>` and `/background` slash
+  commands are refused unless you turn on **Allow terminals over remote
+  access**. Tasks still run commands through the usual approvals, which the
+  device can answer: a paired device can still get commands run, so pair only
+  devices you control.
 - **No app preview.** The drawer's Preview tab loads your dev server through
   proxies on this computer's loopback, which a remote device cannot reach;
   `/api/preview…` is refused and the tab says so.
 - **Remote access settings stay on this computer.** A remote device cannot
   see or change pairing, devices, the address or phone notifications.
 - **No secrets.** Secret files (`.env`, `secrets.env`, private keys,
-  credential JSON) are not shown or diffed, ShadowCode's own settings folder
+  credential JSON), also when reached through a symlink or a spelling such as
+  `.env/`, are not shown or diffed, ShadowCode's own settings folder
   cannot be opened as a project, and recognizable keys and tokens in any
   answer are replaced by `[redacted secret]`. Text containing a redacted
   value cannot be saved back from a remote device.
@@ -126,7 +130,12 @@ minutes.
   address within 5 minutes, that address is refused for 5 minutes.
 - **Browsers.** There are no CORS headers: cross-origin requests and
   preflights are refused, and a request whose `Origin` is not this server's
-  own is rejected. Pages are served with a strict Content Security Policy,
+  own is rejected. The server answers only its own host names (IP addresses,
+  `localhost`, `*.localhost`, Tailscale `*.ts.net` names and the public
+  address), so a web page that points its own domain at this computer (DNS
+  rebinding) gets `421` before any token is checked and cannot use up the
+  failed-attempt budget. If you reach the server by another name, enter that
+  address as the **Public address**. Pages are served with a strict Content Security Policy,
   `X-Frame-Options: DENY` and `nosniff`.
 - **Limits.** Request bodies up to 8 MB (pairing: 4 KB), 64 connections, 32
   event streams, 32 browser tabs per server; static files are served only
