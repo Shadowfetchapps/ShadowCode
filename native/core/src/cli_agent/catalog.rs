@@ -1147,7 +1147,7 @@ async fn probe_acp_vendor(binary: &Path, args: &[&str], status: &mut VendorStatu
         Vendor::Antigravity => {
             "Antigravity's agent server reports no plan usage to other apps".into()
         }
-        _ => "Grok reports token counts per task, not plan allowance".into(),
+        _ => "Grok reports per-session tokens only, not plan allowance".into(),
     });
     let antigravity = vendor == Vendor::Antigravity;
     match acp_probe::probe_vendor(binary, args, &workspace, None, PROBE_TIMEOUT, antigravity).await

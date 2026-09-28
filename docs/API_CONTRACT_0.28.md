@@ -532,8 +532,12 @@ imports: [{path, mmproj, name, source}], excluded, llama_binary, context_size }`
   `mentions: [{path, kind: "file"|"dir"}]` (at most 20, inside the project).
   Effort maps to OpenRouter `reasoning.effort`, llama.cpp
   `chat_template_kwargs.enable_thinking` (false for `low`) on templates with
-  the switch, Codex `-c model_reasoning_effort="…"` and Claude Code
-  `MAX_THINKING_TOKENS` (4 000 / 16 000 / 31 999); other runtimes ignore it.
+  the switch, Codex `turn/start.effort` (and `-c model_reasoning_effort="…"`
+  for new threads), Claude Code `--effort <level>` (`MAX_THINKING_TOKENS`
+  4 000 / 16 000 / 31 999 only for a Claude Code without `--effort`) and an
+  ACP session's `thought_level` config option (Grok `reasoning_effort`);
+  other runtimes ignore it. Vendor picker rows carry `reasoning: false` for
+  models that take no effort (Claude Haiku).
   Native models read each mentioned file's current text (64 KB each, 256 KB
   in all) or folder listing with the prompt; the stored prompt and
   `user.message` keep only the text (vendor CLIs resolve the `@path` in it).
