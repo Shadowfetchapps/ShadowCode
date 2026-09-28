@@ -71,7 +71,7 @@ const TAURI_CONTROL = `Package: shadow-code
 Version: ${version}
 Architecture: amd64
 Installed-Size: 1
-Maintainer: ShadowfetchLinux <209457103+ShadowfetchLinux@users.noreply.github.com>
+Maintainer: Shadowfetch <209457103+Shadowfetchapps@users.noreply.github.com>
 Priority: optional
 Depends: git, libgomp1, libssl3, libasound2, libwebkit2gtk-4.1-0, libgtk-3-0
 Recommends: libvulkan1, bubblewrap
