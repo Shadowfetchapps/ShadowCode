@@ -741,7 +741,13 @@ async fn launch(
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
         }
     }
-    let props = props(&client, port, &api_key).await;
+    let props = match props(&client, port, &api_key).await {
+        Ok(props) => props,
+        Err(error) => {
+            terminate(&mut child).await;
+            return Err(other(error));
+        }
+    };
     if let Err(error) = sources.validate(spec) {
         terminate(&mut child).await;
         return Err(other(error));
@@ -916,23 +922,143 @@ async fn health(client: &reqwest::Client, port: u16, key: &str) -> bool {
         .is_ok_and(|r| r.status().is_success())
 }
 
-async fn props(client: &reqwest::Client, port: u16, key: &str) -> Value {
-    match client
+async fn props(client: &reqwest::Client, port: u16, key: &str) -> Result<Value> {
+    let response = client
         .get(format!("http://127.0.0.1:{port}/props"))
         .bearer_auth(key)
         .send()
         .await
-    {
-        Ok(response) if response.status().is_success() => {
-            response.json().await.unwrap_or(Value::Null)
-        }
-        _ => Value::Null,
-    }
+        .map_err(|_| anyhow!("llama-server readiness /props request failed"))?;
+    ensure!(
+        response.status().is_success(),
+        "llama-server readiness /props returned HTTP {}",
+        response.status().as_u16()
+    );
+    let props: Value = response
+        .json()
+        .await
+        .map_err(|_| anyhow!("llama-server readiness /props returned invalid JSON"))?;
+    ensure!(
+        props.is_object(),
+        "llama-server readiness /props must be a JSON object"
+    );
+    Ok(props)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A single bounded HTTP exchange, with no external process or detached task.
+    /// Only fake fixture authorization is inspected; no request/body is logged.
+    async fn props_fixture(status: u16, body: &str) -> Result<Value> {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = loopback_client(Duration::from_secs(2)).unwrap();
+        let serve = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 256];
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "fixture request ended before headers");
+                request.extend_from_slice(&chunk[..read]);
+                assert!(request.len() <= 8192, "fixture request headers are bounded");
+            }
+            let request = std::str::from_utf8(&request).unwrap();
+            assert!(request.starts_with("GET /props HTTP/1.1\r\n"));
+            assert!(request.lines().any(|line| {
+                line.eq_ignore_ascii_case("authorization: Bearer fixture-props-key")
+            }));
+            let response = format!(
+                "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Fixture-Private: fixture-private-header\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(props(&client, port, "fixture-props-key"), serve)
+        })
+        .await
+        .expect("bounded loopback props fixture");
+        result
+    }
+
+    #[tokio::test]
+    async fn runtime_props_reject_http_errors_without_private_response_data() {
+        for status in [401, 503] {
+            let error = props_fixture(status, r#"{"private":"fixture-private-body"}"#)
+                .await
+                .unwrap_err();
+            let diagnostic = format!("{error:#}");
+            assert_eq!(
+                diagnostic,
+                format!("llama-server readiness /props returned HTTP {status}")
+            );
+            for private in [
+                "fixture-private-body",
+                "fixture-private-header",
+                "fixture-props-key",
+            ] {
+                assert!(!diagnostic.contains(private));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_props_reject_invalid_json_and_non_objects() {
+        let error = props_fixture(200, "{fixture-private-body")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "llama-server readiness /props returned invalid JSON"
+        );
+        for body in ["null", "[]", "true", "42", r#""fixture-private-body""#] {
+            let error = props_fixture(200, body).await.unwrap_err();
+            assert_eq!(
+                format!("{error:#}"),
+                "llama-server readiness /props must be a JSON object"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_props_accept_objects_without_optional_capability_claims() {
+        for expected in [
+            json!({}),
+            json!({
+                "chat_template": null,
+                "chat_template_tool_use": null,
+                "chat_template_caps": null,
+                "default_generation_settings": null,
+                "modalities": null
+            }),
+            json!({
+                "chat_template_caps": {
+                    "supports_tools": false,
+                    "supports_tool_calls": null,
+                    "supports_parallel_tool_calls": "unknown"
+                },
+                "default_generation_settings": {"n_ctx": null}
+            }),
+        ] {
+            let actual = props_fixture(200, &expected.to_string()).await.unwrap();
+            assert_eq!(actual, expected);
+            let report = reported_tool_capabilities(&actual);
+            assert!(report["supports_tool_calls"].is_null());
+            assert!(report["supports_parallel_tool_calls"].is_null());
+            assert!(actual
+                .pointer("/default_generation_settings/n_ctx")
+                .and_then(Value::as_u64)
+                .is_none());
+        }
+    }
 
     #[test]
     fn runtime_tool_reports_keep_false_missing_and_malformed_distinct() {

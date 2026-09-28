@@ -35,6 +35,32 @@ def log(name, value):
     with open(os.path.join(HERE, name), "a") as f:
         f.write(json.dumps(value) + "\n")
 
+if args[:1] == ["--foreign-health-props"]:
+    foreign_port = int(args[1])
+    class Foreign(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+        def do_GET(self):
+            if self.path == "/props":
+                with open(os.path.join(HERE, "foreign-props-observed.json"), "w") as f:
+                    json.dump({"path": self.path}, f)
+                code, body = 401, {"error": "foreign fixture rejects this launch key"}
+            elif self.path == "/fixture/sentinel":
+                code, body = 200, {"foreign_listener": "still owned by fixture"}
+            else:
+                code, body = 200, {"status": "ok"}
+            data = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+    foreign = ThreadingHTTPServer(("127.0.0.1", foreign_port), Foreign)
+    with open(os.path.join(HERE, "foreign-listener-ready.json"), "w") as f:
+        json.dump({"pid": os.getpid(), "port": foreign_port}, f)
+    foreign.serve_forever()
+    sys.exit(0)
+
 if args == ["--version"]:
     if os.path.exists(os.path.join(HERE, "hold-probe")):
         open(os.path.join(HERE, "probe-started"), "w").close()
@@ -177,6 +203,19 @@ class Handler(BaseHTTPRequestHandler):
         if not tool_results:
             return sse(self, tool_call("read_file", {"path": "hello.txt"}))
         return sse(self, text("The file says hello from the fake model."))
+
+if name == "porthold.gguf" and os.path.exists(os.path.join(HERE, "hold-port-bind")):
+    bind_barrier = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    bind_path = os.path.join(HERE, "port-bind-%s.sock" % os.getpid())
+    bind_barrier.bind(bind_path)
+    bind_barrier.listen(1)
+    with open(os.path.join(HERE, "port-bind-held.json"), "w") as f:
+        json.dump({"pid": os.getpid(), "port": port, "socket": bind_path}, f)
+    connection, _ = bind_barrier.accept()
+    with connection, connection.makefile("rb") as stream:
+        if stream.read(4) != b"bind":
+            sys.exit(2)
+    bind_barrier.close()
 
 server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
 if name == "postready.gguf":
@@ -550,16 +589,20 @@ async fn hermes_unconfirmed_runtime_template_is_refused_and_reaped() {
             .await
             .err()
             .expect("unconfirmed templates cannot prepare tools");
-        assert!(
-            error.to_string().contains("did not confirm the expected"),
-            "{error}"
-        );
-        assert!(error.to_string().contains("expected_template_identities"));
-        assert!(error.to_string().contains("reported_template_field_type"));
-        assert!(!error.to_string().contains("MUST-NOT-LEAK"));
         if sentinel == "unavailable-props" {
-            assert!(error.to_string().contains("unavailable_or_invalid_props"));
+            assert_eq!(
+                error.to_string(),
+                "llama-server readiness /props returned HTTP 503"
+            );
+        } else {
+            assert!(
+                error.to_string().contains("did not confirm the expected"),
+                "{error}"
+            );
+            assert!(error.to_string().contains("expected_template_identities"));
+            assert!(error.to_string().contains("reported_template_field_type"));
         }
+        assert!(!error.to_string().contains("MUST-NOT-LEAK"));
         assert!(engine.local_runtime().loaded().is_none());
         assert_eq!(engine.local_runtime().in_use(), 0);
         assert!(lines(&f.bin.join("requests.jsonl")).is_empty());
@@ -3325,4 +3368,211 @@ async fn post_ready_crash_clears_direct_loaded_observation() {
 #[tokio::test]
 async fn post_ready_crash_refreshes_primed_cached_picker_without_acquire() {
     post_ready_crash_observation("picker").await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn foreign_health_with_rejected_props_cannot_mark_an_unbound_runtime_loaded() {
+    use anyhow::Context;
+    fn process(pid: u64) -> Option<(u64, char)> {
+        let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let fields: Vec<_> = text.rsplit_once(") ")?.1.split_whitespace().collect();
+        Some((
+            fields.get(19)?.parse().ok()?,
+            fields.first()?.chars().next()?,
+        ))
+    }
+    async fn barrier(path: &Path) -> anyhow::Result<Value> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(bytes) = fs::read(path) {
+                    if let Ok(value) = serde_json::from_slice(&bytes) {
+                        return value;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("fake runtime did not reach its explicit socket/listener barrier")
+    }
+    async fn gone(pid: u64, start: u64) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while process(pid).is_some_and(|(now, state)| now == start && state != 'Z') {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("owned fake runtime remained after cleanup")
+    }
+
+    let f = fixture(""); // Fake CPU-only mode: no GPU retry can obscure the case.
+    let model = f.models.join("porthold.gguf");
+    qwen_like(&model, "qwen3", TOOLS_TEMPLATE);
+    let model_before = fs::read(&model).unwrap();
+    fs::write(f.bin.join("hold-port-bind"), "hold").unwrap();
+    fs::write(f.project.join("hello.txt"), "original port fixture\n").unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "base",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&f.project)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let index = fs::read(f.project.join(".git/index")).unwrap();
+    Config::patch(&f.paths, json!({"local_engine":{"files":[model]},"network":{"mode":"offline"},"cli_agents":{"enabled":false}})).unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let id = local_engine::scan(&cfg.local_engine)[0].id.clone();
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let mut loading = None;
+    let mut foreign: Option<tokio::process::Child> = None;
+    let observed: anyhow::Result<Value> = async {
+        let owner = service.clone(); let target = id.clone();
+        loading = Some(tokio::spawn(async move { call(&owner, "POST", "/api/local-models/load", json!({"id":target})).await }));
+        let held = barrier(&f.bin.join("port-bind-held.json")).await?;
+        let pid = held["pid"].as_u64().context("barrier PID missing")?;
+        let port = held["port"].as_u64().context("barrier port missing")?;
+        let (start, state) = process(pid).context("held runtime child absent")?;
+        anyhow::ensure!(state != 'Z', "owned child exited before collision setup");
+        anyhow::ensure!(Path::new(held["socket"].as_str().context("barrier socket missing")?).exists(), "private bind barrier is not established");
+        // This independent listener is fixture-owned, not a LocalRuntime child.
+        foreign = Some(tokio::process::Command::new(f.bin.join("llama-server"))
+            .args(["--foreign-health-props", &port.to_string()])
+            .env_clear().env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .kill_on_drop(true).spawn()?);
+        let listener = barrier(&f.bin.join("foreign-listener-ready.json")).await?;
+        anyhow::ensure!(listener["port"] == port && listener["pid"].as_u64() == foreign.as_ref().unwrap().id().map(u64::from), "wrong listener barrier: {listener}");
+        // The barrier marker is emitted only by the actual /props handler.
+        barrier(&f.bin.join("foreign-props-observed.json")).await?;
+        let attempt = match tokio::time::timeout(Duration::from_secs(5), loading.as_mut().unwrap()).await {
+            Ok(joined) => {
+                loading = None;
+                match joined.context("public load worker panicked")? {
+                    Ok(value) => json!({"kind":"accepted","response":value}),
+                    Err(error) => json!({"kind":"refused","error":error.to_string()}),
+                }
+            }
+            Err(_) => json!({"kind":"pending"}),
+        };
+        let owned_alive_after_props = process(pid).is_some_and(|(now, state)| now == start && state != 'Z');
+        let owned_present_after_props = process(pid).is_some_and(|(now, _)| now == start);
+        let catalog = call(&service, "GET", "/api/local-models", Value::Null).await?;
+        let picker = call(&service, "GET", "/api/picker?cached=1", Value::Null).await?;
+        let launches_before_retry = lines(&f.bin.join("launches.jsonl")).len();
+        let _ = tokio::time::timeout(Duration::from_secs(10), call(&service, "POST", "/api/local-models/unload", json!({}))).await.context("managed attempt unload deadline")??;
+        if let Some(task) = loading.as_mut() {
+            let _outcome = tokio::time::timeout(Duration::from_secs(5), &mut *task).await.context("load worker did not join after cancellation")?.context("load worker panicked during cleanup")?;
+            loading = None;
+        }
+        gone(pid, start).await?;
+        anyhow::ensure!(foreign.as_mut().unwrap().try_wait()?.is_none(), "managed cleanup stopped unrelated listener");
+        let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(2)).build()?;
+        let sentinel = client.get(format!("http://127.0.0.1:{port}/fixture/sentinel")).send().await?.json::<Value>().await?;
+        anyhow::ensure!(sentinel == json!({"foreign_listener":"still owned by fixture"}), "foreign listener was replaced or stopped: {sentinel}");
+        // The fixture itself releases its listener only after survival proof.
+        let child = foreign.as_mut().unwrap(); child.start_kill()?;
+        tokio::time::timeout(Duration::from_secs(3), child.wait()).await.context("foreign listener cleanup deadline")??;
+        fs::remove_file(f.bin.join("hold-port-bind"))?;
+        let retry = tokio::time::timeout(Duration::from_secs(10), call(&service, "POST", "/api/local-models/load", json!({"id":id}))).await.context("explicit retry deadline")??;
+        let loaded = service.engine.local_runtime().loaded().context("explicit retry not loaded")?;
+        let new_pid = loaded.pid.context("explicit retry PID missing")? as u64;
+        let (new_start, _) = process(new_pid).context("retry child missing")?;
+        service.engine.shutdown().await?;
+        gone(new_pid, new_start).await?;
+        Ok(json!({"attempt":attempt,"owned_alive_after_props":owned_alive_after_props,"owned_present_after_props":owned_present_after_props,"catalog_loaded":catalog["loaded"],"picker":picker,
+            "launches_before_retry":launches_before_retry,"launches_after_retry":lines(&f.bin.join("launches.jsonl")).len(),
+            "foreign_survived_managed_cleanup":true,"retry":retry,"first_pid":pid,"retry_pid":new_pid,
+            "no_inference_requests":lines(&f.bin.join("requests.jsonl")).is_empty(),
+            "index_unchanged":fs::read(f.project.join(".git/index"))? == index,
+            "model_unchanged":fs::read(&model)? == model_before,
+            "project_unchanged":fs::read_to_string(f.project.join("hello.txt"))? == "original port fixture\n"}))
+    }.await;
+
+    // Cleanup precedes the expected before-fix false-readiness assertion.
+    let shutdown = tokio::time::timeout(Duration::from_secs(12), service.engine.shutdown()).await;
+    let load_joined = if let Some(task) = loading.as_mut() {
+        match tokio::time::timeout(Duration::from_secs(5), &mut *task).await {
+            Ok(Ok(_)) => true,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                false
+            }
+        }
+    } else {
+        true
+    };
+    let foreign_reaped = if let Some(child) = foreign.as_mut() {
+        let _ = child.start_kill();
+        matches!(
+            tokio::time::timeout(Duration::from_secs(3), child.wait()).await,
+            Ok(Ok(_))
+        )
+    } else {
+        true
+    };
+    assert!(
+        matches!(shutdown, Ok(Ok(()))),
+        "managed shutdown failed: {shutdown:?}"
+    );
+    assert!(
+        load_joined && foreign_reaped,
+        "owned fixture cleanup did not complete"
+    );
+    let observed = observed.expect("port collision fixture setup/cleanup failed");
+    eprintln!("PORT_FALSE_READINESS {observed}");
+    assert_eq!(observed["foreign_survived_managed_cleanup"], true);
+    assert_eq!(
+        observed["launches_before_retry"], 1,
+        "no automatic runtime retries: {observed}"
+    );
+    assert_eq!(observed["launches_after_retry"], 2);
+    assert_eq!(observed["retry"]["loaded"]["id"], id);
+    assert_eq!(observed["no_inference_requests"], true);
+    assert_eq!(observed["index_unchanged"], true);
+    assert_eq!(observed["model_unchanged"], true);
+    assert_eq!(observed["project_unchanged"], true);
+    assert_eq!(
+        observed["attempt"]["kind"], "refused",
+        "foreign health200/props401 must not establish readiness: {observed}"
+    );
+    assert_eq!(
+        observed["owned_alive_after_props"], false,
+        "refusal must stop its owned child before returning: {observed}"
+    );
+    assert_eq!(
+        observed["owned_present_after_props"], false,
+        "refusal must reap its owned child before returning: {observed}"
+    );
+    assert!(
+        observed["catalog_loaded"].is_null(),
+        "foreign endpoint published as loaded: {observed}"
+    );
+    let row = observed["picker"]["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap();
+    assert!(
+        !row["reason"].as_str().unwrap().starts_with("Loaded"),
+        "picker claimed foreign runtime ready: {observed}"
+    );
 }
