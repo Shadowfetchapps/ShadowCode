@@ -248,6 +248,22 @@ service discovery therefore differs from the physical desktop. No GTK portal
 backend is mandated; this qualifies the controlled X11 app and Markdown/CSP
 behavior, not physical Wayland or all portal features.
 
+For an explicit test on the current physical Wayland desktop, run the desktop
+probe directly under a private bus instead of the X11 wrapper:
+
+```sh
+SHADOW_NATIVE_DISPLAY=wayland dbus-run-session -- node scripts/test-native-desktop.mjs
+```
+
+This opens a test window on your current display, uses disposable application
+state, and removes X11 fallback from the launched process. It records the
+compositor socket, display dimensions and executable identity. Resize failures
+remain failures even when the probe continues other interactions; an overall
+nonzero result must not be presented as complete Wayland qualification. Some
+tiling compositors control window dimensions independently of application
+requests. The AppImage launcher keeps the bundled X11 default when no backend
+is chosen and preserves an explicit `GDK_BACKEND=wayland` selection.
+
 Both probes capture their direct private session identity and clean only newly
 activated services bound to that exact bus, with PID/start/executable/user
 revalidation. Cleanup is bounded and fails closed. The outer wrapper then

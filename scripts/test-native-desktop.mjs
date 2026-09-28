@@ -18,6 +18,8 @@
 //   SHADOW_WEBKIT_DRIVER    WebKitWebDriver path (passed as --native-driver)
 //   SHADOW_NATIVE_ARTIFACTS screenshots/reports directory (default artifacts/native)
 //   SHADOW_NATIVE_ENDURANCE=1 adds the required dedicated UI-03 100-task phase
+//   SHADOW_NATIVE_DISPLAY=wayland explicitly exercises the current desktop;
+//     run directly under dbus-run-session, never through run-native-x11.mjs.
 //   SHADOW_EXPECT_VENDORS   e.g. "codex=Ready,claude=Sign in": exact picker
 //                           availability expected for vendors on this machine
 import assert from "node:assert/strict";
@@ -26,14 +28,28 @@ import { EDITOR_FILE, OTHER_FILE, seedNativeEditorFixtures, nativeEditorBeforeRe
 import { nativeRunCheck } from "./fixtures/native-run-check-smoke.mjs";
 import { nativeEndurance } from "./fixtures/native-endurance-smoke.mjs";
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createWriteStream, existsSync } from "node:fs";
-import { chmod, copyFile, mkdtemp, mkdir, readFile, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, mkdir, readFile, readdir, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+const displayBackend = process.env.SHADOW_NATIVE_DISPLAY || "x11";
+assert.ok(["x11", "wayland"].includes(displayBackend), "Unknown native display backend");
+const displayEvidence = { backend: displayBackend, geometryFailures: [] };
+if (displayBackend === "wayland") {
+  assert.equal(process.env.XDG_SESSION_TYPE, "wayland", "Wayland qualification requires an actual Wayland session");
+  assert.ok(process.env.WAYLAND_DISPLAY && process.env.XDG_RUNTIME_DIR, "Wayland display and runtime directory required");
+  const socket = path.resolve(process.env.XDG_RUNTIME_DIR, process.env.WAYLAND_DISPLAY);
+  const identity = await stat(socket);
+  assert.ok(identity.isSocket(), "Wayland display must identify a live compositor socket");
+  assert.equal(identity.uid, process.getuid(), "Wayland socket must belong to this user");
+  Object.assign(displayEvidence, { socket, socketDevice: identity.dev, socketInode: identity.ino,
+    desktop: process.env.XDG_CURRENT_DESKTOP || null, session: process.env.XDG_SESSION_ID || null });
+}
 const privateSession = await capturePrivateSession();
 let finalReport;
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -121,14 +137,19 @@ const nativeEnv = {
   XDG_CACHE_HOME: path.join(profile, "cache"),
   TMPDIR: path.join(scratch, "tmp"),
   SHADOWCODE_LLAMA_SERVER: fakeServer,
-  WEBKIT_DISABLE_DMABUF_RENDERER: "1",
 };
 delete nativeEnv.NO_CLEANUP;
 // Stay on the xvfb display: GTK would otherwise prefer a Wayland session the
-// test was started from and open the window on the user's desktop.
-delete nativeEnv.WAYLAND_DISPLAY;
+// test was started from. Real-desktop qualification requires an explicit opt-in.
 delete nativeEnv.WAYLAND_SOCKET;
-nativeEnv.GDK_BACKEND = "x11";
+nativeEnv.GDK_BACKEND = displayBackend;
+if (displayBackend === "x11") {
+  delete nativeEnv.WAYLAND_DISPLAY;
+  nativeEnv.WEBKIT_DISABLE_DMABUF_RENDERER = "1";
+} else {
+  delete nativeEnv.DISPLAY; // No XWayland fallback can satisfy this run.
+  displayEvidence.dmabufOverride = nativeEnv.WEBKIT_DISABLE_DMABUF_RENDERER || null;
+}
 const launches = () => readFile(path.join(runtimeDir, "launches.jsonl"), "utf8").then((t) => t.trim().split("\n").filter(Boolean).map(JSON.parse), () => []);
 const modelRequests = () => readFile(path.join(runtimeDir, "requests.jsonl"), "utf8").then((t) => t.trim().split("\n").filter(Boolean).map(JSON.parse), () => []);
 
@@ -265,8 +286,17 @@ async function fill(selector, value) {
 }
 async function setWindow({ width, height }) {
   await wd("POST", `/session/${session}/window/rect`, { width, height });
-  await until(`Window ${width}px (inner ${await execute("return window.innerWidth+'x'+window.innerHeight")})`, async () => Math.abs((await execute("return window.innerWidth")) - width) < 40, 8000);
+  try {
+    await until(`Window ${width}px (inner ${await execute("return window.innerWidth+'x'+window.innerHeight")})`, async () => Math.abs((await execute("return window.innerWidth")) - width) < 40, 8000);
+  } catch (error) {
+    if (displayBackend !== "wayland" || !/^Window .* timed out$/.test(error.message)) throw error;
+    const actual = await execute("return {width:innerWidth,height:innerHeight}");
+    displayEvidence.geometryFailures.push({ requested: { width, height }, actual });
+    console.log(`  FAIL  Wayland resize ${width}x${height}: actual ${actual.width}x${actual.height}; continuing other checks with overall failure retained`);
+    return false;
+  }
   await delay(300);
+  return true;
 }
 /** Brightness of the page background (0 black … 1 white), as rendered. */
 const pageLuminance = () => execute("const [r,g,b]=getComputedStyle(document.body).backgroundColor.match(/[\\d.]+/g).map(Number);return (0.2126*r+0.7152*g+0.0722*b)/255");
@@ -368,6 +398,13 @@ try {
   const created = await wd("POST", "/session", { capabilities: { alwaysMatch: { "tauri:options": { application: binary, args: binaryArgs } } } });
   session = created.sessionId;
   await wd("POST", `/session/${session}/timeouts`, { script: 60000, implicit: 0, pageLoad: 30000 });
+  if (displayBackend === "wayland") {
+    const screen = await execute("return {width:screen.availWidth,height:screen.availHeight,scale:devicePixelRatio}");
+    assert.ok(screen.width > 0 && screen.height > 0, "Physical display dimensions available");
+    displayEvidence.screen = screen;
+    WIDE.width = Math.min(WIDE.width, screen.width);
+    WIDE.height = Math.min(WIDE.height, screen.height);
+  }
   await setWindow(WIDE);
 
   // ------------------------------------------------------------ first run
@@ -376,6 +413,12 @@ try {
   appPid = version.pid;
   assert.equal(version.runtime, "rust"); assert.equal(version.transport, "native");
   assert.equal(path.basename(await readlink(`/proc/${appPid}/exe`)), "shadowcode");
+  if (displayBackend === "wayland") {
+    const environment = (await readFile(`/proc/${appPid}/environ`, "utf8")).split("\0");
+    assert.ok(environment.includes("GDK_BACKEND=wayland"), "The actual app preserves native Wayland selection");
+    assert.ok(!environment.some(item => item.startsWith("DISPLAY=")), "Actual app has no X11 fallback");
+    displayEvidence.executableSha256 = createHash("sha256").update(await readFile(`/proc/${appPid}/exe`)).digest("hex");
+  }
   const expectedScript = (await readFile(path.join(root, "ui/dist/index.html"), "utf8")).match(/src="([^"]+\.js)"/)[1];
   assert.equal(await execute("return new URL(document.querySelector('script[type=module]').src).pathname"), expectedScript, "The binary embeds the current ui/dist build");
   const onboarding = await text();
@@ -662,22 +705,23 @@ try {
   note("Stop ends a running local task");
 
   // ------------------------------------------------------------ compact
-  await setWindow({ width: 520, height: 860 });
-  assert.equal(await horizontalOverflow(), false, "No horizontal scroll at 520 px");
-  await composerControlsFit("Compact composer controls fit without overlaps");
-  await screenshot("compact");
-  await accessibility("compact");
-  await setTheme("dark");
-  await accessibility("compact-dark");
-  await setTheme("light");
-  await openPicker();
-  assert.equal(await horizontalOverflow(), false, "Picker fits at 520 px");
-  await screenshot("compact-picker");
-  await accessibility("compact-picker");
-  await execute("document.querySelector('.unified-picker-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
-  await setWindow(WIDE);
-  note("520 px compact layout without horizontal scroll, light and dark axe clean");
-  note("light screenshots render light and dark ones dark (computed page background)");
+  if (await setWindow({ width: 520, height: 860 })) {
+    assert.equal(await horizontalOverflow(), false, "No horizontal scroll at 520 px");
+    await composerControlsFit("Compact composer controls fit without overlaps");
+    await screenshot("compact");
+    await accessibility("compact");
+    await setTheme("dark");
+    await accessibility("compact-dark");
+    await setTheme("light");
+    await openPicker();
+    assert.equal(await horizontalOverflow(), false, "Picker fits at 520 px");
+    await screenshot("compact-picker");
+    await accessibility("compact-picker");
+    await execute("document.querySelector('.unified-picker-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+    await setWindow(WIDE);
+    note("520 px compact layout without horizontal scroll, light and dark axe clean");
+    note("light screenshots render light and dark ones dark (computed page background)");
+  }
 
   // ------------------------------------------------------------ quit
   const children = await descendants(appPid);
@@ -692,7 +736,7 @@ try {
   note(`quit: app and ${children.length} child processes (${serverPids.length} llama-server launches) exited`);
   await wd("DELETE", `/session/${session}`).catch(() => {}); session = undefined;
 
-  finalReport = { passed: true, version: version.version, vendors: vendorSummary, checks, axe: axeFindings, screenshots: shots };
+  finalReport = { passed: displayEvidence.geometryFailures.length === 0, version: version.version, vendors: vendorSummary, checks, axe: axeFindings, screenshots: shots };
 } catch (error) {
   finalReport = { passed: false, checks, failure: error.stack || String(error) };
   if (session) {
@@ -714,8 +758,10 @@ try {
   const busCleanup = await privateSession.cleanup();
   await writePrivateSessionReport(privateSession, busCleanup);
   finalReport ||= { passed: false, checks, failure: "Window test did not complete" };
+  finalReport.display = displayEvidence;
   finalReport.private_session_cleanup = busCleanup;
   if (!busCleanup.ok) { finalReport.passed = false; process.exitCode = 1; }
+  if (!finalReport.passed) process.exitCode = 1;
   await writeFile(path.join(artifacts, "result.json"), JSON.stringify(finalReport, null, 2) + "\n");
   console.log(`Native desktop window ${finalReport.passed ? "passed" : "failed"} (${checks.length} checks). Screenshots in ${artifacts}`);
   driverLog.end();
