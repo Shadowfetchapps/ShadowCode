@@ -462,7 +462,7 @@ through a route without the engine (e.g. `/api/accounts`).
 
 ```
 {
-  id: "local:gguf:<hash>", name, path, bytes, source: "file"|"directory"|"ollama",
+  id: "local:gguf:<hash>", name, path, bytes, source: "file"|"directory"|"ollama"|"download",
   architecture: string|null, context_train: number|null, context_tokens: number,
   compatible: boolean, reason: string,
   vision: boolean, mmproj: string|null, tools: boolean, tools_reason: string,
@@ -482,6 +482,38 @@ projector; after load it is what the server reports in `/props`
 `modalities.vision`. Projector, vocabulary-only and embedding GGUFs are not
 listed as models.
 
+`source: "download"` rows are finished catalog downloads found in
+`<data>/local-models` (not in `config.yaml`), named from the catalog.
+
+`GET /api/local-models/downloads` → `DownloadCatalog` (the built-in list of
+free models, `native/core/src/local_downloads.rs`):
+
+```
+{
+  directory, free_bytes: number|null, offline: boolean,
+  hardware: { ram_bytes, vram_bytes: number|null, gpu: string|null },
+  recommended: string|null, recommended_fit: "gpu"|"cpu"|"tight"|null,
+  busy: boolean,            // a download or resume check runs
+  models: [{ id, name, publisher, summary, file, bytes, sha256, license, license_url,
+             source_url, quantization, architecture, memory_bytes, min_memory_bytes,
+             fit: "gpu"|"cpu"|"tight"|"no", recommended, supported, unsupported_reason,
+             state: "available"|"downloading"|"checking"|"paused"|"failed"|"installed",
+             done, total, bytes_per_second, error: string|null,
+             model_id: "local:gguf:…"|null, path: string|null }]
+}
+```
+
+- `POST /api/local-models/downloads/start {id}` starts or resumes (HTTP range)
+  one download in the background and returns the catalog. Refused in offline
+  mode, for an architecture the runtime lacks, when already downloaded, while
+  another download runs, and when the free space is short. A running download
+  re-reads the network mode every 2 seconds and stops (state `failed`, partial
+  file kept) when offline mode is turned on.
+- `POST /api/local-models/downloads/pause {id}` keeps the partial file;
+  `…/cancel {id}` stops and deletes it (and clears a failure);
+  `…/delete {id}` unloads the model if loaded (refused while a task uses it)
+  and deletes the file. Each returns the catalog.
+- `POST /api/local-models/remove` refuses a `download` row ("Choose Delete").
 - `POST /api/local-models/add {path}` (file or folder) → `{ ok, local_engine }`;
   a projector/vocab/embedding file is refused with the reason.
 - `POST /api/local-models/remove {id}` or `{path}` → `{ ok, deleted_weights: false, detail, local_engine }`;
@@ -1201,6 +1233,37 @@ title> · <project>", message, tags, priority, click?}`; `message` is a
 generic sentence unless `details` is on; `click` is
 `<public or running address>/#session=<id>`, which the web interface opens.
 
+## About and updates
+
+Settings › About and the status-bar update notice (`native/core/src/updates.rs`,
+[DISTRIBUTING.md](DISTRIBUTING.md#updates)). Only `?auto=1` and `POST
+/api/updates/check` reach the network, and only
+`GET https://api.github.com/repos/Shadowfetchapps/ShadowCode/releases/latest`
+with `User-Agent: ShadowCode-update-check` and no identifiers.
+
+- `GET /api/about` → `{name, version, commit: string|null, install: {kind:
+  "appimage"|"deb"|"system"|"source"|"unknown", label}, license: {spdx,
+  name, holder, notice, third_party: string|null}, links: {repository,
+  release_notes, releases, license, notice, issues, user_guide}, updates}`.
+  `commit` is recorded at build time (`SHADOWCODE_COMMIT`); `notice` is the
+  NOTICE text; `third_party` is the installed notices folder; `updates` is the
+  status below. No network access.
+- `GET /api/updates[?auto=1]` → `{current, allowed, automatic, setting:
+  bool|null, default_on, offline, policy_message, policy_source, install,
+  last_checked_at, last_attempt_at, error, latest: {version, tag, url,
+  published_at, signed}|null, available, dismissed, next_step: {text,
+  command, link}|null, releases_url}`. `allowed` is false when the build or a
+  policy file turned checks off; `automatic` adds `updates.check`. With
+  `auto=1` the daily check runs first when it is allowed, online and due (24 h
+  after the last attempt); otherwise the saved answer is returned.
+  `available` means `latest` is newer than `current`; `dismissed` means its
+  notice was hidden; `next_step` depends on `install` and the policy message.
+- `POST /api/updates/check {}` → the status after asking GitHub now (not again
+  within 30 s). Fails with the reason when checks are turned off or the
+  network mode is Offline; a failed request is reported in `error`.
+- `POST /api/updates/dismiss {version}` → the status; hides the notice for
+  that version until a newer one appears.
+
 ## Config
 
 `GET/PUT /api/config`:
@@ -1213,6 +1276,8 @@ generic sentence unless `details` is on; `click` is
   (0–30, default 1.0): model request retries (see above).
   `agent.summary_compaction` (default true) and `agent.summary_timeout_sec`
   (5–600, default 60): model-written compaction summaries.
+- `updates.check: bool` (unset follows the packaged default) — the daily
+  update check; see [About and updates](#about-and-updates).
 - `network.mode: "online" | "web_off" | "offline"` — `web_off` disables web
   tools only; `offline` also suppresses account/usage refresh and any helper
   network activity. Cloud rows are marked unavailable in `offline`.

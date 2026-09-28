@@ -1,6 +1,13 @@
 import { lazy, Suspense, type ReactNode, type RefObject } from "react";
 import { ArrowDown } from "lucide-react";
-import type { Approval, CommandResult, Health, Job, Session } from "../../api";
+import type {
+  Approval,
+  CommandResult,
+  DownloadModel,
+  Health,
+  Job,
+  Session,
+} from "../../api";
 import type { ApprovalDecision } from "../ApprovalCard";
 import type { DrawerTab } from "../Drawer";
 import type { AdvancedTab, SettingsSection } from "../Settings";
@@ -21,13 +28,16 @@ import type { useTaskActions } from "../../hooks/useTaskActions";
 import type { ToastKind } from "../../hooks/useToasts";
 import type { WorkspaceStatus } from "../../hooks/useWorkspace";
 import type { Fallback } from "../../lib/allowance";
-import type { PickerTarget } from "../../lib/picker";
+import { isReady, type PickerTarget } from "../../lib/picker";
+import { useModelDownloads } from "../../hooks/useModelDownloads";
+import { ModelSetupPanel } from "../ModelSetup";
 
 const CompareView = lazy(() =>
   import("../CompareView").then((module) => ({ default: module.CompareView })),
 );
 import { writeStore } from "../../lib/storage";
-import { invoke } from "../../lib/transport";
+import { invoke, isNative, isRemote } from "../../lib/transport";
+import { noticeVersion, useUpdateNotice } from "../../hooks/useUpdates";
 import { trustRequestFor } from "../../lib/trust";
 import { chipInput } from "../../lib/usageChip";
 import { ContextChip } from "../ContextChip";
@@ -56,6 +66,7 @@ export function Stage({
   targets,
   pickerLoaded,
   onRefreshModels,
+  onModelDownloaded,
   pickerOpen,
   setPickerOpen,
   selectedTarget,
@@ -107,6 +118,8 @@ export function Stage({
   targets: PickerTarget[];
   pickerLoaded: boolean;
   onRefreshModels: () => Promise<void>;
+  /** A free model finished downloading (choose it if nothing is chosen). */
+  onModelDownloaded: (model: DownloadModel) => void;
   pickerOpen: boolean;
   setPickerOpen: (open: boolean) => void;
   selectedTarget: PickerTarget | undefined;
@@ -149,6 +162,8 @@ export function Stage({
 }) {
   const { transcript, job, busy, connection, history } = conversation;
   const { switching, sessionId, modelChoice, runningChoice } = nav;
+  // Updates are this computer's business: a paired phone never asks.
+  const updates = useUpdateNotice(isNative() && !isRemote());
   const view = compare.view;
   const locked = busy || submitting || switching || Boolean(shutdown);
   const composerLocked = submitting || switching || Boolean(shutdown);
@@ -179,6 +194,24 @@ export function Stage({
     setTask(text);
     promptRef.current?.focus();
   };
+  // No model selected: show how to get one. A free model downloaded here is
+  // selected as soon as it is ready (unless something was chosen meanwhile).
+  const needsModel = pickerLoaded && !selectedTarget;
+  const downloads = useModelDownloads({
+    enabled: needsModel,
+    onError: (text) => toast(text, "err"),
+    onInstalled: onModelDownloaded,
+  });
+  const modelSetup = needsModel ? (
+    <ModelSetupPanel
+      downloads={downloads}
+      hasReadyModel={targets.some(isReady)}
+      onChooseModel={() => setPickerOpen(true)}
+      onOpenRouter={() => openSettings("accounts", { vendor: "openrouter" })}
+      onSubscription={() => openSettings("accounts")}
+      onBrowse={() => openSettings("local")}
+    />
+  ) : undefined;
   return (
     <main className="stage">
       <StageBanners
@@ -250,8 +283,9 @@ export function Stage({
           scroll.pin();
         }}
         onSuggestion={focusWith}
-        needsModel={pickerLoaded && !selectedTarget}
+        needsModel={needsModel}
         onChooseModel={() => setPickerOpen(true)}
+        modelSetup={modelSetup}
         rows={
           <TranscriptRows
             items={transcript.items}
@@ -415,6 +449,8 @@ export function Stage({
         context={
           <ContextChip input={chip} compaction={transcript.compaction} />
         }
+        update={noticeVersion(updates)}
+        onUpdate={() => openSettings("about")}
         version={health?.version || ""}
       />
     </main>

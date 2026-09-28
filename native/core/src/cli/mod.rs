@@ -196,6 +196,120 @@ async fn task(
     }
     watch::job(backend, started, options, json_output, true).await
 }
+/// A completion script for `shell`, generated from the same definitions as
+/// `--help`.
+pub fn completions(shell: args::CompletionShell) -> Result<Vec<u8>> {
+    use clap::CommandFactory;
+    use clap_complete::{generate, Shell};
+    let shell = match shell {
+        args::CompletionShell::Bash => Shell::Bash,
+        args::CompletionShell::Zsh => Shell::Zsh,
+        args::CompletionShell::Fish => Shell::Fish,
+    };
+    let mut out = Vec::new();
+    generate(shell, &mut Options::command(), "shadowcode", &mut out);
+    Ok(out)
+}
+/// The `shadowcode(1)` manual page (roff), with the subcommands, the files
+/// and the update-check switches that packagers look for.
+pub fn manpage() -> Result<Vec<u8>> {
+    use clap::CommandFactory;
+    let command = Options::command()
+        .name("shadowcode")
+        .display_name("shadowcode")
+        .long_about(
+            "ShadowCode is a desktop coding agent for local GGUF models, vendor coding \
+             subscriptions and OpenRouter. With no command it opens the desktop window; \
+             the commands below run the same engine from a terminal.",
+        );
+    let man = clap_mangen::Man::new(command)
+        .title("SHADOWCODE")
+        .section("1")
+        .source(format!("ShadowCode {}", crate::VERSION))
+        .manual("User Commands");
+    let mut out = Vec::new();
+    man.render_title(&mut out)?;
+    man.render_name_section(&mut out)?;
+    man.render_synopsis_section(&mut out)?;
+    man.render_description_section(&mut out)?;
+    man.render_options_section(&mut out)?;
+    // clap_mangen would point at one page per command (shadowcode-run(1));
+    // only this page is installed, so list the commands here.
+    out.extend_from_slice(b".SH COMMANDS\n");
+    for command in Options::command().get_subcommands() {
+        if command.is_hide_set() {
+            continue;
+        }
+        let about = command
+            .get_about()
+            .map(|about| about.to_string())
+            .unwrap_or_default();
+        out.extend_from_slice(
+            format!(
+                ".TP\n\\fBshadowcode {}\\fR\n{}\n",
+                roff_text(command.get_name()),
+                roff_text(&about)
+            )
+            .as_bytes(),
+        );
+    }
+    out.extend_from_slice(b".PP\nRun \\fBshadowcode\\fR \\fICOMMAND\\fR \\fB\\-\\-help\\fR for a command's options.\n");
+    out.extend_from_slice(MANPAGE_EXTRA.as_bytes());
+    man.render_version_section(&mut out)?;
+    Ok(out)
+}
+/// Plain text as one roff line: escapes, and no leading control character.
+fn roff_text(text: &str) -> String {
+    let text = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('\\', "\\e")
+        .replace('-', "\\-");
+    if text.starts_with(['.', '\'']) {
+        format!("\\&{text}")
+    } else {
+        text
+    }
+}
+const MANPAGE_EXTRA: &str = r#".SH FILES
+.TP
+\fI~/.config/shadow-agent/config.yaml\fR
+Settings. \fBupdates.check: false\fR turns off the daily update check.
+.TP
+\fI~/.config/shadow-agent/secrets.env\fR
+API keys for HTTP providers (mode 600).
+.TP
+\fI~/.local/state/shadow-agent/\fR
+Conversations, jobs and history (SQLite), and the update check's last answer.
+.TP
+\fI~/.local/share/shadow-agent/\fR
+Webview storage, voice and code-intelligence models.
+.TP
+\fI/etc/shadowcode/policy.yaml\fR, \fI/usr/share/shadowcode/policy.yaml\fR
+System policy. \fBupdates: {check: false}\fR turns the update check off for
+every user; \fBupdates.message\fR replaces the update steps shown in
+Settings > About.
+.TP
+\fI/usr/lib/shadowcode/\fR
+The bundled llama.cpp runtime for local models.
+.SH ENVIRONMENT
+.TP
+\fBXDG_CONFIG_HOME\fR, \fBXDG_DATA_HOME\fR, \fBXDG_STATE_HOME\fR
+Base folders for the files above.
+.SH PRIVACY
+ShadowCode sends no telemetry. Once a day, unless turned off, it asks
+api.github.com for the latest release of Shadowfetchapps/ShadowCode; the
+request carries no version or identifier. Offline mode stops it.
+.SH COPYRIGHT
+Copyright 2026 Shadowfetch. ShadowCode was originally created by Shadowfetch.
+Licensed under the Apache License, Version 2.0; see
+\fI/usr/share/doc/shadow-code/copyright\fR.
+.SH SEE ALSO
+\fBgit\fR(1), \fBbwrap\fR(1)
+.PP
+Documentation: https://github.com/Shadowfetchapps/ShadowCode
+"#;
 /// The executable an editor or MCP client should launch, with the AppImage
 /// flag when running from an AppImage.
 fn launcher() -> Result<(PathBuf, Vec<String>)> {
@@ -284,6 +398,18 @@ async fn acp(
 }
 /// Terminal work runs before any GTK/Tauri initialization, including in AppImage.
 pub async fn run(options: Options) -> Result<i32> {
+    // Generated text only: no profile, project or engine is opened.
+    match &options.command {
+        Some(Command::Completions { shell }) => {
+            std::io::stdout().write_all(&completions(*shell)?)?;
+            return Ok(0);
+        }
+        Some(Command::Manpage) => {
+            std::io::stdout().write_all(&manpage()?)?;
+            return Ok(0);
+        }
+        _ => {}
+    }
     let parent = crate::lifecycle::extraction_parent();
     if let Some(Command::Acp {
         trust,
@@ -668,6 +794,9 @@ async fn execute(backend: &Backend, workspace: &Path, options: &Options) -> Resu
         Command::Ui => bail!("Desktop startup must use the native window"),
         Command::Tui { .. } => unreachable!("Terminal UI handled before CLI dispatch"),
         Command::Acp { .. } => unreachable!("ACP handled before CLI dispatch"),
+        Command::Completions { .. } | Command::Manpage => {
+            unreachable!("Generated text is printed before CLI dispatch")
+        }
         Command::Sqlite {path,sql,params,limit,timeout_ms}=>backend.call("POST","/api/sqlite",json!({"path":path,"sql":sql,"params":serde_json::from_str::<Value>(params).context("--params must be a JSON array")?,"limit":limit,"timeout_ms":timeout_ms})).await?,
         Command::Memory {note,task,replace,expected_hash}=>backend.call("POST","/api/memory",json!({"action":if *replace{"replace"}else if note.is_some(){"append"}else{"read"},"scope":if task.is_some(){"task"}else{"project"},"task_id":task,"note":note,"expected_hash":expected_hash})).await?,
         Command::Doctor { test_model } => {

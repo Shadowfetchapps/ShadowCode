@@ -19,9 +19,16 @@ import {
   readManagedRuntime,
 } from "./llama-runtime.mjs";
 import { applicationNotices, appdirNotices } from "./native-notices.mjs";
-import { applyPackagingPath } from "./native-packaging-env.mjs";
+import {
+  applyPackagingPath,
+  bundleEnvironment,
+} from "./native-packaging-env.mjs";
 import { buildRuntime, runtimeNotices } from "./native-runtime.mjs";
-import { METAINFO_FILE, normalizeDesktopEntry } from "./native-desktop-metadata.mjs";
+import {
+  METAINFO_FILE,
+  normalizeDesktopEntry,
+} from "./native-desktop-metadata.mjs";
+import { finishDebianPackage } from "./native-deb.mjs";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const packagingPath = applyPackagingPath(root);
 console.log(`Using sanitized packaging PATH: ${packagingPath}`);
@@ -42,12 +49,34 @@ async function command(binary, args, env = {}) {
     );
   });
 }
-const run = (args) => command(process.execPath, [cli, ...args]);
+const run = (args, env = {}) => command(process.execPath, [cli, ...args], env);
 if (process.platform !== "linux" || process.arch !== "x64")
   throw new Error("This packaging workflow currently supports Linux x86_64");
 const version = JSON.parse(
   await readFile(path.join(root, "src-tauri/tauri.conf.json"), "utf8"),
 ).version;
+// Settings › About shows the commit. A distribution building from a source
+// archive without Git history may set SHADOWCODE_COMMIT itself.
+if (!process.env.SHADOWCODE_COMMIT) {
+  try {
+    const head = (
+      await exec("git", ["rev-parse", "--verify", "HEAD"], { cwd: root })
+    ).stdout.trim();
+    const changed = (
+      await exec("git", ["status", "--porcelain", "--untracked-files=no"], {
+        cwd: root,
+      })
+    ).stdout.trim();
+    process.env.SHADOWCODE_COMMIT = changed ? `${head}-dirty` : head;
+  } catch {
+    console.log("No Git checkout: the build records no commit");
+  }
+}
+if (process.env.SHADOWCODE_COMMIT)
+  console.log(`Recording commit ${process.env.SHADOWCODE_COMMIT}`);
+for (const name of ["SHADOWCODE_UPDATE_CHECK", "SHADOWCODE_UPDATE_MESSAGE"])
+  if (process.env[name])
+    console.log(`Update check build switch: ${name}=${process.env[name]}`);
 // Fail before the long release build when the managed runtime is missing,
 // was built from another commit, or lacks its pinned notices.
 const llama = await readManagedRuntime(root);
@@ -92,7 +121,10 @@ await copyFile(executable, original);
 try {
   for (const format of ["appimage", "deb"]) {
     await copyFile(original, executable);
-    await run(["bundle", "--bundles", format, "--ci", "--config", config]);
+    await run(
+      ["bundle", "--bundles", format, "--ci", "--config", config],
+      bundleEnvironment(format, nativeRuntime.runtime),
+    );
     if (format === "deb") {
       // The bundler's custom-files copy dereferences symlinks, so the runtime
       // is added to the finished package with its relative SONAME links.
@@ -103,7 +135,17 @@ try {
         ),
         llama,
         scratch,
-        { run: (binary, args) => command(binary, args), normalizeDesktop: true },
+        {
+          run: (binary, args) => command(binary, args),
+          normalizeDesktop: true,
+          // Copyright, changelog, manual page, completions, icons, lintian
+          // overrides, stripped runtime and libc dependency.
+          finish: (work) =>
+            finishDebianPackage(work, {
+              exec: (binary, args, options = {}) =>
+                exec(binary, args, { maxBuffer: 64_000_000, ...options }),
+            }),
+        },
       );
     }
     if (format === "appimage") {

@@ -16,6 +16,25 @@ On first launch, onboarding asks for the project and a permission mode.
 *Ask before actions* is the default. You can change it later in
 **Settings › Permissions & network**.
 
+If no model is ready yet (no signed-in subscription, no OpenRouter key and no
+local model), a second step asks how ShadowCode should think:
+
+- **Download a free model to run on this computer** is preselected when one
+  fits. ShadowCode recommends one for your memory and graphics card and shows
+  its size and about how long it takes (see
+  [free models](LOCAL_MODELS.md#download-a-free-model)). It is free, needs no
+  account, and your code stays on the computer. The download starts only when
+  you press **Download**; the conversation shows its progress with **Pause**
+  and **Cancel**, and selects the model as soon as it is ready. *See other
+  free models* opens **Settings › Local models**.
+- **Use an OpenRouter key** opens **Settings › Accounts › OpenRouter**
+  (paid per use).
+- **Sign in to a subscription** opens **Settings › Accounts** (Codex, Claude
+  Code, Cursor, Antigravity, Grok).
+
+**Skip for now** leaves the choice for later; the empty conversation offers
+the same three choices until a model is ready.
+
 The sidebar groups conversations by project. **New task** (`Ctrl+N`) starts a
 new conversation in the current project.
 
@@ -47,8 +66,9 @@ groups:
 
 - **Subscriptions / Vendor CLIs**: Codex, Claude Code, Cursor, Antigravity and Grok, run
   through the vendor's official CLI. Unconfirmed billing is labelled Vendor CLIs. See [subscriptions](SUBSCRIPTIONS.md).
-- **On this computer**: GGUF models run by the bundled llama.cpp. See
-  [local models](LOCAL_MODELS.md).
+- **On this computer**: GGUF models run by the bundled llama.cpp: free
+  models downloaded from **Settings › Local models**, files you add, and
+  Ollama imports. See [local models](LOCAL_MODELS.md).
 - **API keys**: OpenRouter models, billed per token to your OpenRouter
   account. Add a key in **Settings › Accounts › OpenRouter**; until then the
   group offers *Add an OpenRouter API key…*. See [OpenRouter](OPENROUTER.md).
@@ -570,7 +590,37 @@ In **Settings › Permissions & network**:
   "Offline mode: choose a model that runs on this computer". Shell commands
   that reach the network (for example `curl`, `npm` or `pip`) are denied.
   Voice input keeps working with a local model; OpenRouter transcription and
-  model downloads are refused.
+  model downloads (chat, voice and code-search models) are refused. A free
+  model that is downloading stops and can be resumed once you are online. The
+  daily update check pauses too.
+
+## About and updates
+
+**Settings › About** shows the version, the commit it was built from, how it
+was installed (AppImage, Debian package, another system package, or built from
+source), the license (Apache 2.0, with the NOTICE that credits Shadowfetch as
+the original creator) and links to the release notes, source, license, this
+guide and the issue tracker.
+
+Once a day while the window is open, ShadowCode asks GitHub which release is
+the newest. The request sends no version, account or other identifier, and
+ShadowCode never downloads or installs anything by itself. When a newer
+version exists:
+
+- **Update available: VERSION** appears at the right of the status bar. Click
+  it to open Settings › About.
+- About shows the new version, its release notes and the steps for your
+  installation: for the AppImage, download it with its four signature files
+  and run the authenticated installer (copy the command with the copy
+  button); for the deb, update through your package manager.
+- **Hide the notice until the next version** removes the status-bar button
+  until a newer release appears.
+
+**Check now** asks right away. **Check for updates once a day** turns the
+daily check off. In Offline mode nothing is checked. If your distribution
+manages ShadowCode's updates, About says so instead and the switch is not
+shown. A check that fails (for example with no network) stays quiet; About
+shows why the last one didn't work.
 
 ## The shell sandbox
 
@@ -656,6 +706,11 @@ Subscription CLIs use their own sandboxes, not this one.
 - **A local model loaded on the CPU.** The row shows *CPU fallback (GPU load
   failed)*. Check that `libvulkan1` and a Vulkan driver are installed, and read
   the error on **Settings › Local models**.
+- **A model download stopped.** The partial file is kept: choose **Resume**
+  on its row (the conversation or **Settings › Local models**) and it
+  continues where it stopped, even after ShadowCode restarts. *Not enough disk
+  space* names the folder and how much is needed. A file that fails its
+  checksum is deleted; download it again.
 - **The AppImage won't mount.** Run it with `--appimage-extract-and-run`. FUSE
   is optional.
 - **A command fails with "Require sandbox is on".** Install bubblewrap, or turn
