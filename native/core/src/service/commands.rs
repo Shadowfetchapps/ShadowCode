@@ -560,12 +560,11 @@ impl Service {
             && result["kind"] != "overlay"
         {
             if let Some(sid) = sid {
-                store.add_event(
-                    "command.completed",
-                    &json!({"name":name,"result":result}),
-                    Some(&sid),
-                    None,
-                )?;
+                // The stored transcript is redacted; `result` stays raw for
+                // the caller and follows the API's own redaction on return.
+                let mut event = json!({"name":name,"result":result});
+                crate::redaction::redact_value(&mut event);
+                store.add_event("command.completed", &event, Some(&sid), None)?;
             }
         }
         Ok(result)

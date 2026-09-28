@@ -402,12 +402,10 @@ impl Service {
             ),
         );
         let result = process::run(spec, ws.reservation.cancellation(), None).await?;
-        store.add_event(
-            "terminal.completed",
-            &json!({"command":command,"result":result}),
-            session.as_deref(),
-            None,
-        )?;
+        // The stored transcript is redacted; `result` stays raw for the caller.
+        let mut event = json!({"command":command,"result":result});
+        crate::redaction::redact_value(&mut event);
+        store.add_event("terminal.completed", &event, session.as_deref(), None)?;
         let mut result = json!(result);
         result["command"] = json!(command);
         Ok(result)

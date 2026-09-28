@@ -1561,3 +1561,47 @@ async fn historical_verification_rechecks_external_edits_and_restart_without_rew
     );
     reopened.engine.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn stored_command_output_is_redacted_in_events_and_exports() {
+    let (root, service) = setup(true);
+    let workspace = service.workspace().unwrap();
+    init(&workspace);
+    let session = call(
+        &service,
+        "POST",
+        "/api/sessions",
+        json!({"title": "Redact"}),
+    )
+    .await
+    .unwrap();
+    let sid = session["id"].as_str().unwrap().to_owned();
+    // A fake GitHub token printed by a terminal command must not reach the
+    // stored transcript or the conversation export.
+    let token = format!("{}{}", "ghp_", "A".repeat(36));
+    call(
+        &service,
+        "POST",
+        "/api/workspace/exec",
+        json!({"command": format!("echo {token}"), "session_id": sid}),
+    )
+    .await
+    .unwrap();
+    let events = service.engine.store().recent_events(&sid, 100).unwrap();
+    let stored = serde_json::to_string(&events).unwrap();
+    assert!(!stored.contains(&token), "token leaked into stored events");
+    assert!(stored.contains("[redacted secret]"), "{stored}");
+    let export = call(
+        &service,
+        "GET",
+        &format!("/api/sessions/{sid}/export?format=markdown"),
+        Value::Null,
+    )
+    .await
+    .unwrap_or(Value::Null);
+    assert!(
+        !serde_json::to_string(&export).unwrap().contains(&token),
+        "token leaked into export"
+    );
+    drop(root);
+}
