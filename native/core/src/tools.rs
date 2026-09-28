@@ -867,6 +867,15 @@ impl ToolExecutor {
             "git_clean" => vec!["clean".into(), "-fd".into()],
             _ => bail!("Unknown Git tool"),
         };
+        // The read-only tools run without approval: they never run the
+        // repository's own filter drivers (`crate::git_guard`).
+        if matches!(name, "git_status" | "git_diff" | "git_log") {
+            let words: Vec<&str> = git.iter().map(String::as_str).collect();
+            command.extend(crate::git_guard::args_async(&self.workspace.path, &words).await?);
+            // …and stay out of submodules' working trees (their own
+            // configuration is not inspected).
+            git = crate::git_guard::harden(&words);
+        }
         command.append(&mut git);
         let refs: Vec<_> = command.iter().map(String::as_str).collect();
         let mut spec = ProcessSpec::command("git", &refs, self.workspace.path.clone());
@@ -900,7 +909,10 @@ impl ToolExecutor {
             }
             "read_file" => {
                 let path = string(args, "path")?;
-                if crate::redaction::is_secret_path(path) {
+                // Check the name, a normalizing spelling (a trailing slash or
+                // dot segment) and the symlink target, so none reaches a
+                // secret file's contents.
+                if self.workspace.is_secret_target(path) {
                     return Ok(crate::redaction::secret_file_refusal(path));
                 }
                 let file = self.workspace.read(path)?;

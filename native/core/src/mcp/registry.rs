@@ -233,11 +233,44 @@ pub fn read(workspace: &Workspace, config: &Config, id: &str) -> Result<Entry> {
     let definition: Definition = serde_json::from_value(value)
         .map_err(|_| anyhow::anyhow!("Invalid MCP definition fields or types"))?;
     definition.validate()?;
+    if id.starts_with("project:") {
+        // A file in the repository must not turn a provider or first-party
+        // key into a bearer token or child-process variable sent to a URL or
+        // command it chose: SECURITY.md promises, for example, that the
+        // OpenRouter key reaches only openrouter.ai. A server that needs such
+        // a key is added in Settings › Extensions, where the user names it.
+        let referenced = definition
+            .api_key_env
+            .iter()
+            .map(String::as_str)
+            .chain(definition.env_refs.values().map(String::as_str));
+        for name in referenced {
+            ensure!(
+                !is_protected_secret(name),
+                "A project MCP server may not reference {name}; add servers that use provider keys in Settings › Extensions."
+            );
+        }
+    }
     Ok(Entry {
         id: id.into(),
         hash: content_hash,
         definition,
     })
+}
+
+/// Provider and first-party credentials a repository file must never point an
+/// MCP server at (the vendor-CLI removal list plus ShadowCode's own keys).
+fn is_protected_secret(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    crate::cli_agent::API_KEY_VARIABLES.contains(&name.as_str())
+        || matches!(
+            name.as_str(),
+            "GROK_API_KEY"
+                | "LLAMA_API_KEY"
+                | "SHADOWCODE_NTFY_TOKEN"
+                | "NTFY_TOKEN"
+                | "OPENROUTER_KEY"
+        )
 }
 pub fn catalog(workspace: &Workspace, config: &Config) -> Result<Value> {
     let approved: Vec<_> = activations(config)?

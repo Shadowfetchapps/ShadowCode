@@ -402,6 +402,73 @@ async fn background_commands_require_remote_terminal_permission() {
 }
 
 #[tokio::test]
+async fn slash_commands_cannot_run_commands_while_terminals_are_off() {
+    let f = fixture().await;
+    shadowcode_core::config::Config::patch(
+        f.service.engine.paths(),
+        json!({"trusted_workspaces": [f.workspace]}),
+    )
+    .unwrap();
+    let token = f.pair().await;
+    for (name, args) in [
+        ("run", "printf run > slash-marker.txt"),
+        ("test", "printf test > slash-marker.txt"),
+        ("background", "start probe printf bg > slash-marker.txt"),
+    ] {
+        let (status, body) = f
+            .api(
+                &token,
+                "POST",
+                "/api/commands/run",
+                Some(json!({"name": name, "args": args})),
+            )
+            .await;
+        assert_eq!(status, 403, "/{name}: {body}");
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!f.workspace.join("slash-marker.txt").exists());
+    // Other slash commands still work remotely.
+    let (status, body) = f
+        .api(
+            &token,
+            "POST",
+            "/api/commands/run",
+            Some(json!({"name": "help", "args": ""})),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    f.manager.stop();
+}
+
+#[tokio::test]
+async fn rebound_host_names_are_refused_before_authentication() {
+    let f = fixture().await;
+    let token = f.pair().await;
+    // A page that points its own name at this server: more attempts than the
+    // failure limit, none of which may count against the real device.
+    for _ in 0..12 {
+        let response = raw(
+            f.address,
+            &format!(
+                "GET /api/health HTTP/1.1\r\nHost: rebind.attacker.example:{}\r\nAuthorization: Bearer scr_wrongwrongwrongwrongwrong\r\nConnection: close\r\n\r\n",
+                f.address.port()
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 421"), "{response}");
+    }
+    let page = raw(
+        f.address,
+        "GET / HTTP/1.1\r\nHost: rebind.attacker.example\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(page.starts_with("HTTP/1.1 421"), "{page}");
+    let (status, _) = f.api(&token, "GET", "/api/health", None).await;
+    assert_eq!(status, 200, "the paired device is not locked out");
+    f.manager.stop();
+}
+
+#[tokio::test]
 async fn secrets_are_not_shown_remotely() {
     let f = fixture().await;
     let token = f.pair().await;
@@ -418,6 +485,23 @@ async fn secrets_are_not_shown_remotely() {
         .api(&token, "GET", "/api/workspace/file?path=.env", None)
         .await;
     assert_eq!(status, 403, "{body}");
+    // A normalizing spelling is refused by the policy after normalization.
+    let (status, _) = f
+        .api(&token, "GET", "/api/workspace/file?path=.env/", None)
+        .await;
+    assert_eq!(status, 403);
+    // A symlink to the secret file is blanked by the response redaction even
+    // though its name looks innocent.
+    std::os::unix::fs::symlink(".env", f.workspace.join("link.txt")).unwrap();
+    let (status, body) = f
+        .api(&token, "GET", "/api/workspace/file?path=link.txt", None)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !body["content"].as_str().unwrap_or("").contains("TOKEN="),
+        "the secret's contents leaked through a symlink: {body}"
+    );
+    assert_eq!(body["content"], "[secret file hidden over remote access]");
     let (status, body) = f
         .api(&token, "GET", "/api/workspace/file?path=notes.txt", None)
         .await;

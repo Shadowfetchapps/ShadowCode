@@ -31,10 +31,14 @@ as your Linux user. ShadowCode's own `exec` tool limits what they can reach:
   (Linux 5.13+). Landlock allows reading only the system folders, the toolchain
   folders and the project, and writing only the project and temporary folders.
   TCP blocking when the shell network is off needs Landlock ABI 4 or newer;
-  earlier supported kernels provide file limits only. ShadowCode's Landlock
-  rules don't cover UDP and give no process isolation. If neither layer is
-  available, commands run unrestricted. Either way, the conversation shows a
-  warning once.
+  earlier supported kernels provide file limits only. Landlock also scopes
+  abstract Unix sockets (the X11 socket, an abstract D-Bus bus) and signals to
+  processes outside the sandbox, and on kernels with Landlock ABI 9 or newer it
+  blocks connecting to named Unix sockets outside the project and temporary
+  folders (the D-Bus session bus, ShadowCode's own control socket); earlier
+  kernels leave those connections open. ShadowCode's Landlock rules don't cover
+  UDP and give no process isolation. If neither layer is available, commands run
+  unrestricted. Either way, the conversation shows a warning once.
   Landlock isn't layered under bubblewrap: it forbids the mount calls
   bubblewrap needs, and ShadowCode runs no helper inside the sandbox.
 - **Network** for shell commands is `off`, `on`, or `allowlist`
@@ -47,7 +51,11 @@ as your Linux user. ShadowCode's own `exec` tool limits what they can reach:
   entry names that address or `localhost`. Raw TCP, UDP and DNS have no route
   out. Programs that ignore proxy variables simply fail to connect. The filter
   sees host names, not URLs or request bodies: an allowed host can receive
-  anything the command sends. Allowlist mode needs bubblewrap and
+  anything the command sends, and a host behind a shared CDN can pass a
+  request on to another site on that CDN. With shell network `on`, the
+  command shares this computer's network namespace: it can reach services
+  listening on loopback (a local model server, a database) and the X
+  server's abstract socket. Allowlist mode needs bubblewrap and
   unprivileged user namespaces. Without them the command is refused and never
   run unfiltered.
 
@@ -57,6 +65,31 @@ policy check. It is not containment. Background processes started with
 run in this sandbox. The command sandbox settings, including "Require sandbox"
 and its network limits, apply to the built-in `exec` tool. Background-process
 approvals disclose this difference before execution.
+
+**ShadowCode's own Git never runs a repository's filter drivers.** The command
+sandbox makes the whole project writable, including `.git`. Because ShadowCode
+runs Git itself outside the sandbox (checkpoints after each command, the Changes
+view, reviews and Compare), it switches off every `filter.*` clean/smudge/process
+driver the repository's own configuration defines, so a command cannot plant one
+in `.git/config` and have it run unsandboxed later, and merely opening a
+repository does not run one. It also stays out of submodules and other nested
+repositories, whose own configuration it does not inspect: its automatic
+status and diffs don't look inside their working trees (new submodule commits
+still show), and its snapshots don't run Git inside them. Signature checks are
+off for its own Git. Drivers from your global or system Git configuration, and
+Git LFS's standard commands, keep working, and staging or committing for you
+keeps the repository's filters. The limit: the sandbox cannot stop a command
+from changing `.git/config` or `.git/hooks`. Git you run in a terminal obeys
+both, as in any repository, and the Changes view's Stage and Commit buttons
+use the repository's filter and signing settings (never its hooks). After
+running code you don't trust, check `.git/config` and `.git/hooks` before
+using Git yourself.
+
+An "allow for this task" command grant covers only the same program and
+subcommand (`cargo test`, `git status`), and never a command wrapper (`timeout`,
+`nice`, `env`, a shell, …), a script interpreter (`python`, `node`, …) or a
+`git` invocation carrying `-c`/`-C`/`--git-dir` and similar, so a grant cannot be
+widened into running an unrelated program.
 
 Vendor CLIs (Codex, Claude Code, Cursor, Antigravity, Grok) run as your user
 with their own tools and sandboxes. ShadowCode doesn't wrap them in bubblewrap,
@@ -189,7 +222,7 @@ What each vendor runtime enforces (from `permissions.rs`, shown in
 | Vendor | Enforcement |
 | --- | --- |
 | Codex | Codex's own sandbox: `workspace-write`, or `read-only` for Plan/Review, with `approvalPolicy: on-request`. Codex decides which actions ask. The `codex exec` fallback has no approval channel. It is used only if app-server fails before a turn starts, and only when shell commands are set not to ask (`permissions.approve_shell: false`). With the defaults of both modes, it never runs |
-| Claude Code | Permission prompts come to ShadowCode (`--permission-prompts host`). Plan/Review uses `--permission-mode plan`. Claude's own settings can pre-approve tools that ShadowCode never sees |
+| Claude Code | Permission prompts come to ShadowCode (`--permission-prompts host`). Plan/Review uses `--permission-mode plan`. Claude's own settings — including a trusted project's `.claude/settings.json` and `.mcp.json` — can pre-approve tools, run hooks or start MCP servers that ShadowCode never sees. Trust a project only if you trust that content |
 | Cursor | ACP permission requests come to ShadowCode. Plan/Review uses Cursor's plan mode when offered |
 | Grok | ACP permission requests come to ShadowCode. Grok has no read-only mode, so Plan/Review is not enforced by Grok |
 | Antigravity | Asks through ACP `session/request_permission`, like Cursor and Grok. In Plan/Review ShadowCode denies its requests |
@@ -210,20 +243,29 @@ default).
   cases: the previous turn ran locally, the conversation moves to another
   provider (a bounded handoff of at most 12,000 characters), or images go to a
   cloud route for the first time in the conversation. Without consent, no job
-  row is written and nothing is sent.
+  row is written and nothing is sent. A subagent has no interactive consent
+  channel, so a conversation running on this computer cannot spawn a subagent on
+  a cloud route: a repository agent file's `model` field or a `spawn_agent`
+  model argument that names a cloud model is refused unless the conversation is
+  already on a cloud route.
 - **Offline mode.** Jobs on cloud routes are refused, and no vendor process is
   started for status, models or usage.
 
 ## Stored data and redaction
 
-- **Before model context.** Common secret patterns (private keys, GitHub,
-  Slack and AWS tokens, `sk-…` keys, JWTs, bearer tokens, `api_key=…`) and
-  high-entropy tokens are replaced with `[redacted secret]` in file contents
-  and tool output. Requests to read `.env`, `.env.*`, `secrets.env`, credential
-  JSON or private keys are refused.
-- **Stored events.** `tool.started`, `tool.completed`, `approval.requested`
-  and `command.completed` payloads are written to SQLite in redacted form.
-  Vendor CLI output is redacted before it is shown or stored.
+- **Before model context.** Common secret patterns (private keys; GitHub
+  including `github_pat_`; GitLab, Slack, AWS, Google, xAI, Hugging Face, npm
+  and Stripe tokens; `sk-…` keys; ShadowCode's own `scr_` remote token; JWTs;
+  bearer tokens; `api_key=…`) and high-entropy tokens are replaced with
+  `[redacted secret]` in file contents and tool output. Requests to read `.env`,
+  `.env.*`, `secrets.env`, credential JSON, `.netrc`, `.git-credentials`, SSH
+  private keys and similar are refused, whether reached directly, through a
+  normalizing spelling (a trailing slash or `.`/`..` segment) or through a
+  symlink, by `read_file`, an @-mention or a file-glob search.
+- **Stored events.** `tool.started`, `tool.completed`, `approval.requested`,
+  `command.completed`, `terminal.completed` and `hook.completed` payloads are
+  written to SQLite (and copied into exports) in redacted form. Vendor CLI
+  output is redacted before it is shown or stored.
 - **Limits.** Redaction matches patterns only. It is not a guarantee.
 - **The history database is sensitive.** `shadow-agent.db` holds prompts,
   answers and source excerpts. It is created with mode 600, and migration
@@ -251,11 +293,16 @@ default).
   pair with single-use links that expire after 10 minutes and can be
   unpaired one by one or all at once. Eight failed attempts from one address
   within 5 minutes block it for 5 minutes. There are no CORS headers;
-  cross-origin requests are refused; static files are served by exact name
-  from the built interface only; bodies are limited to 8 MB. A paired device
-  has the same control as the desktop window, except: it cannot manage remote
-  access, terminals and direct commands are refused unless you allow them,
-  secret files are not shown, the profile folders cannot be opened, and
+  cross-origin requests are refused; the server answers only its own host
+  names (IP addresses, `localhost`, `*.localhost`, Tailscale `*.ts.net` and the
+  configured public address), so a web page that points its own name at this
+  computer (DNS rebinding) is refused before any token check; static files are
+  served by exact name from the built interface only; bodies are limited to
+  8 MB. A paired device has the same control as the desktop window, except: it
+  cannot manage remote access, terminals and direct commands are refused unless
+  you allow them (this covers the `/run`, `/test <command>` and `/background`
+  slash commands too), secret files are not shown (including through a symlink
+  or a normalizing spelling), the profile folders cannot be opened, and
   recognizable credentials in answers are redacted. **Plain HTTP on a local
   network is not encrypted**: anyone on that network can read the traffic,
   including the access key. Use Tailscale (`tailscale serve` gives HTTPS).
@@ -289,7 +336,16 @@ default).
   [docs/NATIVE_MCP.md](docs/NATIVE_MCP.md).
 - **Plugins and hooks.** [Plugins](docs/NATIVE_PLUGINS.md) install without
   running anything. [Hooks](docs/NATIVE_HOOKS.md) need explicit activation
-  pinned to the exact definition. Enabled commands run as your user.
+  pinned to the exact definition. Enabled commands run as your user, outside
+  the command sandbox; a hook that runs a project script or `npm run …` runs
+  whatever that script says at the time, including edits a task made.
+- **MCP servers** need explicit per-project activation pinned to the reviewed
+  content hash. An MCP definition committed in a project (`project:` source)
+  cannot reference a provider or first-party key (the OpenRouter, Anthropic,
+  OpenAI, Grok, Gemini and Google keys, the ntfy token or the llama key) through
+  `api_key_env` or `env_refs`, so a repository file cannot make ShadowCode send
+  a stored provider key to a URL of its choosing. A server that needs such a key
+  is added in Settings › Extensions, where you name it.
 
 ## Recovery
 
@@ -331,3 +387,13 @@ OpenAI, Google, xAI, GitHub) or a private key, or when a `.env` or
 `secrets.env` file is tracked, and it never prints the value it found.
 Contributors run it before pushing; `--staged` and `--value-file F` are
 described in [CONTRIBUTING.md](CONTRIBUTING.md#checks).
+
+Dependencies are checked with `cargo audit` and `npm audit --omit=dev` (the
+interface's shipped packages) before a release. Neither reports a known
+vulnerability. `cargo audit` lists six *unmaintained* notices, all for crates
+the GTK and Tauri platform libraries pull in, not ShadowCode's own
+dependencies: `proc-macro-error` (RUSTSEC-2024-0370, a build-time macro helper
+of the GTK bindings) and `unic-char-property`, `unic-char-range`,
+`unic-common`, `unic-ucd-ident` and `unic-ucd-version` (RUSTSEC-2025-0075,
+-0080, -0081, -0098, -0100, via Tauri's `urlpattern`). They have no fix to
+apply here and go away when those libraries move off them.

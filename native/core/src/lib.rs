@@ -22,6 +22,7 @@ pub mod effort;
 pub mod engine;
 pub mod events;
 pub mod gguf;
+pub mod git_guard;
 pub mod guardian;
 pub mod hooks;
 pub mod instructions;

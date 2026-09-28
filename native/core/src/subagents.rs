@@ -556,6 +556,16 @@ impl SubagentHost {
             !self.parent.config.offline() || crate::config::runs_on_this_computer(&model),
             "Offline mode: choose a model that runs on this computer"
         );
+        // Consent before cloud: a subagent has no interactive consent channel,
+        // so when this conversation runs on this computer a subagent may not
+        // move it to a cloud route. This blocks a repository agent file or an
+        // injected spawn_agent argument from silently sending project files to
+        // a cloud provider (and billing the user's key).
+        ensure!(
+            subagent_cloud_allowed(parent, &model),
+            "This conversation runs on this computer; a subagent cannot use the cloud model '{}'. Switch this conversation to that model first, or choose a local subagent model.",
+            model.provider
+        );
         Ok(model)
     }
 
@@ -877,6 +887,9 @@ impl SubagentHost {
         cancel: &CancellationToken,
     ) -> Result<(Vec<compare::FileStat>, bool, Vec<String>, String)> {
         let (files, truncated) = compare::diffstat(worktree, base, cancel).await?;
+        // The child's worktree is throwaway; `add` would otherwise run Git
+        // inside any nested repository it planted (`crate::git_guard`).
+        crate::git_guard::freeze_gitlinks(worktree, None).await?;
         compare::git(worktree, &["add", "--all"], cancel).await?;
         let patch = compare::git(
             worktree,
@@ -958,4 +971,46 @@ fn agents_filter(definition: &AgentDefinition) -> ToolFilter {
         allow.push("update_plan".into());
     }
     ToolFilter::new(&allow, &definition.deny)
+}
+
+/// Consent before cloud: a subagent may move to a cloud route only when the
+/// conversation is already on one. It has no interactive consent channel, so a
+/// local conversation never silently spawns a cloud child (from a repository
+/// agent file or an injected `spawn_agent` model argument).
+fn subagent_cloud_allowed(
+    parent: &crate::config::ModelConfig,
+    child: &crate::config::ModelConfig,
+) -> bool {
+    crate::cli_agent::handoff::is_local(child) || !crate::cli_agent::handoff::is_local(parent)
+}
+
+#[cfg(test)]
+mod cloud_consent_tests {
+    use super::subagent_cloud_allowed;
+    use crate::config::ModelConfig;
+
+    fn model(provider: &str, default: &str, endpoint: &str) -> ModelConfig {
+        ModelConfig {
+            provider: provider.into(),
+            default: default.into(),
+            endpoint: endpoint.into(),
+            ..ModelConfig::default()
+        }
+    }
+
+    #[test]
+    fn a_local_conversation_never_spawns_a_cloud_subagent() {
+        let local = model("llamacpp", "local:gguf:x", "http://127.0.0.1:8080/v1");
+        let cloud = model(
+            "openrouter",
+            "api:openrouter:a/b",
+            "https://openrouter.ai/api/v1",
+        );
+        // Local parent: a cloud child is refused, a local child is fine.
+        assert!(!subagent_cloud_allowed(&local, &cloud));
+        assert!(subagent_cloud_allowed(&local, &local));
+        // Cloud parent (the conversation already consented): either is fine.
+        assert!(subagent_cloud_allowed(&cloud, &cloud));
+        assert!(subagent_cloud_allowed(&cloud, &local));
+    }
 }

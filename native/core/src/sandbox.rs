@@ -346,14 +346,17 @@ impl HomeLayout {
         }
         // A project that contains the home folder (or a credential folder)
         // must not expose it through its own writable mount.
-        for (relative, resolved) in DENIED_HOME.iter().zip(&denied) {
-            let path = home.join(relative);
+        for (_relative, resolved) in DENIED_HOME.iter().zip(&denied) {
             if !resolved.starts_with(&workspace) {
                 continue;
             }
-            match std::fs::symlink_metadata(&path) {
-                Ok(meta) if meta.is_dir() => layout.masked_dirs.push(path),
-                Ok(meta) if meta.is_file() => layout.masked_files.push(path),
+            // Mask the resolved target's real location, so a credential folder
+            // reached through a symlink (for example `.ssh -> dotfiles/ssh`, as
+            // dotfile managers create) is hidden at the real path the project
+            // mount also exposes, not only at the symlink's name.
+            match std::fs::symlink_metadata(resolved) {
+                Ok(meta) if meta.is_dir() => layout.masked_dirs.push(resolved.clone()),
+                Ok(meta) if meta.is_file() => layout.masked_files.push(resolved.clone()),
                 _ => {}
             }
         }
@@ -962,6 +965,20 @@ mod tests {
         let mask = position(&args, &["--tmpfs", &text(&home.join(".ssh"))]).expect(".ssh hidden");
         assert!(mask > bind);
         assert!(position(&args, &["--tmpfs", &text(&home.join(".config"))]).is_some());
+
+        // A credential folder reached through a symlink is hidden at its real
+        // location, which the project mount also exposes.
+        let (_root2, home2, _ws2) = fake_home();
+        std::fs::create_dir_all(home2.join("dotfiles/ssh")).unwrap();
+        std::fs::write(home2.join("dotfiles/ssh/id_ed25519"), "not a real key").unwrap();
+        std::fs::remove_dir_all(home2.join(".ssh")).unwrap();
+        std::os::unix::fs::symlink(home2.join("dotfiles/ssh"), home2.join(".ssh")).unwrap();
+        let layout = HomeLayout::build(Some(home2.clone()), &[], &home2);
+        let args = isolated_args(&home2, "true", Net::Off, None, &layout);
+        assert!(
+            position(&args, &["--tmpfs", &text(&home2.join("dotfiles/ssh"))]).is_some(),
+            "the symlinked key folder's real location must be masked: {args:?}"
+        );
     }
 
     #[test]

@@ -437,7 +437,11 @@ impl Runner {
                     }
                 }
             }
-            events.emit("hook.completed", json!(outcome))?;
+            // The stored/broadcast event is redacted; the returned outcome
+            // keeps the raw process output for the gate decision.
+            let mut payload = json!(outcome);
+            crate::redaction::redact_value(&mut payload);
+            events.emit("hook.completed", payload)?;
             let failed = !outcome.success;
             outcomes.push(outcome);
             // A failing gate prevents both the action and later gate commands.

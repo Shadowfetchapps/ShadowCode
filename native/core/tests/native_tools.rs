@@ -454,6 +454,81 @@ async fn denied_approval_is_not_success_and_does_not_run_the_command() {
 }
 
 #[tokio::test]
+async fn read_file_cannot_reach_secrets_by_spelling_or_symlink() {
+    let (_root, tools) = fixture(Config::default());
+    fs::write(
+        tools.workspace.path.join(".env"),
+        "DB_PASSWORD=hunter2plaintext\n",
+    )
+    .unwrap();
+    // A symlink named innocuously, and normalizing spellings, must not read it.
+    std::os::unix::fs::symlink(".env", tools.workspace.path.join("notes.txt")).unwrap();
+    for path in [".env", ".env/", "./.env", "sub/../.env", "notes.txt"] {
+        let result = call(&tools, "read_file", json!({ "path": path })).await;
+        let blocked = !result.success
+            || result.output["redacted"] == true
+            || result.output["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("Refusing"));
+        assert!(blocked, "{path} was readable: {}", result.output);
+        assert!(
+            !serde_json::to_string(&result.output)
+                .unwrap()
+                .contains("hunter2plaintext"),
+            "{path} leaked the secret: {}",
+            result.output
+        );
+    }
+}
+
+#[tokio::test]
+async fn search_text_glob_cannot_read_secret_files() {
+    let (_root, tools) = fixture(Config::default());
+    fs::write(
+        tools.workspace.path.join(".env"),
+        "DB_PASSWORD=hunter2plaintext\n",
+    )
+    .unwrap();
+    fs::write(
+        tools.workspace.path.join("keep.txt"),
+        "DB_PASSWORD=hunter2plaintext\n",
+    )
+    .unwrap();
+    // A glob override outranks the hidden-file rule; the secret file must
+    // still never appear in the results.
+    for glob in ["*", ".env", ".env*", "**/*"] {
+        let result = call(
+            &tools,
+            "search_text",
+            json!({"query":"hunter2plaintext","glob":glob}),
+        )
+        .await;
+        assert!(result.success, "{}", result.error);
+        let text = serde_json::to_string(&result.output).unwrap();
+        assert!(
+            result.output["matches"]
+                .as_array()
+                .is_some_and(|m| m.iter().all(|hit| hit["path"] != ".env")),
+            "glob {glob} exposed .env: {text}"
+        );
+    }
+    // A broad glob still finds the non-secret file with the same content.
+    let result = call(
+        &tools,
+        "search_text",
+        json!({"query":"hunter2plaintext","glob":"*"}),
+    )
+    .await;
+    assert!(
+        result.output["matches"]
+            .as_array()
+            .is_some_and(|m| m.iter().any(|hit| hit["path"] == "keep.txt")),
+        "{}",
+        result.output
+    );
+}
+
+#[tokio::test]
 async fn secret_env_is_refused_and_tokens_redacted_in_tool_messages() {
     let (_root, tools) = fixture(Config::default());
     let openai = format!("{}{}", "sk-test", "abcdefghijklmnopqrstuvwxyz0123");

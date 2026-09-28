@@ -8,7 +8,7 @@
 use anyhow::Result;
 use landlock::{
     Access, AccessFs, AccessNet, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-    RulesetAttr, RulesetCreatedAttr, ABI,
+    RulesetAttr, RulesetCreatedAttr, Scope, ABI,
 };
 use std::{
     io,
@@ -17,6 +17,10 @@ use std::{
 };
 
 const ABI_WANTED: ABI = ABI::V5;
+/// Newest ABI whose extra rights (V6 abstract-socket/signal scopes, V9
+/// `ResolveUnix` for named sockets) harden the fallback. `CompatLevel::
+/// BestEffort` drops what an older kernel does not support.
+const ABI_SCOPED: ABI = ABI::V9;
 
 /// Highest Landlock ABI the running kernel supports (0 when unavailable).
 pub fn kernel_abi() -> i64 {
@@ -47,10 +51,16 @@ pub fn ruleset(paths: &Paths) -> Result<Option<OwnedFd>> {
         return Ok(None);
     }
     let read = AccessFs::from_read(ABI_WANTED);
-    let all = AccessFs::from_all(ABI_WANTED);
+    // Connecting to a named Unix socket outside the workspace (the D-Bus
+    // session bus, ShadowCode's own control socket) is governed by
+    // `ResolveUnix` (ABI 9); grant it only where files are writable.
+    let all = AccessFs::from_all(ABI_WANTED) | AccessFs::ResolveUnix;
     let mut base = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
-        .handle_access(all)?;
+        .handle_access(all)?
+        // Abstract Unix sockets (the X11 socket, an abstract D-Bus bus) and
+        // signals to processes outside the sandbox (ABI 6+).
+        .scope(Scope::from_all(ABI_SCOPED))?;
     if paths.deny_tcp {
         base = base.handle_access(AccessNet::from_all(ABI_WANTED))?;
     }

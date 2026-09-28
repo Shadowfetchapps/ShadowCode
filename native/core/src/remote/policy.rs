@@ -71,6 +71,24 @@ fn query_value(path: &str, key: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
+/// The last real path component, so `.env/`, `./.env` and `a/../.env` are all
+/// judged as `.env` by [`redaction::is_secret_path`].
+fn normalize_secret(path: &str) -> String {
+    use std::path::{Component, Path};
+    let mut normalized = std::path::PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => {}
+        }
+    }
+    normalized.to_string_lossy().into_owned()
+}
+
 fn contains_placeholder(value: &Value) -> bool {
     match value {
         Value::String(text) => {
@@ -143,6 +161,20 @@ pub fn check(path: &str, body: &Value, access: &Access, paths: &AppPaths) -> Res
     if parts == ["workspace", "exec"] && !access.allow_terminals {
         return Err(Refusal(TERMINALS_OFF));
     }
+    // Slash commands reach the same runners from inside the engine, where
+    // this policy does not look again: `/run` and `/test <command>` use the
+    // direct command runner, `/background` starts and stops processes.
+    if parts == ["commands", "run"] {
+        let name = body["name"].as_str().unwrap_or("");
+        let args = body["args"].as_str().unwrap_or("").trim();
+        let direct = matches!(name, "run" | "background") || (name == "test" && !args.is_empty());
+        if direct && !access.allow_terminals {
+            return Err(Refusal(TERMINALS_OFF));
+        }
+        if matches!(name, "diff" | "why") && !args.is_empty() && redaction::is_secret_path(args) {
+            return Err(Refusal(SECRET_FILE));
+        }
+    }
     if family == "voice"
         && matches!(
             parts.get(1).copied(),
@@ -152,8 +184,11 @@ pub fn check(path: &str, body: &Value, access: &Access, paths: &AppPaths) -> Res
         return Err(Refusal(MICROPHONE));
     }
     // Any route that reads one file by `?path=` (workspace file and diff,
-    // a task's review of one file, …).
-    if query_value(path, "path").is_some_and(|p| redaction::is_secret_path(&p)) {
+    // a task's review of one file, …). Normalize first so a trailing slash or
+    // `.`/`..` segment cannot slip a secret name past the name check; the
+    // handler additionally resolves symlinks and the response redaction blanks
+    // a `secret_target`.
+    if query_value(path, "path").is_some_and(|p| redaction::is_secret_path(&normalize_secret(&p))) {
         return Err(Refusal(SECRET_FILE));
     }
     if contains_placeholder(body) {
@@ -189,10 +224,14 @@ const HIDDEN_FILE: &str = "[secret file hidden over remote access]";
 fn hide_secret_files(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            let secret = ["path", "file"]
-                .iter()
-                .filter_map(|key| map.get(*key).and_then(Value::as_str))
-                .any(redaction::is_secret_path);
+            // A response whose own handler resolved the read to a secret file
+            // (a symlink or a normalizing spelling) is blanked even when its
+            // visible `path` looks innocent.
+            let secret = map.get("secret_target") == Some(&Value::Bool(true))
+                || ["path", "file"]
+                    .iter()
+                    .filter_map(|key| map.get(*key).and_then(Value::as_str))
+                    .any(redaction::is_secret_path);
             for (key, field) in map.iter_mut() {
                 if secret && CONTENT_FIELDS.contains(&key.as_str()) {
                     match field {
@@ -254,6 +293,126 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Every `/api/<family>` the engine dispatches, with the remote-access
+    /// decision made for it. A family missing here fails
+    /// `every_api_family_has_a_remote_access_decision`: decide whether a
+    /// paired device may use it (and add a refusal above when not) before
+    /// listing it.
+    const REVIEWED_FAMILIES: &[(&str, &str)] = &[
+        ("remote", "refused: managed on this computer"),
+        ("preview", "refused: loopback proxies and local processes"),
+        ("terminals", "refused unless terminals are allowed"),
+        ("background", "refused unless terminals are allowed"),
+        (
+            "workspace",
+            "allowed; exec needs terminals; editor drafts refused; secret paths hidden",
+        ),
+        (
+            "commands",
+            "allowed; /run, /test <cmd>, /background need terminals",
+        ),
+        ("voice", "allowed; the host microphone is never switched on"),
+        ("compare", "allowed: agent work, approvals apply"),
+        ("compares", "allowed"),
+        ("agents", "allowed"),
+        ("subagents", "allowed"),
+        ("worktrees", "allowed"),
+        ("parallel", "allowed"),
+        ("worktree-tasks", "allowed"),
+        ("sandbox", "allowed: status and scratch cleanup"),
+        ("sessions", "allowed; profile folders refused"),
+        ("projects", "allowed; profile folders refused"),
+        ("events", "allowed"),
+        ("resolve", "allowed"),
+        ("jobs", "allowed: tasks run with approvals"),
+        ("run", "allowed"),
+        ("approvals", "allowed: the device answers approvals"),
+        ("checkpoints", "allowed"),
+        ("goals", "allowed"),
+        (
+            "automations",
+            "allowed: trusted projects, never auto-approve",
+        ),
+        ("issues", "allowed"),
+        ("review", "allowed; secret files hidden"),
+        ("feed", "allowed"),
+        (
+            "git",
+            "allowed: status, branches, push and PRs as in the window",
+        ),
+        ("code-intel", "allowed"),
+        ("config", "allowed: full settings control, as in the window"),
+        ("routing", "allowed"),
+        ("onboarding", "allowed"),
+        ("health", "allowed"),
+        ("version", "allowed"),
+        ("doctor", "allowed"),
+        (
+            "diagnostic-exports",
+            "allowed: allow-listed check results only",
+        ),
+        ("guardian", "allowed"),
+        ("about", "allowed: version, install kind, links"),
+        (
+            "updates",
+            "allowed: notify-only check, 30 s manual throttle",
+        ),
+        ("accounts", "allowed; tokens never returned"),
+        ("cli-agents", "allowed"),
+        ("openrouter", "allowed; the stored key is never returned"),
+        ("allowance", "allowed"),
+        ("providers", "allowed"),
+        ("models", "allowed"),
+        ("picker", "allowed"),
+        ("local-models", "allowed"),
+        ("plugins", "allowed: install runs nothing"),
+        ("mcp", "allowed: activation is hash-pinned"),
+        ("hooks", "allowed: activation is hash-pinned"),
+        ("sqlite", "allowed: read-only inspection"),
+        ("memory", "allowed"),
+    ];
+
+    #[test]
+    fn every_api_family_has_a_remote_access_decision() {
+        let source = include_str!("../service.rs");
+        let start = source
+            .find("match call.family() {")
+            .expect("the dispatcher's family match");
+        let end = start
+            + source[start..]
+                .find("_ => Err(call.unavailable()),\n        }\n    }")
+                .expect("the end of the dispatcher");
+        let mut families = Vec::new();
+        for line in source[start..end].lines() {
+            let Some((head, _)) = line.split_once("=>") else {
+                continue;
+            };
+            if head.contains('(') {
+                continue; // an inner (method, path) arm
+            }
+            families.extend(head.split('"').skip(1).step_by(2).map(str::to_owned));
+        }
+        assert!(families.len() > 40, "parsed {families:?}");
+        let reviewed: Vec<&str> = REVIEWED_FAMILIES.iter().map(|(f, _)| *f).collect();
+        for family in &families {
+            assert!(
+                reviewed.contains(&family.as_str()),
+                "/api/{family} has no remote-access decision: review it and add it to REVIEWED_FAMILIES in remote/policy.rs"
+            );
+        }
+        // The refusals listed are enforced.
+        let (_dir, paths) = paths();
+        let access = Access {
+            allow_terminals: false,
+        };
+        for family in ["remote", "preview", "terminals", "background"] {
+            assert!(
+                check(&format!("/api/{family}"), &Value::Null, &access, &paths).is_err(),
+                "{family}"
+            );
+        }
+    }
+
     fn paths() -> (tempfile::TempDir, AppPaths) {
         let dir = tempfile::tempdir().unwrap();
         let paths = AppPaths::isolated(dir.path()).unwrap();
@@ -285,6 +444,39 @@ mod tests {
             );
             assert!(check(path, &Value::Null, &on, &paths).is_ok());
         }
+        // Slash commands that run a command directly are the same runner.
+        for body in [
+            json!({"name": "run", "args": "make deploy"}),
+            json!({"name": "test", "args": "cargo test"}),
+            json!({"name": "background", "args": "start web npm run dev"}),
+            json!({"name": "background", "args": "stop abc"}),
+        ] {
+            assert_eq!(
+                check("/api/commands/run", &body, &off, &paths),
+                Err(Refusal(TERMINALS_OFF)),
+                "{body}"
+            );
+            assert!(check("/api/commands/run", &body, &on, &paths).is_ok());
+        }
+        for body in [
+            json!({"name": "test", "args": ""}),
+            json!({"name": "plan", "args": "tidy the parser"}),
+            json!({"name": "git"}),
+        ] {
+            assert!(
+                check("/api/commands/run", &body, &off, &paths).is_ok(),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            check(
+                "/api/commands/run",
+                &json!({"name": "diff", "args": ".env.local"}),
+                &on,
+                &paths
+            ),
+            Err(Refusal(SECRET_FILE))
+        );
         // Routes that start agent work (tasks, automations, reviews) are
         // allowed: their commands still go through approvals.
         for path in [

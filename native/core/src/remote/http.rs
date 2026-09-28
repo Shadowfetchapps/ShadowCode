@@ -255,6 +255,17 @@ async fn handle(shared: &Arc<Shared>, peer: SocketAddr, request: Request<Incomin
     if request.uri().scheme().is_some() || request.uri().authority().is_some() {
         return error(StatusCode::BAD_REQUEST, "Invalid request target");
     }
+    let public_url = shared
+        .manager
+        .settings()
+        .map(|s| s.public_url)
+        .unwrap_or_default();
+    if !known_host(request.headers(), &public_url) {
+        return error(
+            StatusCode::MISDIRECTED_REQUEST,
+            "Unknown host name. Open the address from the pairing link, or enter this address as the public address in Settings › Remote access.",
+        );
+    }
     let path = request.uri().path().to_owned();
     if request.method() == Method::OPTIONS {
         // No CORS: cross-origin preflights are refused.
@@ -286,6 +297,49 @@ async fn handle(shared: &Arc<Shared>, peer: SocketAddr, request: Request<Incomin
         }
         _ => error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed"),
     }
+}
+
+/// DNS rebinding: a web page can point its own name at this computer and
+/// then talk to the server as its own origin (it still has no token, but it
+/// could see the sign-in page and use up the failed-attempt budget of every
+/// device behind a local proxy). Pairing links, and so every stored token,
+/// use an IP address or the public address, so only those names are served:
+/// IP addresses, `localhost` and `*.localhost` (always loopback), Tailscale
+/// names (`*.ts.net`, not assignable by a web page) and the public address.
+/// Requests without `Host` are not from a browser.
+pub(super) fn known_host(headers: &HeaderMap, public_url: &str) -> bool {
+    let hosts: Vec<_> = headers.get_all(header::HOST).iter().collect();
+    let host = match hosts.as_slice() {
+        [] => return true,
+        [one] => match one.to_str() {
+            Ok(host) => host.trim().to_ascii_lowercase(),
+            Err(_) => return false,
+        },
+        _ => return false,
+    };
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((v6, port)) if port.is_empty() || port.starts_with(':') => {
+                return v6.parse::<std::net::Ipv6Addr>().is_ok();
+            }
+            _ => return false,
+        }
+    } else {
+        match host.rsplit_once(':') {
+            Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
+            Some(_) => return false,
+            None => host.as_str(),
+        }
+    };
+    let public = reqwest::Url::parse(public_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+    !name.is_empty()
+        && (name.parse::<std::net::Ipv4Addr>().is_ok()
+            || name == "localhost"
+            || name.ends_with(".localhost")
+            || name.ends_with(".ts.net")
+            || public.as_deref() == Some(name))
 }
 
 /// Browser requests must come from this server's own origin. Requests
@@ -766,6 +820,45 @@ mod tests {
             !same_origin(&proxied, lan),
             "only a loopback proxy may forward the host"
         );
+    }
+
+    #[test]
+    fn rebound_host_names_are_refused() {
+        for good in [
+            "127.0.0.1:7390",
+            "192.168.1.5:7390",
+            "100.101.102.103:7390",
+            "[::1]:7390",
+            "[fd7a:115c:a1e0::1]:7390",
+            "localhost:7390",
+            "phone.localhost:7390",
+            "box.tailnet.ts.net",
+            "My-Box.example.org",
+        ] {
+            assert!(
+                known_host(&headers(&[("host", good)]), "https://my-box.example.org"),
+                "{good}"
+            );
+        }
+        for bad in [
+            "attacker.example:7390",
+            "127.0.0.1.attacker.example:7390",
+            "localhost.attacker.example",
+            "my-box.example.org.attacker.example",
+            "[::1:7390",
+            "127.0.0.1:port",
+            "",
+        ] {
+            assert!(
+                !known_host(&headers(&[("host", bad)]), "https://my-box.example.org"),
+                "{bad}"
+            );
+        }
+        assert!(!known_host(
+            &headers(&[("host", "127.0.0.1:7390"), ("host", "attacker.example")]),
+            ""
+        ));
+        assert!(known_host(&HeaderMap::new(), ""), "not a browser");
     }
 
     #[test]

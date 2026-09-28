@@ -186,14 +186,14 @@ impl Service {
                         let content =
                             String::from_utf8(bytes).context("File is not valid UTF-8")?;
                         return Ok(
-                            json!({"path":path.to_string_lossy(),"hash":hash,"bytes":size,"content":content,"truncated":false}),
+                            json!({"path":path.to_string_lossy(),"hash":hash,"bytes":size,"content":content,"truncated":false,"secret_target":workspace.is_secret_target(call.q("path"))}),
                         );
                     }
                     return Ok(json!({"path":path.to_string_lossy(),"hash":hash,"bytes":size}));
                 }
                 let file = workspace.read(call.q("path"))?;
                 Ok(
-                    json!({"path":file.path,"content":truncate(&file.content,200000),"hash":file.hash,"bytes":file.bytes,"truncated":file.content.len()>200000}),
+                    json!({"path":file.path,"content":truncate(&file.content,200000),"hash":file.hash,"bytes":file.bytes,"truncated":file.content.len()>200000,"secret_target":workspace.is_secret_target(call.q("path"))}),
                 )
             }
             ("PUT", "/api/workspace/file") => {
@@ -402,12 +402,10 @@ impl Service {
             ),
         );
         let result = process::run(spec, ws.reservation.cancellation(), None).await?;
-        store.add_event(
-            "terminal.completed",
-            &json!({"command":command,"result":result}),
-            session.as_deref(),
-            None,
-        )?;
+        // The stored transcript is redacted; `result` stays raw for the caller.
+        let mut event = json!({"command":command,"result":result});
+        crate::redaction::redact_value(&mut event);
+        store.add_event("terminal.completed", &event, session.as_deref(), None)?;
         let mut result = json!(result);
         result["command"] = json!(command);
         Ok(result)
