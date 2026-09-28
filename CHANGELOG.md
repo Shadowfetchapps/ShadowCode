@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Refresh visible check evidence after editor saves, editor-observed disk changes and relevant same-session engine events. Hide old passing results immediately and discard refresh responses superseded by an edit. This change is not included in the published 0.33.1 packages.
+
 ## 0.33.1: Reliability and daily workflow
 
 - Runtime builds and notices refreshes preserve tracked source pins and reference metadata; actual build provenance stays in generated runtime output. Regression coverage reproduces the source-integrity failure that stopped the unpublished 0.33.0 attempt.

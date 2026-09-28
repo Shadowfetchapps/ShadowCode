@@ -132,7 +132,7 @@ Owner review of the release workflow/source and repository protections remains n
 
 All existing required gates remain, with a new required `built-project-cleanup` gate running the exact release-profile cleanup test over actual installed UI dependencies and output. The default Rust suite transfers only this test to that gate; missing, failed or ignored qualification rejects signing and publication. This scope does not claim full Cargo-cache cleanup qualification.
 
-The tracked AppImage installer authenticates candidates and retains durable accepted-state receipts. Production signing and publication of the seven authenticated 0.33.1 assets are complete, with the workflow failure and publication recovery recorded above. Independently authenticated installer bootstrap, authenticated .deb installation and the broader installation/upgrade/rollback lifecycle remain separate qualification requirements. Existing installed applications and older public releases are not authenticated retroactively.
+The tracked AppImage installer authenticates candidates and retains durable accepted-state receipts. Production signing and publication of the seven authenticated 0.33.1 assets are complete, with the workflow failure and publication recovery recorded above. The published .deb was also authenticated into a private snapshot and installed in a network-disabled runtime-only container; version, CLI/MCP and first-window checks passed (see the implementation ledger). Independently authenticated installer bootstrap distribution and the broader installation/upgrade/rollback lifecycle remain separate qualification requirements. Existing installed applications and older public releases are not authenticated retroactively.
 
 ## Trusted installer and durable accepted state
 

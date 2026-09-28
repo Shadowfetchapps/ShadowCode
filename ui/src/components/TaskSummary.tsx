@@ -8,6 +8,8 @@ import {
   type Verification,
   type TaskActivity,
 } from "../lib/activity";
+import { isNative, listen } from "../lib/transport";
+import { onWorkspaceFilesChanged } from "../lib/workspaceChanges";
 import type { LineCounts } from "../lib/diffStats";
 import { TaskTimingDetails } from "./TaskTimingDetails";
 import { LocalModelDetails } from "./LocalModelDetails";
@@ -27,8 +29,12 @@ export const TaskSummary = memo(function TaskSummary({
   diffStats,
   readVerification,
   runCheck,
+  workspace,
+  sessionId,
 }: {
   activity: TaskActivity;
+  workspace?: string;
+  sessionId?: string;
   runCheck?: RunCheckAction;
   readVerification?: (attemptId: string) => Promise<unknown>;
   onReview: (path?: string) => void;
@@ -66,6 +72,9 @@ export const TaskSummary = memo(function TaskSummary({
     attemptId: string;
     source: Verification | undefined;
     value: Verification;
+    workspace: string | undefined;
+    sessionId: string | undefined;
+    read: typeof readVerification;
   }>();
   const [assessment, setAssessment] = useState("checking");
   const [refreshKey, setRefreshKey] = useState(0);
@@ -77,29 +86,94 @@ export const TaskSummary = memo(function TaskSummary({
     if (!readVerification || !attemptId) return;
     let live = true,
       visible = false,
-      running = false;
+      running = false,
+      pending = false;
+    let generation = 0;
+    let unlisten: (() => void) | undefined;
     setFresh(undefined);
     setAssessment("checking");
     const assess = async () => {
       if (!visible || running || !live) return;
       running = true;
+      pending = false;
+      const readingGeneration = generation;
       setAssessment("checking");
       try {
         const result = parseVerification(await readVerification(attemptId));
-        if (live) {
+        if (live && readingGeneration === generation) {
           setFresh(
             result
-              ? { attemptId, source: activity.verification, value: result }
+              ? {
+                  attemptId,
+                  source: activity.verification,
+                  value: result,
+                  workspace,
+                  sessionId,
+                  read: readVerification,
+                }
               : undefined,
           );
           setAssessment(result ? "current" : "unavailable");
         }
       } catch {
-        if (live) setAssessment("unavailable");
+        if (live && readingGeneration === generation)
+          setAssessment("unavailable");
       } finally {
         running = false;
+        // An edit during the read invalidates its result and queues one fresh
+        // read. Bursts coalesce without allowing the pre-edit green to win.
+        if (live && pending) void assess();
       }
     };
+    const invalidate = () => {
+      if (!live) return;
+      ++generation;
+      pending = true;
+      setFresh(undefined);
+      setAssessment("checking");
+      void assess();
+    };
+    const stopFiles = workspace
+      ? onWorkspaceFilesChanged(workspace, invalidate)
+      : undefined;
+    if (isNative()) {
+      void listen("shadowcode:events", (payload) => {
+        const event = payload as {
+          type?: unknown;
+          session_id?: unknown;
+        } | null;
+        // Engine wake-ups lack workspace identity. Named events are scoped to
+        // this conversation; untyped reconnect/lag wake-ups may hide anything.
+        if (
+          typeof event?.session_id === "string" &&
+          event.session_id &&
+          event.session_id !== sessionId
+        )
+          return;
+        if (
+          typeof event?.type !== "string" ||
+          !event.type ||
+          event.type.startsWith("view.") ||
+          [
+            "tool.completed",
+            "files.changed",
+            "checkpoint.updated",
+            "checkpoint.restored",
+            "checkpoint.rewind_undone",
+            "review.undone",
+            "agent.completed",
+          ].includes(event.type)
+        )
+          invalidate();
+      })
+        .then((stop) => {
+          if (live) unlisten = stop;
+          else stop();
+        })
+        .catch(() => {
+          // Mount, local edits, focus and explicit refresh still work offline.
+        });
+    }
     const observer =
       typeof IntersectionObserver === "undefined"
         ? null
@@ -113,22 +187,34 @@ export const TaskSummary = memo(function TaskSummary({
       void assess();
     }
     const focus = () => {
-      if (document.visibilityState !== "hidden") void assess();
+      if (document.visibilityState !== "hidden") invalidate();
     };
     window.addEventListener("focus", focus);
     document.addEventListener("visibilitychange", focus);
     return () => {
       live = false;
       observer?.disconnect();
+      stopFiles?.();
+      unlisten?.();
       window.removeEventListener("focus", focus);
       document.removeEventListener("visibilitychange", focus);
     };
-  }, [attemptId, readVerification, activity.verification, refreshKey]);
+  }, [
+    attemptId,
+    readVerification,
+    activity.verification,
+    refreshKey,
+    workspace,
+    sessionId,
+  ]);
   const verification = canAssess
     ? assessment === "current" &&
       fresh &&
       fresh.attemptId === attemptId &&
-      fresh.source === activity.verification
+      fresh.source === activity.verification &&
+      fresh.workspace === workspace &&
+      fresh.sessionId === sessionId &&
+      fresh.read === readVerification
       ? fresh.value
       : {
           ...activity.verification!,

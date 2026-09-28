@@ -182,6 +182,8 @@ const TranscriptRow = memo(function TranscriptRow({
         {!timelineAbove && <ActivityTimeline activity={activity} withSummary />}
         <TaskSummary
           activity={activity}
+          workspace={actions.runCheck?.workspace}
+          sessionId={actions.runCheck?.sessionId}
           runCheck={actions.runCheck}
           readVerification={api.jobVerification}
           diffStats={actions.diffStats}

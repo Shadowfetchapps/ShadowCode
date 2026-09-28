@@ -7,6 +7,7 @@ import {
   type FileBuffer,
 } from "../hooks/useDrawerMemory";
 import { Empty } from "./cards";
+import { notifyWorkspaceFilesChanged } from "../lib/workspaceChanges";
 import { CodeEditor, hasMixedLineEndings } from "./CodeEditor";
 import { plainEditorEdit, plainEditorRange } from "../lib/plainEditorEdit";
 
@@ -96,6 +97,12 @@ export function FileEditor({
     const path = active;
     let stopped = false;
     let checking = false;
+    let observedHash = buffer.hash;
+    const observed = (hash: string) => {
+      if (hash === observedHash) return;
+      observedHash = hash;
+      notifyWorkspaceFilesChanged(workspace);
+    };
     const check = async () => {
       if (checking) return;
       checking = true;
@@ -103,6 +110,7 @@ export function FileEditor({
       try {
         revision = await api.fileRevision(path);
         if (stopped) return;
+        observed(revision.hash);
         // A save response and the polling read may cross in flight. If the
         // observed disk revision is exactly the one our own save produced,
         // reconcile it as ours instead of surfacing a false external conflict.
@@ -157,6 +165,7 @@ export function FileEditor({
         });
       } catch (reason) {
         if (!stopped) {
+          if (String(reason).includes("File not found")) observed("missing");
           if (String(reason).includes("File not found"))
             updateBuffer(path, (current) =>
               current.disk === null ? current : { ...current, disk: null },
@@ -234,6 +243,7 @@ export function FileEditor({
         submitted,
         expectedHash ?? buffer.hash,
       );
+      notifyWorkspaceFilesChanged(workspace);
       savingRevision.current = { path, hash: result.hash };
       updateBuffer(path, (current) => {
         // The user can keep typing while the write is in flight. Advance the
