@@ -89,9 +89,10 @@ impl Service {
                 let model = model_registry::resolve(&store, id, &cfg.model)?;
                 // Unload aborts a load in progress; the lease ends right away
                 // so the loaded model stays until another model is needed.
+                // A model a running task holds is never waited for.
                 let prepared = self
                     .engine
-                    .prepare_model_client(&cfg, &model, &CancellationToken::new())
+                    .prepare_model_client_now(&cfg, &model, &CancellationToken::new())
                     .await?;
                 drop(prepared);
                 Ok(json!({"ok":true,"loaded":self.engine.local_runtime().loaded_json()}))
@@ -209,7 +210,7 @@ impl Service {
         // the lease in `prepared` lasts for this test.
         let prepared = self
             .engine
-            .prepare_model_client(&cfg, &model, &cancel)
+            .prepare_model_client_now(&cfg, &model, &cancel)
             .await?;
         let client: ModelClient = prepared.client(self.engine.paths())?;
         let model = prepared.config.clone();

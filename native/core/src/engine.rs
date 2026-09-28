@@ -280,6 +280,41 @@ impl Engine {
         }
         crate::local_engine::prepare(&config.local_engine, model, &self.0.local_llama, cancel).await
     }
+    /// `prepare_model_client` for Settings (Load, Test): a managed local
+    /// model that would have to wait for the runtime (another model is in use
+    /// by a task, or is loading) is refused at once with a clear message,
+    /// instead of leaving the page waiting for that task to end.
+    pub async fn prepare_model_client_now(
+        &self,
+        config: &Config,
+        model: &ModelConfig,
+        cancel: &CancellationToken,
+    ) -> Result<crate::local_engine::PreparedModel> {
+        if crate::openrouter::is_openrouter(model) || !crate::local_engine::is_managed(model) {
+            return self.prepare_model_client(config, model, cancel).await;
+        }
+        let local = &self.0.local_llama;
+        crate::local_engine::prepare_with_progress(
+            &config.local_engine,
+            model,
+            local,
+            cancel,
+            true,
+            &|progress| match progress {
+                crate::local_runtime::Progress::Loading => Ok(()),
+                crate::local_runtime::Progress::Waiting => match local.loaded() {
+                    Some(loaded) if local.in_use() > 0 => bail!(
+                        "A running task is using the local model {}, and only one local model runs at a time. Stop that task or wait for it to finish, then try again.",
+                        loaded.name
+                    ),
+                    _ => bail!(
+                        "Another local model is loading. Try again when it has finished."
+                    ),
+                },
+            },
+        )
+        .await
+    }
     pub fn delete_session(&self, id: &str) -> Result<bool> {
         let goals = self
             .0

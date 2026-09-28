@@ -491,10 +491,13 @@ listed as models.
   `Environment=OLLAMA_MODELS`, then `~/.ollama/models`) → `{ ok, local_engine }`.
   Incompatible tags are refused with the reason (e.g. `unsupported architecture gptoss`).
 - `POST /api/local-models/load {id}` → `{ ok, loaded }` (starts llama-server; one at a time;
-  refused with "Another task is using …" while a task holds the loaded model)
+  refused at once with "A running task is using the local model …" while a task holds
+  a different loaded model, or "Another local model is loading" during a load; the same
+  model is shared)
 - `POST /api/local-models/unload` → `{ ok, unloaded: boolean }` (also aborts a load in
   progress; refused while a task holds the model)
-- `POST /api/models/test {id: "local:gguf:…"}` loads and tests a local row.
+- `POST /api/models/test {id: "local:gguf:…"}` loads and tests a local row (refused
+  like `load` instead of waiting for another task's model).
 - `POST /api/jobs` with a `local:gguf:` model (or default) and `images` on a row without
   vision is refused before a job is created.
 

@@ -1370,6 +1370,69 @@ async fn load_switch_lease_unload_and_shutdown_stop_the_server() {
     );
 }
 
+/// Settings' Load and Test never wait for a model a running task holds:
+/// they answer at once with a clear message, and work once it is free.
+#[tokio::test]
+async fn settings_load_and_test_refuse_while_a_task_holds_another_model() {
+    let f = fixture(GPU);
+    let a = f.models.join("a.gguf");
+    qwen_like(&a, "qwen3", TOOLS_TEMPLATE);
+    let b = f.models.join("b.gguf");
+    qwen_like(&b, "qwen3", TOOLS_TEMPLATE);
+    Config::patch(
+        &f.paths,
+        json!({"local_engine":{"files":[a.display().to_string(), b.display().to_string()]}}),
+    )
+    .unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let entries = local_engine::scan(&cfg.local_engine);
+    let id_a = entries.iter().find(|e| e.name == "a").unwrap().id.clone();
+    let id_b = entries.iter().find(|e| e.name == "b").unwrap().id.clone();
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let held = service
+        .engine
+        .prepare_model_client(&cfg, &model_for(&id_a), &CancellationToken::new())
+        .await
+        .unwrap();
+    for path in ["/api/local-models/load", "/api/models/test"] {
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            call(&service, "POST", path, json!({"id": id_b})),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{path} waited for the running task"))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("running task is using"), "{path}: {error}");
+    }
+    assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 1);
+    // The same model is shared, not refused.
+    let loaded = call(
+        &service,
+        "POST",
+        "/api/local-models/load",
+        json!({"id": id_a}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(loaded["loaded"]["id"], id_a.as_str());
+    drop(held);
+    let loaded = tokio::time::timeout(
+        Duration::from_secs(20),
+        call(
+            &service,
+            "POST",
+            "/api/local-models/load",
+            json!({"id": id_b}),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(loaded["loaded"]["id"], id_b.as_str());
+    service.engine.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn cancel_during_load_early_exit_tail_and_cpu_fallback() {
     let f = fixture(GPU);

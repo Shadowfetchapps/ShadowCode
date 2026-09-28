@@ -120,8 +120,10 @@ llama-server -m <gguf> --host 127.0.0.1 --port <free> --no-webui --jinja \
 - **Cancel.** Loading waits up to 90 seconds for `/health` and can be
   cancelled with **Unload**.
 - **One at a time.** Only one model is loaded. A task holds the loaded model
-  until it ends. While any task holds it, loading another model or unloading
-  is refused with "Another task is using …".
+  until it ends. While any task holds it, **Load**, **Test** or **Unload** of
+  another model is refused at once with "A running task is using …" (a task
+  started on another model waits its turn instead). While another model is
+  still loading, **Load** and **Test** say so and can be tried again.
 - **Stop.** Unload, a switch or quitting ShadowCode sends SIGTERM to the
   server's process group, then SIGKILL after 5 seconds. The server also dies
   with ShadowCode (`PR_SET_PDEATHSIG`).
