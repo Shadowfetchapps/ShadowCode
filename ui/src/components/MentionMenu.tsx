@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { FileCode2, Folder, Bot } from "lucide-react";
 import { api, type AgentInfo } from "../api";
-import type { Mention } from "../lib/mentions";
+import { fitsMentionQuery, type Mention } from "../lib/mentions";
 
 /** One row of the @ menu: a subagent (W1-F's `@agent` at the start of a
  * message) or a project file or folder to attach. */
@@ -40,7 +40,16 @@ export function useFileMentions(query: string | null): {
     };
   }, [query]);
   if (query === null) return { items: [], loading: false };
-  return { items: found.items, loading: found.query !== query };
+  const loading = found.query !== query;
+  // While the answer for the latest text is on its way, show only earlier
+  // results that still fit it: Enter must never pick a file the text typed
+  // since rules out (typing "@app" fast used to pick "README.md").
+  return {
+    items: loading
+      ? found.items.filter((item) => fitsMentionQuery(item.path, query))
+      : found.items,
+    loading,
+  };
 }
 
 /** The @ menu: subagents first (only for `@name` at the start of a
