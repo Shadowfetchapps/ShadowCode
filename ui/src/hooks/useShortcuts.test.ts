@@ -195,3 +195,24 @@ it("moves between conversations with Alt+↑/↓ and Ctrl+Tab", () => {
     shortcutFor(key("ArrowUp", alt), { ...closed, overlay: true }),
   ).toBeNull();
 });
+
+it("keys inside any modal dialog are the dialog's, even one the app does not track", () => {
+  const modal = document.createElement("div");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  const button = document.createElement("button");
+  modal.append(button);
+  document.body.append(modal);
+  try {
+    for (const k of [
+      key("n", { ctrlKey: true, target: button }),
+      key("k", { ctrlKey: true, target: button }),
+      key("Escape", { target: button }),
+    ])
+      expect(shortcutFor(k, { ...closed, panel: true })).toBeNull();
+    // Outside the dialog the same keys still work.
+    expect(shortcutFor(key("n", { ctrlKey: true }), closed)).toBe("new");
+  } finally {
+    modal.remove();
+  }
+});

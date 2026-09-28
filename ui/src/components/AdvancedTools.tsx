@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type ParallelPlan, type GuardianStatus } from "../api";
+import { sentenceCase } from "../lib/statusLabels";
 
 export function AdvancedTools({ onOpen }: { onOpen?: (path: string) => void }) {
   const [plan, setPlan] = useState<ParallelPlan | null>(null);
@@ -109,7 +110,7 @@ export function AdvancedTools({ onOpen }: { onOpen?: (path: string) => void }) {
               <article className="advanced-worker" key={worker.item.id}>
                 <div className="advanced-heading">
                   <strong>{worker.item.title}</strong>
-                  <span className="dim">{worker.status}</span>
+                  <span className="dim">{sentenceCase(worker.status)}</span>
                 </div>
                 <code className="worktree-path">{worker.branch}</code>
                 <div className="row">

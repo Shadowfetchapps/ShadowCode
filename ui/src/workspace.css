@@ -620,6 +620,9 @@ kbd {
   background: var(--ok);
   flex-shrink: 0;
 }
+.status-dot.offline {
+  background: var(--danger);
+}
 .running-dot,
 .status-dot.active {
   animation: pulse 1.7s infinite;
@@ -815,7 +818,8 @@ kbd {
 .task-plan li small {
   margin-left: auto;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 .task-plan .plan-done {
   color: var(--ok);

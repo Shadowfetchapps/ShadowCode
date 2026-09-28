@@ -1,4 +1,10 @@
-import { useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type SetStateAction,
+} from "react";
 import { readStore, writeStore } from "../lib/storage";
 import { isNative, listen, openExternal } from "../lib/transport";
 import type { ToastKind } from "./useToasts";
@@ -45,19 +51,26 @@ export function useDesktopEvents(
   return shutdown;
 }
 
-/** The sidebar is remembered, and closes when the window gets narrow. */
+/** The sidebar is remembered, and closes when the window gets narrow. Only
+ * the user's own choice is remembered: a sidebar the narrow window closed
+ * comes back when the window is wide again (and after a restart). */
 export function useSidebar() {
-  const [sidebar, setSidebar] = useState(
-    () => readStore("shadow:sidebar") !== "closed" && window.innerWidth > 760,
+  const chosen = useRef(readStore("shadow:sidebar") !== "closed");
+  const [sidebar, setOpen] = useState(
+    () => chosen.current && window.innerWidth > 760,
   );
-  useEffect(() => {
-    writeStore("shadow:sidebar", sidebar ? "open" : "closed");
-  }, [sidebar]);
+  const setSidebar = useCallback((next: SetStateAction<boolean>) => {
+    setOpen((current) => {
+      const open = typeof next === "function" ? next(current) : next;
+      chosen.current = open;
+      writeStore("shadow:sidebar", open ? "open" : "closed");
+      return open;
+    });
+  }, []);
   useEffect(() => {
     const compact = window.matchMedia("(max-width: 760px)");
-    const resize = (event: MediaQueryListEvent) => {
-      if (event.matches) setSidebar(false);
-    };
+    const resize = (event: MediaQueryListEvent) =>
+      setOpen(event.matches ? false : chosen.current);
     compact.addEventListener("change", resize);
     return () => compact.removeEventListener("change", resize);
   }, []);

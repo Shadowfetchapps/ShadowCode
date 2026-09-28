@@ -408,6 +408,7 @@ export function Stage({
         busy={busy}
         paused={job?.status === "paused"}
         reconnecting={connection === "reconnecting"}
+        connected={Boolean(health)}
         branch={gitBranch}
         onBranch={() => setPanel("git")}
         allowance={allowance.data}

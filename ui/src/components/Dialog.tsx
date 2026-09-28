@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
-/** Modal focus containment and restoration shared by settings and pickers. */
+/** Modal focus containment and restoration shared by settings and pickers.
+ * Escape closes the dialog (after any control inside it, such as an open
+ * menu, has handled it), whether or not the app tracks it as an overlay. */
 export function Dialog({
   children,
   onClose,
@@ -79,6 +81,12 @@ export function Dialog({
         aria-modal="true"
         aria-label={label}
         tabIndex={-1}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape" || event.defaultPrevented) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onClose();
+        }}
       >
         {children}
       </div>

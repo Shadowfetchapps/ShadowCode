@@ -57,6 +57,10 @@ export function shortcutFor(
   );
   const toggleTerminal = mod && (e.key === "`" || e.key === "Dead");
   if (inTerminal) return toggleTerminal && !open.overlay ? "terminal" : null;
+  // Keys pressed inside a modal dialog (a confirmation, Settings, Compare…)
+  // belong to it: the dialog closes itself on Escape, and no shortcut acts
+  // on the window behind it.
+  if (target?.closest('[aria-modal="true"]')) return null;
   if (e.key === "Escape") {
     if (open.consent) return null;
     if (open.overlay) return "close-overlay";

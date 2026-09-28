@@ -8,6 +8,8 @@ import {
   type WorktreeCopyReview,
   type WorktreeRepairReview,
 } from "../api";
+import { sentenceCase } from "../lib/statusLabels";
+
 export function WorktreeSettings({
   onOpen,
   onToast,
@@ -167,7 +169,7 @@ export function WorktreeSettings({
             data-worktree-id={record.id}
           >
             <strong>{record.branch}</strong>
-            <span className="hint">{record.state.replaceAll("_", " ")}</span>
+            <span className="hint">{sentenceCase(record.state)}</span>
             <code className="worktree-path">{record.path}</code>
             <p className="hint">{record.detail}</p>
             <div className="row">
