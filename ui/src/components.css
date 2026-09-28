@@ -338,6 +338,12 @@ button.link {
   background: var(--surface);
   box-shadow: var(--shadow-2);
 }
+/* A closed <details> can still lay out its content in some engines (WebKit
+ * keeps boxes for it); hide the menu explicitly so nothing in it is measured,
+ * focused or clicked until More is open. */
+.composer-more:not([open]) > .composer-more-menu {
+  display: none;
+}
 .composer-more-heading {
   padding: 2px 7px 5px;
   color: var(--muted);
