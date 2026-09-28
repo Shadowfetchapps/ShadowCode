@@ -2496,3 +2496,249 @@ async fn discard_preserves_a_lane_with_an_active_background_process_until_retry(
     assert_eq!(retried["cleanup_pending"], false);
     assert!(!beta.exists());
 }
+
+/// LOC-05 core boundary: a real nonretryable provider response must not
+/// invalidate the other lane's files or configured-check receipt.
+#[tokio::test]
+async fn failed_generation_preserves_checked_candidate_through_reopen_and_keep() {
+    use anyhow::{ensure, Context};
+    use futures_util::FutureExt;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_util::sync::CancellationToken;
+
+    const CHECK: &str = "python3 check_candidate.py";
+    let f = fixture().await;
+    fs::write(f.project.join("check_candidate.py"), "from pathlib import Path\nassert Path('answer.txt').read_text() == 'alpha\\n'\nassert Path('lib.txt').read_text() == 'value = 2 (alpha)\\n'\nprint('candidate-check-passed')\n").unwrap();
+    git(&f.project, &["add", "check_candidate.py"]);
+    git(&f.project, &["commit", "-qm", "Candidate check"]);
+    fs::write(f.project.join("tracked.txt"), "staged user bytes\n").unwrap();
+    git(&f.project, &["add", "tracked.txt"]);
+    fs::write(f.project.join("tracked.txt"), "unstaged user bytes\n").unwrap();
+    fs::write(f.project.join("notes.txt"), "unrelated user bytes\n").unwrap();
+    let head = git(&f.project, &["rev-parse", "HEAD"]);
+    let index = fs::read(f.project.join(".git/index")).unwrap();
+    Config::patch(&f.paths, json!({"verification":{"commands":[CHECK]}})).unwrap();
+    let mut service = Some(f.service);
+
+    let success = support::server(|_, body| {
+        let messages = body["messages"].as_array().cloned().unwrap_or_default();
+        let edited = messages.iter().any(|m| m["role"] == "tool");
+        let checked = messages.iter().any(|m| m["name"] == "exec");
+        let value = if edited && !checked {
+            response(
+                "Checking the candidate",
+                json!([tool("check", "exec", json!({"command":CHECK}))]),
+            )
+        } else {
+            reply(body)
+        };
+        (value, Duration::ZERO)
+    })
+    .await;
+    // A separate listener lets alpha finish while beta's second request is
+    // held. The ordinary support server handles one response at a time.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = requests.clone();
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let release = CancellationToken::new();
+    let released = release.clone();
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let mut worker = tokio::spawn(async move {
+        let exchange = async move {
+            let mut entered = Some(entered);
+            loop {
+                let (mut socket, _) = listener.accept().await?;
+                let body = tokio::time::timeout(Duration::from_secs(10), async {
+                    let mut wire = Vec::new();
+                    let mut buffer = [0; 8192];
+                    loop {
+                        let n = socket.read(&mut buffer).await?;
+                        ensure!(n > 0, "beta request ended before body");
+                        wire.extend_from_slice(&buffer[..n]);
+                        ensure!(wire.len() < 1_000_000, "beta request byte limit");
+                        if let Some(end) = wire.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&wire[..end]).to_lowercase();
+                            let len: usize = headers
+                                .lines()
+                                .find_map(|line| {
+                                    line.strip_prefix("content-length:")
+                                        .and_then(|v| v.trim().parse().ok())
+                                })
+                                .context("beta needs Content-Length")?;
+                            ensure!(len < 1_000_000, "beta declared body limit");
+                            if wire.len() >= end + 4 + len {
+                                return Ok::<Value, anyhow::Error>(serde_json::from_slice(
+                                    &wire[end + 4..end + 4 + len],
+                                )?);
+                            }
+                        }
+                    }
+                })
+                .await
+                .context("beta request timeout")??;
+                let index = {
+                    let mut requests = captured.lock().unwrap();
+                    ensure!(requests.len() < 8, "beta request count limit");
+                    let index = requests.len();
+                    requests.push(body.clone());
+                    index
+                };
+                ensure!(body["model"] == "beta", "wrong target reached beta fixture");
+                let (status, value) = if index == 0 {
+                    (
+                        "200 OK",
+                        response(
+                            "Partial beta result",
+                            json!([tool(
+                                "partial",
+                                "write_file",
+                                json!({"path":"beta-partial.txt","content":"retained beta work\n","expected_hash":"missing"})
+                            )]),
+                        ),
+                    )
+                } else {
+                    if index == 1 {
+                        ensure!(
+                            body["messages"].as_array().is_some_and(|messages| messages
+                                .iter()
+                                .any(|m| m["role"] == "tool" && m["name"] == "write_file")),
+                            "beta did not receive its actual tool result"
+                        );
+                        let _ = entered.take().context("duplicate beta barrier")?.send(());
+                        tokio::time::timeout(Duration::from_secs(30), released.cancelled())
+                            .await
+                            .context("beta failure barrier was not released")?;
+                    }
+                    // HTTP400 is deterministic/nonretryable, not a connection
+                    // timeout or a manufactured persisted job status.
+                    (
+                        "400 Bad Request",
+                        json!({"error":{"message":"comparison beta fixture rejected request"}}),
+                    )
+                };
+                let text = value.to_string();
+                tokio::time::timeout(Duration::from_secs(5), socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).as_bytes())).await.context("beta response timeout")??;
+            }
+        };
+        tokio::select! {
+            _ = stopped.cancelled() => Ok::<(), anyhow::Error>(()),
+            result = exchange => result,
+        }
+    });
+
+    let observed = std::panic::AssertUnwindSafe(async {
+        for (name, endpoint) in [("alpha", success.endpoint.as_str()), ("beta", endpoint.as_str())] {
+            call(service.as_ref().unwrap(), "POST", "/api/models/register", json!({"id":format!("failure-{name}"),"name":name,"provider":"local","endpoint":endpoint,"context_limit":16384})).await?;
+        }
+        let started = call(service.as_ref().unwrap(), "POST", "/api/compare", json!({"workspace":f.project,"task":"Set the answer and check it","models":["failure-alpha","failure-beta"]})).await?;
+        let id = started["id"].as_str().context("comparison ID")?.to_owned();
+        let alpha_id = lane(&started,"failure-alpha")["job_id"].as_str().context("alpha job")?.to_owned();
+        let beta_id = lane(&started,"failure-beta")["job_id"].as_str().context("beta job")?.to_owned();
+        let alpha_path = PathBuf::from(lane(&started,"failure-alpha")["worktree"].as_str().context("alpha worktree")?);
+        let beta_path = PathBuf::from(lane(&started,"failure-beta")["worktree"].as_str().context("beta worktree")?);
+        tokio::time::timeout(Duration::from_secs(15), entered_rx).await.context("beta never reached failure barrier")??;
+        let alpha = tokio::time::timeout(Duration::from_secs(15), service.as_ref().unwrap().engine.wait(&alpha_id)).await.context("alpha did not finish while beta was held")??;
+        let before = call(service.as_ref().unwrap(), "GET", &format!("/api/compare/{id}"), Value::Null).await?;
+        ensure!(alpha.status == "completed" && before["state"] == "running", "held comparison state: {before}");
+        let checks = lane(&before,"failure-alpha")["checks"].clone();
+        ensure!(checks["passed"] == 1 && checks["failed"] == 0 && checks["incomplete"] == 0, "alpha check did not pass: {before}");
+        ensure!(checks["commands"][0]["command"] == CHECK && checks["commands"][0]["exit_code"] == 0, "wrong configured check");
+        let receipt = service.as_ref().unwrap().engine.store().last_task_event(&alpha.task_id,"verification.summary")?.context("missing alpha verification receipt")?;
+        let commands = receipt["payload"]["commands"].as_array().context("missing receipt commands")?;
+        ensure!(alpha.result.as_ref().context("missing alpha result")?["verification"]["commands"] == receipt["payload"]["commands"], "job result and durable receipt diverged");
+        let check_receipts: Vec<_> = commands.iter().filter(|r| r["kind"] == "configured_check" && r["command"] == CHECK).collect();
+        ensure!(check_receipts.len() == 1, "missing or duplicate configured receipt");
+        let check_receipt = check_receipts[0];
+        ensure!(check_receipt["task_id"] == alpha.task_id && check_receipt["success"] == true && check_receipt["exit_code"] == 0 && check_receipt["state"] == "passed", "invalid initial check receipt");
+        let call_id = check_receipt["tool_call_id"].as_str().filter(|id| !id.is_empty() && *id != "[redacted secret]").context("missing owned tool identity")?;
+        let completed_id: i64 = check_receipt["output_ref"].as_str().and_then(|r| r.strip_prefix("event:")).context("missing exact output_ref")?.parse()?;
+        ensure!(completed_id > 0, "invalid output reference");
+        let completion = service.as_ref().unwrap().engine.store().events_after(&alpha.session_id, completed_id - 1, Some(completed_id), 1)?.pop().context("referenced command completion missing")?;
+        ensure!(completion["id"] == completed_id && completion["task_id"] == alpha.task_id && completion["session_id"] == alpha.session_id && completion["type"] == "tool.completed", "foreign/non-completion output reference");
+        ensure!(completion["payload"]["tool"] == "exec" && completion["payload"]["call_id"] == call_id && completion["payload"]["success"] == true && completion["payload"]["output"]["exit_code"] == 0 && completion["payload"]["output"]["stdout"] == "candidate-check-passed\n", "receipt does not name the actual successful check output: {completion}");
+        let events = service.as_ref().unwrap().engine.store().recent_events(&alpha.session_id, 100)?;
+        let starts: Vec<_> = events.iter().filter(|e| e["task_id"] == alpha.task_id && e["type"] == "tool.started" && e["payload"]["tool"] == "exec" && e["payload"]["call_id"] == call_id).collect();
+        ensure!(starts.len() == 1 && starts[0]["payload"]["arguments"]["command"] == CHECK, "command identity did not start exact check");
+        ensure!(fs::read_to_string(alpha_path.join("answer.txt"))? == "alpha\n", "alpha output missing before failure");
+        ensure!(fs::read_to_string(beta_path.join("beta-partial.txt"))? == "retained beta work\n", "beta's tool never ran");
+        release.cancel();
+        let beta = tokio::time::timeout(Duration::from_secs(15), service.as_ref().unwrap().engine.wait(&beta_id)).await.context("beta did not fail after release")??;
+        let alpha_requests = success.requests.lock().unwrap().len();
+        ensure!(beta.status == "failed" && beta.summary.contains("400"), "wrong beta failure: {beta:?}");
+        for reopened in [false, true] {
+            if reopened {
+                service.as_ref().unwrap().engine.shutdown().await?;
+                drop(service.take());
+                service = Some(Service::open(f.paths.clone(), Some(f.project.clone()))?);
+            }
+            let current = service.as_ref().unwrap();
+            let done = call(current,"GET",&format!("/api/compare/{id}"),Value::Null).await?;
+            ensure!(done["state"] == "done" && done["winner"].is_null(), "comparison outcome lost: {done}");
+            ensure!(lane(&done,"failure-alpha")["job_id"] == alpha_id && lane(&done,"failure-alpha")["status"] == "completed" && lane(&done,"failure-alpha")["summary"] == alpha.summary, "successful lane changed: {done}");
+            ensure!(lane(&done,"failure-beta")["job_id"] == beta_id && lane(&done,"failure-beta")["status"] == "failed" && lane(&done,"failure-beta")["error"].as_str().is_some_and(|s| !s.is_empty()), "failed lane outcome missing: {done}");
+            ensure!(lane(&done,"failure-alpha")["checks"] == checks && current.engine.store().last_task_event(&alpha.task_id,"verification.summary")? == Some(receipt.clone()), "successful receipt changed after beta failed/reopen: {done}");
+            ensure!(current.engine.store().events_after(&alpha.session_id, completed_id - 1, Some(completed_id), 1)?.pop() == Some(completion.clone()), "durable check completion changed after failure/reopen");
+            ensure!(alpha_path.is_dir() && beta_path.is_dir() && lane(&done,"failure-alpha")["removed"] == false && lane(&done,"failure-beta")["removed"] == false, "failure removed recovery material");
+            ensure!(fs::read_to_string(alpha_path.join("answer.txt"))? == "alpha\n" && fs::read_to_string(alpha_path.join("lib.txt"))? == "value = 2 (alpha)\n", "alpha files changed");
+            ensure!(fs::read_to_string(beta_path.join("beta-partial.txt"))? == "retained beta work\n", "failed lane partial work changed");
+            ensure!(fs::read(f.project.join(".git/index"))? == index && git(&f.project,&["rev-parse","HEAD"]) == head, "source index/HEAD changed before Keep");
+            ensure!(fs::read_to_string(f.project.join("tracked.txt"))? == "unstaged user bytes\n" && fs::read_to_string(f.project.join("notes.txt"))? == "unrelated user bytes\n", "user work changed before Keep");
+            ensure!(!f.project.join("answer.txt").exists() && !f.project.join("beta-partial.txt").exists() && fs::read_to_string(f.project.join("lib.txt"))? == "value = 1\n", "failure changed source");
+            for _ in 0..2 {
+                let board = call(current,"GET","/api/compare/scoreboard",Value::Null).await?;
+                ensure!(board["rows"].as_array().context("scoreboard rows")?.iter().all(|row| row["runs"] == 1 && row["wins"] == 0), "duplicate run count: {board}");
+            }
+        }
+        let kept = call(service.as_ref().unwrap(),"POST",&format!("/api/compare/{id}/keep"),json!({"model":"failure-alpha"})).await?;
+        ensure!(kept["state"] == "applied" && kept["winner"] == "failure-alpha" && lane(&kept,"failure-alpha")["checks"] == checks, "checked winner could not be kept: {kept}");
+        service.as_ref().unwrap().engine.shutdown().await?;
+        drop(service.take());
+        service = Some(Service::open(f.paths.clone(),Some(f.project.clone()))?);
+        for _ in 0..2 {
+            let retried = call(service.as_ref().unwrap(),"POST",&format!("/api/compare/{id}/discard"),Value::Null).await?;
+            ensure!(retried["state"] == "applied" && retried["winner"] == "failure-alpha" && retried["cleanup_pending"] == false && lane(&retried,"failure-alpha")["checks"] == checks, "applied result changed on cleanup retry: {retried}");
+        }
+        let board = call(service.as_ref().unwrap(),"GET","/api/compare/scoreboard",Value::Null).await?;
+        let scores = board["rows"].as_array().context("scoreboard rows")?;
+        ensure!(scores.len() == 2 && scores.iter().all(|row| row["runs"] == 1 && row["wins"] == if row["model"] == "failure-alpha" { 1 } else { 0 }), "winner rescored: {board}");
+        ensure!(fs::read_to_string(f.project.join("answer.txt"))? == "alpha\n" && fs::read_to_string(f.project.join("lib.txt"))? == "value = 2 (alpha)\n" && !f.project.join("beta-partial.txt").exists(), "wrong files applied");
+        ensure!(fs::read(f.project.join(".git/index"))? == index && git(&f.project,&["rev-parse","HEAD"]) == head, "source index/HEAD changed");
+        ensure!(fs::read_to_string(f.project.join("tracked.txt"))? == "unstaged user bytes\n" && fs::read_to_string(f.project.join("notes.txt"))? == "unrelated user bytes\n", "unrelated user work changed");
+        ensure!(service.as_ref().unwrap().engine.store().last_task_event(&alpha.task_id,"verification.summary")? == Some(receipt.clone()), "durable receipt changed after Keep");
+        ensure!(service.as_ref().unwrap().engine.store().events_after(&alpha.session_id, completed_id - 1, Some(completed_id), 1)?.pop() == Some(completion.clone()), "durable check completion changed after Keep");
+        ensure!(success.requests.lock().unwrap().len() == alpha_requests, "reopen/Keep replayed successful generation");
+        ensure!(requests.lock().unwrap().len() == 2 && f.server.requests.lock().unwrap().is_empty(), "beta retried or old endpoint used");
+        ensure!(service.as_ref().unwrap().engine.store().last_task_event(&beta.task_id,"model.retry")?.is_none(), "nonretryable failure retried");
+        Ok(json!({"comparison":id,"alpha_job":alpha_id,"beta_job":beta_id,"checks":checks,"receipt":receipt,"completion":completion,"scoreboard":board,"beta_requests":requests.lock().unwrap().len()}))
+    }).catch_unwind().await;
+    // Release/join fixture work and stop engine children before outcome asserts.
+    release.cancel();
+    let shutdown = if let Some(service) = service.as_ref() {
+        service.engine.shutdown().await
+    } else {
+        Ok(())
+    };
+    stop.cancel();
+    let joined = tokio::time::timeout(Duration::from_secs(5), &mut worker).await;
+    if joined.is_err() {
+        worker.abort();
+        let _ = worker.await;
+    }
+    eprintln!(
+        "COMPARE_LANE_FAILURE panic={}; result={:?}; shutdown={shutdown:?}; listener={joined:?}",
+        observed.is_err(),
+        observed.as_ref().ok()
+    );
+    assert!(shutdown.is_ok(), "{shutdown:?}");
+    assert!(matches!(joined, Ok(Ok(Ok(())))), "{joined:?}");
+    match observed {
+        Ok(result) => {
+            result.expect("Compare failed-lane isolation regression");
+        }
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
