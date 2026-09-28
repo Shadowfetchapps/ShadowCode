@@ -12,7 +12,7 @@
   content rating and release history). The package check now validates it
   strictly and requires the newest listed release to be the packaged
   version.
-- Refresh visible check evidence after editor saves, editor-observed disk changes and relevant same-session engine events. Hide old passing results immediately and discard refresh responses superseded by an edit. This change is not included in the published 0.33.1 packages.
+- Refresh visible check evidence after editor saves, editor-observed disk changes and relevant same-session engine events. Hide old passing results immediately and discard refresh responses superseded by an edit. Visible task summaries refresh together through one batched request (`POST /api/jobs/verification-refresh`, up to 32 jobs sharing one workspace fingerprint) on a shared five-second cadence; offscreen cards and hidden windows don't poll. Not included in the published 0.33.1 packages.
 
 ## 0.33.1: Reliability and daily workflow
 

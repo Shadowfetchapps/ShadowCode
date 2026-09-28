@@ -64,9 +64,35 @@ struct DecisionBody {
     note: Text,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerificationRefreshBody {
+    job_ids: Vec<String>,
+}
+
 impl Service {
     pub(super) async fn job_routes(&self, call: &Arc<Call>) -> Result<Value> {
         let parts = call.parts();
+        if call.method == "POST" && call.path == "/api/jobs/verification-refresh" {
+            let body: VerificationRefreshBody = call.body()?;
+            ensure!(
+                !body.job_ids.is_empty() && body.job_ids.len() <= 32,
+                "Refresh requires 1 to 32 jobs"
+            );
+            let mut seen = std::collections::BTreeSet::new();
+            let mut jobs = Vec::with_capacity(body.job_ids.len());
+            for id in &body.job_ids {
+                ensure!(
+                    !id.is_empty() && id.len() <= 128 && seen.insert(id),
+                    "Refresh job IDs must be nonempty, bounded and unique"
+                );
+                jobs.push(self.engine.job(id)?.context("Job not found")?);
+            }
+            let results = crate::verification::current_batch(&self.engine, &jobs).await?;
+            let verifications: serde_json::Map<String, Value> =
+                body.job_ids.into_iter().zip(results).collect();
+            return Ok(json!({"verifications": verifications}));
+        }
         match (call.method.as_str(), call.path.as_str()) {
             ("POST", "/api/jobs/test") => return self.start_test_job(call).await,
             ("POST", "/api/jobs" | "/api/run") => return self.start_job(call).await,

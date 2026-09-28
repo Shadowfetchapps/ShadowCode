@@ -213,7 +213,7 @@ it("reassesses visible receipts on focus and never falls back to a green result 
   await waitFor(() =>
     expect(screen.getByText("Checks are stale — files changed")).toBeTruthy(),
   );
-  expect(read).toHaveBeenCalledWith("job-1");
+  expect(read).toHaveBeenCalledWith("job-1", expect.any(AbortSignal));
   fireEvent.click(
     screen.getByRole("button", { name: "Refresh check evidence" }),
   );
@@ -276,7 +276,7 @@ it("does not reuse a freshness result when the displayed attempt changes", async
   await waitFor(() =>
     expect(screen.getByText("Checks are stale — files changed")).toBeTruthy(),
   );
-  expect(read).toHaveBeenLastCalledWith("second");
+  expect(read).toHaveBeenLastCalledWith("second", expect.any(AbortSignal));
   expect(screen.queryByText("Configured checks passed")).toBeNull();
   vi.unstubAllGlobals();
 });

@@ -10,6 +10,7 @@ import {
 } from "../lib/activity";
 import { isNative, listen } from "../lib/transport";
 import { onWorkspaceFilesChanged } from "../lib/workspaceChanges";
+import { onVerificationRefresh } from "../lib/verificationRefresh";
 import type { LineCounts } from "../lib/diffStats";
 import { TaskTimingDetails } from "./TaskTimingDetails";
 import { LocalModelDetails } from "./LocalModelDetails";
@@ -36,7 +37,10 @@ export const TaskSummary = memo(function TaskSummary({
   workspace?: string;
   sessionId?: string;
   runCheck?: RunCheckAction;
-  readVerification?: (attemptId: string) => Promise<unknown>;
+  readVerification?: (
+    attemptId: string,
+    signal?: AbortSignal,
+  ) => Promise<unknown>;
   onReview: (path?: string) => void;
   onRewind?: () => void;
   diffStat?: (path: string) => Promise<DiffStat>;
@@ -77,7 +81,7 @@ export const TaskSummary = memo(function TaskSummary({
     read: typeof readVerification;
   }>();
   const [assessment, setAssessment] = useState("checking");
-  const [refreshKey, setRefreshKey] = useState(0);
+  const refreshAssessment = useRef<() => void>(() => {});
   const attemptId = activity.verification?.commands.find(
     (c) => c.kind === "configured_check",
   )?.attemptId;
@@ -89,17 +93,22 @@ export const TaskSummary = memo(function TaskSummary({
       running = false,
       pending = false;
     let generation = 0;
+    let controller: AbortController | undefined;
     let unlisten: (() => void) | undefined;
     setFresh(undefined);
     setAssessment("checking");
     const assess = async () => {
-      if (!visible || running || !live) return;
+      if (!visible || document.visibilityState === "hidden" || running || !live)
+        return;
       running = true;
       pending = false;
       const readingGeneration = generation;
+      controller = new AbortController();
       setAssessment("checking");
       try {
-        const result = parseVerification(await readVerification(attemptId));
+        const result = parseVerification(
+          await readVerification(attemptId, controller.signal),
+        );
         if (live && readingGeneration === generation) {
           setFresh(
             result
@@ -133,6 +142,16 @@ export const TaskSummary = memo(function TaskSummary({
       setAssessment("checking");
       void assess();
     };
+    refreshAssessment.current = invalidate;
+    const suspend = () => {
+      ++generation;
+      controller?.abort();
+      setFresh(undefined);
+      setAssessment("checking");
+    };
+    const stopRefresh = onVerificationRefresh(() => {
+      if (visible && !running) void assess();
+    });
     const stopFiles = workspace
       ? onWorkspaceFilesChanged(workspace, invalidate)
       : undefined;
@@ -178,8 +197,10 @@ export const TaskSummary = memo(function TaskSummary({
       typeof IntersectionObserver === "undefined"
         ? null
         : new IntersectionObserver((entries) => {
-            visible = entries.some((entry) => entry.isIntersecting);
-            if (visible) void assess();
+            const nextVisible = entries.some((entry) => entry.isIntersecting);
+            if (visible && !nextVisible) suspend();
+            visible = nextVisible;
+            if (visible) invalidate();
           });
     if (observer && summaryRef.current) observer.observe(summaryRef.current);
     else {
@@ -188,11 +209,15 @@ export const TaskSummary = memo(function TaskSummary({
     }
     const focus = () => {
       if (document.visibilityState !== "hidden") invalidate();
+      else suspend();
     };
     window.addEventListener("focus", focus);
     document.addEventListener("visibilitychange", focus);
     return () => {
       live = false;
+      controller?.abort();
+      refreshAssessment.current = () => {};
+      stopRefresh();
       observer?.disconnect();
       stopFiles?.();
       unlisten?.();
@@ -203,7 +228,6 @@ export const TaskSummary = memo(function TaskSummary({
     attemptId,
     readVerification,
     activity.verification,
-    refreshKey,
     workspace,
     sessionId,
   ]);
@@ -333,15 +357,13 @@ export const TaskSummary = memo(function TaskSummary({
             <button
               type="button"
               className="mini"
-              onClick={() => {
-                setAssessment("checking");
-                setRefreshKey((key) => key + 1);
-              }}
+              onClick={() => refreshAssessment.current()}
             >
               Refresh check evidence
             </button>
             <p className="dim">
-              Point-in-time assessment; original receipts remain in history.
+              Reassessed every five seconds while visible. Point-in-time
+              evidence; original receipts remain in history.
             </p>
           </>
         )}

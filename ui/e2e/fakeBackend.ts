@@ -2804,6 +2804,29 @@ export function installFakeBackend(options: FakeOptions = {}) {
       }
       return { ...job };
     }
+    if (path === "/api/jobs/verification-refresh" && method === "POST") {
+      const ids: unknown = body?.job_ids;
+      if (
+        !Array.isArray(ids) ||
+        !ids.length ||
+        ids.length > 32 ||
+        ids.some((id) => typeof id !== "string" || !id.trim()) ||
+        new Set(ids).size !== ids.length
+      )
+        throw new Error("Expected 1–32 unique verification jobs");
+      const jobs = ids.map((id) =>
+        state.jobs.find((job: Json) => job.id === id),
+      );
+      if (jobs.some((job) => !job)) throw new Error("Unknown verification job");
+      return {
+        verifications: Object.fromEntries(
+          jobs.map((job) => [
+            job.id,
+            job.result?.verification || { status: "not_run", commands: [] },
+          ]),
+        ),
+      };
+    }
     if ((m = path.match(/^\/api\/jobs\/([^/]+)\/verification$/)))
       return (
         state.jobs.find((j: Json) => j.id === m![1])?.result?.verification || {

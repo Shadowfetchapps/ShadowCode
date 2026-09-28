@@ -53,6 +53,21 @@ from attaching to a different conversation. A refresh failure after acceptance
 does not make the accepted command retryable. Check output and the new receipt
 appear in the ordinary task transcript.
 
+`POST /api/jobs/verification-refresh` receives `{job_ids: string[]}` and returns
+`{verifications: {[job_id]: Verification}}`. A request must contain 1–32 unique,
+nonempty IDs of at most 128 bytes, all identifying existing jobs. Invalid or
+unknown IDs reject the whole request. The response uses the same assessment as
+`GET /api/jobs/{id}/verification`, sharing one current fingerprint per workspace
+within that batch. No fingerprint is cached across requests. Unreadable or
+missing workspace content cannot retain a passing verdict; original stored
+receipts remain unchanged. Vendor-owned and nonpassing receipts require no scan.
+
+Visible summaries use a shared five-second refresh cadence in addition to edit
+and engine notifications. Offscreen cards and hidden documents do not poll;
+pending reads are not overlapped by timer ticks. Refreshes are point-in-time
+observations with bounded detection delay, not an atomic filesystem watch or a
+claim that no file can change after assessment.
+
 ## Picker
 
 `GET /api/picker` → `{ targets: PickerTarget[], local_engine: LocalCatalog, vendors: {[vendorId]: VendorStatus}, generated_at: number }`

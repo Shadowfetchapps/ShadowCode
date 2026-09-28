@@ -1,7 +1,7 @@
 // Real WebKit UI + native command execution; no fake command API or model turn.
 // Called after the existing local fixture task and editor/reload checks finish.
 import assert from "node:assert/strict";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export async function nativeRunCheck(ctx) {
@@ -92,13 +92,41 @@ export async function nativeRunCheck(ctx) {
   assert.equal((await ctx.modelRequests()).length, beforeRequests, "The entire check invokes no model");
   assert.equal((await ctx.jobsFor(ctx.sessionId)).length, beforeJobs.length + 1);
   await ctx.screenshot("run-check-result");
+  // Change a file outside the editor and engine, without refocusing or asking
+  // the API to refresh. The visible summary's bounded cadence must detect it.
+  const external = path.join(ctx.project, "external-verification-change.txt");
+  const changedAt = Date.now();
+  await writeFile(external, "External source change after the check\n", { flag: "wx" });
+  let externalChangeDetectedMs;
+  try {
+    await ctx.until("Visible check becomes stale after an external write", () => ctx.execute(`
+      const summary = [...document.querySelectorAll(arguments[0])].at(-1);
+      return summary?.innerText.includes('Checks are stale — files changed') &&
+        !summary.innerText.includes('Configured checks passed');
+    `, [summaries]));
+    externalChangeDetectedMs = Date.now() - changedAt;
+    const retained = (await ctx.jobsFor(ctx.sessionId)).find(current => current.id === job.id);
+    assert.deepEqual(retained.result.verification, job.result.verification,
+      "Freshness assessment cannot rewrite the original passing receipt");
+    assert.equal((await ctx.modelRequests()).length, beforeRequests);
+    assert.equal(await ctx.execute("return document.querySelector(arguments[0]).value", [composer]), draft);
+    await ctx.screenshot("run-check-external-stale");
+  } finally {
+    await unlink(external);
+  }
+  await ctx.until("Restored files reassess against the original check fingerprint", () => ctx.execute(`
+    return [...document.querySelectorAll(arguments[0])].at(-1)?.innerText.includes('Configured checks passed');
+  `, [summaries]));
   await writeFile(path.join(ctx.artifacts, "native-run-check.json"), JSON.stringify({
     passed: true, task_id: job.task_id, job_id: job.id, command, state: receipt.state,
     exit_code: receipt.exit_code, provenance: receipt.provenance, model_requests: job.timings.model_requests,
     output_observed_in_receipt: output, cwd_device_inode_checked: cwdIdentity,
     receipt_cwd_redacted: receipt.cwd === "[redacted secret]",
     draft_preserved: true, earlier_summary_preserved: true,
+    external_change_detected_ms: externalChangeDetectedMs,
+    original_receipt_preserved_after_external_edit: true,
   }, null, 2) + "\n");
   await ctx.fill(composer, originalDraft);
   ctx.note("Run a check: real command approval, native output/receipt, preserved draft and earlier summary, zero model requests");
+  ctx.note("Visible check evidence refreshes after external writes without focus changes or model requests");
 }

@@ -1,4 +1,5 @@
 import { request, ApiError } from "./lib/transport";
+import { createVerificationReader } from "./lib/verificationRefresh";
 import type { BillingMode, PickerTarget, UsageSnapshot } from "./lib/picker";
 import type { ContextAttachment } from "./lib/pendingAttachments";
 import type { PreviewOpened, PreviewServer } from "./lib/preview";
@@ -1043,6 +1044,9 @@ export type NtfyChange = Partial<
 };
 
 const get = <T>(path: string) => request<T>(path);
+const readJobVerification = createVerificationReader((job_ids) =>
+  send("/api/jobs/verification-refresh", "POST", { job_ids }),
+);
 
 async function send<T>(
   path: string,
@@ -1714,10 +1718,7 @@ export const api = {
   startTestJob: (body: CheckJobRequest) =>
     send<Job>("/api/jobs/test", "POST", body),
   job: (id: string) => get<Job>(`/api/jobs/${id}`),
-  jobVerification: (id: string) =>
-    get<Record<string, unknown>>(
-      `/api/jobs/${encodeURIComponent(id)}/verification`,
-    ),
+  jobVerification: readJobVerification,
   cancelJob: (id: string, only_if_queued = false) =>
     send<Job>(`/api/jobs/${id}/cancel`, "POST", { only_if_queued }),
   pauseJob: (id: string) => send<Job>(`/api/jobs/${id}/pause`, "POST", {}),

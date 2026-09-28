@@ -12,6 +12,7 @@ import { useDrawerMemory } from "../hooks/useDrawerMemory";
 import { isNative, listen } from "../lib/transport";
 import { notifyWorkspaceFilesChanged } from "../lib/workspaceChanges";
 import { emptyActivity } from "../lib/activity";
+import { createVerificationReader } from "../lib/verificationRefresh";
 import { FileEditor } from "./FileEditor";
 import { TaskSummary } from "./TaskSummary";
 
@@ -32,6 +33,7 @@ vi.mock("../api", () => ({
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.resetAllMocks();
   vi.unstubAllGlobals();
 });
@@ -282,4 +284,195 @@ it("uses scoped engine mutation wake-ups without reading on token events", async
   expect(read).toHaveBeenCalledTimes(2);
   shown.unmount();
   expect(stop).toHaveBeenCalledOnce();
+});
+
+it("reassesses an external change without an event and never piles polls onto a slow read", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("IntersectionObserver", undefined);
+  const slow = deferred();
+  const read = vi
+    .fn()
+    .mockResolvedValueOnce(passed)
+    .mockReturnValueOnce(slow.promise)
+    .mockResolvedValue(stale);
+  const shown = render(
+    <TaskSummary
+      workspace="/project"
+      activity={activity}
+      readVerification={read}
+      onReview={() => {}}
+    />,
+  );
+  await act(async () => {});
+  expect(screen.getByText("Configured checks passed")).toBeTruthy();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+  });
+  expect(read).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText("Configured checks passed")).toBeNull();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  expect(read).toHaveBeenCalledTimes(2);
+  await act(async () => slow.resolve(stale));
+  expect(screen.getByText("Checks are stale — files changed")).toBeTruthy();
+  expect(read).toHaveBeenCalledTimes(2);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+  });
+  expect(read).toHaveBeenCalledTimes(3);
+  shown.unmount();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("does not read a hidden document or offscreen card and rejects a read completed after hiding", async () => {
+  vi.useFakeTimers();
+  let intersect!: (entries: { isIntersecting: boolean }[]) => void;
+  vi.stubGlobal(
+    "IntersectionObserver",
+    class {
+      constructor(callback: typeof intersect) {
+        intersect = callback;
+      }
+      observe() {}
+      disconnect() {}
+    },
+  );
+  const visibility = vi
+    .spyOn(document, "visibilityState", "get")
+    .mockReturnValue("hidden");
+  const slow = deferred();
+  const read = vi
+    .fn()
+    .mockReturnValueOnce(slow.promise)
+    .mockResolvedValue(stale);
+  render(
+    <TaskSummary
+      workspace="/project"
+      activity={activity}
+      readVerification={read}
+      onReview={() => {}}
+    />,
+  );
+  act(() => intersect([{ isIntersecting: true }]));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10_000);
+  });
+  expect(read).not.toHaveBeenCalled();
+  visibility.mockReturnValue("visible");
+  fireEvent(document, new Event("visibilitychange"));
+  expect(read).toHaveBeenCalledOnce();
+  visibility.mockReturnValue("hidden");
+  fireEvent(document, new Event("visibilitychange"));
+  expect(read.mock.calls[0][1].aborted).toBe(true);
+  await act(async () => slow.resolve(passed));
+  expect(screen.queryByText("Configured checks passed")).toBeNull();
+  act(() => intersect([{ isIntersecting: false }]));
+  visibility.mockReturnValue("visible");
+  fireEvent(document, new Event("visibilitychange"));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(20_000);
+  });
+  expect(read).toHaveBeenCalledOnce();
+  await act(async () => intersect([{ isIntersecting: true }]));
+  expect(screen.getByText("Checks are stale — files changed")).toBeTruthy();
+  visibility.mockRestore();
+});
+
+it("coalesces repeated manual refresh while a read is pending", async () => {
+  vi.stubGlobal("IntersectionObserver", undefined);
+  const slow = deferred();
+  const read = vi
+    .fn()
+    .mockReturnValueOnce(slow.promise)
+    .mockResolvedValue(stale);
+  render(
+    <TaskSummary
+      activity={activity}
+      readVerification={read}
+      onReview={() => {}}
+    />,
+  );
+  for (let i = 0; i < 10; i++)
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh check evidence" }),
+    );
+  expect(read).toHaveBeenCalledOnce();
+  await act(async () => slow.resolve(passed));
+  expect(read).toHaveBeenCalledTimes(2);
+  expect(screen.getByText("Checks are stale — files changed")).toBeTruthy();
+});
+
+it("shares one periodic batch across visible cards and removes queued hidden cards", async () => {
+  vi.useFakeTimers();
+  const intersections: ((entries: { isIntersecting: boolean }[]) => void)[] =
+    [];
+  vi.stubGlobal(
+    "IntersectionObserver",
+    class {
+      constructor(callback: (entries: { isIntersecting: boolean }[]) => void) {
+        intersections.push(callback);
+      }
+      observe() {}
+      disconnect() {}
+    },
+  );
+  let externalEdit = false;
+  const send = vi.fn(async (ids: string[]) => ({
+    verifications: Object.fromEntries(
+      ids.map((id) => [id, externalEdit ? stale : passed]),
+    ),
+  }));
+  const read = createVerificationReader(send);
+  const otherActivity = {
+    ...activity,
+    taskId: "task-2",
+    verification: {
+      ...activity.verification,
+      commands: [{ ...command, attemptId: "check-2" }],
+    },
+  };
+  const shown = render(
+    <>
+      <TaskSummary
+        activity={activity}
+        readVerification={read}
+        onReview={() => {}}
+      />
+      <TaskSummary
+        activity={otherActivity}
+        readVerification={read}
+        onReview={() => {}}
+      />
+    </>,
+  );
+  await act(async () => {
+    for (const intersect of intersections)
+      intersect([{ isIntersecting: true }]);
+  });
+  expect(send).toHaveBeenCalledOnce();
+  expect(send).toHaveBeenCalledWith(["check-1", "check-2"]);
+  expect(screen.getAllByText("Configured checks passed")).toHaveLength(2);
+  externalEdit = true;
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+  });
+  expect(send).toHaveBeenCalledTimes(2);
+  expect(screen.getAllByText("Checks are stale — files changed")).toHaveLength(
+    2,
+  );
+  await act(async () => {
+    // A card can leave the viewport after requesting but before dispatch.
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Refresh check evidence" })[0],
+    );
+    intersections[0]([{ isIntersecting: false }]);
+  });
+  expect(send).toHaveBeenCalledTimes(2);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+  });
+  expect(send).toHaveBeenLastCalledWith(["check-2"]);
+  shown.unmount();
+  expect(vi.getTimerCount()).toBe(0);
 });

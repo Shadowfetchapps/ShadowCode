@@ -285,19 +285,17 @@ pub async fn execute(
     Ok(result)
 }
 
-pub async fn refresh(commands: &mut [Value], workspace: Arc<Workspace>) {
-    if !commands
+fn needs_refresh(commands: &[Value]) -> bool {
+    commands
         .iter()
         .any(|v| v["kind"] == "configured_check" && v["state"] == "passed")
-    {
-        return;
-    }
-    let current = fingerprint(workspace).await;
+}
+
+fn apply_fingerprint(commands: &mut [Value], current: Option<&str>) {
     for command in commands {
         if command["kind"] == "configured_check"
             && command["state"] == "passed"
-            && (current.is_none()
-                || command["workspace_fingerprint"].as_str() != current.as_deref())
+            && (current.is_none() || command["workspace_fingerprint"].as_str() != current)
         {
             command["state"] = json!("stale");
             command["success"] = json!(false);
@@ -305,34 +303,84 @@ pub async fn refresh(commands: &mut [Value], workspace: Arc<Workspace>) {
     }
 }
 
+pub async fn refresh(commands: &mut [Value], workspace: Arc<Workspace>) {
+    if needs_refresh(commands) {
+        let current = fingerprint(workspace).await;
+        apply_fingerprint(commands, current.as_deref());
+    }
+}
+
 /// Revalidate a historical result without rewriting its original receipts.
 /// Reopening an application/profile does not make an old pass current.
 pub async fn current(engine: &crate::engine::Engine, job: &crate::engine::Job) -> Result<Value> {
-    let mut summary = job
-        .result
-        .as_ref()
-        .map(|result| result["verification"].clone())
-        .filter(|value| value.is_object())
-        .or(engine
-            .store()
-            .last_task_event(&job.task_id, "verification.summary")?
-            .map(|event| event["payload"].clone()))
-        .unwrap_or_else(|| json!({"status":"not_run","commands":[]}));
-    if summary["status"] == "vendor_owned" {
-        return Ok(summary);
-    }
-    let mut commands = summary["commands"].as_array().cloned().unwrap_or_default();
-    match Workspace::open(&job.workspace) {
-        Ok(workspace) => refresh(&mut commands, Arc::new(workspace)).await,
-        Err(_) => {
-            for command in &mut commands {
-                if command["kind"] == "configured_check" && command["state"] == "passed" {
-                    command["state"] = json!("stale");
-                    command["success"] = json!(false);
-                }
-            }
+    Ok(current_batch(engine, std::slice::from_ref(job))
+        .await?
+        .remove(0))
+}
+
+/// One bounded point-in-time scan per workspace for visible receipt refreshes.
+/// Nothing is cached between calls: external writes need no engine event.
+pub async fn current_batch(
+    engine: &crate::engine::Engine,
+    jobs: &[crate::engine::Job],
+) -> Result<Vec<Value>> {
+    current_batch_using(engine, jobs, |path| async move {
+        match Workspace::open(&path) {
+            Ok(workspace) => fingerprint(Arc::new(workspace)).await,
+            Err(_) => None,
         }
+    })
+    .await
+}
+
+async fn current_batch_using<F, Fut>(
+    engine: &crate::engine::Engine,
+    jobs: &[crate::engine::Job],
+    mut read: F,
+) -> Result<Vec<Value>>
+where
+    F: FnMut(std::path::PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    ensure!(
+        !jobs.is_empty() && jobs.len() <= 32,
+        "Refresh requires 1 to 32 jobs"
+    );
+    let mut fingerprints = BTreeMap::new();
+    let mut results = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let summary = job
+            .result
+            .as_ref()
+            .map(|result| result["verification"].clone())
+            .filter(|value| value.is_object())
+            .or(engine
+                .store()
+                .last_task_event(&job.task_id, "verification.summary")?
+                .map(|event| event["payload"].clone()))
+            .unwrap_or_else(|| json!({"status":"not_run","commands":[]}));
+        if summary["status"] == "vendor_owned" {
+            results.push(summary);
+            continue;
+        }
+        let mut commands = summary["commands"].as_array().cloned().unwrap_or_default();
+        if needs_refresh(&commands) {
+            if !fingerprints.contains_key(&job.workspace) {
+                fingerprints.insert(job.workspace.clone(), read(job.workspace.clone()).await);
+            }
+            apply_fingerprint(
+                &mut commands,
+                fingerprints
+                    .get(&job.workspace)
+                    .and_then(|value| value.as_deref()),
+            );
+        }
+        results.push(assess_summary(summary, commands, job));
     }
+    Ok(results)
+}
+
+fn assess_summary(mut summary: Value, commands: Vec<Value>, job: &crate::engine::Job) -> Value {
     let text = if summary["model_claimed_success"] == true {
         "All tests passed"
     } else {
@@ -361,7 +409,7 @@ pub async fn current(engine: &crate::engine::Engine, job: &crate::engine::Job) -
     }
     summary["assessed_at"] = json!(crate::now());
     summary["freshness_scope"] = json!("Point-in-time assessment of current file fingerprints for command receipts. Recorded inspection scope is historical and not revalidated, including legacy summaries without separate host scope. Original task history is unchanged.");
-    Ok(summary)
+    summary
 }
 
 /// The latest receipt for each exact check, for Compare and other consumers.
@@ -457,6 +505,109 @@ pub(crate) fn classify_observations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn batch_refresh_shares_only_in_request_fingerprints_and_detects_external_changes() {
+        use std::cell::RefCell;
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::AppPaths::isolated(&root.path().join("profile")).unwrap();
+        let engine = crate::engine::Engine::open(paths).unwrap();
+        let mut jobs = Vec::new();
+        for project in ["a", "b"] {
+            let workspace = root.path().join(project);
+            std::fs::create_dir(&workspace).unwrap();
+            std::fs::write(workspace.join("source.txt"), "before").unwrap();
+            let hash = fingerprint(Arc::new(Workspace::open(&workspace).unwrap()))
+                .await
+                .unwrap();
+            for index in 0..2 {
+                let mut command = check("project check", State::Passed);
+                command["workspace_fingerprint"] = json!(hash);
+                jobs.push(crate::engine::Job {
+                    id: format!("{project}-{index}"),
+                    task_id: format!("task-{project}-{index}"),
+                    workspace: workspace.clone(),
+                    status: "completed".into(),
+                    result: Some(json!({"verification":classify("", &[command], false)})),
+                    ..Default::default()
+                });
+            }
+        }
+        let original: Vec<_> = jobs.iter().map(|job| job.result.clone()).collect();
+        let scans = RefCell::new(Vec::new());
+        let read = |path: std::path::PathBuf| {
+            scans.borrow_mut().push(path.clone());
+            async move { fingerprint(Arc::new(Workspace::open(&path).unwrap())).await }
+        };
+        let first = current_batch_using(&engine, &jobs, read).await.unwrap();
+        assert!(first.iter().all(|summary| summary["status"] == "passed"));
+        assert_eq!(
+            scans.borrow().len(),
+            2,
+            "One scan per workspace, not per receipt"
+        );
+        // No engine event: an external rename plus a same-size write must be
+        // observed by the next assessment, with no time-based cache reuse.
+        std::fs::rename(
+            root.path().join("a/source.txt"),
+            root.path().join("a/renamed.txt"),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("a/renamed.txt"), "after!").unwrap();
+        let second = current_batch_using(&engine, &jobs, read).await.unwrap();
+        assert_eq!(scans.borrow().len(), 4);
+        assert!(second[..2]
+            .iter()
+            .all(|summary| summary["status"] == "stale" && summary["verified"] == false));
+        assert!(second[2..]
+            .iter()
+            .all(|summary| summary["status"] == "passed"));
+        std::fs::remove_dir_all(root.path().join("b")).unwrap();
+        let third = current_batch(&engine, &jobs).await.unwrap();
+        assert!(third.iter().all(|summary| summary["status"] == "stale"));
+        assert_eq!(
+            jobs.iter()
+                .map(|job| job.result.clone())
+                .collect::<Vec<_>>(),
+            original
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_refresh_does_not_scan_nonpassing_or_vendor_receipts() {
+        let root = tempfile::tempdir().unwrap();
+        let engine = crate::engine::Engine::open(
+            crate::paths::AppPaths::isolated(&root.path().join("profile")).unwrap(),
+        )
+        .unwrap();
+        let jobs: Vec<_> = [
+            json!({"status":"vendor_owned","commands":[]}),
+            classify("", &[check("failed check", State::Failed)], false),
+            classify("", &[], false),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, summary)| crate::engine::Job {
+            id: format!("job-{index}"),
+            task_id: format!("task-{index}"),
+            workspace: root.path().join("missing"),
+            status: "completed".into(),
+            result: Some(json!({"verification":summary})),
+            ..Default::default()
+        })
+        .collect();
+        let results = current_batch_using(&engine, &jobs, |_| async {
+            panic!("Nonpassing historical evidence must not trigger a workspace scan")
+        })
+        .await
+        .unwrap();
+        assert_eq!(results[0]["status"], "vendor_owned");
+        assert_eq!(results[1]["status"], "failed");
+        assert_eq!(results[2]["status"], "not_run");
+        assert!(current_batch(&engine, &[]).await.is_err());
+        engine.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn legacy_inspection_scope_is_preserved_as_historical_not_revalidated() {
