@@ -54,11 +54,32 @@ pub struct Grant {
 }
 
 /// Programs a command grant never covers: they delete, change ownership or
-/// run other programs whose effect the prefix cannot describe.
+/// run other programs whose effect the prefix cannot describe. This includes
+/// command wrappers (a numeric or option first argument collapses the grant to
+/// the wrapper's name, which would then cover whatever program it runs) and
+/// script interpreters.
 const NEVER_GRANTED: &[&str] = &[
-    "rm", "rmdir", "dd", "mkfs", "chmod", "chown", "reboot", "shutdown", "kill", "killall", "sh",
-    "bash", "zsh", "fish", "eval", "exec", "xargs", "env", "find", "sudo", "doas", "su", "pkexec",
-    "run0",
+    // Destructive or privilege-changing.
+    "rm", "rmdir", "dd", "mkfs", "chmod", "chown", "reboot", "shutdown", "kill", "killall", "sudo",
+    "doas", "su", "pkexec", "run0", // Shells and evaluators.
+    "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "eval", "exec", "xargs", "env",
+    "find", // Wrappers that run another program named in their arguments.
+    "timeout", "nice", "nohup", "stdbuf", "setsid", "command", "time", "busybox", "watch", "chrt",
+    "ionice", "setpriv", "unshare", "flock", // Script interpreters.
+    "python", "python2", "python3", "node", "nodejs", "deno", "bun", "perl", "ruby", "php", "lua",
+    "Rscript",
+];
+
+/// `git` options that let it run another program or use another repository, so
+/// a `git` grant carrying one cannot be summarized by its subcommand.
+const UNSAFE_GIT_OPTIONS: &[&str] = &[
+    "-c",
+    "--config-env",
+    "-C",
+    "--git-dir",
+    "--work-tree",
+    "--exec-path",
+    "--namespace",
 ];
 
 impl Grant {
@@ -89,6 +110,16 @@ impl Grant {
             || words
                 .iter()
                 .any(|w| *w == "--privileged" || NEVER_GRANTED.contains(&base(w).as_str()))
+        {
+            return None;
+        }
+        // A `git` invocation carrying a config or path override could run
+        // another program (e.g. a pager or alias) or reach another repository,
+        // which its subcommand does not describe.
+        if base(program) == "git"
+            && words
+                .iter()
+                .any(|w| UNSAFE_GIT_OPTIONS.contains(&w.split('=').next().unwrap_or(w)))
         {
             return None;
         }
@@ -443,9 +474,33 @@ mod tests {
             "bash -c 'x'",
             "find . -delete",
             "",
+            // Wrappers whose grant would collapse to the wrapper's name and
+            // then cover whatever program they run.
+            "timeout 5 npm test",
+            "nice -n 10 cargo build",
+            "nohup ./run.sh",
+            "stdbuf -oL make",
+            "command cargo test",
+            "/usr/bin/time cargo test",
+            "busybox sh",
+            // Interpreters that run an arbitrary script the model may edit.
+            "python3 build.py",
+            "node script.js",
+            "perl -e 'x'",
+            // git carrying a config or path override.
+            "git -c core.pager=sh status",
+            "git -c alias.x=!sh x",
+            "git -C /other log",
+            "git --git-dir=/x/.git status",
+            "git --exec-path=/tmp log",
         ] {
             assert!(Grant::command("exec", never).is_none(), "{never}");
         }
+        // Ordinary git subcommands are still grantable.
+        assert_eq!(
+            Grant::command("exec", "git status").unwrap().prefix,
+            ["git", "status"]
+        );
     }
 
     #[tokio::test]
