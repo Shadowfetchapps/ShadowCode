@@ -213,7 +213,7 @@ Job statuses end in `completed`, `failed`, `cancelled`, `interrupted` or
 - **Picker and settings.** `ui/src/components/UnifiedPicker.tsx` is filled only
   by `GET /api/picker`. The settings pages are in `components/settings/`:
   Accounts (vendors, the Antigravity install and the OpenRouter key), Local
-  models, Permissions & network, Appearance and Advanced.
+  models, Permissions & network, Appearance, Advanced and About.
 - **Consent and progress.** `ConsentDialog.tsx` answers the `needs_consent`
   reply. `ActivityTimeline.tsx` and `TaskSummary.tsx` are built from recorded
   events.
@@ -231,3 +231,17 @@ the managed llama.cpp runtime in `usr/lib/shadowcode`. The runtime uses
 relative `$ORIGIN` links and `NOTICES/`. `scripts/check-native-package.mjs`
 verifies both packages. `scripts/install-appimage.sh` installs the AppImage's
 runtime into `~/.local/lib/shadowcode`. See [docs/RELEASING.md](docs/RELEASING.md).
+`scripts/native-deb.mjs` finishes the deb for distributions (copyright,
+changelog, manual page and completions from `shadowcode manpage` and
+`shadowcode completions`, icons, stripped runtime, libc dependency); see
+[docs/DISTRIBUTING.md](docs/DISTRIBUTING.md).
+
+`updates.rs` serves Settings › About (`/api/about`) and the update notice
+(`/api/updates`). It detects the install type from the package format Tauri's
+bundler writes into the executable, the AppImage environment and the
+executable's path. At most once a day, when the build, the system
+policy (`/etc/shadowcode/policy.yaml`, `<prefix>/share/shadowcode/policy.yaml`),
+`updates.check` and the network mode allow it, the window's
+`GET /api/updates?auto=1` asks GitHub's latest-release API. The request has a
+fixed User-Agent and no identifiers; the answer is kept in
+`update-check.json` in the state folder. Nothing is downloaded.

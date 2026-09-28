@@ -74,6 +74,13 @@ permissions:
 #   llama_binary: ""       # explicit llama-server; default is the bundled/managed runtime
 #   context_size: 0        # upper bound for the server context; 0 = 16384
 
+# Update notice (Settings › About): at most once a day ask GitHub for the
+# newest release; the request carries no version or identifier. Offline mode
+# pauses it. Unset follows the packaged default (on unless the distribution
+# turned it off in /etc/shadowcode/policy.yaml; see docs/DISTRIBUTING.md).
+# updates:
+#   check: true
+
 git:
   auto_commit: false
   allow_destructive: false

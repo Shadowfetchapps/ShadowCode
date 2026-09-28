@@ -140,6 +140,12 @@ try {
   const registered = await cli(["models", "--use", "native-cli-fixture", "--provider", "local", "--endpoint", `http://127.0.0.1:${model.address().port}/v1`, "--context-limit", "32768"]);
   assert.equal(registered.model.context_limit, 32768);
   assert.equal(await cli(["config", "model.context_limit"]), 32768);
+  // The update check's switch is settable before it was ever set.
+  assert.equal(await cli(["config", "updates.check"]), null);
+  assert.equal((await cli(["config", "updates.check", "false"])).updates.check, false);
+  assert.equal(await cli(["config", "updates.check"]), false);
+  assert.match((await finish(launch(["completions", "bash"]))).stdout, /complete -F _shadowcode/);
+  assert.match((await finish(launch(["manpage"]))).stdout, /^\.TH SHADOWCODE 1 /m);
   checks.push("headless startup, arguments, project trust and lifecycle validation");
   const pluginList = await cli(["plugin"]);
   assert.equal(pluginList.format,"native-plugins-v1");

@@ -311,6 +311,9 @@ pub struct Config {
     /// computer) or `"ask"`; `fallback_model` optionally names the
     /// `local:gguf:` row to use.
     pub limits: Value,
+    /// The daily update check (`updates.check`); see [`crate::updates`].
+    #[serde(default)]
+    pub updates: crate::updates::UpdatesConfig,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -336,6 +339,7 @@ impl Default for Config {
             sandbox: crate::sandbox::SandboxConfig::default(),
             checkpoints: crate::checkpoint::CheckpointConfig::default(),
             limits: json!({"on_limit":"local","fallback_model":""}),
+            updates: crate::updates::UpdatesConfig::default(),
             extra: BTreeMap::new(),
         }
     }
