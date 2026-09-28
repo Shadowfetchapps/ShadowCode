@@ -328,6 +328,11 @@ pub fn provider_error_detail(body: &[u8], local: bool) -> Option<String> {
 /// slow local model can take minutes). The answer itself has no overall
 /// deadline, only the 120-second stall limit between bytes.
 const HEADERS_TIMEOUT: Duration = Duration::from_secs(600);
+/// Longest silence between bytes of a streamed answer.
+const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Longest wait for a local runtime's first byte after its headers: prompt
+/// processing on a CPU-only machine can take several minutes.
+const LOCAL_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(900);
 pub fn is_loopback_endpoint(endpoint: &str) -> bool {
     reqwest::Url::parse(endpoint)
         .ok()
@@ -686,8 +691,19 @@ impl ModelClient {
                 .is_some_and(|h| h.starts_with("application/json"));
             let mut stream = response.bytes_stream();
             let mut raw = Vec::new();
+            // A local runtime sends its headers at once and then says nothing
+            // while it reads the prompt, which on a CPU can take minutes for a
+            // long context. Allow that before the first byte; afterwards the
+            // usual stall limit applies between bytes.
+            let mut waiting_for_first_byte = is_loopback_endpoint(&url);
             loop {
-                let next = tokio::select! {_=cancel.cancelled()=>bail!("Model request cancelled"),next=tokio::time::timeout(Duration::from_secs(120),stream.next())=>next.map_err(|_| crate::retry::ModelFailure::Stalled{message:"Model response stalled for 120 seconds".into()})?};
+                let limit = if waiting_for_first_byte {
+                    LOCAL_FIRST_BYTE_TIMEOUT
+                } else {
+                    STREAM_STALL_TIMEOUT
+                };
+                let next = tokio::select! {_=cancel.cancelled()=>bail!("Model request cancelled"),next=tokio::time::timeout(limit,stream.next())=>next.map_err(|_| crate::retry::ModelFailure::Stalled{message:format!("Model response stalled for {} seconds", limit.as_secs())})?};
+                waiting_for_first_byte = false;
                 let Some(chunk) = next else { break };
                 let chunk = chunk.context("Model stream disconnected before completion")?;
                 bytes += chunk.len();

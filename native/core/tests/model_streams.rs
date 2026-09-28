@@ -1030,3 +1030,90 @@ async fn long_steady_streams_are_not_cut_off_by_a_total_deadline() {
     assert_eq!(result.text, "0 1 2 3 4 5 6 7 8 9 10 11 ");
     server.await.unwrap();
 }
+
+/// A local runtime on a CPU-only machine sends its headers at once, then may
+/// stay silent for minutes while it reads a long prompt. That silence before
+/// the first byte must not stall the request; silence after the answer has
+/// started still does after 120 seconds. Paused clock: no real waiting.
+#[tokio::test(start_paused = true)]
+async fn slow_local_prompt_processing_is_not_a_stall_but_a_silent_answer_is() {
+    // `seen` is notified once the client has handed the first words to its
+    // caller, so the silence after it starts only when the client is waiting.
+    async fn serve(
+        first_silence: u64,
+        after_first: Option<(u64, std::sync::Arc<tokio::sync::Notify>)>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let count = socket.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:")?.trim().parse().ok())
+                        .unwrap_or(0usize);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(first_silence)).await;
+            let piece = sse(json!({"choices":[{"delta":{"content":"ready "}}]}));
+            socket.write_all(piece.as_bytes()).await.unwrap();
+            if let Some((pause, seen)) = after_first {
+                seen.notified().await;
+                tokio::time::sleep(Duration::from_secs(pause)).await;
+            }
+            let end =
+                sse(json!({"choices":[{"delta":{},"finish_reason":"stop"}]})) + "data: [DONE]\n\n";
+            let _ = socket.write_all(end.as_bytes()).await;
+        });
+        endpoint
+    }
+    let root = tempfile::tempdir().unwrap();
+    let paths = AppPaths::isolated(root.path()).unwrap();
+    let client = |endpoint: String| {
+        ModelClient::new(
+            ModelConfig {
+                provider: "local".into(),
+                name: "fixture".into(),
+                endpoint,
+                ..Default::default()
+            },
+            &paths,
+        )
+        .unwrap()
+    };
+    let message = [json!({"role":"user","content":"read this long prompt"})];
+    // Five minutes of prompt processing, then the answer.
+    let slow = client(serve(300, None).await)
+        .chat(&message, &[], CancellationToken::new(), |_| {})
+        .await
+        .unwrap();
+    assert_eq!(slow.text, "ready ");
+    // The answer starts, then goes silent for three minutes: a stall.
+    let seen = std::sync::Arc::new(tokio::sync::Notify::new());
+    let signal = seen.clone();
+    let stalled = client(serve(1, Some((180, seen))).await)
+        .chat(&message, &[], CancellationToken::new(), move |_| {
+            signal.notify_one()
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{stalled:#}").contains("stalled for 120 seconds"),
+        "{stalled:#}"
+    );
+}

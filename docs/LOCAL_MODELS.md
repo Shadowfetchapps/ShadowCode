@@ -228,6 +228,10 @@ llama-server -m <gguf> --host 127.0.0.1 --port <free> --no-webui --jinja \
   tasks in different projects take their turns in the order they were sent;
   a local follow-up still queued behind other work in its own project does
   not hold up a local task in another project.
+- **Slow prompts.** On a CPU-only machine the server can take minutes to read
+  a long prompt before it writes the first word. ShadowCode waits up to 15
+  minutes for that first word; once the answer is streaming, 120 seconds
+  without any output counts as a stall.
 - **Stop.** Unload, a switch or quitting ShadowCode sends SIGTERM to the
   server's process group, then SIGKILL after 5 seconds. The server also dies
   with ShadowCode (`PR_SET_PDEATHSIG`).
