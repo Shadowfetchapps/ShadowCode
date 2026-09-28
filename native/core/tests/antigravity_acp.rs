@@ -105,9 +105,27 @@ async fn install_sign_in_models_run_and_sign_out_through_the_acp_server() {
         "a custom setting never falls back to the managed install"
     );
 
+    // Temp directories a crash left behind: a stale one is removed at the
+    // next launch, a recent one (another running launch) is kept.
+    let stale = home.join("runs/left-by-a-crash");
+    let recent = home.join("runs/still-running");
+    fs::create_dir_all(stale.join("tmp")).unwrap();
+    fs::create_dir_all(&recent).unwrap();
+    let aged = std::process::Command::new("touch")
+        .args(["-d", "3 days ago"])
+        .arg(&stale)
+        .status()
+        .unwrap();
+    assert!(aged.success());
+
     // Installed, not signed in: the status probe sees the printed link and
     // stops; no browser is opened.
     let status = catalog.refresh(Vendor::Antigravity, &cfg, true).await;
+    assert!(
+        !stale.exists(),
+        "a crash's leftover temp directory is removed"
+    );
+    assert!(recent.exists());
     assert_eq!(
         status.availability,
         Availability::SignIn,

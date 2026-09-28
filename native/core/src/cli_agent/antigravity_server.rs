@@ -204,6 +204,8 @@ pub fn prepare(
     allow_browser: bool,
 ) -> Result<RunDir> {
     let profile = ensure_profile()?;
+    // Temp directories of launches a crash never cleaned up.
+    sweep_runs();
     let runs = runs_dir();
     fs::create_dir_all(&runs)?;
     let run = RunDir(runs.join(crate::id()));

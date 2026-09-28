@@ -73,6 +73,8 @@ the `agy` CLI's print mode could not do.
   pick it again.
 - **Temp files.** Each launch gets its own temp directory under
   `~/.local/share/shadowcode/antigravity-acp/runs`, removed afterwards.
+  Directories a crash left there are removed at the next launch once they
+  are a day old.
 - **Hosts without IPv6.** The server refuses to start without an IPv6
   loopback (`::1`); on such hosts ShadowCode passes the server's own
   `--enforce_kernel_ipv6_support=false` switch.
