@@ -116,6 +116,7 @@ export function AdvancedTools({ onOpen }: { onOpen?: (path: string) => void }) {
                 <div className="row">
                   <button
                     type="button"
+                    className="ghost"
                     disabled={busy || !onOpen || worker.status === "removed"}
                     onClick={() => onOpen?.(worker.worktree_path)}
                   >
@@ -123,6 +124,7 @@ export function AdvancedTools({ onOpen }: { onOpen?: (path: string) => void }) {
                   </button>
                   <button
                     type="button"
+                    className="ghost"
                     disabled={
                       busy ||
                       worker.status === "finished" ||
@@ -146,6 +148,7 @@ export function AdvancedTools({ onOpen }: { onOpen?: (path: string) => void }) {
             <div className="row">
               <button
                 type="button"
+                className="ghost"
                 disabled={
                   busy || plan.workers.some((w) => w.status !== "finished")
                 }
@@ -165,6 +168,7 @@ export function AdvancedTools({ onOpen }: { onOpen?: (path: string) => void }) {
               </button>
               <button
                 type="button"
+                className="ghost"
                 disabled={busy}
                 onClick={() =>
                   void perform(async () => {
@@ -212,6 +216,7 @@ export function AdvancedTools({ onOpen }: { onOpen?: (path: string) => void }) {
         <div className="row">
           <button
             type="button"
+            className="ghost"
             disabled={busy || !guardian?.enabled}
             onClick={() =>
               void perform(async () => {
@@ -224,6 +229,7 @@ export function AdvancedTools({ onOpen }: { onOpen?: (path: string) => void }) {
           </button>
           <button
             type="button"
+            className="ghost"
             disabled={busy}
             onClick={() => void perform(async () => "Status refreshed.")}
           >
