@@ -34,6 +34,7 @@ const SECTIONS = [
   "Appearance",
   "Remote access",
   "Advanced",
+  "About",
 ];
 const ADVANCED = [
   "Skills",

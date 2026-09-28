@@ -669,7 +669,7 @@ try {
   // no "ApiError" prefix) and passes axe.
   const settingsText = () => execute("return document.querySelector('.settings-body').innerText");
   const pageSettled = () => execute("return !/^(Reading|Loading|Running) .*…$/m.test(document.querySelector('.settings-body').innerText)");
-  for (const [section, ready] of [["Code intelligence", /Language servers|language server/i], ["Voice", /Transcribe with/i], ["Appearance", /Theme/], ["Remote access", /Turn on remote access/]]) {
+  for (const [section, ready] of [["Code intelligence", /Language servers|language server/i], ["Voice", /Transcribe with/i], ["Appearance", /Theme/], ["Remote access", /Turn on remote access/], ["About", /About ShadowCode/]]) {
     await clickButton(section, "//nav[@aria-label='Settings sections']");
     await until(`${section} page`, async () => (await pageSettled()) && ready.test(await settingsText()), 20000);
     assert.doesNotMatch(await settingsText(), /ApiError/, `${section} shows no raw error`);
@@ -688,7 +688,7 @@ try {
     await accessibility(name);
   }
   await closeSettings();
-  note("Settings › Accounts, Local models, Permissions & network, Code intelligence, Voice, Appearance, Remote access and every Advanced tab render and pass axe (read-only)");
+  note("Settings › Accounts, Local models, Permissions & network, Code intelligence, Voice, Appearance, Remote access, About and every Advanced tab render and pass axe (read-only)");
 
   // ------------------------------------------------------------ drawer panels
   await clickButton("Review changes");

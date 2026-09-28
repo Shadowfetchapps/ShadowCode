@@ -85,6 +85,11 @@ export function paletteItems(a: PaletteActions): PaletteItem[] {
       run: () => a.settings("remote"),
     },
     {
+      id: "about",
+      label: "About ShadowCode · version and updates",
+      run: () => a.settings("about"),
+    },
+    {
       id: "goals",
       label: "Goals and milestones",
       run: () => a.panel("goals"),

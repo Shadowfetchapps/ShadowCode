@@ -12,6 +12,7 @@ const SETTINGS_SECTIONS = [
   "appearance",
   "remote",
   "advanced",
+  "about",
 ];
 
 it("the command palette reaches every drawer panel and Settings page", () => {
@@ -34,7 +35,8 @@ it("the command palette reaches every drawer panel and Settings page", () => {
   items.forEach((item) => item.run());
   for (const tab of DRAWER_TABS.map((t) => t.id).filter((t) => t !== "tools"))
     expect(panels).toContain(tab);
-  for (const view of TOOL_VIEWS.map((t) => t.id)) expect(panels).toContain(view);
+  for (const view of TOOL_VIEWS.map((t) => t.id))
+    expect(panels).toContain(view);
   for (const section of SETTINGS_SECTIONS) expect(sections).toContain(section);
   // Every entry is unique and reads as a label, not an identifier.
   expect(new Set(items.map((i) => i.id)).size).toBe(items.length);
