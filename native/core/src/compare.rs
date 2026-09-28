@@ -424,9 +424,10 @@ pub(crate) async fn git_with(
     ];
     // Lane snapshots and diffs run automatically after agent turns: never
     // with the repository's own filter drivers (`crate::git_guard`).
-    let guard = crate::git_guard::args_async(dir).await?;
+    let guard = crate::git_guard::args_async(dir, args).await?;
     flags.extend(guard.iter().map(String::as_str));
-    flags.extend_from_slice(args);
+    let hardened = crate::git_guard::harden(args);
+    flags.extend(hardened.iter().map(String::as_str));
     let mut spec = ProcessSpec::command("git", &flags, dir.into());
     spec.timeout = Duration::from_secs(300);
     spec.output_limit = 4_000_000;
@@ -521,6 +522,9 @@ pub(crate) async fn snapshot_for(
     } else {
         git_env(source, &["read-tree", "HEAD"], &env, cancel).await?;
     }
+    // `add` checks submodules and nested repositories by running Git inside
+    // them, under their own configuration: freeze their entries first.
+    crate::git_guard::freeze_gitlinks(source, Some(&index)).await?;
     git_env(source, &["add", "--all", "--sparse"], &env, cancel)
         .await
         .context("Could not capture uncommitted work")?;

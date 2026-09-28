@@ -870,7 +870,11 @@ impl ToolExecutor {
         // The read-only tools run without approval: they never run the
         // repository's own filter drivers (`crate::git_guard`).
         if matches!(name, "git_status" | "git_diff" | "git_log") {
-            command.extend(crate::git_guard::args_async(&self.workspace.path).await?);
+            let words: Vec<&str> = git.iter().map(String::as_str).collect();
+            command.extend(crate::git_guard::args_async(&self.workspace.path, &words).await?);
+            // …and stay out of submodules' working trees (their own
+            // configuration is not inspected).
+            git = crate::git_guard::harden(&words);
         }
         command.append(&mut git);
         let refs: Vec<_> = command.iter().map(String::as_str).collect();

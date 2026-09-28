@@ -189,7 +189,7 @@ fn sanitize(component: &str) -> String {
 async fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<Vec<u8>> {
     // Checkpoints run right after shell commands, which may have changed
     // `.git/config`: never run the repository's own filter drivers.
-    let guard = crate::git_guard::args_async(dir).await?;
+    let guard = crate::git_guard::args_async(dir, args).await?;
     let mut command = tokio::process::Command::new("git");
     command
         .args([
@@ -207,7 +207,7 @@ async fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<Vec<u8>>
             "maintenance.auto=false",
         ])
         .args(&guard)
-        .args(args)
+        .args(crate::git_guard::harden(args))
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -376,6 +376,9 @@ fn record(
 // ---------------------------------------------------------------- Git ----
 
 async fn stage(dir: &Path, index: &Path, scratch: &Path) -> Result<HashSet<String>> {
+    // `add` checks submodules and nested repositories by running Git inside
+    // them, under their own configuration: freeze their entries first.
+    crate::git_guard::freeze_gitlinks(dir, Some(index)).await?;
     git(dir, &["add", "-u", "--", "."], Some(index)).await?;
     let listed = git(
         dir,
@@ -852,6 +855,50 @@ mod tests {
             "the checkpoint is still taken"
         );
         assert!(!marker.exists(), "the checkpoint ran a repository filter");
+    }
+
+    /// A nested repository's own configuration is not inspected: the
+    /// checkpoint must not run Git inside it at all.
+    #[tokio::test]
+    async fn checkpoints_never_run_nested_repository_filters() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let inner = repo.join("vendor");
+        std::fs::create_dir_all(&inner).unwrap();
+        run(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("a.txt"), b"one\n").unwrap();
+        run(&repo, &["add", "a.txt"]);
+        run(&inner, &["init", "-q"]);
+        std::fs::write(inner.join("f.txt"), b"one\n").unwrap();
+        run(&inner, &["add", "f.txt"]);
+        run(&inner, &["commit", "-qm", "inner"]);
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&inner)
+            .output()
+            .unwrap();
+        let entry = format!(
+            "160000,{},vendor",
+            String::from_utf8_lossy(&head.stdout).trim()
+        );
+        run(&repo, &["update-index", "--add", "--cacheinfo", &entry]);
+        run(&repo, &["commit", "-qm", "base"]);
+        let marker = root.path().join("nested-filter-ran");
+        let command = format!("touch '{}'; cat", marker.display());
+        run(&inner, &["config", "filter.nested.clean", &command]);
+        std::fs::write(inner.join(".gitattributes"), b"* filter=nested\n").unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+        std::fs::write(inner.join("f.txt"), b"two\n").unwrap();
+        std::fs::write(repo.join("a.txt"), b"two\n").unwrap();
+        let before = before(&repo, "s1", "test", &CheckpointConfig::default()).await;
+        assert!(
+            matches!(before.kind, Kind::Git(_)),
+            "the checkpoint is still taken"
+        );
+        assert!(
+            !marker.exists(),
+            "the checkpoint ran a nested repository's filter"
+        );
     }
 
     #[test]

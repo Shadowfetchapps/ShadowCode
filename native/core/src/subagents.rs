@@ -794,6 +794,9 @@ impl SubagentHost {
         cancel: &CancellationToken,
     ) -> Result<(Vec<compare::FileStat>, bool, Vec<String>, String)> {
         let (files, truncated) = compare::diffstat(worktree, base, cancel).await?;
+        // The child's worktree is throwaway; `add` would otherwise run Git
+        // inside any nested repository it planted (`crate::git_guard`).
+        crate::git_guard::freeze_gitlinks(worktree, None).await?;
         compare::git(worktree, &["add", "--all"], cancel).await?;
         let patch = compare::git(
             worktree,

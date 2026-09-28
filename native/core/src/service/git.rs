@@ -25,10 +25,15 @@ impl Service {
         // Reading the project (status, diffs, logs) never runs the
         // repository's own filter drivers; staging and committing for you
         // keep them, as Git in a terminal would (`crate::git_guard`).
-        if !writes_for_the_user(&args) {
-            base.extend(crate::git_guard::args_async(workspace).await?);
+        if writes_for_the_user(&args) {
+            base.extend(args);
+        } else {
+            // Status and diffs also stay out of submodules' working trees,
+            // whose own configuration is not inspected.
+            let words: Vec<&str> = args.iter().map(String::as_str).collect();
+            base.extend(crate::git_guard::args_async(workspace, &words).await?);
+            base.extend(crate::git_guard::harden(&words));
         }
-        base.extend(args);
         let refs: Vec<_> = base.iter().map(String::as_str).collect();
         Ok(json!(
             process::run(
