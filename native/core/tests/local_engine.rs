@@ -2931,6 +2931,155 @@ async fn compare_runs_two_installed_gguf_models_sequentially_in_offline_mode() {
     service.engine.shutdown().await.unwrap();
 }
 
+/// LOC-05: one installed model fails to load in a Compare. Its lane fails
+/// with the runtime's own error (no CPU fallback in a comparison), and the
+/// other lane runs, finishes and keeps its result and receipts.
+#[tokio::test]
+async fn one_local_model_failing_in_compare_leaves_the_other_lane_intact() {
+    let f = fixture(GPU);
+    let crash = f.models.join("crash.gguf");
+    let good = f.models.join("good.gguf");
+    qwen_like(&crash, "qwen3", TOOLS_TEMPLATE);
+    qwen_like(&good, "qwen3", TOOLS_TEMPLATE);
+    fs::write(f.project.join("hello.txt"), "hello\n").unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "base",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&f.project)
+            .status()
+            .unwrap()
+            .success());
+    }
+    Config::patch(&f.paths,json!({"local_engine":{"files":[crash,good]},"network":{"mode":"offline"},"cli_agents":{"enabled":false}})).unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let entries = local_engine::scan(&cfg.local_engine);
+    let id = |name: &str| entries.iter().find(|e| e.name == name).unwrap().id.clone();
+    let (crash_id, good_id) = (id("crash"), id("good"));
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let record = call(
+        &service,
+        "POST",
+        "/api/compare",
+        json!({"workspace":f.project,"task":"Read hello.txt","models":[crash_id,good_id],"web":false}),
+    )
+    .await
+    .unwrap();
+    let record_id = record["id"].as_str().unwrap().to_owned();
+    for lane in record["lanes"].as_array().unwrap() {
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            service.engine.wait(lane["job_id"].as_str().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+    let done = call(
+        &service,
+        "GET",
+        &format!("/api/compare/{record_id}"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert_eq!(done["state"], "done", "{done}");
+    let lane = |model: &str| {
+        done["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|lane| lane["model"] == model)
+            .unwrap()
+            .clone()
+    };
+    let failed = lane(&crash_id);
+    assert_eq!(failed["status"], "failed", "{failed}");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("fake crash loading model"),
+        "{failed}"
+    );
+    let good_lane = lane(&good_id);
+    assert_eq!(good_lane["status"], "completed", "{good_lane}");
+    assert!(good_lane["summary"]
+        .as_str()
+        .unwrap()
+        .contains("hello from the fake model"));
+    assert_eq!(good_lane["local_runtime"]["runtime"]["cpu_fallback"], false);
+    let good_job = service
+        .engine
+        .job(good_lane["job_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    let receipt = service
+        .engine
+        .store()
+        .last_task_event(&good_job.task_id, "verification.summary")
+        .unwrap()
+        .expect("the finished lane keeps its verification receipt");
+    // No automatic CPU retry inside a comparison: one launch per model.
+    let launches = lines(&f.bin.join("launches.jsonl"));
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    assert!(!launches[0]["argv"].to_string().contains("\"none\""));
+    // Reopening keeps both outcomes and the receipt.
+    service.engine.shutdown().await.unwrap();
+    drop(service);
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let reopened = call(
+        &service,
+        "GET",
+        &format!("/api/compare/{record_id}"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    for model in [&crash_id, &good_id] {
+        let before = lane(model);
+        let after = reopened["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|lane| lane["model"] == model.as_str())
+            .unwrap();
+        assert_eq!(after["status"], before["status"]);
+        assert_eq!(after["summary"], before["summary"]);
+        assert_eq!(after["checks"], before["checks"]);
+    }
+    assert_eq!(
+        service
+            .engine
+            .store()
+            .last_task_event(&good_job.task_id, "verification.summary")
+            .unwrap(),
+        Some(receipt)
+    );
+    call(
+        &service,
+        "POST",
+        &format!("/api/compare/{record_id}/discard"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    service.engine.shutdown().await.unwrap();
+}
+
 /// Opt-in real inference acceptance. Set explicit model paths; never downloads
 /// weights or imports the user's account/profile. Run in a network namespace
 /// with loopback enabled for an enforced offline qualification.
