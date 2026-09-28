@@ -1,6 +1,7 @@
 import { StrictMode, useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { Dialog } from "./Dialog";
 import { Palette } from "./overlays";
 import { useShortcuts } from "../hooks/useShortcuts";
@@ -95,4 +96,63 @@ it("restores the actual palette opener across repeated StrictMode mounts", () =>
     ).toBeNull();
     expect(document.activeElement).toBe(target);
   }
+});
+
+function ConfirmHarness({ onShortcut }: { onShortcut: () => void }) {
+  const [open, setOpen] = useState(true);
+  // The window's shortcuts do not know about this dialog (like Rewind or a
+  // drawer confirmation): nothing marks it as an overlay.
+  useShortcuts(
+    {
+      consent: false,
+      overlay: false,
+      trust: false,
+      picker: false,
+      panel: true,
+      onboarding: false,
+    },
+    onShortcut,
+  );
+  return open ? (
+    <ConfirmDialog
+      title="Rewind this task's changes?"
+      confirmLabel="Rewind"
+      onConfirm={() => setOpen(false)}
+      onCancel={() => setOpen(false)}
+    >
+      <input
+        aria-label="Inner menu"
+        onKeyDown={(e) => {
+          // An inner control that handles Escape itself keeps the dialog.
+          if (e.key === "Escape" && e.currentTarget.value) {
+            e.stopPropagation();
+            e.currentTarget.value = "";
+          }
+        }}
+      />
+    </ConfirmDialog>
+  ) : null;
+}
+
+it("Escape closes any dialog, after inner controls, and shortcuts stay behind it", () => {
+  const shortcut = vi.fn();
+  render(<ConfirmHarness onShortcut={shortcut} />);
+  const dialog = screen.getByRole("dialog", {
+    name: "Rewind this task's changes?",
+  });
+  const inner = screen.getByRole("textbox", { name: "Inner menu" });
+  inner.focus();
+  // Window shortcuts do not act on the window behind a modal dialog.
+  fireEvent.keyDown(inner, { key: "n", ctrlKey: true });
+  fireEvent.keyDown(inner, { key: "k", ctrlKey: true });
+  expect(shortcut).not.toHaveBeenCalled();
+  (inner as HTMLInputElement).value = "open";
+  fireEvent.keyDown(inner, { key: "Escape" });
+  expect(dialog.isConnected).toBe(true);
+  fireEvent.keyDown(inner, { key: "Escape" });
+  expect(
+    screen.queryByRole("dialog", { name: "Rewind this task's changes?" }),
+  ).toBeNull();
+  // Escape did not also close the drawer behind the dialog.
+  expect(shortcut).not.toHaveBeenCalled();
 });

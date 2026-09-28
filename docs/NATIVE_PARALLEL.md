@@ -1,6 +1,6 @@
 # Parallel workspaces
 
-> **Advanced.** This is reached through Settings › Advanced › Worktrees. For the everyday workflow see the [user guide](USER_GUIDE.md), [subscriptions](SUBSCRIPTIONS.md) and [local models](LOCAL_MODELS.md).
+> **Advanced.** This is reached through Settings › Advanced › Guardian. For the everyday workflow see the [user guide](USER_GUIDE.md), [subscriptions](SUBSCRIPTIONS.md) and [local models](LOCAL_MODELS.md).
 
 Settings › Advanced prepares up to four Git worktrees for separate work items
 (one per line of the goal; further lines join the fourth).
@@ -8,7 +8,7 @@ Each starts from committed HEAD. Uncommitted lead edits stay in the source
 checkout. Open each workspace to start a task explicitly; preparation does not
 launch model workers or choose models.
 
-![Advanced workspace controls in the native desktop](images/advanced-dark.png)
+![Parallel workspaces and Guardian in Settings › Advanced](images/advanced-parallel.png)
 
 Plans are saved per source workspace in the current profile and survive an app
 restart. Finish and commit each worker's changes, then mark it finished and use

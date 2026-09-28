@@ -5,6 +5,7 @@ import { relativeTime } from "../../lib/picker";
 import { isRemote } from "../../lib/transport";
 import { announceUpdates } from "../../hooks/useUpdates";
 import "../../about.css";
+import { LoadError } from "../cards";
 
 type Toast = (text: string, kind: "ok" | "err" | "info") => void;
 type Save = (values: Record<string, unknown>) => Promise<void>;
@@ -88,9 +89,7 @@ export function AboutPage({
       <section className="settings-page about-page">
         <h3>About ShadowCode</h3>
         {error ? (
-          <p className="health-bad" role="alert">
-            {error}
-          </p>
+          <LoadError message={error} onRetry={load} />
         ) : (
           <p role="status">Reading version information…</p>
         )}

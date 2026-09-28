@@ -544,3 +544,86 @@ it("offers cached local choices before a held full picker refresh without select
     });
   }
 });
+
+it("/new keeps the command visible until the new task is selected, and creates one task", async () => {
+  await boot();
+  const bridge = window.__SHADOW_TEST_TRANSPORT__!;
+  const request = bridge.request;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let creates = 0;
+  bridge.request = async (path, method, body) => {
+    if (path === "/api/sessions" && method === "POST") {
+      creates += 1;
+      await held;
+    }
+    return request(path, method, body);
+  };
+  const before = localStorage.getItem("shadow:selected");
+  expect(before).toBeTruthy();
+  fireEvent.change(prompt(), { target: { value: "/new" } });
+  fireEvent.click(send());
+  await waitFor(() => expect(creates).toBe(1));
+  // While the task is being created the composer is not yet empty, so an
+  // empty composer never shows the previous task.
+  expect(prompt()).toHaveProperty("value", "/new");
+  // A second Send meanwhile does not create another task.
+  fireEvent.keyDown(prompt(), { key: "Enter" });
+  fireEvent.click(send());
+  await act(async () => {
+    release();
+    await held;
+  });
+  await waitFor(() => expect(prompt()).toHaveProperty("value", ""));
+  const selected = localStorage.getItem("shadow:selected");
+  expect(selected).toBeTruthy();
+  expect(selected).not.toBe(before);
+  expect(creates).toBe(1);
+  // Nothing about "/new" was saved as a draft for the previous task.
+  expect(localStorage.getItem(`shadow:draft:${before}`)).toBeNull();
+});
+
+it("an engine that does not answer shows Not connected and Reconnect; a refused task only offers dismissal", async () => {
+  const bridge = window.__SHADOW_TEST_TRANSPORT__!;
+  const request = bridge.request;
+  let down = true;
+  bridge.request = async (path, method, body) => {
+    if (down) throw new Error("Connection refused: the engine is not running");
+    if (path === "/api/jobs" && method === "POST")
+      throw new Error("Error: The project is busy");
+    return request(path, method, body);
+  };
+  render(<App />);
+  const alert = await screen.findByRole("alert");
+  // The sentence, without a JavaScript class prefix.
+  expect(alert.textContent).toContain(
+    "Connection refused: the engine is not running",
+  );
+  expect(alert.textContent).not.toMatch(/ApiError|Error:/);
+  expect(screen.getByRole("contentinfo").textContent).toContain(
+    "Not connected",
+  );
+  down = false;
+  fireEvent.click(within(alert).getByRole("button", { name: "Reconnect" }));
+  await waitFor(() =>
+    expect(screen.getByRole("contentinfo").textContent).toContain("Ready"),
+  );
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  await choose(/qwen3:14b · This computer/);
+  fireEvent.change(prompt(), { target: { value: "Fix the build" } });
+  fireEvent.click(send());
+  const refused = await waitFor(() => {
+    const banner = document.querySelector(".notice.bad");
+    expect(banner).toBeTruthy();
+    return banner as HTMLElement;
+  });
+  expect(refused.textContent).toContain("The project is busy");
+  expect(
+    within(refused).queryByRole("button", { name: "Reconnect" }),
+  ).toBeNull();
+  expect(
+    within(refused).getByRole("button", { name: "Dismiss error" }),
+  ).toBeTruthy();
+});

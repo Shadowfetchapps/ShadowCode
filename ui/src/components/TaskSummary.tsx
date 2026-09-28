@@ -299,7 +299,11 @@ export const TaskSummary = memo(function TaskSummary({
         </header>
         <TaskTimingDetails timings={activity.timings} />
         <LocalModelDetails receipt={activity.localRuntime} />
-        {runCheck && <RunCheck action={runCheck} />}
+        {runCheck && (
+          <div className="row task-summary-actions">
+            <RunCheck action={runCheck} />
+          </div>
+        )}
       </section>
     );
   }

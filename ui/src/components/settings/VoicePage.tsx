@@ -6,6 +6,7 @@ import {
   type VoiceStatus,
 } from "../../lib/voice";
 import { formatBytes } from "./LocalModelsPage";
+import { LoadError } from "../cards";
 
 const LENGTHS = [
   { seconds: 30, label: "30 seconds" },
@@ -71,9 +72,7 @@ export function VoicePage({
       <section className="settings-page">
         <h3>Voice</h3>
         {error ? (
-          <p className="health-bad" role="alert">
-            {error}
-          </p>
+          <LoadError message={error} onRetry={load} />
         ) : (
           <p role="status">Reading voice settings…</p>
         )}

@@ -1,6 +1,7 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import type { CommandResult } from "../api";
 import type { SubagentRun } from "../lib/subagents";
+import { readableError } from "../lib/transport";
 import { Markdown } from "./Markdown";
 
 /** Every row carries a React `key` that survives updates (lib/rowKeys). */
@@ -277,6 +278,38 @@ export function Empty({ title, body }: { title: string; body?: string }) {
     <div className="empty">
       <h3>{title}</h3>
       {body && <p>{body}</p>}
+    </div>
+  );
+}
+
+/** A panel that could not load: what went wrong and a way to try again,
+ * instead of a dead end. */
+export function LoadError({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void | Promise<void>;
+}) {
+  const [retrying, setRetrying] = useState(false);
+  return (
+    <div className="load-error" role="alert">
+      <p>{readableError(message)}</p>
+      <button
+        type="button"
+        className="mini"
+        disabled={retrying}
+        onClick={async () => {
+          setRetrying(true);
+          try {
+            await onRetry();
+          } finally {
+            setRetrying(false);
+          }
+        }}
+      >
+        {retrying ? "Trying again…" : "Try again"}
+      </button>
     </div>
   );
 }

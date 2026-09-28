@@ -42,6 +42,14 @@ button:disabled {
 ::placeholder {
   color: var(--dim);
 }
+/* Links use the app's accent in both themes, not the engine's blue/purple. */
+a {
+  color: var(--accent);
+  text-underline-offset: 2px;
+}
+a:hover {
+  color: var(--text);
+}
 code {
   font-family: var(--mono);
   font-size: 12px;
@@ -127,6 +135,7 @@ h4 {
 }
 .top-title {
   flex: 1;
+  margin: 0;
   text-align: center;
   font-weight: 600;
   font-size: 13px;
@@ -754,6 +763,10 @@ button.mini.primary-mini {
   gap: 6px;
   align-items: center;
 }
+.drawer-toolbar > button {
+  flex: none;
+  white-space: nowrap;
+}
 .drawer-toolbar .search,
 .field input,
 .field select,
@@ -880,8 +893,19 @@ button.mini.primary-mini {
   margin-top: 6px;
 }
 .item:hover .item-actions,
+.item:focus-within .item-actions,
 .item.active .item-actions {
   display: flex;
+}
+/* The task list's open button fills the row like the row itself used to. */
+.item-open {
+  display: block;
+  width: 100%;
+  text-align: left;
+  color: inherit;
+}
+.item-open span {
+  display: block;
 }
 .item.static button.mini {
   position: absolute;
@@ -1358,11 +1382,10 @@ button.mini.primary-mini {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  margin: 0;
+  padding-left: 18px;
 }
 .help-example {
-  padding: 7px 10px;
-  background: var(--surface-2);
-  border-radius: 7px;
   font-size: 12px;
   color: var(--text-2);
   font-style: italic;
@@ -1648,4 +1671,23 @@ button.fork-action {
 }
 .guardian-schedule .field {
   max-width: 240px;
+}
+
+/* A panel that could not load: the reason and Try again. */
+.load-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.load-error p {
+  margin: 0;
+  flex: 1 1 220px;
+  color: var(--text);
+  overflow-wrap: anywhere;
 }

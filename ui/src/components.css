@@ -32,7 +32,7 @@ button.link {
   display: block;
   margin: 0 auto 16px;
 }
-.welcome h1 {
+.welcome .welcome-title {
   font-size: clamp(22px, 2.6vw, 30px);
   letter-spacing: -0.6px;
 }
@@ -349,6 +349,13 @@ button.link {
   color: var(--muted);
   font-size: 11px;
   font-weight: 600;
+}
+.composer-more-reason {
+  margin: -2px 0 3px;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 .composer-more-menu > .compare-btn,
 .composer-more-menu > .worktree-btn {
@@ -1018,6 +1025,9 @@ div.activity-step {
 /* Settings ----------------------------------------------------------------- */
 .settings-page {
   display: grid;
+  /* Rows keep their own height: a short page (a load error, a small
+     Advanced tab) must not stretch the tab bar or centre the text. */
+  align-content: start;
   gap: 12px;
 }
 .settings-page h4 {

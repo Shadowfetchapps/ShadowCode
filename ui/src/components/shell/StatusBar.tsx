@@ -10,6 +10,7 @@ export function StatusBar({
   busy,
   paused,
   reconnecting,
+  connected = true,
   branch,
   onBranch,
   allowance,
@@ -23,6 +24,8 @@ export function StatusBar({
   busy: boolean;
   paused: boolean;
   reconnecting: boolean;
+  /** The engine answered at startup. Without it nothing is "Ready". */
+  connected?: boolean;
   branch: string;
   onBranch: () => void;
   allowance: AllowanceResponse | null;
@@ -37,7 +40,9 @@ export function StatusBar({
 }) {
   return (
     <footer className="statusline" aria-live="polite">
-      <span className={`status-dot ${busy ? "active" : ""}`} />
+      <span
+        className={`status-dot ${busy ? "active" : !connected ? "offline" : ""}`}
+      />
       <span className="status-label">
         {busy
           ? paused
@@ -45,7 +50,9 @@ export function StatusBar({
             : "Working"
           : reconnecting
             ? "Reconnecting"
-            : "Ready"}
+            : connected
+              ? "Ready"
+              : "Not connected"}
       </span>
       {branch && (
         <>
@@ -79,7 +86,7 @@ export function StatusBar({
           Update available: {update}
         </button>
       )}
-      <span className="version">{version ? `v${version}` : "Connecting"}</span>
+      {version && <span className="version">v{version}</span>}
     </footer>
   );
 }

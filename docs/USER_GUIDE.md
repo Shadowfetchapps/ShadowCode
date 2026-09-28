@@ -93,9 +93,10 @@ Type in the composer and press `Enter`. `Shift+Enter` adds a line.
 
 The composer keeps your model, **Code / Plan / Ask**, permission and **Web**
 choices in view. Open **More** for reasoning effort, **Compare** and
-**Worktree**; press `Escape` or click outside to close it. `Ctrl+Shift+Enter`
-starts a worktree task without opening the menu, and a non-default reasoning
-effort stays marked on the **More** button.
+**Worktree**; press `Escape` or click outside to close it. When an option
+can't be used yet (for example before you type a task), the menu says why.
+`Ctrl+Shift+Enter` starts a worktree task without opening the menu, and a
+non-default reasoning effort stays marked on the **More** button.
 
 ![More task options in the composer](images/composer-more.png)
 
@@ -496,6 +497,8 @@ keep or discard it.
   **Pin**, **Fork**, **Export** or **Delete** it. Deleting a conversation
   also deletes its subagents' conversations, unless a fork of it still
   shows them.
+- A narrow window hides the sidebar; it comes back when the window is wide
+  again, unless you closed it yourself (`Ctrl+B`).
 - `Alt+↑` / `Alt+↓` open the previous or next conversation in the list;
   `Ctrl+Tab` goes back to the one you had open before.
 
@@ -670,8 +673,9 @@ Subscription CLIs use their own sandboxes, not this one.
 - **Interrupted tasks.** If ShadowCode exits during a task, the task is marked
   *interrupted*. **Continue task** writes a recovery request for you. Shell
   commands and file edits are never replayed automatically.
-- **Command palette** (`Ctrl+K`): rename, branch, export (`Ctrl+Shift+E`) and
-  delete conversations.
+- **Tasks** in the drawer (or *Manage tasks* in the `Ctrl+K` command palette)
+  lists every conversation with search, **Rename**, **Fork**, **Export**
+  (`Ctrl+Shift+E` exports the open one) and **Delete**, which asks first.
 
 ## Long conversations, retries and cost
 
@@ -701,6 +705,10 @@ Subscription CLIs use their own sandboxes, not this one.
 
 ## Troubleshooting
 
+- **The status bar says Not connected.** The window could not reach
+  ShadowCode's engine when it opened. Choose **Reconnect** in the message at
+  the top of the conversation. A Settings page that could not load shows the
+  reason and **Try again**.
 - **A subscription row says Sign in.** Use **Settings › Accounts › Connect**,
   or run the vendor's login command in a terminal and choose **Refresh**.
   Antigravity's sign-in is ShadowCode's own, so use **Connect** for it.

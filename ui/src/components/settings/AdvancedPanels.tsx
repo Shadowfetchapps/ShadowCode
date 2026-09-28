@@ -8,7 +8,9 @@ import {
   type ProjectSkill,
 } from "../../api";
 import { exportDiagnostics, isNative } from "../../lib/transport";
-import { Empty } from "../cards";
+import { Empty, LoadError } from "../cards";
+import { ConfirmDialog } from "../ConfirmDialog";
+import { goalStatusLabel, processStatusLabel } from "../../lib/statusLabels";
 
 /* Project tools: skills and health sit under Settings › Advanced; goals and
  * background processes are in the drawer's Tools tab (used while working). */
@@ -203,6 +205,7 @@ function GoalsTab({
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState("");
+  const [deleting, setDeleting] = useState<Goal | null>(null);
   const load = useCallback(async () => {
     try {
       setGoals((await api.goals()).goals);
@@ -349,7 +352,7 @@ function GoalsTab({
             ))}
           </ul>
           <div className="row goal-actions">
-            <span className="dim">{g.running ? "running…" : g.status}</span>
+            <span className="dim goal-status">{goalStatusLabel(g)}</span>
             {!g.running && g.status !== "completed" && (
               <button
                 type="button"
@@ -402,7 +405,7 @@ function GoalsTab({
                 type="button"
                 className="mini danger-text"
                 disabled={Boolean(pending)}
-                onClick={() => void action(g.id, () => api.deleteGoal(g.id))}
+                onClick={() => setDeleting(g)}
               >
                 Delete
               </button>
@@ -413,6 +416,24 @@ function GoalsTab({
           )}
         </div>
       ))}
+      {deleting && (
+        <ConfirmDialog
+          title="Delete this goal?"
+          confirmLabel="Delete"
+          danger
+          onCancel={() => setDeleting(null)}
+          onConfirm={async () => {
+            const goal = deleting;
+            await action(goal.id, () => api.deleteGoal(goal.id));
+            setDeleting(null);
+          }}
+        >
+          <p>
+            “{deleting.title || deleting.instruction}” and its checklist are
+            removed. Tasks it already ran stay in the task list.
+          </p>
+        </ConfirmDialog>
+      )}
     </>
   );
 }
@@ -448,7 +469,9 @@ function HealthTab({ health }: { health: Health | null }) {
   }, []);
   useEffect(() => {
     void load();
-    return () => { requestNumber.current += 1; };
+    return () => {
+      requestNumber.current += 1;
+    };
   }, [load]);
   const snapshot = report?.diagnostic_export;
   const save = async () => {
@@ -470,44 +493,62 @@ function HealthTab({ health }: { health: Health | null }) {
     <>
       <div className="kv">
         <div>
-          <span>version</span>
+          <span>ShadowCode</span>
           <code>{health?.version || "…"}</code>
         </div>
         {Object.entries(health?.tools || {}).map(([name, info]) => (
           <div key={name}>
             <span>{name}</span>
             <code className={info.ok ? "health-ok" : "health-bad"}>
-              {info.ok ? info.detail || "yes" : "not found"}
+              {info.ok ? info.detail || "Found" : "Not found"}
             </code>
           </div>
         ))}
       </div>
       <h4>Diagnostics</h4>
-      {error && (
-        <p className="health-bad" role="alert">
-          {error}
-        </p>
-      )}
+      {error && <LoadError message={error} onRetry={load} />}
       {loading && !report && <p role="status">Running diagnostics…</p>}
       {snapshot && (
         <div className="diagnostic-export">
-          <button type="button" className="mini" onClick={() => setPreviewOpen((open) => !open)}>
+          <button
+            type="button"
+            className="mini"
+            onClick={() => setPreviewOpen((open) => !open)}
+          >
             {previewOpen ? "Hide export preview" : "Preview diagnostics export"}
           </button>
           {previewOpen && (
             <div>
-              <p>Review these local Doctor check statuses before saving. The export excludes paths, project content, credentials, prompts and raw logs. It is not a full system or model qualification.</p>
-              <pre aria-label="Diagnostics export preview">{snapshot.content}</pre>
-              {saveError && <p className="health-bad" role="alert">{saveError}</p>}
+              <p>
+                Review these local Doctor check statuses before saving. The
+                export excludes paths, project content, credentials, prompts and
+                raw logs. It is not a full system or model qualification.
+              </p>
+              <pre aria-label="Diagnostics export preview">
+                {snapshot.content}
+              </pre>
+              {saveError && (
+                <p className="health-bad" role="alert">
+                  {saveError}
+                </p>
+              )}
               {saved && <p role="status">Diagnostics saved.</p>}
-              <button type="button" className="mini" disabled={saving || loading} onClick={() => void save()}>
+              <button
+                type="button"
+                className="mini"
+                disabled={saving || loading}
+                onClick={() => void save()}
+              >
                 {saving ? "Saving…" : "Save diagnostics…"}
               </button>
             </div>
           )}
         </div>
       )}
-      {report && (
+      {report && report.checks.length === 0 && (
+        <p className="dim">No checks reported for this project.</p>
+      )}
+      {report && report.checks.length > 0 && (
         <div className="diagnostic-list">
           {report.checks.map((c) => {
             const status = c.status || (c.ok ? "pass" : "fail");
@@ -644,13 +685,18 @@ function BackgroundTab({ toast }: { toast: Toast }) {
           {error}
         </p>
       )}
-      {!error && tasks.length === 0 && <Empty title="No process history" />}
+      {!error && tasks.length === 0 && (
+        <Empty
+          title="No processes yet"
+          body="Start a dev server or watcher above, or ask the agent to run one."
+        />
+      )}
       {tasks.map((t) => (
         <div key={t.id} className="bg-task">
           <header>
             <strong>{t.name}</strong>
             <span className={`dim st-${t.status.toLowerCase()}`}>
-              {t.status}
+              {processStatusLabel(t.status)}
               {t.exit_code !== null ? ` · exit ${t.exit_code}` : ""}
             </span>
             {["STARTING", "RUNNING", "STOPPING"].includes(

@@ -267,7 +267,11 @@ export function Stage({
         onTrust={() =>
           nav.setTrust(trustRequestFor(workspace, status?.permissions))
         }
-        onReconnect={() => void nav.boot()}
+        onReconnect={
+          !health || connection === "reconnecting"
+            ? () => void nav.boot()
+            : undefined
+        }
         onDismissError={() => nav.setError("")}
         history={history}
         onOlder={() => {
@@ -436,11 +440,13 @@ export function Stage({
           queueing,
           onRun: () => void actions.submit({ worktree: true }),
         }}
+        worktreeNote={actions.worktreeBlocked}
       />
       <StatusBar
         busy={busy}
         paused={job?.status === "paused"}
         reconnecting={connection === "reconnecting"}
+        connected={Boolean(health)}
         branch={gitBranch}
         onBranch={() => setPanel("git")}
         allowance={allowance.data}

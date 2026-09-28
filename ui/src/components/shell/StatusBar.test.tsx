@@ -30,3 +30,16 @@ it("shows no notice without a newer version", () => {
   render(<StatusBar {...base} update="" onUpdate={() => undefined} />);
   expect(screen.queryByRole("button", { name: /Update available/ })).toBeNull();
 });
+
+it("never says Ready when the engine did not answer", () => {
+  render(<StatusBar {...base} branch="main" connected={false} version="" />);
+  const bar = screen.getByRole("contentinfo");
+  expect(bar.textContent).toContain("Not connected");
+  expect(bar.textContent).not.toContain("Ready");
+  expect(bar.textContent).not.toContain("Connecting");
+  expect(bar.querySelector(".status-dot.offline")).toBeTruthy();
+  cleanup();
+  render(<StatusBar {...base} connected />);
+  expect(screen.getByRole("contentinfo").textContent).toContain("Ready");
+  expect(screen.getByRole("contentinfo").textContent).toContain("v0.33.1");
+});

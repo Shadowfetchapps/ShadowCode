@@ -1,6 +1,7 @@
 import { Check, ListChecks, LoaderCircle, X } from "lucide-react";
 import type { PlanStep } from "../../api";
 import type { Toast } from "../../hooks/useToasts";
+import { planStepLabel } from "../../lib/statusLabels";
 
 /** Small pieces of the window frame: the startup screen, the task plan above
  * the composer and the notification stack. */
@@ -56,7 +57,7 @@ export function TaskPlan({ plan }: { plan: PlanStep[] }) {
               <span className="plan-circle" />
             )}
             <span>{p.title}</span>
-            <small>{p.status}</small>
+            <small>{planStepLabel(p.status)}</small>
           </li>
         ))}
       </ol>

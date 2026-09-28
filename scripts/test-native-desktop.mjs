@@ -5,7 +5,7 @@
 // they are installed, read-only probes done by the app itself), a local GGUF
 // row served by a test-double llama-server (scripts/fake-llama-server.py, no
 // GPU, no weights), approvals, the activity timeline, the summary card, the
-// Changes drawer, native file editing, reload persistence, Settings pages, the cloud consent dialog
+// Changes drawer and its Tasks/Tools panels, native file editing, reload persistence, every Settings page, the cloud consent dialog
 // (always cancelled: no vendor turn ever runs), Stop, light/dark/compact
 // layouts with axe checks, and process cleanup after quit.
 //
@@ -228,12 +228,16 @@ async function composerControlsFit(label) {
     const panel = document.querySelector('form.composer').getBoundingClientRect();
     const controls = [...document.querySelectorAll('.composer-footer button, .composer-footer select')]
       .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden')
-      .map(el => ({name: el.getAttribute('aria-label') || el.textContent.trim(), box: el.getBoundingClientRect()}));
+      .map(el => ({el, name: el.getAttribute('aria-label') || el.textContent.trim(), box: el.getBoundingClientRect()}));
     const problems = controls.length < 4 ? ['missing composer controls'] : [];
     for (const [index, control] of controls.entries()) {
       const r = control.box;
       if (r.left < panel.left - 1 || r.right > panel.right + 1 || r.top < panel.top - 1 || r.bottom > panel.bottom + 1)
         problems.push('outside composer: ' + control.name);
+      // Nothing invisible (such as a closed menu's content) sits over it.
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      if (!hit || !(control.el === hit || control.el.contains(hit)))
+        problems.push('covered: ' + control.name);
       for (const other of controls.slice(index + 1)) {
         const b = other.box;
         if (Math.min(r.right, b.right) - Math.max(r.left, b.left) > 1 && Math.min(r.bottom, b.bottom) - Math.max(r.top, b.top) > 1)
@@ -322,7 +326,16 @@ async function settle() {
   await delay(150);
 }
 const shots = [];
+// Screenshots used in the docs show the window, not a passing notification.
+const DOC_SHOTS = new Set(["picker", "composer-more-ready", "task-complete", "workspace-light", "accounts", "settings-advanced-guardian"]);
+// They also never show the tester's own account: e-mail addresses from the
+// real vendor CLIs are replaced for the capture.
+const MASK_EMAILS = "const w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);const re=/[\\w.+-]+@[\\w-]+(\\.[\\w-]+)+/g;for(let n=w.nextNode();n;n=w.nextNode()){if(re.test(n.nodeValue)){re.lastIndex=0;n.nodeValue=n.nodeValue.replace(re,'you@example.com')}}";
 async function screenshot(name) {
+  if (DOC_SHOTS.has(name)) {
+    await execute("document.querySelectorAll('.toast button[aria-label=\"Dismiss notification\"]').forEach(b=>b.click())");
+    await execute(MASK_EMAILS);
+  }
   await settle();
   // Screenshots are light unless named "-dark".
   await expectTheme(/-dark$/.test(name) ? "dark" : "light", `Screenshot ${name}`);
@@ -568,6 +581,18 @@ try {
   await until("Picker closed", async () => !(await visible(".unified-picker-menu")));
   note(`selected local row "${localTarget.name}"`);
   await composerControlsFit("Desktop composer controls fit after selecting a model");
+  // With a task typed and a model chosen, More offers Worktree and Compare
+  // without an "unavailable" reason.
+  await fill(composer, "Add a regression test for the parser");
+  await click("details.composer-more > summary");
+  await until("More task options open", () => execute("return document.querySelector('.composer-more')?.open"));
+  assert.equal(await execute("return document.querySelectorAll('.composer-more-menu .composer-more-reason').length"), 0, "No unavailable reason once a task and model are chosen");
+  assert.equal(await execute("return document.querySelector('.composer-more-menu .worktree-btn').getAttribute('aria-disabled')"), "false", "Worktree is available");
+  await screenshot("composer-more-ready");
+  await accessibility("composer-more-ready");
+  await click("details.composer-more > summary");
+  await until("More task options close", () => execute("return !document.querySelector('.composer-more')?.open"));
+  await fill(composer, "");
 
   // ------------------------------------------------------------ local task
   await send("Create hello.txt with a greeting, then check it.");
@@ -646,8 +671,52 @@ try {
   await until("Permissions page", () => execute("return /Ask before actions/.test(document.querySelector('.settings-body').innerText)"));
   await screenshot("permissions");
   await accessibility("permissions");
+  // The remaining pages only read status here: nothing is installed, turned
+  // on or connected. Each shows its content from the top (no stretched rows,
+  // no "ApiError" prefix) and passes axe.
+  const settingsText = () => execute("return document.querySelector('.settings-body').innerText");
+  const pageSettled = () => execute("return !/^(Reading|Loading|Running) .*…$/m.test(document.querySelector('.settings-body').innerText)");
+  for (const [section, ready] of [["Code intelligence", /Language servers|language server/i], ["Voice", /Transcribe with/i], ["Appearance", /Theme/], ["Remote access", /Turn on remote access/], ["About", /About ShadowCode/]]) {
+    await clickButton(section, "//nav[@aria-label='Settings sections']");
+    await until(`${section} page`, async () => (await pageSettled()) && ready.test(await settingsText()), 20000);
+    assert.doesNotMatch(await settingsText(), /ApiError/, `${section} shows no raw error`);
+    await accessibility(`settings-${section.toLowerCase().replace(/\W+/g, "-")}`);
+  }
+  await clickButton("Advanced", "//nav[@aria-label='Settings sections']");
+  for (const tab of ["Skills", "Health", "MCP", "Plugins", "Hooks", "Guardian", "Vendor tools"]) {
+    await clickButton(tab, "//div[@role='tablist']");
+    await until(`Advanced ${tab}`, async () => (await execute("return document.querySelector('[role=tab][aria-selected=true]')?.textContent")) === tab && (await pageSettled()), 20000);
+    await settle();
+    const bar = await execute("return document.querySelector('.advanced-tabs').getBoundingClientRect().height");
+    assert.ok(bar < 60, `Advanced ${tab}: the tab bar stays one row (${bar}px)`);
+    assert.doesNotMatch(await settingsText(), /ApiError/, `Advanced ${tab} shows no raw error`);
+    const name = `settings-advanced-${tab.toLowerCase().replace(/\W+/g, "-")}`;
+    if (["Health", "Guardian"].includes(tab)) await screenshot(name);
+    await accessibility(name);
+  }
   await closeSettings();
-  note("Settings › Accounts, Local models, Permissions & network render (no Connect/Disconnect clicked)");
+  note("Settings › Accounts, Local models, Permissions & network, Code intelligence, Voice, Appearance, Remote access, About and every Advanced tab render and pass axe (read-only)");
+
+  // ------------------------------------------------------------ drawer panels
+  await clickButton("Review changes");
+  await until("Drawer open", () => visible(".drawer"));
+  const closeBox = await execute("const c=document.querySelector('.drawer-close').getBoundingClientRect(),t=document.querySelector('.drawer-tab-list button').getBoundingClientRect();return Math.abs(c.top-t.top)");
+  assert.ok(closeBox < 8, "Drawer Close sits on the first row of tabs");
+  await clickButton("Tasks", "//div[contains(@class,'drawer-tab-list')]");
+  await until("Tasks panel", () => visible('input[aria-label="Search tasks"].search'));
+  await screenshot("drawer-tasks");
+  await accessibility("drawer-tasks");
+  await clickButton("Tools", "//div[contains(@class,'drawer-tab-list')]");
+  for (const view of ["Goals", "Automations", "Issues", "Processes", "Worktrees"]) {
+    await clickButton(view, "//section[@aria-label='Tools']");
+    await until(`Tools ${view}`, async () => (await execute("return [...document.querySelectorAll('.tools-tab .seg button')].find(b=>b.getAttribute('aria-pressed')==='true')?.textContent")) === view);
+    await settle();
+    assert.doesNotMatch(await execute("return document.querySelector('.drawer').innerText"), /ApiError/, `Tools ${view} shows no raw error`);
+    if (view === "Processes") await screenshot("tools-processes");
+    await accessibility(`tools-${view.toLowerCase()}`);
+  }
+  await click("button.drawer-close");
+  note("Drawer: Close on the tab row; Tasks and every Tools view pass axe");
 
   // ------------------------------------------------------------ cloud consent
   const cloud = (await api("GET", "/api/picker")).targets.find((t) => t.inference === "cloud" && t.availability === "ready");

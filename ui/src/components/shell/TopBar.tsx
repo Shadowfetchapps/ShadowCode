@@ -57,9 +57,10 @@ export function TopBar({
         <span>{projectPath.split("/").pop() || "Open project"}</span>
       </button>
       <ChevronRight size={13} className="dim" aria-hidden="true" />
-      <span className="top-title" title={title}>
+      {/* The page's one level-one heading: the open task (or Comparisons). */}
+      <h1 className="top-title" title={title}>
         {comparing ? "Comparisons" : title}
-      </span>
+      </h1>
       <div className="top-right">
         <button
           type="button"

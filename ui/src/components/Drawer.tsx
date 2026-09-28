@@ -2,6 +2,8 @@ import { X } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { api, type Session } from "../api";
 import { Empty } from "./cards";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { relativeTime } from "../lib/picker";
 import { TerminalPanel } from "./TerminalPanel";
 import type { ToolsView } from "./ToolsTab";
 import { exportSession } from "../lib/transport";
@@ -54,7 +56,7 @@ export const DRAWER_TABS: { id: DrawerTab | "tools"; label: string }[] = [
   { id: "terminal", label: "Terminal" },
   { id: "preview", label: "Preview" },
   { id: "files", label: "Files" },
-  { id: "sessions", label: "Sessions" },
+  { id: "sessions", label: "Tasks" },
   { id: "tools", label: "Tools" },
 ];
 
@@ -111,22 +113,26 @@ export function Drawer({
   return (
     <aside className="drawer" aria-label="Drawer">
       <div className="drawer-tabs">
-        {DRAWER_TABS.map((t) => {
-          const on = t.id === "tools" ? Boolean(tool) : tab === t.id;
-          return (
-            <button
-              type="button"
-              key={t.id}
-              className={on ? "on" : ""}
-              aria-pressed={on}
-              onClick={() =>
-                onTab(t.id === "tools" ? memory.toolsView || "goals" : t.id)
-              }
-            >
-              {t.label}
-            </button>
-          );
-        })}
+        {/* The tabs wrap inside their own group so Close stays on the first
+            row, at the top right, whatever the drawer's width. */}
+        <div className="drawer-tab-list" role="group" aria-label="Panels">
+          {DRAWER_TABS.map((t) => {
+            const on = t.id === "tools" ? Boolean(tool) : tab === t.id;
+            return (
+              <button
+                type="button"
+                key={t.id}
+                className={on ? "on" : ""}
+                aria-pressed={on}
+                onClick={() =>
+                  onTab(t.id === "tools" ? memory.toolsView || "goals" : t.id)
+                }
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
         <button
           type="button"
           className="icon-btn drawer-close"
@@ -226,7 +232,7 @@ export function Drawer({
   );
 }
 
-// --- Sessions: search · rename · delete · branch ----------------------------
+// --- Tasks: search · rename · fork · export · delete ------------------------
 
 function SessionsTab({
   sessions,
@@ -249,6 +255,7 @@ function SessionsTab({
     id: string;
     title: string;
   } | null>(null);
+  const [deleting, setDeleting] = useState<Session | null>(null);
 
   useEffect(() => {
     if (!q.trim()) {
@@ -268,25 +275,48 @@ function SessionsTab({
 
   const rows = hits ?? sessions;
 
+  async function afterChange() {
+    await onRefresh();
+    if (q) setHits((await api.sessions(q)).sessions);
+  }
+
   async function rename() {
     if (!renaming) return;
     try {
       await api.renameSession(renaming.id, renaming.title);
       setRenaming(null);
-      await onRefresh();
-      if (q) setHits((await api.sessions(q)).sessions);
+      await afterChange();
     } catch (err) {
       toast(String(err), "err");
     }
   }
 
   async function remove(id: string) {
-    if (!window.confirm("Delete this session and its transcript?")) return;
     try {
       await api.deleteSession(id);
-      toast("Session deleted", "ok");
-      await onRefresh();
-      if (q) setHits((await api.sessions(q)).sessions);
+      toast("Task deleted", "ok");
+      await afterChange();
+    } catch (err) {
+      toast(String(err), "err");
+    }
+  }
+
+  // The same Fork and Export as the sidebar's task menu, with the same words.
+  async function fork(id: string) {
+    try {
+      const copy = await api.branchSession(id);
+      await afterChange();
+      onOpen(copy.id);
+      toast("Forked. The copy continues from the same history.", "ok");
+    } catch (err) {
+      toast(String(err), "err");
+    }
+  }
+
+  async function exportTask(id: string) {
+    try {
+      const saved = await exportSession(id);
+      if (saved) toast(`Exported to ${saved}`, "ok");
     } catch (err) {
       toast(String(err), "err");
     }
@@ -299,97 +329,123 @@ function SessionsTab({
           className="search"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Search sessions…"
+          placeholder="Search tasks…"
+          aria-label="Search tasks"
         />
         <button type="button" className="mini" onClick={onNew}>
-          New
+          New task
         </button>
       </div>
       {rows.length === 0 && (
         <Empty
-          title={q ? "No matches" : "No sessions yet"}
+          title={q ? "No matches" : "No tasks yet"}
           body={q ? undefined : "Run a task and it shows up here."}
         />
       )}
       <div className="list">
-        {rows.map((s) => (
-          <div
-            key={s.id}
-            className={`item ${s.id === sessionId ? "active" : ""}`}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (
-                e.target === e.currentTarget &&
-                (e.key === "Enter" || e.key === " ")
-              )
-                onOpen(s.id);
-            }}
-            onClick={() => onOpen(s.id)}
-          >
-            {renaming?.id === s.id ? (
-              <input
-                autoFocus
-                className="rename"
-                value={renaming.title}
-                onClick={(e) => e.stopPropagation()}
-                onChange={(e) =>
-                  setRenaming({ id: s.id, title: e.target.value })
-                }
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void rename();
-                  if (e.key === "Escape") setRenaming(null);
-                }}
-                onBlur={() => void rename()}
-              />
-            ) : (
-              <strong>
-                {s.title || "Untitled"}
-                {s.parent_id ? " ↳" : ""}
-              </strong>
-            )}
-            <span>
-              {s.status} · {s.workspace.split("/").pop()}
-            </span>
-            <div className="item-actions" onClick={(e) => e.stopPropagation()}>
-              <button
-                type="button"
-                className="mini"
-                onClick={() => setRenaming({ id: s.id, title: s.title || "" })}
-              >
-                Rename
-              </button>
-              <button
-                type="button"
-                className="mini"
-                title="Fork this session"
-                onClick={() =>
-                  void api.branchSession(s.id).then(() => onRefresh())
-                }
-              >
-                Branch
-              </button>
-              <button
-                type="button"
-                className="mini"
-                title="Export as Markdown"
-                onClick={() =>
-                  void exportSession(s.id).catch((e) => toast(String(e), "err"))
-                }
-              >
-                Export
-              </button>
-              <button
-                type="button"
-                className="mini danger-text"
-                onClick={() => void remove(s.id)}
-              >
-                Delete
-              </button>
+        {rows.map((s) => {
+          const title = s.title || "New task";
+          return (
+            <div
+              key={s.id}
+              className={`item ${s.id === sessionId ? "active" : ""}`}
+            >
+              {renaming?.id === s.id ? (
+                <input
+                  autoFocus
+                  className="rename"
+                  aria-label={`Rename ${title}`}
+                  value={renaming.title}
+                  onChange={(e) =>
+                    setRenaming({ id: s.id, title: e.target.value })
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void rename();
+                    if (e.key === "Escape") {
+                      e.stopPropagation();
+                      setRenaming(null);
+                    }
+                  }}
+                  onBlur={() => void rename()}
+                />
+              ) : (
+                // One button opens the task; its actions are separate
+                // buttons beside it, never nested inside it.
+                <button
+                  type="button"
+                  className="item-open"
+                  aria-current={s.id === sessionId ? "page" : undefined}
+                  onClick={() => onOpen(s.id)}
+                >
+                  <strong>
+                    {title}
+                    {s.parent_id ? " ↳" : ""}
+                  </strong>
+                  <span>
+                    {s.updated_at
+                      ? `Updated ${relativeTime(s.updated_at)}`
+                      : "Not started"}
+                    {" · "}
+                    {s.workspace.split("/").pop()}
+                  </span>
+                </button>
+              )}
+              <div className="item-actions">
+                <button
+                  type="button"
+                  className="mini"
+                  aria-label={`Rename ${title}`}
+                  onClick={() =>
+                    setRenaming({ id: s.id, title: s.title || "" })
+                  }
+                >
+                  Rename
+                </button>
+                <button
+                  type="button"
+                  className="mini"
+                  aria-label={`Fork ${title}`}
+                  title="Copy this task and continue from the same history"
+                  onClick={() => void fork(s.id)}
+                >
+                  Fork
+                </button>
+                <button
+                  type="button"
+                  className="mini"
+                  aria-label={`Export ${title}`}
+                  title="Save as Markdown"
+                  onClick={() => void exportTask(s.id)}
+                >
+                  Export
+                </button>
+                <button
+                  type="button"
+                  className="mini danger-text"
+                  aria-label={`Delete ${title}`}
+                  onClick={() => setDeleting(s)}
+                >
+                  Delete
+                </button>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
+      {deleting && (
+        <ConfirmDialog
+          title="Delete this task?"
+          confirmLabel="Delete"
+          danger
+          onCancel={() => setDeleting(null)}
+          onConfirm={async () => {
+            await remove(deleting.id);
+            setDeleting(null);
+          }}
+        >
+          <p>“{deleting.title || "New task"}” and its history are removed.</p>
+        </ConfirmDialog>
+      )}
     </>
   );
 }

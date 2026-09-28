@@ -1,5 +1,5 @@
-import { expect, it } from "vitest";
-import { branchNameProblem, syncText } from "./forge";
+import { describe, expect, it } from "vitest";
+import { branchNameProblem, signedInText, syncText } from "./forge";
 
 it("explains bad branch names the way the engine refuses them", () => {
   for (const good of ["feature/login", "fix-12", "user/a.b_c"])
@@ -40,4 +40,18 @@ it("describes where a branch stands against its remote", () => {
   expect(syncText({ repo: true, branch: null, detached: true })).toMatch(
     /Detached/,
   );
+});
+
+describe("signed-in line", () => {
+  it("names the account instead of repeating the CLI's status line", () => {
+    expect(signedInText("Logged in to github.com account octo (keyring)")).toBe(
+      "Signed in as octo",
+    );
+    expect(
+      signedInText(
+        "Logged in to gitlab.com as octo (/home/me/.config/glab-cli/config.yml)",
+      ),
+    ).toBe("Signed in as octo");
+    expect(signedInText("Token valid (oauth_token)")).toBe("Token valid");
+  });
 });

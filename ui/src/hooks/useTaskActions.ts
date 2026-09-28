@@ -1,4 +1,4 @@
-import { useMemo, type RefObject } from "react";
+import { useMemo, useRef, type RefObject } from "react";
 import {
   api,
   type CommandResult,
@@ -120,6 +120,7 @@ export type TaskActionContext = {
  * continuations and the plan-limit setting. */
 export function useTaskActions(c: TaskActionContext) {
   const { task, attachments, selectedTarget, modelChoice, pickerLoaded } = c;
+  const creatingSession = useRef(false);
   const { canAttachImages } = c;
   const pending = c.extras?.context.length ?? 0;
   const sendBlocked = useMemo(() => {
@@ -404,8 +405,18 @@ export function useTaskActions(c: TaskActionContext) {
       return;
     }
     if (isSessionCommand(task)) {
-      c.setTask("");
-      await c.newSession({ force: true });
+      // Keep "/new" in the composer until the new task is selected:
+      // openSession replaces it with that task's (empty) draft, so an empty
+      // composer always means the new task is already open, and anything
+      // typed meanwhile is not left behind in the previous task. A repeated
+      // Enter while it is being created does not create a second task.
+      if (creatingSession.current) return;
+      creatingSession.current = true;
+      try {
+        await c.newSession({ force: true });
+      } finally {
+        creatingSession.current = false;
+      }
       return;
     }
     const prompt = trustPromptFor(

@@ -15,6 +15,7 @@ import { api } from "../api";
 import {
   branchNameProblem,
   forgeApi,
+  signedInText,
   syncText,
   type GitOverview,
   type PrStatus,
@@ -577,7 +578,7 @@ export function BranchPanel({
                 cli?.detail &&
                 cli.authenticated && (
                   <p className="hint dim">
-                    {FORGE[status.provider]}: {cli.detail}
+                    {FORGE[status.provider]}: {signedInText(cli.detail)}
                   </p>
                 )}
             </>

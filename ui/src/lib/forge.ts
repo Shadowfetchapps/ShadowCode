@@ -168,3 +168,16 @@ export function syncText(o: GitOverview): string {
     ? `${parts.join(" · ")} · ${o.upstream}`
     : `Up to date with ${o.upstream}`;
 }
+
+/** "Signed in as octo" from the forge CLI's own status line
+ * ("Logged in to github.com account octo (keyring)" from gh, "Logged in to
+ * gitlab.com as octo (/home/…/config.yml)" from glab). Anything else is shown
+ * without the trailing storage detail in parentheses. */
+export function signedInText(detail: string): string {
+  const text = detail.trim();
+  const account =
+    text.match(/\baccount\s+([^\s()]+)/i)?.[1] ||
+    text.match(/\blogged in to \S+ as\s+([^\s()]+)/i)?.[1];
+  if (account) return `Signed in as ${account}`;
+  return text.replace(/\s*\([^)]*\)\s*$/, "");
+}

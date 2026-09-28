@@ -29,6 +29,7 @@ import {
   recentTargets,
   rowAction,
   shortName,
+  usageAfterAvailability,
   usageDetailLines,
   usageLabel,
   vendorKey,
@@ -595,7 +596,7 @@ function Row({
           {/* Rows show allowance only when the provider reports one; the
               "Usage unavailable" explanation stays in the details panel. */}
           {target.usage?.state !== "unavailable" &&
-            ` · ${usageLabel(target.usage, target.inference)}`}
+            rowUsage(availabilityLabel(target), target)}
         </small>
       </span>
       <span className="unified-picker-meta">
@@ -690,4 +691,14 @@ function Details({
       </div>
     </div>
   );
+}
+
+/** " · <usage>" for a row, or nothing when the usage only repeats the
+ * availability. */
+function rowUsage(availability: string, target: PickerTarget): string {
+  const usage = usageAfterAvailability(
+    availability,
+    usageLabel(target.usage, target.inference),
+  );
+  return usage ? ` · ${usage}` : "";
 }

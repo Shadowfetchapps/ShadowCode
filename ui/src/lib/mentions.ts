@@ -64,3 +64,17 @@ export function removeMentionText(text: string, m: Mention): string {
     .replace(/[ \t]{2,}/g, " ")
     .trim();
 }
+
+/** Whether `path` can still match `query` in the project search (its
+ * letters appear in order, ignoring case). Used to drop earlier results that
+ * the text typed since rules out while the new answer is on its way. */
+export function fitsMentionQuery(path: string, query: string): boolean {
+  const haystack = path.toLowerCase();
+  let at = 0;
+  for (const letter of query.toLowerCase()) {
+    at = haystack.indexOf(letter, at);
+    if (at < 0) return false;
+    at += 1;
+  }
+  return true;
+}
