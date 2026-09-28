@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Dialog } from "./Dialog";
-import type { Health } from "../api";
+import type { DownloadModel, Health } from "../api";
 import { AccountsPage } from "./settings/AccountsPage";
 import { CodeIntelPage } from "./settings/CodeIntelPage";
 import { VoicePage } from "./settings/VoicePage";
@@ -45,6 +45,8 @@ export type SettingsProps = {
   onSave: (values: Record<string, unknown>) => Promise<void>;
   /** Accounts or local models changed: the picker reloads its rows. */
   onCatalogChanged: () => void;
+  /** A free model finished downloading on the Local models page. */
+  onModelDownloaded?: (model: DownloadModel) => void;
   onToast: (text: string, kind: "ok" | "err" | "info") => void;
   onOpenProject?: (path: string) => void;
   onOpenSession: (id: string) => void;
@@ -65,6 +67,7 @@ export function Settings({
   onClose,
   onSave,
   onCatalogChanged,
+  onModelDownloaded,
   onToast,
   onOpenProject,
   onOpenSession,
@@ -103,7 +106,11 @@ export function Settings({
           />
         )}
         {section === "local" && (
-          <LocalModelsPage onChanged={onCatalogChanged} onToast={onToast} />
+          <LocalModelsPage
+            onChanged={onCatalogChanged}
+            onDownloaded={onModelDownloaded}
+            onToast={onToast}
+          />
         )}
         {section === "code" && <CodeIntelPage onToast={onToast} />}
         {section === "voice" && <VoicePage onToast={onToast} />}

@@ -1,6 +1,13 @@
 import { lazy, Suspense, type ReactNode, type RefObject } from "react";
 import { ArrowDown } from "lucide-react";
-import type { Approval, CommandResult, Health, Job, Session } from "../../api";
+import type {
+  Approval,
+  CommandResult,
+  DownloadModel,
+  Health,
+  Job,
+  Session,
+} from "../../api";
 import type { ApprovalDecision } from "../ApprovalCard";
 import type { DrawerTab } from "../Drawer";
 import type { AdvancedTab, SettingsSection } from "../Settings";
@@ -21,7 +28,9 @@ import type { useTaskActions } from "../../hooks/useTaskActions";
 import type { ToastKind } from "../../hooks/useToasts";
 import type { WorkspaceStatus } from "../../hooks/useWorkspace";
 import type { Fallback } from "../../lib/allowance";
-import type { PickerTarget } from "../../lib/picker";
+import { isReady, type PickerTarget } from "../../lib/picker";
+import { useModelDownloads } from "../../hooks/useModelDownloads";
+import { ModelSetupPanel } from "../ModelSetup";
 
 const CompareView = lazy(() =>
   import("../CompareView").then((module) => ({ default: module.CompareView })),
@@ -56,6 +65,7 @@ export function Stage({
   targets,
   pickerLoaded,
   onRefreshModels,
+  onModelDownloaded,
   pickerOpen,
   setPickerOpen,
   selectedTarget,
@@ -107,6 +117,8 @@ export function Stage({
   targets: PickerTarget[];
   pickerLoaded: boolean;
   onRefreshModels: () => Promise<void>;
+  /** A free model finished downloading (choose it if nothing is chosen). */
+  onModelDownloaded: (model: DownloadModel) => void;
   pickerOpen: boolean;
   setPickerOpen: (open: boolean) => void;
   selectedTarget: PickerTarget | undefined;
@@ -179,6 +191,24 @@ export function Stage({
     setTask(text);
     promptRef.current?.focus();
   };
+  // No model selected: show how to get one. A free model downloaded here is
+  // selected as soon as it is ready (unless something was chosen meanwhile).
+  const needsModel = pickerLoaded && !selectedTarget;
+  const downloads = useModelDownloads({
+    enabled: needsModel,
+    onError: (text) => toast(text, "err"),
+    onInstalled: onModelDownloaded,
+  });
+  const modelSetup = needsModel ? (
+    <ModelSetupPanel
+      downloads={downloads}
+      hasReadyModel={targets.some(isReady)}
+      onChooseModel={() => setPickerOpen(true)}
+      onOpenRouter={() => openSettings("accounts", { vendor: "openrouter" })}
+      onSubscription={() => openSettings("accounts")}
+      onBrowse={() => openSettings("local")}
+    />
+  ) : undefined;
   return (
     <main className="stage">
       <StageBanners
@@ -250,8 +280,9 @@ export function Stage({
           scroll.pin();
         }}
         onSuggestion={focusWith}
-        needsModel={pickerLoaded && !selectedTarget}
+        needsModel={needsModel}
         onChooseModel={() => setPickerOpen(true)}
+        modelSetup={modelSetup}
         rows={
           <TranscriptRows
             items={transcript.items}

@@ -29,6 +29,7 @@ pub mod intelligence;
 pub mod issues;
 #[cfg(unix)]
 pub mod lifecycle;
+pub mod local_downloads;
 pub mod local_engine;
 pub mod local_runtime;
 pub mod local_templates;

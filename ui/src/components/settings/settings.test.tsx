@@ -33,7 +33,9 @@ it("Accounts: explicit unknown billing overrides legacy auth labels without inve
   render(<AccountsPage onChanged={vi.fn()} onToast={vi.fn()} />);
   const codex = await screen.findByRole("article", { name: "Codex" });
   expect(
-    within(codex).getByText("Billing not verified · Check your provider account"),
+    within(codex).getByText(
+      "Billing not verified · Check your provider account",
+    ),
   ).toBeTruthy();
   expect(
     within(codex).queryByText("API key login · billed per token"),
@@ -608,4 +610,94 @@ it("Local models: a file tool hint is not presented as verified support", async 
   expect(
     within(model).queryByText(/Tools verified|Tool support verified/),
   ).toBeNull();
+});
+
+it("Local models: free downloads, the empty state and Delete for downloaded models", async () => {
+  fake.state.local.models = [];
+  const onChanged = vi.fn();
+  const onToast = vi.fn();
+  render(<LocalModelsPage onChanged={onChanged} onToast={onToast} />);
+  expect(
+    await screen.findByText(
+      "No models yet. Download a free one below, or add a GGUF file you already have.",
+    ),
+  ).toBeTruthy();
+  expect(
+    screen.getByRole("heading", { name: "Download a free model" }),
+  ).toBeTruthy();
+  const gemma = await screen.findByRole("article", { name: "Gemma 4 E4B" });
+  expect(within(gemma).getByText("Recommended for this computer")).toBeTruthy();
+  expect(
+    within(gemma).getByText(
+      /4.8 GB download · needs about 6.1 GB of memory · Runs on your graphics card/,
+    ),
+  ).toBeTruthy();
+  expect(
+    screen.getByText(/checked with SHA-256 before it is used/),
+  ).toBeTruthy();
+  // Nothing downloads by itself.
+  expect(
+    fake.log.some((r) => r.path.startsWith("/api/local-models/downloads/")),
+  ).toBe(false);
+
+  // A finished download is a model row whose Remove deletes the file.
+  const entry = fake.state.downloads.models[1];
+  Object.assign(entry, {
+    state: "installed",
+    done: entry.total,
+    model_id: "local:gguf:dl-gemma-4-e4b",
+    path: "/data/local-models/gemma-4-E4B_q4_0-it.gguf",
+  });
+  fake.state.local.models = [
+    {
+      ...fake.state.local.models[0],
+      id: "local:gguf:dl-gemma-4-e4b",
+      name: "Gemma 4 E4B",
+      path: "/data/local-models/gemma-4-E4B_q4_0-it.gguf",
+      bytes: entry.bytes,
+      source: "download",
+      architecture: "gemma4",
+      compatible: true,
+      reason: "gemma4 · 16384-token context",
+      vision: false,
+      mmproj: null,
+      tools: true,
+      memory: null,
+      fits: "gpu",
+      availability: "ready",
+      last_error: null,
+    },
+  ];
+  cleanup();
+  render(<LocalModelsPage onChanged={onChanged} onToast={onToast} />);
+  const rows = await screen.findAllByRole("article", { name: "Gemma 4 E4B" });
+  const row = rows.find(
+    (r) =>
+      r.classList.contains("local-model") &&
+      !r.classList.contains("download-model"),
+  )!;
+  await waitFor(() =>
+    expect(fake.log.some((r) => r.path === "/api/local-models/downloads")).toBe(
+      true,
+    ),
+  );
+  expect(within(row).queryByRole("button", { name: "Remove" })).toBeNull();
+  fireEvent.click(within(row).getByRole("button", { name: "Delete" }));
+  expect(
+    within(row).getByText(/Delete the downloaded file \(4.8 GB\)\?/),
+  ).toBeTruthy();
+  fireEvent.click(within(row).getByRole("button", { name: "Delete" }));
+  await waitFor(() =>
+    expect(
+      fake.log.find((r) => r.path === "/api/local-models/downloads/delete")
+        ?.body,
+    ).toEqual({ id: "gemma-4-e4b" }),
+  );
+  expect(fake.log.some((r) => r.path === "/api/local-models/remove")).toBe(
+    false,
+  );
+  await waitFor(() =>
+    expect(onToast).toHaveBeenCalledWith("Gemma 4 E4B deleted.", "ok"),
+  );
+  expect(onChanged).toHaveBeenCalled();
 });

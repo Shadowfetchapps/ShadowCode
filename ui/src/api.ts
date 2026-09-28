@@ -100,7 +100,8 @@ export type GgufEntry = {
   name: string;
   path: string;
   bytes: number;
-  source: "file" | "directory" | "ollama" | string;
+  /** `download`: fetched from the built-in catalog (Delete frees the disk). */
+  source: "file" | "directory" | "ollama" | "download" | string;
   architecture: string | null;
   context_train: number | null;
   context_tokens: number;
@@ -121,6 +122,59 @@ export type GgufEntry = {
   fits?: "gpu" | "cpu" | "no" | string;
   availability?: string;
   last_error?: string | null;
+};
+
+/** How a catalog model runs on this computer (GET /api/local-models/downloads). */
+export type DownloadFit = "gpu" | "cpu" | "tight" | "no";
+export type DownloadState =
+  "available" | "downloading" | "checking" | "paused" | "failed" | "installed";
+
+/** A free model ShadowCode can download, pinned to one Hugging Face commit. */
+export type DownloadModel = {
+  id: string;
+  name: string;
+  publisher: string;
+  summary: string;
+  file: string;
+  bytes: number;
+  sha256: string;
+  license: string;
+  license_url: string;
+  source_url: string;
+  quantization: string;
+  architecture: string;
+  /** Memory needed at the default context, and at the smallest one. */
+  memory_bytes: number;
+  min_memory_bytes: number;
+  fit: DownloadFit;
+  recommended: boolean;
+  /** The bundled llama.cpp can load this architecture. */
+  supported: boolean;
+  unsupported_reason?: string | null;
+  state: DownloadState;
+  done: number;
+  total: number;
+  bytes_per_second: number;
+  error?: string | null;
+  /** The local picker id once downloaded. */
+  model_id?: string | null;
+  path?: string | null;
+};
+
+export type DownloadCatalog = {
+  directory: string;
+  free_bytes: number | null;
+  offline: boolean;
+  hardware: {
+    ram_bytes: number;
+    vram_bytes: number | null;
+    gpu: string | null;
+  };
+  recommended: string | null;
+  recommended_fit: DownloadFit | null;
+  /** A download or resume check is running. */
+  busy: boolean;
+  models: DownloadModel[];
 };
 
 export type OllamaModel = {
@@ -1295,6 +1349,19 @@ export const api = {
     ),
   unloadLocalModel: () =>
     send<{ ok: boolean }>("/api/local-models/unload", "POST", {}),
+  /** The built-in download catalog with this computer's recommendation. */
+  modelDownloads: () => get<DownloadCatalog>("/api/local-models/downloads"),
+  /** Starts, or resumes, one download (refused offline or without space). */
+  startModelDownload: (id: string) =>
+    send<DownloadCatalog>("/api/local-models/downloads/start", "POST", { id }),
+  pauseModelDownload: (id: string) =>
+    send<DownloadCatalog>("/api/local-models/downloads/pause", "POST", { id }),
+  /** Stops and deletes the partial file. */
+  cancelModelDownload: (id: string) =>
+    send<DownloadCatalog>("/api/local-models/downloads/cancel", "POST", { id }),
+  /** Deletes a downloaded model (unloading it first). */
+  deleteModelDownload: (id: string) =>
+    send<DownloadCatalog>("/api/local-models/downloads/delete", "POST", { id }),
   remoteStatus: () => get<RemoteStatus>("/api/remote"),
   saveRemote: (
     values: Partial<

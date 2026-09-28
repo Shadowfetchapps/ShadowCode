@@ -1,7 +1,8 @@
 //! `/api/providers…`, `/api/models…`, `/api/picker` and
 //! `/api/local-models…`: the model registry, the composer picker, model
-//! tests and the local GGUF catalog, plus the model helpers other route
-//! modules share (`model_from_body`, `register`, `resolve_model`).
+//! tests and the local GGUF catalog (downloads are in `local_downloads`),
+//! plus the model helpers other route modules share (`model_from_body`,
+//! `register`, `resolve_model`).
 use super::*;
 
 #[derive(Default, Deserialize)]
@@ -15,6 +16,11 @@ struct LocalModelBody {
 
 impl Service {
     pub(super) async fn model_routes(&self, call: &Arc<Call>) -> Result<Value> {
+        if call.path == "/api/local-models/downloads"
+            || call.path.starts_with("/api/local-models/downloads/")
+        {
+            return self.local_download_routes(call).await;
+        }
         let q = |key: &str| call.q(key);
         match (call.method.as_str(), call.path.as_str()) {
             ("GET", "/api/providers/detect") => {

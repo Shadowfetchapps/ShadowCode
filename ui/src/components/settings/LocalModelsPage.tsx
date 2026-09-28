@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { Eye, MessageSquareText } from "lucide-react";
-import { api, type GgufEntry, type LocalCatalog } from "../../api";
+import {
+  api,
+  type DownloadModel,
+  type GgufEntry,
+  type LocalCatalog,
+} from "../../api";
+import { useModelDownloads } from "../../hooks/useModelDownloads";
 import { pickLocalModel } from "../../lib/transport";
+import { DownloadList } from "../ModelDownloads";
 
 export function formatBytes(bytes: number | null | undefined): string {
   if (!bytes || bytes <= 0) return "0 B";
@@ -22,12 +29,16 @@ const FITS: Record<string, string> = {
 };
 
 /** Settings › Local models: the managed llama.cpp runtime, this computer's
- * hardware, GGUF files the user added, and weights found in the Ollama store. */
+ * hardware, the models on the list, free models to download, GGUF files to
+ * add, and weights found in the Ollama store. */
 export function LocalModelsPage({
   onChanged,
+  onDownloaded,
   onToast,
 }: {
   onChanged: () => void;
+  /** A download finished; the app selects it when nothing is selected. */
+  onDownloaded?: (model: DownloadModel) => void;
   onToast: (text: string, kind: "ok" | "err" | "info") => void;
 }) {
   const [catalog, setCatalog] = useState<LocalCatalog | null>(null);
@@ -46,6 +57,20 @@ export function LocalModelsPage({
   useEffect(() => {
     void load();
   }, [load]);
+  const downloads = useModelDownloads({
+    onError: (text) => onToast(text, "err"),
+    onInstalled: (model) => {
+      void load();
+      if (onDownloaded) onDownloaded(model);
+      else {
+        onToast(
+          `${model.name} is downloaded and ready in the model picker.`,
+          "ok",
+        );
+        onChanged();
+      }
+    },
+  });
 
   async function run(
     key: string,
@@ -98,9 +123,10 @@ export function LocalModelsPage({
     <section className="settings-page">
       <h3>Local models</h3>
       <p className="hint">
-        GGUF models run on this computer through ShadowCode's managed llama.cpp
-        runtime, one at a time. Nothing is downloaded; you add weights you
-        already have. Removing an entry never deletes the file.
+        Models here run on this computer through ShadowCode's managed llama.cpp
+        runtime, one at a time: free, private and without an account. Download
+        one below or add a GGUF file you already have. Nothing downloads until
+        you choose Download.
       </p>
       {error && (
         <p className="health-bad" role="alert">
@@ -170,7 +196,10 @@ export function LocalModelsPage({
           )}
           <h4>Your models</h4>
           {models.length === 0 && (
-            <p className="hint">No GGUF models added yet.</p>
+            <p className="hint">
+              No models yet. Download a free one below, or add a GGUF file you
+              already have.
+            </p>
           )}
           {models.map((model) => (
             <ModelRow
@@ -194,15 +223,33 @@ export function LocalModelsPage({
                   "Model unloaded",
                 )
               }
-              onRemove={() =>
-                void run(
-                  `remove:${model.id}`,
-                  () => api.removeLocalModel(model.path),
-                  "Removed from the list. The model file was not deleted.",
-                )
-              }
+              onRemove={() => {
+                const download = downloads.catalog?.models.find(
+                  (d) => d.model_id === model.id,
+                );
+                if (model.source === "download" && download)
+                  void downloads.remove(download.id).then((ok) => {
+                    if (ok) onToast(`${model.name} deleted.`, "ok");
+                    void load();
+                    onChanged();
+                  });
+                else
+                  void run(
+                    `remove:${model.id}`,
+                    () => api.removeLocalModel(model.path),
+                    "Removed from the list. The model file was not deleted.",
+                  );
+              }}
             />
           ))}
+          <h4>Download a free model</h4>
+          <p className="hint">
+            Chosen for coding with tools, with a permissive license.
+            {downloads.catalog?.recommended
+              ? " The recommendation fits this computer's memory and graphics card."
+              : ""}
+          </p>
+          <DownloadList downloads={downloads} />
           <h4>Add a model</h4>
           <div className="field">
             <label htmlFor="local-gguf">GGUF file or folder</label>
@@ -330,6 +377,8 @@ function ModelRow({
 }) {
   const memory = model.memory;
   const loading = pending === `load:${model.id}`;
+  const downloaded = model.source === "download";
+  const [confirming, setConfirming] = useState(false);
   return (
     <article className="local-model" aria-label={model.name}>
       <header>
@@ -416,15 +465,45 @@ function ModelRow({
             {loading ? "Loading…" : "Load"}
           </button>
         )}
-        <button
-          type="button"
-          className="ghost danger-text"
-          disabled={Boolean(pending)}
-          title="Removes the entry; the file stays on disk"
-          onClick={onRemove}
-        >
-          Remove
-        </button>
+        {downloaded && confirming ? (
+          <>
+            <span className="hint">
+              Delete the downloaded file ({formatBytes(model.bytes)})?
+            </span>
+            <button
+              type="button"
+              className="ghost danger-text"
+              disabled={Boolean(pending)}
+              onClick={() => {
+                setConfirming(false);
+                onRemove();
+              }}
+            >
+              Delete
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setConfirming(false)}
+            >
+              Keep
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="ghost danger-text"
+            disabled={Boolean(pending)}
+            title={
+              downloaded
+                ? "Deletes the downloaded file"
+                : "Removes the entry; the file stays on disk"
+            }
+            onClick={downloaded ? () => setConfirming(true) : onRemove}
+          >
+            {downloaded ? "Delete" : "Remove"}
+          </button>
+        )}
       </div>
     </article>
   );
