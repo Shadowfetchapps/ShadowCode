@@ -234,7 +234,11 @@ export function Stage({
         onTrust={() =>
           nav.setTrust(trustRequestFor(workspace, status?.permissions))
         }
-        onReconnect={() => void nav.boot()}
+        onReconnect={
+          !health || connection === "reconnecting"
+            ? () => void nav.boot()
+            : undefined
+        }
         onDismissError={() => nav.setError("")}
         history={history}
         onOlder={() => {

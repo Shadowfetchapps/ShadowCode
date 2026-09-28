@@ -182,6 +182,15 @@ test("the drawer keeps Close on its tab row and the Tasks panel is keyboard frie
   expect(
     closeBox && firstBox && Math.abs(closeBox.y - firstBox.y),
   ).toBeLessThan(8);
+  // At the default width all seven tabs fit on that one row.
+  const rows = await drawer
+    .locator(".drawer-tab-list button")
+    .evaluateAll(
+      (buttons) =>
+        new Set(buttons.map((b) => Math.round(b.getBoundingClientRect().top)))
+          .size,
+    );
+  expect(rows).toBe(1);
   await drawer.getByRole("button", { name: "Tasks", exact: true }).click();
   const search = drawer.getByRole("textbox", { name: "Search tasks" });
   await expect(search).toBeVisible();

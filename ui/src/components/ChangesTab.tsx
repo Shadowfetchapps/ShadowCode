@@ -267,6 +267,7 @@ export function ChangesTab({
       )}
       <div className="commit">
         <input
+          aria-label="Commit message"
           value={msg}
           onChange={(e) => setMsg(e.target.value)}
           placeholder="Commit message"

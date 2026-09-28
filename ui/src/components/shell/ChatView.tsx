@@ -118,7 +118,9 @@ export function ChatView({
   /** The error is a trust refusal and a project is open. */
   canTrust: boolean;
   onTrust: () => void;
-  onReconnect: () => void;
+  /** Offered when the engine is not connected; other errors are only
+   * dismissed (reconnecting would not fix a refused task). */
+  onReconnect?: () => void;
   onDismissError: () => void;
   history: HistoryState;
   onOlder: () => void;
@@ -172,9 +174,11 @@ export function ChatView({
                 Trust this folder
               </button>
             )}
-            <button type="button" className="mini" onClick={onReconnect}>
-              Reconnect
-            </button>
+            {onReconnect && (
+              <button type="button" className="mini" onClick={onReconnect}>
+                Reconnect
+              </button>
+            )}
             <button
               type="button"
               className="icon-btn"
