@@ -2322,6 +2322,53 @@ async fn a_plan_limit_continues_the_conversation_on_a_local_model() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(asked.expect("ask is recorded")["ask"], true);
+
+    // A Compare lane never continues on another model, whatever on_limit says.
+    Config::patch(&f.paths, json!({"limits":{"on_limit":"local"}})).unwrap();
+    let lane = store
+        .create_session(&f.project, "cli:codex", "Compare · Codex")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    store
+        .set_session_meta(&lane, "compare_id", "fixture-compare")
+        .unwrap();
+    let job = call(
+        &service,
+        "POST",
+        "/api/jobs",
+        json!({"workspace": f.project, "task": "Lane", "model": "cli:codex", "session_id": lane, "handoff_consent": true}),
+    )
+    .await
+    .unwrap();
+    let limited = wait_job(&service, job["id"].as_str().unwrap()).await;
+    assert_eq!(limited["status"], "limit_reached");
+    let mut refused = None;
+    for _ in 0..200 {
+        let events = store.events_after(&lane, 0, None, 10_000).unwrap();
+        if let Some(e) = events.iter().find(|e| e["type"] == "limit.fallback") {
+            refused = Some(e["payload"].clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let refused = refused.expect("the lane records why it stopped");
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert!(refused["reason"].as_str().unwrap().contains("Compare lane"));
+    let jobs = call(&service, "GET", "/api/jobs", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(
+        jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|j| j["session_id"] == json!(lane))
+            .count(),
+        1,
+        "no follow-up job in the lane"
+    );
     let jobs = call(&service, "GET", "/api/jobs", Value::Null)
         .await
         .unwrap();

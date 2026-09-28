@@ -391,7 +391,8 @@ panel and at the top of **Settings › Accounts**:
   labelled *Continued automatically*. Nothing leaves your computer and there is
   no quota. The model is the one you pick in the setting, or else the last
   local model you used in this project, or else the first ready local model
-  with tool support.
+  with tool support. A Compare lane never continues on another model: it
+  stops at *Plan limit reached*, so its result stays that model's own.
 - **Ask me.** The conversation shows a card with **Continue on <local model>**
   and **Choose another model**.
 

@@ -1364,6 +1364,19 @@ impl Engine {
         let from = crate::cli_agent::Vendor::from_provider(&provider)
             .map(|v| v.product_label())
             .unwrap_or("The model");
+        // A Compare lane is scored as its own model's work: another model
+        // continuing in it would be credited to the lane's model.
+        if self
+            .0
+            .store
+            .session_meta(&job.session_id, keys::COMPARE_ID)?
+            .is_some()
+        {
+            return self.note_limit_fallback(
+                &job,
+                json!({"ok":false,"from":from,"reason":"A Compare lane keeps its own model, so it did not continue on a local model."}),
+            );
+        }
         let Some((id, name)) = self.local_fallback(&config, &job.workspace).await? else {
             return self.note_limit_fallback(
                 &job,
