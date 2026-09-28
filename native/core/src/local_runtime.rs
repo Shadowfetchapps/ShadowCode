@@ -242,7 +242,19 @@ pub struct LocalRuntime {
 enum LoadFailure {
     /// The process exited before it became ready.
     Exited(String),
+    /// It exited because another program took its port first (the port is
+    /// picked free just before launch, so another program can win the race).
+    PortTaken(String),
     Other(anyhow::Error),
+}
+
+/// Launches tried on fresh ports before a port conflict is reported.
+const PORT_ATTEMPTS: usize = 3;
+
+/// llama-server's own words for a port it could not listen on.
+fn port_in_use(output: &str) -> bool {
+    let output = output.to_ascii_lowercase();
+    output.contains("address already in use") || output.contains("couldn't bind http server socket")
 }
 
 impl LocalRuntime {
@@ -474,22 +486,26 @@ impl LocalRuntime {
         abort: &CancellationToken,
         allow_cpu_fallback: bool,
     ) -> Result<Server> {
-        match launch(spec, sources, spec.gpu, cancel, abort).await {
+        match launch_on_free_port(spec, sources, spec.gpu, cancel, abort).await {
             Ok(server) => Ok(server),
             Err(LoadFailure::Exited(first)) if spec.gpu != GpuMode::Off && allow_cpu_fallback => {
-                let mut server = match launch(spec, sources, GpuMode::Off, cancel, abort).await {
-                    Ok(server) => server,
-                    Err(LoadFailure::Exited(second)) => {
-                        bail!("{second}\nThe GPU attempt failed first: {first}")
-                    }
-                    Err(LoadFailure::Other(error)) => return Err(error),
-                };
+                let mut server =
+                    match launch_on_free_port(spec, sources, GpuMode::Off, cancel, abort).await {
+                        Ok(server) => server,
+                        Err(LoadFailure::Exited(second)) => {
+                            bail!("{second}\nThe GPU attempt failed first: {first}")
+                        }
+                        Err(LoadFailure::PortTaken(error)) => bail!("{error}"),
+                        Err(LoadFailure::Other(error)) => return Err(error),
+                    };
                 server.info.cpu_fallback = true;
                 server.info.backend = "cpu".into();
                 server.info.fallback_reason = Some(first);
                 Ok(server)
             }
-            Err(LoadFailure::Exited(message)) => Err(anyhow!(message)),
+            Err(LoadFailure::Exited(message) | LoadFailure::PortTaken(message)) => {
+                Err(anyhow!(message))
+            }
             Err(LoadFailure::Other(error)) => Err(error),
         }
     }
@@ -596,6 +612,33 @@ pub fn loopback_client(timeout: Duration) -> Result<reqwest::Client> {
         .connect_timeout(Duration::from_secs(1))
         .redirect(reqwest::redirect::Policy::none())
         .build()?)
+}
+
+/// [`launch`], on a fresh port again when another program took the port: a
+/// port conflict is never mistaken for a GPU failure (which would move the
+/// model to the CPU).
+async fn launch_on_free_port(
+    spec: &LaunchSpec,
+    sources: &SourceIdentity,
+    gpu: GpuMode,
+    cancel: &CancellationToken,
+    abort: &CancellationToken,
+) -> std::result::Result<Server, LoadFailure> {
+    let mut attempt = 1;
+    loop {
+        match launch(spec, sources, gpu, cancel, abort).await {
+            Err(LoadFailure::PortTaken(message)) if attempt < PORT_ATTEMPTS => {
+                tracing::warn!("llama-server port was taken; retrying on another port: {message}");
+                attempt += 1;
+            }
+            Err(LoadFailure::PortTaken(message)) => {
+                return Err(LoadFailure::PortTaken(format!(
+                    "{message}\nllama-server could not listen on a free local port after {PORT_ATTEMPTS} tries: another program keeps taking them. Try again."
+                )))
+            }
+            other => return other,
+        }
+    }
 }
 
 async fn launch(
@@ -710,10 +753,15 @@ async fn launch(
             Ok(Some(status)) => {
                 // Let the drain task collect the final lines.
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                return Err(LoadFailure::Exited(format!(
-                    "llama-server exited before it became ready ({status}). Last output:\n{}",
-                    tail_of(&stderr)
-                )));
+                let output = tail_of(&stderr);
+                let message = format!(
+                    "llama-server exited before it became ready ({status}). Last output:\n{output}"
+                );
+                return Err(if port_in_use(&output) {
+                    LoadFailure::PortTaken(message)
+                } else {
+                    LoadFailure::Exited(message)
+                });
             }
             Ok(None) => {}
             Err(error) => return Err(other(error.into())),

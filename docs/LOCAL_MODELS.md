@@ -116,7 +116,9 @@ llama-server -m <gguf> --host 127.0.0.1 --port <free> --no-webui --jinja \
 - **CPU fallback.** If the server exits during a GPU start, it is retried once
   on the CPU. The row then says *Loaded · CPU fallback (GPU load failed)*.
   Otherwise the last error, including the server's own stderr, is shown on the
-  row.
+  row. A server that could not listen because another program took its port
+  is not a GPU failure: it is started again on another free port (three tries
+  in all) on the same device.
 - **Cancel.** Loading waits up to 90 seconds for `/health` and can be
   cancelled with **Unload**.
 - **One at a time.** Only one model is loaded. A task holds the loaded model

@@ -1477,6 +1477,76 @@ fn runtime_probe_does_not_hang_on_a_child_left_behind() {
     }
 }
 
+/// LOC-04: another program takes llama-server's port between choosing it and
+/// the server listening. The load retries on a fresh port on the same device
+/// instead of calling it a GPU failure and moving the model to the CPU.
+#[tokio::test]
+async fn an_occupied_port_is_retried_without_a_cpu_fallback() {
+    let f = fixture(GPU);
+    let model = f.models.join("porthold.gguf");
+    qwen_like(&model, "qwen3", TOOLS_TEMPLATE);
+    fs::write(f.bin.join("hold-port-bind"), "hold").unwrap();
+    Config::patch(&f.paths, json!({"local_engine":{"files":[model]}})).unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let id = local_engine::scan(&cfg.local_engine)[0].id.clone();
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let owner = service.clone();
+    let target = id.clone();
+    let loading = tokio::spawn(async move {
+        call(
+            &owner,
+            "POST",
+            "/api/local-models/load",
+            json!({"id": target}),
+        )
+        .await
+    });
+    let held_path = f.bin.join("port-bind-held.json");
+    let held: Value = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(value) = fs::read(&held_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            {
+                return value;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the runtime reached its bind barrier");
+    let port = held["port"].as_u64().unwrap() as u16;
+    // Another program takes the port; the next launch binds at once.
+    let squatter = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    fs::remove_file(f.bin.join("hold-port-bind")).unwrap();
+    {
+        use std::io::Write;
+        let mut barrier =
+            std::os::unix::net::UnixStream::connect(held["socket"].as_str().unwrap()).unwrap();
+        barrier.write_all(b"bind").unwrap();
+    }
+    let loaded = tokio::time::timeout(Duration::from_secs(30), loading)
+        .await
+        .expect("the load finished")
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded["loaded"]["id"], id.as_str(), "{loaded}");
+    let runtime = service.engine.local_runtime().loaded().unwrap();
+    assert!(
+        !runtime.cpu_fallback,
+        "a port conflict is not a GPU failure"
+    );
+    assert_ne!(runtime.port, port);
+    let launches = lines(&f.bin.join("launches.jsonl"));
+    assert_eq!(launches.len(), 2);
+    for launch in &launches {
+        let argv = launch["argv"].to_string();
+        assert!(!argv.contains("\"--device\",\"none\""), "{argv}");
+    }
+    drop(squatter);
+    service.engine.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn cancel_during_load_early_exit_tail_and_cpu_fallback() {
     let f = fixture(GPU);
