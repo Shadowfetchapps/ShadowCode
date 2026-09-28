@@ -8,7 +8,7 @@
 use anyhow::{ensure, Context, Result};
 use serde_json::{json, Value};
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -279,9 +279,15 @@ fn usable(addr: &SocketAddr, literal: bool) -> bool {
     if literal {
         return true;
     }
+    let usable_v4 = |ip: Ipv4Addr| !(ip.is_loopback() || ip.is_link_local() || ip.is_unspecified());
     match addr.ip() {
-        IpAddr::V4(ip) => !(ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()),
+        IpAddr::V4(ip) => usable_v4(ip),
         IpAddr::V6(ip) => {
+            // An IPv4-mapped address (`::ffff:127.0.0.1`, `::ffff:169.254.169.254`)
+            // reaches the embedded IPv4 host, so judge it as that address.
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return usable_v4(v4);
+            }
             !(ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xffc0) == 0xfe80)
         }
     }
@@ -455,6 +461,13 @@ mod tests {
         assert!(!usable(&lo, false));
         assert!(usable(&public, false));
         assert!(usable(&lo, true));
+        // IPv4-mapped IPv6 forms reach the embedded host and are judged as it.
+        let mapped_meta: SocketAddr = "[::ffff:169.254.169.254]:80".parse().unwrap();
+        let mapped_lo: SocketAddr = "[::ffff:127.0.0.1]:443".parse().unwrap();
+        let mapped_public: SocketAddr = "[::ffff:93.184.216.34]:443".parse().unwrap();
+        assert!(!usable(&mapped_meta, false));
+        assert!(!usable(&mapped_lo, false));
+        assert!(usable(&mapped_public, false));
     }
 
     async fn ask(port: u16, request: &str) -> String {
