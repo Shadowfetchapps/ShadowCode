@@ -138,6 +138,11 @@ test("the Debian changelog comes from the AppStream release history", () => {
   assert.equal(changelogDate("2026-09-28"), "Mon, 28 Sep 2026 00:00:00 +0000");
   assert.equal(changelogDate("2024-02-29"), "Thu, 29 Feb 2024 00:00:00 +0000");
   assert.throws(() => changelogDate("2026-02-30"));
+  // Two releases on one day carry times, so the newest stays the latest.
+  assert.equal(changelogDate("2026-09-28T17:59:32Z"), "Mon, 28 Sep 2026 17:59:32 +0000");
+  assert.equal(changelogDate("2026-09-28T23:00Z"), "Mon, 28 Sep 2026 23:00:00 +0000");
+  assert.throws(() => changelogDate("2026-09-28T24:00:00Z"));
+  assert.throws(() => changelogDate("2026-09-28 17:59"));
   const text = debianChangelog({ maintainer: "A <a@example.com>", releases });
   const lines = text.split("\n");
   assert.equal(lines[0], `shadow-code (${version}) stable; urgency=medium`);

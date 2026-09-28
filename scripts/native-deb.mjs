@@ -165,7 +165,11 @@ export function appstreamReleases(xml) {
     /<release\s([^>]*?)(?:\/>|>([\s\S]*?)<\/release>)/g,
   )) {
     const version = /version="([^"]+)"/.exec(attributes)?.[1];
-    const date = /date="(\d{4}-\d{2}-\d{2})"/.exec(attributes)?.[1];
+    // AppStream allows a day or a UTC time; two releases on one day need
+    // times so the Debian changelog stays in order.
+    const date = /date="(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?Z)?)"/.exec(
+      attributes,
+    )?.[1];
     assert.ok(
       version && date,
       `AppStream release without version/date: ${attributes}`,
@@ -203,12 +207,20 @@ const MONTHS = [
   "Nov",
   "Dec",
 ];
-/** RFC 5322 date at midnight UTC, as Debian changelog trailers need. */
+/** RFC 5322 date in UTC, as Debian changelog trailers need: an AppStream
+ * day (`2026-09-28`, midnight) or UTC time (`2026-09-28T17:59:32Z`). */
 export function changelogDate(isoDate) {
-  const [year, month, day] = isoDate.split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?Z)?$/.exec(isoDate);
+  assert.ok(match, `Invalid date ${isoDate}`);
+  const [year, month, day, hour = 0, minute = 0, second = 0] = match
+    .slice(1)
+    .map((part) => (part === undefined ? undefined : Number(part)));
+  assert.ok(hour < 24 && minute < 60 && second < 60, `Invalid time ${isoDate}`);
+  const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
   assert.equal(date.getUTCDate(), day, `Invalid date ${isoDate}`);
-  return `${DAYS[date.getUTCDay()]}, ${String(day).padStart(2, "0")} ${MONTHS[month - 1]} ${year} 00:00:00 +0000`;
+  const two = (value) => String(value).padStart(2, "0");
+  return `${DAYS[date.getUTCDay()]}, ${two(day)} ${MONTHS[month - 1]} ${year} ${two(hour)}:${two(minute)}:${two(second)} +0000`;
 }
 
 /** A Debian changelog built from the AppStream release history, so the
