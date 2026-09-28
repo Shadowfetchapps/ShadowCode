@@ -24,7 +24,13 @@ export default defineConfig({
   build: {
     outDir: "dist",
     rollupOptions: {
-      output: { manualChunks: { markdown: ["react-markdown", "remark-gfm"] } },
+      output: {
+        manualChunks: {
+          markdown: ["react-markdown", "remark-gfm"],
+          reactVendor: ["react", "react-dom", "scheduler"],
+          tauriApi: ["@tauri-apps/api"],
+        },
+      },
     },
   },
 });

@@ -32,6 +32,8 @@ export type CompareContext = {
   web: boolean;
   /** The project is a Git repository. */
   repo: boolean;
+  /** Open editor drafts are not on disk and therefore cannot be snapshotted. */
+  unsavedFiles: string[];
   targets: PickerTarget[];
   selectedTarget: PickerTarget | undefined;
   locked: boolean;
@@ -137,6 +139,10 @@ export function useCompare(ctx: CompareContext) {
   }
 
   async function start(chosen: string[]) {
+    if (ctx.unsavedFiles.length)
+      throw new Error(
+        `Save or discard open drafts before comparing: ${ctx.unsavedFiles.join(", ")}`,
+      );
     const texts = ctx.attachments
       .filter((a) => a.kind === "text")
       .map((a) => a.path);

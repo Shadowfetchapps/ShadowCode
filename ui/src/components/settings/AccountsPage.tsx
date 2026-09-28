@@ -87,8 +87,18 @@ export function AccountsPage({
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
-  const [login, setLogin] = useState<Login | null>(null);
-  const loginSequence = useRef(0);
+  const [logins, setLogins] = useState<Record<string, Login>>({});
+  const loginSequence = useRef<Record<string, number>>({});
+  const connecting = useRef(new Set<string>());
+  const [connectingRevision, setConnectingRevision] = useState(0);
+  const catalogRefreshPending = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const [confirm, setConfirm] = useState<VendorStatus | null>(null);
   const [agentConfirm, setAgentConfirm] = useState<"install" | "remove" | null>(
     null,
@@ -103,25 +113,28 @@ export function AccountsPage({
   );
   const finishing = useRef(false);
 
+  const accountRead = useRef(0);
   const load = useCallback(async (refresh = false, cached = false) => {
+    const read = ++accountRead.current;
     setLoading(true);
     setError("");
     try {
       const result = await (cached
         ? api.accountsCached()
         : api.accounts(refresh));
+      if (!mounted.current || read !== accountRead.current) return;
       const next: Record<string, VendorStatus> = {};
       for (const [key, value] of Object.entries(result.vendors || {}))
         next[vendorId(key)] = value;
       setVendors(next);
     } catch (e) {
-      setError(String(e));
+      if (mounted.current && read === accountRead.current) setError(String(e));
     } finally {
-      setLoading(false);
+      if (mounted.current && read === accountRead.current) setLoading(false);
     }
   }, []);
   useEffect(() => {
-    void load();
+    void load(false, true);
   }, [load]);
   useEffect(() => {
     if (focusVendor) focusRequest.current = { key: focusVendor, always: true };
@@ -201,72 +214,145 @@ export function AccountsPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [installing, installPollMs, setInstall]);
 
-  const running =
-    login?.state === "running" || login?.state === "stopping"
-      ? login.vendor
-      : null;
-  const runningAttempt = running ? login?.attempt : null;
-  // Follow a running sign-in: engine events wake the reader; a slow poll covers
-  // missed wake-ups.
+  // Recover engine-owned operations after closing Settings or changing tabs.
+  // These reads never launch authentication or infer current account billing.
   useEffect(() => {
-    if (!running) return;
     let live = true;
-    let reading = false;
-    async function read() {
-      if (!live || reading) return;
-      reading = true;
+    const reads = ORDER.map((vendor) => {
+      const attempt = loginSequence.current[vendor] || 0;
+      return api
+        .loginProgress(vendor)
+        .then((progress) => {
+          if (
+            !live ||
+            (loginSequence.current[vendor] || 0) !== attempt ||
+            !progress.running ||
+            progress.done
+          )
+            return progress.running === false ? false : null;
+          setLogins((current) =>
+            current[vendor] || (loginSequence.current[vendor] || 0) !== attempt
+              ? current
+              : {
+                  ...current,
+                  [vendor]: {
+                    vendor,
+                    attempt,
+                    state: progress.cancellation_requested
+                      ? "stopping"
+                      : "running",
+                    lines: progress.lines || [],
+                  },
+                },
+          );
+          return true;
+        })
+        .catch(() => null);
+    });
+    void Promise.all(reads).then((active) => {
+      if (
+        live &&
+        active.every((running) => running === false) &&
+        !Object.values(loginSequence.current).some(Boolean)
+      )
+        void load();
+    });
+    return () => {
+      live = false;
+    };
+  }, [load]);
+
+  const runningKey = JSON.stringify(
+    Object.values(logins)
+      .filter(
+        (login) => login.state === "running" || login.state === "stopping",
+      )
+      .map(({ vendor, attempt }) => ({ vendor, attempt })),
+  );
+  useEffect(() => {
+    // A successful vendor may finish while another is still stopping. Its
+    // cached card updates immediately, but a full picker refresh must wait
+    // rather than start new probes inside the other operation's cleanup.
+    if (
+      runningKey === "[]" &&
+      connecting.current.size === 0 &&
+      catalogRefreshPending.current
+    ) {
+      catalogRefreshPending.current = false;
+      onChanged();
+    }
+  }, [runningKey, onChanged, connectingRevision]);
+  // Each vendor keeps its own in-flight read, attempt identity and completion.
+  // A slow provider cannot prevent another card's progress or cancellation.
+  useEffect(() => {
+    const running = JSON.parse(runningKey) as {
+      vendor: string;
+      attempt: number;
+    }[];
+    if (!running.length) return;
+    let live = true;
+    const reading = new Set<string>();
+    const finished = new Set<string>();
+    async function read(vendor: string, attempt: number) {
+      if (!live || reading.has(vendor) || finished.has(vendor)) return;
+      reading.add(vendor);
       try {
-        const progress: LoginProgress = await api.loginProgress(running!);
-        if (!live) return;
-        setLogin((current) =>
-          current &&
-          current.vendor === running &&
-          current.attempt === runningAttempt
-            ? {
-                ...current,
-                lines: progress.lines?.length ? progress.lines : current.lines,
-                state: progress.done
-                  ? progress.done.ok
-                    ? progress.done.availability === "ready"
-                      ? "done"
-                      : "unconfirmed"
-                    : "failed"
-                  : current.state,
-                detail: progress.done?.detail || current.detail,
-              }
-            : current,
-        );
+        const progress: LoginProgress = await api.loginProgress(vendor);
+        if (!live || (loginSequence.current[vendor] || 0) !== attempt) return;
+        setLogins((current) => {
+          const login = current[vendor];
+          if (!login || login.attempt !== attempt) return current;
+          return {
+            ...current,
+            [vendor]: {
+              ...login,
+              lines: progress.lines?.length ? progress.lines : login.lines,
+              state: progress.done
+                ? progress.done.ok
+                  ? progress.done.availability === "ready"
+                    ? "done"
+                    : "unconfirmed"
+                  : "failed"
+                : progress.cancellation_requested
+                  ? "stopping"
+                  : login.state,
+              detail: progress.done?.detail || login.detail,
+            },
+          };
+        });
         if (progress.done) {
-          live = false;
-          // The login already owns its final account check. A cancellation
-          // must not start another probe or leave retry waiting for one.
-          await load(false, true);
+          finished.add(vendor);
+          // The operation owns its final account observation; cancellation
+          // must not launch a fresh, slow discovery before retry is possible.
+          void load(false, true);
           if (progress.done.ok && progress.done.availability === "ready")
-            onChanged();
+            catalogRefreshPending.current = true;
         }
       } catch {
-        // The progress route is optional; keep the instructions visible and
-        // let Refresh confirm the result.
+        // Keep known instructions and try again at the next event/tick.
       } finally {
-        reading = false;
+        reading.delete(vendor);
       }
     }
+    const readAll = () => {
+      for (const { vendor, attempt } of running) void read(vendor, attempt);
+    };
     let stop: (() => void) | undefined;
-    void listen("shadowcode:events", () => void read())
+    void listen("shadowcode:events", readAll)
       .then((unlisten) => {
         if (live) stop = unlisten;
         else unlisten();
       })
       .catch(() => undefined);
-    const timer = setInterval(() => void read(), 1500);
-    void read();
+    const timer = setInterval(readAll, 1500);
+    readAll();
     return () => {
       live = false;
       clearInterval(timer);
       stop?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, runningAttempt]);
+  }, [runningKey]);
 
   async function refreshOne(vendor: string) {
     setBusy((b) => ({ ...b, [vendor]: true }));
@@ -288,54 +374,64 @@ export function AccountsPage({
   }
 
   async function connect(vendor: string) {
-    const attempt = ++loginSequence.current;
+    if (connecting.current.has(vendor)) return;
+    connecting.current.add(vendor);
+    setConnectingRevision((value) => value + 1);
+    const attempt = (loginSequence.current[vendor] || 0) + 1;
+    loginSequence.current[vendor] = attempt;
     setBusy((b) => ({ ...b, [vendor]: true }));
     try {
       const result = await api.connectAccount(vendor);
-      if (attempt !== loginSequence.current) return;
-      if (result.state === "unsupported")
-        setLogin({
+      if (!mounted.current || attempt !== loginSequence.current[vendor]) return;
+      setLogins((current) => ({
+        ...current,
+        [vendor]: {
           vendor,
           attempt,
-          state: "unsupported",
-          lines: [],
-          detail:
-            result.hint || result.note || "Sign in with the vendor's own app.",
-        });
-      else
-        setLogin({
-          vendor,
-          attempt,
-          state: "running",
+          state: result.state === "unsupported" ? "unsupported" : "running",
           lines: result.lines || [],
-          detail: result.note,
-        });
+          detail:
+            result.state === "unsupported"
+              ? result.hint ||
+                result.note ||
+                "Sign in with the vendor's own app."
+              : result.note,
+        },
+      }));
     } catch (e) {
-      if (attempt === loginSequence.current) onToast(String(e), "err");
+      if (mounted.current && attempt === loginSequence.current[vendor])
+        onToast(String(e), "err");
     } finally {
-      setBusy((b) => ({ ...b, [vendor]: false }));
+      connecting.current.delete(vendor);
+      if (mounted.current) {
+        setConnectingRevision((value) => value + 1);
+        setBusy((b) => ({ ...b, [vendor]: false }));
+      }
     }
   }
 
   async function cancelLogin(vendor: string) {
-    if (!login || login.vendor !== vendor || login.state !== "running") return;
+    const login = logins[vendor];
+    if (!login || login.state !== "running") return;
     const attempt = login.attempt;
-    setLogin((current) =>
-      current?.attempt === attempt
-        ? { ...current, state: "stopping" }
+    setLogins((current) =>
+      current[vendor]?.attempt === attempt
+        ? { ...current, [vendor]: { ...current[vendor], state: "stopping" } }
         : current,
     );
     try {
       await api.cancelLogin(vendor);
-      // The request only acknowledges cancellation. Keep reading until the
-      // engine reports a terminal result after its owned work has stopped.
+      // This acknowledges the request only. Read until owned work stops.
     } catch (e) {
-      setLogin((current) =>
-        current?.attempt === attempt && current.state === "stopping"
-          ? { ...current, state: "running" }
+      if (!mounted.current) return;
+      setLogins((current) =>
+        current[vendor]?.attempt === attempt &&
+        current[vendor].state === "stopping"
+          ? { ...current, [vendor]: { ...current[vendor], state: "running" } }
           : current,
       );
-      if (attempt === loginSequence.current) onToast(String(e), "err");
+      if ((loginSequence.current[vendor] || 0) === attempt)
+        onToast(String(e), "err");
     }
   }
 
@@ -435,7 +531,7 @@ export function AccountsPage({
           (line) => !(status.account?.plan && / plan$/.test(line)),
         );
         const models = status.models || [];
-        const thisLogin = login?.vendor === key ? login : null;
+        const thisLogin = logins[key];
         const loginActive =
           thisLogin?.state === "running" || thisLogin?.state === "stopping";
         // Antigravity before its agent server is installed: the install

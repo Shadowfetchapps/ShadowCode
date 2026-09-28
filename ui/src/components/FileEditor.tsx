@@ -7,6 +7,8 @@ import {
   type FileBuffer,
 } from "../hooks/useDrawerMemory";
 import { Empty } from "./cards";
+import { CodeEditor, hasMixedLineEndings } from "./CodeEditor";
+import { plainEditorEdit, plainEditorRange } from "../lib/plainEditorEdit";
 
 type Toast = (text: string, kind?: "ok" | "err" | "info") => void;
 
@@ -41,8 +43,14 @@ export function FileEditor({
   const [discarding, setDiscarding] = useState(false);
   const [resolving, setResolving] = useState(false);
   const exitEditor = useRef<HTMLButtonElement>(null);
+  const openRequest = useRef(0);
+  const savingRevision = useRef<{ path: string; hash: string } | null>(null);
   const buffer = active ? memory.filesBuffers[active] : undefined;
   const dirty = Boolean(buffer && buffer.draft !== buffer.base);
+  const plainEditing = Boolean(
+    buffer &&
+    (hasMixedLineEndings(buffer.base) || hasMixedLineEndings(buffer.draft)),
+  );
 
   const updateBuffer = (
     path: string,
@@ -54,6 +62,19 @@ export function FileEditor({
       const next = edit(current);
       return next === current ? previous : { ...previous, [path]: next };
     });
+
+  useEffect(() => {
+    setLoading(null);
+    return () => {
+      ++openRequest.current;
+    };
+  }, [workspace]);
+
+  function selectFile(path: string | null) {
+    ++openRequest.current;
+    setLoading(null);
+    setActive(path);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -82,6 +103,22 @@ export function FileEditor({
       try {
         revision = await api.fileRevision(path);
         if (stopped) return;
+        // A save response and the polling read may cross in flight. If the
+        // observed disk revision is exactly the one our own save produced,
+        // reconcile it as ours instead of surfacing a false external conflict.
+        if (savingRevision.current?.path === path) {
+          if (savingRevision.current.hash === revision.hash) {
+            updateBuffer(path, (current) =>
+              current.disk === undefined
+                ? current
+                : { ...current, disk: undefined },
+            );
+            return;
+          }
+          // A later external edit supersedes the just-saved revision; compare
+          // it with the current buffer below and surface it if needed.
+          savingRevision.current = null;
+        }
         if (revision.hash === buffer.hash) {
           updateBuffer(path, (current) =>
             current.disk === undefined
@@ -93,6 +130,13 @@ export function FileEditor({
         const disk = await api.file(path, true);
         if (stopped) return;
         updateBuffer(path, (current) => {
+          if (
+            savingRevision.current?.path === path &&
+            savingRevision.current.hash === disk.hash
+          )
+            return current.disk === undefined
+              ? current
+              : { ...current, disk: undefined };
           if (disk.hash === current.hash)
             return current.disk === undefined
               ? current
@@ -144,12 +188,17 @@ export function FileEditor({
   }, [active, buffer?.hash, onMemory, workspace]);
 
   async function open(path: string) {
-    setActive(path);
+    const request = ++openRequest.current;
     setError("");
-    if (memory.filesBuffers[path]) return;
+    if (memory.filesBuffers[path]) {
+      setLoading(null);
+      setActive(path);
+      return;
+    }
     setLoading(path);
     try {
       const file = await api.file(path, true);
+      if (request !== openRequest.current) return;
       if (file.truncated)
         throw new Error("The file could not be opened completely");
       onMemory("filesBuffers", (previous) =>
@@ -165,17 +214,18 @@ export function FileEditor({
               },
             },
       );
+      setActive(path);
     } catch (reason) {
-      setError(String(reason));
+      if (request === openRequest.current) setError(String(reason));
     } finally {
-      setLoading(null);
+      if (request === openRequest.current) setLoading(null);
     }
   }
 
-  async function save(expectedHash?: string) {
+  async function save(expectedHash?: string, submittedDraft?: string) {
     if (!active || !buffer || saving || discarding) return;
     const path = active;
-    const submitted = buffer.draft;
+    const submitted = submittedDraft ?? buffer.draft;
     setSaving(true);
     setError("");
     try {
@@ -184,12 +234,20 @@ export function FileEditor({
         submitted,
         expectedHash ?? buffer.hash,
       );
-      updateBuffer(path, (current) => ({
-        ...current,
-        base: submitted,
-        hash: result.hash,
-        disk: undefined,
-      }));
+      savingRevision.current = { path, hash: result.hash };
+      updateBuffer(path, (current) => {
+        // The user can keep typing while the write is in flight. Advance the
+        // saved base to the bytes we submitted, but retain that newer draft so
+        // a successful save cannot eat edits made after Ctrl+S/click.
+        const draftChangedWhileSaving = current.draft !== submitted;
+        return {
+          ...current,
+          base: submitted,
+          draft: draftChangedWhileSaving ? current.draft : submitted,
+          hash: result.hash,
+          disk: undefined,
+        };
+      });
       toast(`Saved ${path}`, "ok");
     } catch (reason) {
       const message = String(reason);
@@ -256,9 +314,11 @@ export function FileEditor({
   async function closeFile() {
     if (!active || !buffer || discarding || saving) return;
     if (dirty) {
-      setActive(null);
+      selectFile(null);
       return;
     }
+    const request = ++openRequest.current;
+    setLoading(null);
     setDiscarding(true);
     setError("");
     try {
@@ -270,7 +330,7 @@ export function FileEditor({
         delete next[buffer.path];
         return next;
       });
-      setActive(null);
+      if (request === openRequest.current) selectFile(null);
     } catch (reason) {
       setError(`The file stayed open: ${String(reason)}`);
     } finally {
@@ -306,8 +366,7 @@ export function FileEditor({
         if (start === end && !event.shiftKey) {
           updateBuffer(active, (current) => ({
             ...current,
-            draft:
-              current.draft.slice(0, start) + "  " + current.draft.slice(end),
+            draft: plainEditorRange(current.draft, start, end, "  "),
           }));
           selectionStart = selectionEnd = start + 2;
         } else {
@@ -323,12 +382,25 @@ export function FileEditor({
               event.shiftKey ? line.replace(/^ {1,2}/, "") : `  ${line}`,
             )
             .join("\n");
+          const outdent = event.shiftKey;
           updateBuffer(active, (current) => ({
             ...current,
-            draft:
-              current.draft.slice(0, lineStart) +
-              after +
-              current.draft.slice(lineEnd),
+            draft: plainEditorRange(
+              current.draft,
+              lineStart,
+              lineEnd,
+              (selected) =>
+                selected
+                  .split(/(\r\n|\r|\n)/)
+                  .map((part, index) =>
+                    index % 2
+                      ? part
+                      : outdent
+                        ? part.replace(/^ {1,2}/, "")
+                        : `  ${part}`,
+                  )
+                  .join(""),
+            ),
           }));
           if (start === end) {
             selectionStart = selectionEnd = Math.max(
@@ -394,7 +466,7 @@ export function FileEditor({
               aria-current={item.path === active ? "page" : undefined}
               aria-label={`Open ${item.path}${item.draft !== item.base ? ", unsaved" : ""}`}
               title={item.path}
-              onClick={() => setActive(item.path)}
+              onClick={() => selectFile(item.path)}
             >
               {item.path.split("/").pop()}
               {item.draft !== item.base ? " •" : ""}
@@ -402,9 +474,7 @@ export function FileEditor({
           ))}
         </div>
       )}
-      {loading !== null && loading === active && (
-        <p role="status">Opening {active}…</p>
-      )}
+      {loading !== null && <p role="status">Opening {loading}…</p>}
       {error && (
         <p className="file-editor-error" role="alert">
           {error}
@@ -615,23 +685,46 @@ export function FileEditor({
               </div>
             </div>
           )}
-          <textarea
-            className="file-editor-input"
-            aria-label={`Edit ${buffer.path}`}
-            disabled={discarding || resolving}
-            spellCheck={false}
+          <CodeEditor
+            suspended={plainEditing}
+            workspace={workspace}
+            path={buffer.path}
+            openPaths={Object.keys(memory.filesBuffers)}
             value={buffer.draft}
-            onChange={(event) =>
-              updateBuffer(buffer.path, (current) => ({
-                ...current,
-                draft: event.target.value,
-              }))
+            disabled={discarding || resolving}
+            onChange={(draft) =>
+              updateBuffer(buffer.path, (current) => ({ ...current, draft }))
             }
-            onKeyDown={editKey}
+            onSave={(draft) => {
+              if (
+                draft !== buffer.base &&
+                buffer.disk === undefined &&
+                buffer.recoveryConflict === undefined
+              )
+                void save(undefined, draft);
+            }}
+            onEscape={() => exitEditor.current?.focus()}
           />
+          {plainEditing && (
+            <textarea
+              className="file-editor-input"
+              aria-label={`Edit ${buffer.path}`}
+              disabled={discarding || resolving}
+              spellCheck={false}
+              value={buffer.draft.replace(/\r\n|\r/g, "\n")}
+              onChange={(event) =>
+                updateBuffer(buffer.path, (current) => ({
+                  ...current,
+                  draft: plainEditorEdit(current.draft, event.target.value),
+                }))
+              }
+              onKeyDown={editKey}
+            />
+          )}
           <p className="file-editor-hint">
+            {plainEditing && "Mixed line endings · plain editing · "}
             Ctrl/⌘+S to save · Tab indents · Shift+Tab outdents · Esc leaves the
-            editor
+            editor{!plainEditing && " · Ctrl/⌘+F to find"}
           </p>
         </div>
       )}

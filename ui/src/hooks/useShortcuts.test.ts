@@ -58,6 +58,73 @@ it("does not open help while typing", () => {
   expect(shortcutFor(key("?", { target: input }), closed)).toBeNull();
 });
 
+it.each(["", "true", "plaintext-only"])(
+  "keeps help typing inside contenteditable=%s and its descendants",
+  (value) => {
+    const editor = document.createElement("div");
+    editor.setAttribute("contenteditable", value);
+    const token = document.createElement("span");
+    editor.append(token);
+    expect(shortcutFor(key("?", { target: editor }), closed)).toBeNull();
+    expect(shortcutFor(key("?", { target: token }), closed)).toBeNull();
+    // This only changes typing detection, not documented global shortcuts.
+    expect(
+      shortcutFor(key("k", { target: token, ctrlKey: true }), closed),
+    ).toBe("palette");
+    token.setAttribute("contenteditable", "false");
+    expect(shortcutFor(key("?", { target: token }), closed)).toBe("help");
+  },
+);
+
+it("lets question marks bubble from editing fields without opening global help", () => {
+  const run = vi.fn();
+  renderHook(() => useShortcuts(closed, run));
+  const fields = document.createElement("section");
+  fields.innerHTML =
+    '<textarea></textarea><div contenteditable="true"><span><em>code</em></span></div>';
+  document.body.append(fields);
+  try {
+    fireEvent.keyDown(fields.querySelector("textarea")!, { key: "?" });
+    fireEvent.keyDown(fields.querySelector("div")!, { key: "?" });
+    fireEvent.keyDown(fields.querySelector("em")!, { key: "?" });
+    expect(run).not.toHaveBeenCalled();
+    fireEvent.keyDown(document.body, { key: "?" });
+    expect(run).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledWith("help");
+  } finally {
+    fields.remove();
+  }
+});
+
+it("does not invoke app actions for a key already consumed by its focused owner", () => {
+  const run = vi.fn();
+  renderHook(() => useShortcuts({ ...closed, panel: true }, run));
+  const editor = document.createElement("div");
+  editor.setAttribute("contenteditable", "true");
+  document.body.append(editor);
+  const consume = (event: Event) => event.preventDefault();
+  editor.addEventListener("keydown", consume);
+  try {
+    for (const init of [{ key: "k", ctrlKey: true }, { key: "Escape" }]) {
+      const event = new KeyboardEvent("keydown", {
+        ...init,
+        bubbles: true,
+        cancelable: true,
+      });
+      editor.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    }
+    expect(run).not.toHaveBeenCalled();
+    editor.removeEventListener("keydown", consume);
+    fireEvent.keyDown(editor, { key: "k", ctrlKey: true });
+    expect(run).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledWith("palette");
+  } finally {
+    editor.removeEventListener("keydown", consume);
+    editor.remove();
+  }
+});
+
 it("Escape closes the topmost layer; dialogs own the keyboard", () => {
   const esc = key("Escape");
   expect(shortcutFor(esc, { ...closed, overlay: true, panel: true })).toBe(

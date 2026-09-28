@@ -11,6 +11,7 @@ import {
 import type { LineCounts } from "../lib/diffStats";
 import { TaskTimingDetails } from "./TaskTimingDetails";
 import { LocalModelDetails } from "./LocalModelDetails";
+import { RunCheck, type RunCheckAction } from "./RunCheck";
 
 export type DiffStat = LineCounts;
 
@@ -25,8 +26,10 @@ export const TaskSummary = memo(function TaskSummary({
   diffStat,
   diffStats,
   readVerification,
+  runCheck,
 }: {
   activity: TaskActivity;
+  runCheck?: RunCheckAction;
   readVerification?: (attemptId: string) => Promise<unknown>;
   onReview: (path?: string) => void;
   onRewind?: () => void;
@@ -186,6 +189,7 @@ export const TaskSummary = memo(function TaskSummary({
         </header>
         <TaskTimingDetails timings={activity.timings} />
         <LocalModelDetails receipt={activity.localRuntime} />
+        {runCheck && <RunCheck action={runCheck} />}
       </section>
     );
   }
@@ -318,6 +322,7 @@ export const TaskSummary = memo(function TaskSummary({
       <TaskTimingDetails timings={activity.timings} />
       <LocalModelDetails receipt={activity.localRuntime} />
       <div className="row task-summary-actions">
+        {runCheck && <RunCheck action={runCheck} />}
         {changed.length > 0 && (
           <button
             type="button"

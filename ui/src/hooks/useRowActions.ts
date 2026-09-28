@@ -1,13 +1,15 @@
 import { useMemo, useRef, type SetStateAction } from "react";
-import { api } from "../api";
+import { api, type CheckJobRequest } from "../api";
 import type { ChatItem } from "../components/cards";
 import type { RowActions } from "../components/shell/TranscriptRows";
 import type { Fallback } from "../lib/allowance";
 import { batchDiffStats } from "../lib/diffStats";
 import type { Transcript } from "../lib/transcript";
+import type { RunCheckAction } from "../components/RunCheck";
 
 type LimitItem = Extract<ChatItem, { kind: "limit" }>;
 export type RowHandlers = {
+  runCheck?: RunCheckAction;
   setTranscript: (update: SetStateAction<Transcript>) => void;
   reviewChanges: (path?: string, taskId?: string) => void;
   rewind: (taskId: string) => Promise<void>;
@@ -33,6 +35,21 @@ export function useRowActions(handlers: RowHandlers): RowActions {
   latest.current = handlers;
   return useMemo(
     () => ({
+      runCheck: handlers.runCheck
+        ? {
+            workspace: handlers.runCheck.workspace,
+            sessionId: handlers.runCheck.sessionId,
+            disabled: handlers.runCheck.disabled,
+            onRun: (request: CheckJobRequest) => {
+              const action = latest.current.runCheck;
+              if (!action)
+                return Promise.reject(
+                  new Error("Check execution is unavailable."),
+                );
+              return action.onRun(request);
+            },
+          }
+        : undefined,
       onToggleTool: (key: string) =>
         latest.current.setTranscript((s) => ({
           ...s,
@@ -63,6 +80,10 @@ export function useRowActions(handlers: RowHandlers): RowActions {
       onRetry: (text: string) => void latest.current.retry(text),
       onCopy: (text: string) => void latest.current.copy(text),
     }),
-    [],
+    [
+      handlers.runCheck?.workspace,
+      handlers.runCheck?.sessionId,
+      handlers.runCheck?.disabled,
+    ],
   );
 }

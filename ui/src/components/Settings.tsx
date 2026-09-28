@@ -32,24 +32,7 @@ const SECTIONS: { id: SettingsSection; label: string }[] = [
 ];
 
 /** Settings. Each page saves only its own configuration group. */
-export function Settings({
-  cfg,
-  initialSection = "accounts",
-  initialAdvanced = "skills",
-  focusVendor,
-  health,
-  sessionId,
-  busy,
-  onClose,
-  onSave,
-  onCatalogChanged,
-  onToast,
-  onOpenProject,
-  onOpenSession,
-  onSkillsChanged,
-  onUseSkill,
-  planLimit,
-}: {
+export type SettingsProps = {
   cfg: Record<string, unknown>;
   initialSection?: SettingsSection;
   initialAdvanced?: AdvancedTab;
@@ -69,7 +52,26 @@ export function Settings({
   onUseSkill: (name: string) => void;
   /** Accounts › "When a plan runs out" (the same control as Allowance). */
   planLimit?: ReactNode;
-}) {
+};
+
+export function Settings({
+  cfg,
+  initialSection = "accounts",
+  initialAdvanced = "skills",
+  focusVendor,
+  health,
+  sessionId,
+  busy,
+  onClose,
+  onSave,
+  onCatalogChanged,
+  onToast,
+  onOpenProject,
+  onOpenSession,
+  onSkillsChanged,
+  onUseSkill,
+  planLimit,
+}: SettingsProps) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [advanced, setAdvanced] = useState<AdvancedTab>(initialAdvanced);
   return (

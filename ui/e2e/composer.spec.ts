@@ -91,6 +91,42 @@ test("@ attaches files, effort and mode reach the engine, ↑ recalls the prompt
   await expect(prompt(page)).toHaveValue("");
 });
 
+test("inspects bounded @-attached context and discloses opaque provider context", async ({
+  page,
+}) => {
+  await prompt(page).pressSequentially("Explain @app");
+  await expect(
+    page.getByRole("option", { name: /src\/app\.ts/ }),
+  ).toBeVisible();
+  await prompt(page).press("Enter");
+
+  await page.getByRole("button", { name: "Inspect attached context" }).click();
+  const inventory = page.getByRole("dialog", {
+    name: "Attached context inventory",
+  });
+  await expect(inventory).toContainText("Included · src/app.ts");
+  await expect(inventory).toContainText(/Lines 1–\d+ · \d+ of \d+ bytes/);
+  await expect(inventory).toContainText(
+    /About \d+ tokens estimated · \d+ attached bytes/,
+  );
+  await expect(inventory).toContainText(
+    "Files are read again when the task starts",
+  );
+  await expect(inventory).toContainText(
+    "ShadowCode cannot enumerate that provider-managed context",
+  );
+  expect(
+    (await fakeLog(page)).some(
+      (entry) => entry.path === "/api/workspace/context-preview",
+    ),
+  ).toBe(true);
+
+  await inventory
+    .getByRole("button", { name: "Refresh context preview" })
+    .click();
+  await expect(inventory).toContainText("Previewed");
+});
+
 test("edit & resend forks just before the message, the original stays", async ({
   page,
 }) => {

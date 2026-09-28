@@ -2,6 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { installFakeBackend } from "./fakeBackend";
 import { installFakeTools } from "./fakeTools";
+import { expectEditorText } from "./editorHelpers";
 
 // Every test drives the production UI build against the deterministic fake
 // engine; nothing here talks to a real vendor CLI or model.
@@ -234,9 +235,10 @@ test("drawer tabs keep the terminal, the open file and the commit message", asyn
   await page.keyboard.type("echo half-typed");
   await tab("Files").click();
   await drawer.getByRole("button", { name: /README\.md/ }).click();
-  await expect(
+  await expectEditorText(
     drawer.getByRole("textbox", { name: "Edit README.md" }),
-  ).toHaveValue("# Demo\n");
+    "# Demo\n",
+  );
   await tab("Changes").click();
   await expect(drawer.getByPlaceholder("Commit message")).toHaveValue(
     "Fix the add function",
@@ -245,9 +247,10 @@ test("drawer tabs keep the terminal, the open file and the commit message", asyn
   await expect(shell).toContainText("ls: ran in /work/demo");
   await expect(shell).toContainText("echo half-typed");
   await tab("Files").click();
-  await expect(
+  await expectEditorText(
     drawer.getByRole("textbox", { name: "Edit README.md" }),
-  ).toHaveValue("# Demo\n");
+    "# Demo\n",
+  );
   // Closing and reopening the drawer keeps them too.
   await drawer.getByRole("button", { name: "Close drawer" }).click();
   await page.getByRole("button", { name: "Review changes" }).click();
@@ -266,23 +269,36 @@ test("keeps an unsaved file draft and reviews an agent edit before saving", asyn
   await tab("Files").click();
   await drawer.getByRole("button", { name: "README.md", exact: true }).click();
   const editor = drawer.getByRole("textbox", { name: "Edit README.md" });
-  await expect(editor).toHaveValue("# Demo\n");
+  await expectEditorText(editor, "# Demo\n");
   await editor.fill("# My draft\n");
   await editor.press("Escape");
   await expect(drawer.getByRole("button", { name: "Diff" })).toBeFocused();
   await expect(drawer).toBeVisible();
   await tab("Changes").click();
   await tab("Files").click();
-  await expect(editor).toHaveValue("# My draft\n");
+  await expectEditorText(editor, "# My draft\n");
   await page.evaluate(() => {
     (window as any).__SHADOW_FAKE__.state.files["README.md"] = "# Agent edit\n";
   });
   const conflict = drawer.getByRole("group", { name: "File conflict" });
   await expect(conflict).toBeVisible({ timeout: 7000 });
-  await expect(editor).toHaveValue("# My draft\n");
+  await expectEditorText(editor, "# My draft\n");
   await expect(
     drawer.getByRole("button", { name: "Save", exact: true }),
   ).toBeDisabled();
+  await editor.press("Control+s");
+  expect(
+    (await fakeLog(page)).filter(
+      (entry) =>
+        entry.method === "PUT" &&
+        entry.path.split("?")[0] === "/api/workspace/file",
+    ),
+  ).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => (window as any).__SHADOW_FAKE__.state.files["README.md"],
+    ),
+  ).toBe("# Agent edit\n");
   await conflict.getByText("Show current disk version").click();
   await expect(conflict).toContainText("# Agent edit");
   await conflict
@@ -308,13 +324,17 @@ test("indents and outdents selected file lines in the rendered editor", async ({
   await drawer.getByRole("button", { name: "README.md", exact: true }).click();
   const editor = drawer.getByRole("textbox", { name: "Edit README.md" });
   await editor.fill("one\ntwo\nthree\n");
-  await editor.evaluate((element) =>
-    (element as HTMLTextAreaElement).setSelectionRange(1, 8),
-  );
+  // Select from column 1 of the first line through the start of line 3
+  // using the real editor keymap, rather than a textarea-only DOM API.
+  await editor.press("Control+Home");
+  await editor.press("ArrowRight");
+  await editor.press("Shift+ArrowDown");
+  await editor.press("Shift+ArrowDown");
+  await editor.press("Shift+ArrowLeft");
   await editor.press("Tab");
-  await expect(editor).toHaveValue("  one\n  two\nthree\n");
+  await expectEditorText(editor, "  one\n  two\nthree\n");
   await editor.press("Shift+Tab");
-  await expect(editor).toHaveValue("one\ntwo\nthree\n");
+  await expectEditorText(editor, "one\ntwo\nthree\n");
 });
 
 test("recovers an unsaved editor draft after window reload and clears it after save", async ({
@@ -351,7 +371,7 @@ test("recovers an unsaved editor draft after window reload and clears it after s
   await page.getByRole("button", { name: "Review changes" }).click();
   await files.click();
   await drawer.getByRole("button", { name: "Open README.md, unsaved" }).click();
-  await expect(editor).toHaveValue("# Draft after restart");
+  await expectEditorText(editor, "# Draft after restart");
   const conflict = drawer.getByRole("group", { name: "File conflict" });
   await expect(conflict).toBeVisible();
   await expect(
@@ -401,8 +421,8 @@ test("waits for an in-flight recovery write before discarding its draft", async 
   await expect(
     drawer.getByRole("button", { name: "Discarding…" }),
   ).toBeVisible();
-  await expect(editor).toHaveValue("# Temporary draft");
-  await expect(editor).toHaveValue("# Demo\n");
+  await expectEditorText(editor, "# Temporary draft");
+  await expectEditorText(editor, "# Demo\n");
   await expect
     .poll(() =>
       page.evaluate(() =>
@@ -569,7 +589,7 @@ test("reviews a competing window's recovery draft before choosing either version
   await editor.fill("# My later edit");
   await expect(conflict).toBeVisible();
   await conflict.getByRole("button", { name: "Use other saved draft" }).click();
-  await expect(editor).toHaveValue("# Newer saved draft");
+  await expectEditorText(editor, "# Newer saved draft");
   await expect(conflict).toHaveCount(0);
   expect(await savedDraft()).toBe("# Newer saved draft");
 });
@@ -1235,6 +1255,82 @@ test("compares a local and a cloud model, keeps one and counts the win", async (
   await page.keyboard.press("Escape");
   await expect(again).toHaveCount(0);
   await page.screenshot({ path: "test-results/compare-composer-520.png" });
+});
+
+test("requires open editor drafts to be saved before Compare snapshots the project", async ({
+  page,
+}) => {
+  await prompt(page).fill("Review the current README");
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const drawer = page.getByRole("complementary", { name: "Drawer" });
+  await drawer
+    .locator(".drawer-tabs")
+    .getByRole("button", { name: "Files" })
+    .click();
+  await drawer.getByRole("button", { name: "README.md", exact: true }).click();
+  const editor = drawer.getByRole("textbox", { name: "Edit README.md" });
+  await expect(editor).toBeVisible();
+  await editor.fill("# Unsaved README draft\n");
+
+  await page.getByRole("button", { name: "Compare", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Compare models" });
+  await pickSlot(page, 1, "qwen3:14b");
+  await pickSlot(page, 2, "GPT-6-Astra");
+  await expect(dialog).toContainText("README.md");
+  const start = dialog.getByRole("button", { name: "Start comparison" });
+  await expect(start).toBeDisabled();
+  expect((await fakeLog(page)).some((r) => r.path === "/api/compare")).toBe(
+    false,
+  );
+
+  await dialog.getByRole("button", { name: "Close Compare" }).click();
+  await drawer.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(drawer.getByText("Saved", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Compare", exact: true }).click();
+  const readyDialog = page.getByRole("dialog", { name: "Compare models" });
+  await expect(
+    readyDialog.getByText(/Save or discard these open drafts/),
+  ).toHaveCount(0);
+  await expect(
+    readyDialog.getByRole("button", { name: "Start comparison" }),
+  ).toHaveAttribute("aria-disabled", "false");
+});
+
+test("Compare rejects a recovery draft saved by another editor window", async ({
+  page,
+}) => {
+  await page.evaluate(() => {
+    // Simulate a recovery record written by another app window after this
+    // window loaded its own editor state. No in-memory buffer sees this draft.
+    sessionStorage.setItem(
+      "shadow-fake-editor-drafts",
+      JSON.stringify({
+        "src/other-window.ts": {
+          path: "src/other-window.ts",
+          base: "const value = 1;\n",
+          draft: "const value = 2;\n",
+          base_hash: "0".repeat(64),
+          revision: "1".repeat(32),
+          updated_at: 1,
+        },
+      }),
+    );
+  });
+  await prompt(page).fill("Compare the existing model results");
+  await page.getByRole("button", { name: "Compare", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Compare models" });
+  await pickSlot(page, 1, "qwen3:14b");
+  await pickSlot(page, 2, "GPT-6-Astra");
+  await dialog.getByRole("button", { name: "Start comparison" }).click();
+  await expect(dialog.getByRole("alert")).toContainText(
+    "Save or discard open editor drafts before comparing: src/other-window.ts",
+  );
+  expect((await fakeLog(page)).some((row) => row.path === "/api/compare")).toBe(
+    true,
+  );
+  await expect(page.getByRole("region", { name: "Comparisons" })).toHaveCount(
+    0,
+  );
 });
 
 test("a lane's approval is answered in its conversation; a conflicting Keep names the files", async ({

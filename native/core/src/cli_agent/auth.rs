@@ -185,12 +185,15 @@ impl Logins {
     }
     pub fn status(&self, vendor: Vendor) -> Value {
         let Ok(state) = self.state.lock() else {
-            return json!({"running":false});
+            return json!({"running":false,"cancellation_requested":false});
         };
         match state.sessions.get(&vendor) {
             Some(session) => json!({"vendor":vendor.id(),"running":session.done.is_none(),
+                "cancellation_requested":session.done.is_none() && session.cancel.is_cancelled(),
                 "started_at":session.started_at,"lines":session.lines,"done":session.done}),
-            None => json!({"vendor":vendor.id(),"running":false,"lines":[],"done":null}),
+            None => {
+                json!({"vendor":vendor.id(),"running":false,"cancellation_requested":false,"lines":[],"done":null})
+            }
         }
     }
     pub fn running(&self, vendor: Vendor) -> bool {
@@ -709,6 +712,53 @@ mod tests {
         assert!(login_url("https://localhost/cb?code=secret").is_none());
         assert!(login_url("no url here").is_none());
     }
+    #[tokio::test]
+    async fn login_status_preserves_vendor_scoped_cancellation_until_terminal() {
+        let catalog = Arc::new(VendorCatalog::new());
+        assert_eq!(
+            catalog.logins().status(Vendor::Codex)["cancellation_requested"],
+            false
+        );
+        let mut first = catalog
+            .logins()
+            .begin(Vendor::Codex, Duration::from_secs(5), &catalog)
+            .unwrap()
+            .unwrap();
+        let mut other = catalog
+            .logins()
+            .begin(Vendor::Claude, Duration::from_secs(5), &catalog)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            catalog.logins().status(Vendor::Codex)["cancellation_requested"],
+            false
+        );
+        assert!(catalog.logins().cancel(Vendor::Codex));
+        let stopping = catalog.logins().status(Vendor::Codex);
+        assert_eq!(stopping["running"], true);
+        assert_eq!(stopping["cancellation_requested"], true);
+        assert_eq!(
+            catalog.logins().status(Vendor::Claude)["cancellation_requested"],
+            false
+        );
+        first.finish(json!({"ok":true,"detail":"process reaped"}));
+        let stopped = catalog.logins().status(Vendor::Codex);
+        assert_eq!(stopped["running"], false);
+        assert_eq!(stopped["cancellation_requested"], false);
+        assert_eq!(stopped["done"]["ok"], false);
+        let mut retry = catalog
+            .logins()
+            .begin(Vendor::Codex, Duration::from_secs(5), &catalog)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            catalog.logins().status(Vendor::Codex)["cancellation_requested"],
+            false
+        );
+        retry.fail("fixture finished");
+        other.fail("fixture finished");
+    }
+
     #[tokio::test]
     async fn accepted_cancel_wins_publication_and_old_generation_cannot_write_retry() {
         let catalog = Arc::new(VendorCatalog::new());

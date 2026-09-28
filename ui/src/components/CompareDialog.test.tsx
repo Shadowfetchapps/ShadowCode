@@ -68,11 +68,13 @@ function Harness({
   onStart = vi.fn(async () => undefined),
   onOpenAllowance = vi.fn(),
   uncommitted = 0,
+  unsavedFiles = [],
 }: {
   initial?: string[];
   onStart?: (models: string[]) => Promise<void>;
   onOpenAllowance?: () => void;
   uncommitted?: number;
+  unsavedFiles?: string[];
 }) {
   const [models, setModels] = useState(initial);
   return (
@@ -82,6 +84,7 @@ function Harness({
       models={models}
       onModels={setModels}
       uncommitted={uncommitted}
+      unsavedFiles={unsavedFiles}
       onStart={onStart}
       onClose={() => undefined}
       onOpenAllowance={onOpenAllowance}
@@ -107,6 +110,24 @@ async function choose(slot: number, name: RegExp) {
 }
 
 describe("CompareDialog", () => {
+  it("blocks a comparison while an open editor draft is missing from the disk snapshot", async () => {
+    const onStart = vi.fn(async () => undefined);
+    render(
+      <Harness
+        initial={["cli:codex:astra", "api:openrouter:qwen/qwen3-coder"]}
+        onStart={onStart}
+        unsavedFiles={["src/main.ts", "README.md"]}
+      />,
+    );
+
+    expect(
+      screen.getByText(/Save or discard these open drafts/).textContent,
+    ).toContain("src/main.ts, README.md");
+    expect(startButton().getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(startButton());
+    expect(onStart).not.toHaveBeenCalled();
+  });
+
   it("shows the task, the cost note and needs two ready models", async () => {
     const onStart = vi.fn(async () => undefined);
     render(<Harness onStart={onStart} />);

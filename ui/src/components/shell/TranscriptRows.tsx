@@ -15,6 +15,7 @@ import { Markdown } from "../Markdown";
 import { CopyButton, UserMessage } from "../MessageActions";
 import { SubagentCard } from "../SubagentCard";
 import { TaskSummary, type DiffStat } from "../TaskSummary";
+import type { RunCheckAction } from "../RunCheck";
 import type { TaskActivity } from "../../lib/activity";
 import type { Fallback } from "../../lib/allowance";
 
@@ -26,6 +27,7 @@ type LimitItem = Extract<ChatItem, { kind: "limit" }>;
 /** Row callbacks. The app passes stable functions, so a memoized row only
  * re-renders when its own item or task activity changes. */
 export type RowActions = {
+  runCheck?: RunCheckAction;
   onToggleTool: (key: string) => void;
   diffStats: (paths: string[]) => Promise<Record<string, DiffStat>>;
   /** Review a task's changes (the Review view), or with no task the
@@ -180,6 +182,7 @@ const TranscriptRow = memo(function TranscriptRow({
         {!timelineAbove && <ActivityTimeline activity={activity} withSummary />}
         <TaskSummary
           activity={activity}
+          runCheck={actions.runCheck}
           readVerification={api.jobVerification}
           diffStats={actions.diffStats}
           onReview={(path) => actions.onReview(path, item.taskId)}

@@ -42,9 +42,14 @@ export function shortcutFor(
 ): ShortcutAction | null {
   const key = e.key.toLowerCase();
   const mod = e.ctrlKey || e.metaKey;
-  const inField = /INPUT|TEXTAREA|SELECT/.test(
-    (e.target as HTMLElement | null)?.tagName || "",
-  );
+  const target = e.target instanceof Element ? e.target : null;
+  const editable = target?.closest("[contenteditable]");
+  const inField =
+    /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || "") ||
+    Boolean((target as HTMLElement | null)?.isContentEditable) ||
+    ["", "true", "plaintext-only"].includes(
+      editable?.getAttribute("contenteditable")?.toLowerCase() ?? "false",
+    );
   // A terminal owns the keyboard (Escape, Ctrl+L, Ctrl+P, …) except the
   // key that toggles it.
   const inTerminal = Boolean(
@@ -95,6 +100,8 @@ export function useShortcuts(
   handler.current = run;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Editors and other focused controls get first ownership of handled keys.
+      if (e.defaultPrevented) return;
       const action = shortcutFor(e, state.current);
       if (!action) return;
       if (!action.startsWith("close-")) e.preventDefault();

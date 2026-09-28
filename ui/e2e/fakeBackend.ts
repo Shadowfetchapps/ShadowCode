@@ -26,6 +26,8 @@ export type FakeOptions = {
   compareConflict?: boolean;
   /** Worktree tasks: the first Apply finds src/app.ts changed. */
   worktreeConflict?: boolean;
+  /** Seed a finished conversation without selecting or calling a model. */
+  completedTask?: boolean;
 };
 
 export function installFakeBackend(options: FakeOptions = {}) {
@@ -2320,7 +2322,19 @@ export function installFakeBackend(options: FakeOptions = {}) {
           })),
       };
     }
-    if (path === "/api/compare" && method === "POST") return startCompare(body);
+    if (path === "/api/compare" && method === "POST") {
+      const savedDrafts = JSON.parse(
+        sessionStorage.getItem("shadow-fake-editor-drafts") || "{}",
+      );
+      const pending = Object.values(savedDrafts as Record<string, Json>)
+        .filter((draft) => draft.draft !== draft.base)
+        .map((draft) => String(draft.path));
+      if (pending.length)
+        throw new Error(
+          `Save or discard open editor drafts before comparing: ${pending.join(", ")}`,
+        );
+      return startCompare(body);
+    }
     if (path === "/api/compares")
       return {
         compares: [...state.compares]
@@ -2413,6 +2427,76 @@ export function installFakeBackend(options: FakeOptions = {}) {
         ],
         issues: [],
       };
+    if (path === "/api/workspace/context-preview") {
+      let budget = 256 * 1024;
+      const items = (Array.isArray(body.mentions) ? body.mentions : []).map(
+        (mention: { path?: string; kind?: string }) => {
+          const filePath = String(mention.path || "");
+          if (mention.kind === "dir") {
+            const entries = Object.keys(state.files)
+              .filter((name) => name.startsWith(`${filePath}/`))
+              .slice(0, 200);
+            return {
+              path: filePath,
+              kind: "dir",
+              included: true,
+              reason:
+                "Explicit @mention; folder names are attached, not file contents.",
+              bytes: entries.reduce((sum, entry) => sum + entry.length, 0),
+              total_bytes: null,
+              from_line: null,
+              to_line: null,
+              entries,
+              truncated: false,
+            };
+          }
+          const text = state.files[filePath];
+          if (text === undefined || text === null)
+            return {
+              path: filePath,
+              kind: "file",
+              included: false,
+              reason: "File could not be read when this preview was prepared.",
+              bytes: 0,
+              total_bytes: null,
+              from_line: null,
+              to_line: null,
+              entries: [],
+              truncated: false,
+            };
+          const limit = Math.min(64 * 1024, budget);
+          const included = text.slice(0, limit);
+          budget -= included.length;
+          const lines = included.split(/\r\n|\r|\n/).length;
+          return {
+            path: filePath,
+            kind: "file",
+            included: true,
+            reason:
+              "Explicit @mention; current file text is attached within per-file and total byte limits.",
+            bytes: included.length,
+            total_bytes: text.length,
+            from_line: included ? 1 : null,
+            to_line: included ? lines : null,
+            entries: [],
+            truncated: included.length < text.length,
+          };
+        },
+      );
+      const includedBytes = items.reduce(
+        (
+          sum: number,
+          item: { included: boolean; bytes: number; kind: string },
+        ) => sum + (item.included && item.kind === "file" ? item.bytes : 0),
+        0,
+      );
+      return {
+        items,
+        included_bytes: includedBytes,
+        estimated_tokens: Math.ceil(includedBytes / 3),
+        truncated: items.some((item: { truncated: boolean }) => item.truncated),
+      };
+    }
     if (path === "/api/workspace/mentions") {
       const query = (q.get("q") || "").toLowerCase();
       const dirs = new Set<string>();
@@ -2610,6 +2694,56 @@ export function installFakeBackend(options: FakeOptions = {}) {
       return { job: job || null };
     }
     if (path === "/api/jobs" && method === "GET") return { jobs: state.jobs };
+    if (path === "/api/jobs/test" && method === "POST") {
+      const session = state.sessions.find(
+        (s: Json) => s.id === body.session_id,
+      );
+      if (
+        !session ||
+        body.workspace !== workspace ||
+        session.workspace !== body.workspace
+      )
+        throw new Error("Test task belongs to another workspace or session");
+      if (!body.command?.trim())
+        throw new Error("Choose an explicit check command");
+      const job: Json = {
+        id: `j${state.jobs.length + 1}`,
+        task_id: `t${state.jobs.length + 1}`,
+        workspace: body.workspace,
+        session_id: body.session_id,
+        status: "queued",
+        task: `Run test command: ${body.command}`,
+        model: "native command",
+        mode: "command",
+        web: false,
+        started_at: now(),
+        event_cursor: state.cursor,
+      };
+      state.jobs.push(job);
+      emit(job.session_id, job.task_id, "user.message", { text: job.task });
+      setTimeout(() => {
+        job.status = "running";
+        emit(job.session_id, job.task_id, "agent.started", {
+          task: job.task,
+          job_id: job.id,
+          mode: "command",
+          model: "native command",
+        });
+        emit(job.session_id, job.task_id, "tool.started", {
+          tool: "exec",
+          call_id: `${job.id}-exec`,
+          arguments: { command: body.command },
+        });
+        requestApproval({
+          session_id: job.session_id,
+          task_id: job.task_id,
+          command: body.command,
+          arguments: { command: body.command },
+          command_job_id: job.id,
+        });
+      }, step);
+      return { ...job };
+    }
     if (path === "/api/jobs" && method === "POST") {
       const target = pickerTargets().find((t) => t.id === body.model);
       if (!target) throw new Error("Choose a model in the composer");
@@ -2670,6 +2804,13 @@ export function installFakeBackend(options: FakeOptions = {}) {
       }
       return { ...job };
     }
+    if ((m = path.match(/^\/api\/jobs\/([^/]+)\/verification$/)))
+      return (
+        state.jobs.find((j: Json) => j.id === m![1])?.result?.verification || {
+          status: "not_run",
+          commands: [],
+        }
+      );
     if ((m = path.match(/^\/api\/jobs\/([^/]+)$/)))
       return { ...state.jobs.find((j: Json) => j.id === m![1]) };
     if (path === "/api/feed" && method === "GET") {
@@ -2728,6 +2869,65 @@ export function installFakeBackend(options: FakeOptions = {}) {
         throw compareError("Approval belongs to a different session");
       state.approvals = state.approvals.filter((a: Json) => a !== approval);
       notify("approval.resolved", approval.session_id);
+      if (approval.command_job_id) {
+        const job = state.jobs.find(
+          (j: Json) => j.id === approval.command_job_id,
+        );
+        setTimeout(() => {
+          const success = body.decision === "approve";
+          const output = success
+            ? "Fixture check output: 4 cases passed."
+            : "Check denied by the user.";
+          emit(job.session_id, job.task_id, "tool.completed", {
+            tool: "exec",
+            call_id: `${job.id}-exec`,
+            success,
+            output_preview: output,
+            output: { stdout: output, exit_code: success ? 0 : null },
+          });
+          const verification = {
+            status: success ? "passed" : "failed",
+            commands: [
+              {
+                schema_version: 1,
+                command: approval.command,
+                kind: "configured_check",
+                state: success ? "passed" : "failed",
+                success,
+                exit_code: success ? 0 : null,
+                task_id: job.task_id,
+                attempt_id: job.id,
+                tool_call_id: `${job.id}-exec`,
+                cwd: job.workspace,
+                provenance: "locally_observed",
+                workspace_fingerprint: "fixture-content-fingerprint",
+                output_ref: `event:${state.cursor}`,
+                scope:
+                  "Explicit user-selected check; rendering fixture, not a real process execution.",
+              },
+            ],
+          };
+          job.status = success ? "completed" : "failed";
+          job.finished_at = now();
+          job.summary = success
+            ? "Test command completed with exit status 0."
+            : output;
+          job.result = { success, summary: job.summary, verification };
+          emit(
+            job.session_id,
+            job.task_id,
+            "verification.summary",
+            verification,
+          );
+          emit(job.session_id, job.task_id, "agent.completed", {
+            success,
+            cancelled: false,
+            summary: job.summary,
+            verification,
+          });
+          job.event_cursor = state.cursor;
+        }, step);
+      }
       return { ...approval, pending: false };
     }
     if (path === "/api/commands") return { commands: [] };
@@ -2966,6 +3166,32 @@ export function installFakeBackend(options: FakeOptions = {}) {
     }
     if (path === "/api/remote/ntfy/test") return { ok: true };
     throw new Error(`Fake backend has no route for ${method} ${path}`);
+  }
+
+  if (options.completedTask) {
+    const job: Json = {
+      id: "j1",
+      task_id: "t1",
+      workspace,
+      session_id: "s1",
+      status: "completed",
+      started_at: now() - 5,
+      finished_at: now(),
+      task: "Inspect the project",
+      model: "native command",
+      mode: "command",
+      event_cursor: 0,
+      result: { success: true, summary: "Project inspection finished." },
+    };
+    state.jobs.push(job);
+    emit("s1", "t1", "user.message", { text: job.task });
+    emit("s1", "t1", "agent.started", { task: job.task, job_id: job.id });
+    emit("s1", "t1", "agent.completed", {
+      success: true,
+      cancelled: false,
+      summary: job.result.summary,
+    });
+    job.event_cursor = state.cursor;
   }
 
   const bridge = {

@@ -119,6 +119,63 @@ it("ignores active completion messages and snapshots belonging to other tasks", 
   expect(stream.close).not.toHaveBeenCalled();
 });
 
+it("keeps cancellation terminal when a late successful event arrives", () => {
+  const complete = vi.fn();
+  const { result } = renderHook(() => useConversation(complete));
+  act(() => result.current.load(detail(), job));
+  const oldStream = vi.mocked(jobEvents).mock.results.at(-1)!.value as JobStream;
+
+  act(() =>
+    oldStream.onmessage?.({
+      data: JSON.stringify(event(201, "Partial output before stop")),
+    }),
+  );
+  expect(result.current.transcript.items.at(-1)?.text).toBe(
+    "Partial output before stop",
+  );
+
+  const cancelled: Job = {
+    ...job,
+    status: "cancelled",
+    summary: "Task cancelled",
+    event_cursor: 201,
+  };
+  const cancelledDetail: SessionDetail = {
+    ...detail(),
+    events: [event(201, "Partial output before stop")],
+    event_cursor: 201,
+  };
+  act(() => result.current.load(cancelledDetail, cancelled));
+
+  act(() =>
+    oldStream.onmessage?.({
+      data: JSON.stringify({
+        type: "job.done",
+        payload: {
+          ...cancelled,
+          status: "completed",
+          summary: "Late success must not replace cancellation",
+          event_cursor: 202,
+        },
+      }),
+    }),
+  );
+
+  expect(result.current.job).toMatchObject({
+    id: "job",
+    status: "cancelled",
+    summary: "Task cancelled",
+  });
+  expect(result.current.transcript.stage).toBe("CANCELLED");
+  expect(result.current.transcript.items.map((item) => item.text)).toContain(
+    "Partial output before stop",
+  );
+  expect(result.current.transcript.items.map((item) => item.text)).not.toContain(
+    "Late success must not replace cancellation",
+  );
+  expect(complete).not.toHaveBeenCalled();
+});
+
 it("promotes a queued local task on preparation without waiting for agent.started", () => {
   const { result } = renderHook(() => useConversation(vi.fn()));
   act(() => result.current.load(detail(), { ...job, status: "queued" }));

@@ -1,8 +1,7 @@
-import type { ReactNode, RefObject } from "react";
+import { lazy, Suspense, type ReactNode, type RefObject } from "react";
 import { ArrowDown } from "lucide-react";
 import type { Approval, CommandResult, Health, Job, Session } from "../../api";
 import type { ApprovalDecision } from "../ApprovalCard";
-import { CompareView } from "../CompareView";
 import type { DrawerTab } from "../Drawer";
 import type { AdvancedTab, SettingsSection } from "../Settings";
 import { ChatView } from "./ChatView";
@@ -23,6 +22,10 @@ import type { ToastKind } from "../../hooks/useToasts";
 import type { WorkspaceStatus } from "../../hooks/useWorkspace";
 import type { Fallback } from "../../lib/allowance";
 import type { PickerTarget } from "../../lib/picker";
+
+const CompareView = lazy(() =>
+  import("../CompareView").then((module) => ({ default: module.CompareView })),
+);
 import { writeStore } from "../../lib/storage";
 import { invoke } from "../../lib/transport";
 import { trustRequestFor } from "../../lib/trust";
@@ -189,23 +192,25 @@ export function Stage({
         issueOffer={issueOffer}
       />
       {view === "compare" && (
-        <CompareView
-          workspace={compare.projectPath}
-          compareId={compare.compareId}
-          targets={targets}
-          onSelect={compare.setCompareId}
-          onClose={() => compare.setView("chat")}
-          onOpenLane={(record, lane) => void compare.openLane(record, lane)}
-          onOpenDiff={(record, lane, path) =>
-            void compare.openLaneDiff(record, lane, path)
-          }
-          onOpenChanges={(path) => {
-            void refresh().catch(() => undefined);
-            reviewChanges(path);
-          }}
-          onApplied={() => void refresh().catch(() => undefined)}
-          onRecords={compare.noteLanes}
-        />
+        <Suspense fallback={<p role="status">Opening Compare…</p>}>
+          <CompareView
+            workspace={compare.projectPath}
+            compareId={compare.compareId}
+            targets={targets}
+            onSelect={compare.setCompareId}
+            onClose={() => compare.setView("chat")}
+            onOpenLane={(record, lane) => void compare.openLane(record, lane)}
+            onOpenDiff={(record, lane, path) =>
+              void compare.openLaneDiff(record, lane, path)
+            }
+            onOpenChanges={(path) => {
+              void refresh().catch(() => undefined);
+              reviewChanges(path);
+            }}
+            onApplied={() => void refresh().catch(() => undefined)}
+            onRecords={compare.noteLanes}
+          />
+        </Suspense>
       )}
       {view !== "compare" && reviewPanel}
       <ChatView

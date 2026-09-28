@@ -1,7 +1,7 @@
-import type { ComponentProps, RefObject } from "react";
+import { lazy, Suspense, type ComponentProps, type RefObject } from "react";
 import type { LimitsConfig, Project } from "../../api";
 import { AllowancePanel, PlanLimitControl } from "../Allowance";
-import { CompareDialog } from "../CompareDialog";
+import type { CompareDialog as CompareDialogComponent } from "../CompareDialog";
 import { ConsentDialog } from "../ConsentDialog";
 import {
   Help,
@@ -9,8 +9,9 @@ import {
   ProjectPicker,
   TrustDialog,
   type PaletteItem,
+  type TrustDialog as TrustDialogComponent,
 } from "../overlays";
-import { Settings, type AdvancedTab, type SettingsSection } from "../Settings";
+import type { AdvancedTab, SettingsProps, SettingsSection } from "../Settings";
 import { readyLocalTargets } from "../../lib/allowance";
 import { billingWarning, type PickerTarget } from "../../lib/picker";
 import type { useAllowance } from "../../hooks/useCatalog";
@@ -19,7 +20,15 @@ import type { Consent } from "../../hooks/useTaskActions";
 export type Overlay =
   "" | "settings" | "help" | "palette" | "project" | "allowance" | "compare";
 
-type CompareProps = ComponentProps<typeof CompareDialog>;
+const Settings = lazy(() =>
+  import("../Settings").then((module) => ({ default: module.Settings })),
+);
+const CompareDialog = lazy(() =>
+  import("../CompareDialog").then((module) => ({
+    default: module.CompareDialog,
+  })),
+);
+type CompareProps = ComponentProps<typeof CompareDialogComponent>;
 
 /** Every modal the window can show: the open overlay (Settings, Compare,
  * Allowance, shortcuts, palette, project picker), the trust prompt and the
@@ -50,14 +59,14 @@ export function AppDialogs({
 }: {
   overlay: Overlay;
   setOverlay: (overlay: Overlay) => void;
-  trust: ComponentProps<typeof TrustDialog>["req"] | null;
+  trust: ComponentProps<typeof TrustDialogComponent>["req"] | null;
   onCancelTrust: () => void;
   onConfirmTrust: () => void;
   consent: Consent | null;
   targets: PickerTarget[];
   onCancelConsent: () => void;
   onSendConsent: () => void;
-  settings: Omit<ComponentProps<typeof Settings>, "planLimit">;
+  settings: Omit<SettingsProps, "planLimit">;
   limits: LimitsConfig;
   allowance: ReturnType<typeof useAllowance>;
   onSaveLimits: (limits: LimitsConfig) => Promise<void>;
@@ -113,21 +122,25 @@ export function AppDialogs({
         />
       )}
       {overlay === "settings" && (
-        <Settings {...settings} planLimit={planLimit} />
+        <Suspense fallback={<p role="status">Opening settings…</p>}>
+          <Settings {...settings} planLimit={planLimit} />
+        </Suspense>
       )}
       {overlay === "compare" && (
-        <CompareDialog
-          {...compare}
-          targets={targets}
-          onOpenAllowance={() => {
-            allowanceReturn.current = true;
-            setOverlay("allowance");
-            void allowance.reload();
-          }}
-          onConnect={(vendor) => onOpenSettings("accounts", { vendor })}
-          onSetup={onSetup}
-          onAddLocal={openLocal}
-        />
+        <Suspense fallback={<p role="status">Opening Compare…</p>}>
+          <CompareDialog
+            {...compare}
+            targets={targets}
+            onOpenAllowance={() => {
+              allowanceReturn.current = true;
+              setOverlay("allowance");
+              void allowance.reload();
+            }}
+            onConnect={(vendor) => onOpenSettings("accounts", { vendor })}
+            onSetup={onSetup}
+            onAddLocal={openLocal}
+          />
+        </Suspense>
       )}
       {overlay === "allowance" && (
         <AllowancePanel

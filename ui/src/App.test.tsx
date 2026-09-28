@@ -21,6 +21,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   delete window.__SHADOW_TEST_TRANSPORT__;
 });
 
@@ -44,6 +45,71 @@ async function choose(name: RegExp) {
   fireEvent.click(await screen.findByRole("option", { name }));
   await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
 }
+
+it("runs an approved check without a model and preserves the unsent composer draft", async () => {
+  // Happy DOM has no layout visibility observations; assess the mounted card.
+  vi.stubGlobal("IntersectionObserver", undefined);
+  fake = installFakeBackend({ stepMs: 5, completedTask: true });
+  await boot();
+  const draft = "Keep this unsent implementation request";
+  fireEvent.change(prompt(), { target: { value: draft } });
+  expect(trigger().textContent).toContain("Choose a model");
+  fireEvent.click(await screen.findByRole("button", { name: "Run a check…" }));
+  const dialog = screen.getByRole("dialog", { name: "Run a check" });
+  fireEvent.change(
+    within(dialog).getByRole("textbox", { name: "Check command" }),
+    { target: { value: "npm test" } },
+  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "Run check" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "Run a check" })).toBeNull(),
+  );
+  const allow = await screen.findByRole("button", {
+    name: "Allow",
+  });
+  expect(prompt()).toHaveProperty("value", draft);
+  expect(fake.state.jobs.at(-1).status).toBe("running");
+  expect(
+    screen.queryByText("Fixture check output: 4 cases passed."),
+  ).toBeNull();
+  fireEvent.click(allow);
+  await waitFor(() => expect(fake.state.jobs.at(-1).status).toBe("completed"));
+  await waitFor(() =>
+    expect(
+      screen.getAllByRole("region", { name: "Task summary" }),
+    ).toHaveLength(2),
+  );
+  const summary = screen
+    .getAllByRole("region", { name: "Task summary" })
+    .at(-1)!;
+  await waitFor(() => expect(within(summary).getByText("passed")).toBeTruthy());
+  expect(
+    within(summary).getByText(/Fixture check output: 4 cases passed\./),
+  ).toBeTruthy();
+  expect(prompt()).toHaveProperty("value", draft);
+  expect(trigger().textContent).toContain("Choose a model");
+  expect(
+    fake.log
+      .filter(
+        (request) =>
+          request.method === "POST" && request.path === "/api/jobs/test",
+      )
+      .map((request) => request.body),
+  ).toEqual([
+    {
+      workspace: "/work/demo",
+      session_id: "s1",
+      command: "npm test",
+      timeout: 300,
+      queue: false,
+    },
+  ]);
+  expect(
+    fake.log.some(
+      (request) => request.method === "POST" && request.path === "/api/jobs",
+    ),
+  ).toBe(false);
+});
 
 it("keeps a pending approval when the selected conversation is opened again", async () => {
   await boot();

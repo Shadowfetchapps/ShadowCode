@@ -334,6 +334,7 @@ export type LimitsConfig = {
 
 export type LoginProgress = {
   running: boolean;
+  cancellation_requested?: boolean;
   lines: string[];
   done: {
     ok: boolean;
@@ -352,6 +353,15 @@ export type ConsentRequest = {
     excerpt_chars?: number;
     images?: number;
   };
+};
+
+/** An explicit user-selected check, executed locally without a model turn. */
+export type CheckJobRequest = {
+  workspace: string;
+  session_id: string;
+  command: string;
+  timeout: number;
+  queue: false;
 };
 
 export type StartJobRequest = {
@@ -1060,6 +1070,23 @@ export type GuardianStatus = {
   last_run?: number;
   last_result?: { tests: { hint?: string; executed: boolean } };
 };
+export type ContextPreview = {
+  items: {
+    path: string;
+    kind: "file" | "dir" | string;
+    included: boolean;
+    reason: string;
+    bytes: number;
+    total_bytes: number | null;
+    from_line: number | null;
+    to_line: number | null;
+    entries: string[];
+    truncated: boolean;
+  }[];
+  included_bytes: number;
+  estimated_tokens: number;
+  truncated: boolean;
+};
 export const api = {
   parallelPlan: () => get<{ plan: ParallelPlan | null }>("/api/parallel"),
   prepareParallel: (goal: string) =>
@@ -1177,12 +1204,14 @@ export const api = {
   loginProgress: async (vendor: string): Promise<LoginProgress> => {
     const raw = await get<{
       running: boolean;
+      cancellation_requested?: boolean;
       lines?: (string | { line?: string })[];
       done: LoginProgress["done"];
     }>(`/api/accounts/${encodeURIComponent(vendor)}/login`);
     // The engine sends {vendor, line, url} records; the page shows text lines.
     return {
       running: raw.running,
+      cancellation_requested: raw.cancellation_requested === true,
       done: raw.done,
       lines: (raw.lines || []).map((entry) =>
         typeof entry === "string" ? entry : String(entry.line ?? ""),
@@ -1682,6 +1711,8 @@ export const api = {
       throw error;
     }
   },
+  startTestJob: (body: CheckJobRequest) =>
+    send<Job>("/api/jobs/test", "POST", body),
   job: (id: string) => get<Job>(`/api/jobs/${id}`),
   jobVerification: (id: string) =>
     get<Record<string, unknown>>(
@@ -1746,6 +1777,11 @@ export const api = {
       items: { path: string; kind: "file" | "dir" }[];
       truncated: boolean;
     }>(`/api/workspace/mentions?q=${encodeURIComponent(query)}&limit=${limit}`),
+  /** Exact byte-bounded ShadowCode @-mention attachment preview. */
+  contextPreview: (mentions: { path: string; kind: "file" | "dir" }[]) =>
+    send<ContextPreview>("/api/workspace/context-preview", "POST", {
+      mentions,
+    }),
   /** The files one task changed (per-task review). */
   review: (taskId: string) =>
     get<{

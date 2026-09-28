@@ -1,18 +1,34 @@
 import { X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { api, type Session } from "../api";
 import { Empty } from "./cards";
-import { ChangesTab } from "./ChangesTab";
-import { BranchPanel } from "./BranchPanel";
-import { PreviewPanel } from "./PreviewPanel";
-import { FileEditor } from "./FileEditor";
 import { TerminalPanel } from "./TerminalPanel";
-import { ToolsTab, type ToolsView } from "./ToolsTab";
+import type { ToolsView } from "./ToolsTab";
 import { exportSession } from "../lib/transport";
 import {
   type DrawerMemory,
   type DrawerMemoryUpdate,
 } from "../hooks/useDrawerMemory";
+
+const FileEditor = lazy(() =>
+  import("./FileEditor").then((module) => ({ default: module.FileEditor })),
+);
+const ChangesTab = lazy(() =>
+  import("./ChangesTab").then((module) => ({ default: module.ChangesTab })),
+);
+const BranchPanel = lazy(() =>
+  import("./BranchPanel").then((module) => ({ default: module.BranchPanel })),
+);
+const PreviewPanel = lazy(() =>
+  import("./PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
+);
+const ToolsTab = lazy(() =>
+  import("./ToolsTab").then((module) => ({ default: module.ToolsTab })),
+);
+
+function PanelFallback() {
+  return <p role="status">Opening panel…</p>;
+}
 
 /** The optional right-hand drawer: the readable diff of current changes,
  * Git (commit, push, pull requests), the user's own terminals, files,
@@ -141,59 +157,69 @@ export function Drawer({
           />
         )}
         {tab === "preview" && (
-          <PreviewPanel
-            workspace={workspace}
-            toast={toast}
-            memory={memory}
-            onMemory={onMemory}
-          />
+          <Suspense fallback={<PanelFallback />}>
+            <PreviewPanel
+              workspace={workspace}
+              toast={toast}
+              memory={memory}
+              onMemory={onMemory}
+            />
+          </Suspense>
         )}
         {tab === "git" && (
-          <BranchPanel
-            busy={busy}
-            toast={toast}
-            memory={memory}
-            onMemory={onMemory}
-            onOpenTerminal={() => onTab("terminal")}
-          />
+          <Suspense fallback={<PanelFallback />}>
+            <BranchPanel
+              busy={busy}
+              toast={toast}
+              memory={memory}
+              onMemory={onMemory}
+              onOpenTerminal={() => onTab("terminal")}
+            />
+          </Suspense>
         )}
         {tool && (
-          <ToolsTab
-            view={tool}
-            onView={onTab}
-            sessionId={sessionId}
-            busy={busy}
-            toast={toast}
-            onOpenSession={onOpenSession}
-            onOpenProject={onOpenProject}
-            onAskAgent={onAskAgent}
-            onIssueLinked={(link) => onMemory("issueTask", link)}
-            onOpenTerminal={() => onTab("terminal")}
-          />
+          <Suspense fallback={<PanelFallback />}>
+            <ToolsTab
+              view={tool}
+              onView={onTab}
+              sessionId={sessionId}
+              busy={busy}
+              toast={toast}
+              onOpenSession={onOpenSession}
+              onOpenProject={onOpenProject}
+              onAskAgent={onAskAgent}
+              onIssueLinked={(link) => onMemory("issueTask", link)}
+              onOpenTerminal={() => onTab("terminal")}
+            />
+          </Suspense>
         )}
         {tab === "files" && (
-          <FileEditor
-            workspace={workspace}
-            memory={memory}
-            onMemory={onMemory}
-            onDiscardFileDraft={onDiscardFileDraft}
-            onResolveFileDraftConflict={onResolveFileDraftConflict}
-            toast={toast}
-            onShowDiff={(p) => {
-              onDiffPath(p);
-              onTab("changes");
-            }}
-          />
+          <Suspense fallback={<p role="status">Opening the file editor…</p>}>
+            <FileEditor
+              workspace={workspace}
+              memory={memory}
+              onMemory={onMemory}
+              onDiscardFileDraft={onDiscardFileDraft}
+              onResolveFileDraftConflict={onResolveFileDraftConflict}
+              toast={toast}
+              onShowDiff={(p) => {
+                onDiffPath(p);
+                onTab("changes");
+              }}
+            />
+          </Suspense>
         )}
         {tab === "changes" && (
-          <ChangesTab
-            path={diffPath}
-            busy={busy}
-            toast={toast}
-            onAskAgent={onAskAgent}
-            memory={memory}
-            onMemory={onMemory}
-          />
+          <Suspense fallback={<PanelFallback />}>
+            <ChangesTab
+              path={diffPath}
+              busy={busy}
+              toast={toast}
+              onAskAgent={onAskAgent}
+              memory={memory}
+              onMemory={onMemory}
+            />
+          </Suspense>
         )}
       </div>
     </aside>

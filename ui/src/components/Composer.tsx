@@ -7,6 +7,7 @@ import {
 } from "react";
 import {
   ArrowUp,
+  Eye,
   FileCode2,
   Folder,
   ListPlus,
@@ -37,6 +38,7 @@ import {
 } from "../lib/attachments";
 import type { ContextAttachment } from "../lib/pendingAttachments";
 import { ContextChips } from "./ContextChips";
+import { ContextInventory } from "./ContextInventory";
 
 export type SlashCommand = {
   name: string;
@@ -123,6 +125,7 @@ export function Composer({
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashOpen, setSlashOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [contextInventoryOpen, setContextInventoryOpen] = useState(false);
   const hits = slashOpen
     ? commands.filter((c) => c.name.startsWith(task.slice(1))).slice(0, 8)
     : [];
@@ -273,30 +276,47 @@ export function Composer({
           </ul>
         )}
         {mentions.length > 0 && (
-          <ul className="chips" aria-label="Mentioned files and folders">
-            {mentions.map((m) => (
-              <li key={m.path} className="path-chip mention-chip">
-                {m.kind === "dir" ? (
-                  <Folder size={12} aria-hidden="true" />
-                ) : (
-                  <FileCode2 size={12} aria-hidden="true" />
-                )}
-                <span title={m.path}>{mentionToken(m).slice(1)}</span>
-                <button
-                  type="button"
-                  className="chip-remove"
-                  aria-label={`Remove ${m.path}`}
-                  onClick={() => {
-                    onTask(removeMentionText(task, m));
-                    onRemoveMention?.(m.path);
-                    promptRef.current?.focus();
-                  }}
-                >
-                  <X size={12} aria-hidden="true" />
-                </button>
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul className="chips" aria-label="Mentioned files and folders">
+              {mentions.map((m) => (
+                <li key={m.path} className="path-chip mention-chip">
+                  {m.kind === "dir" ? (
+                    <Folder size={12} aria-hidden="true" />
+                  ) : (
+                    <FileCode2 size={12} aria-hidden="true" />
+                  )}
+                  <span title={m.path}>{mentionToken(m).slice(1)}</span>
+                  <button
+                    type="button"
+                    className="chip-remove"
+                    aria-label={`Remove ${m.path}`}
+                    onClick={() => {
+                      onTask(removeMentionText(task, m));
+                      onRemoveMention?.(m.path);
+                      promptRef.current?.focus();
+                    }}
+                  >
+                    <X size={12} aria-hidden="true" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              className="context-inventory-trigger"
+              aria-expanded={contextInventoryOpen}
+              onClick={() => setContextInventoryOpen((open) => !open)}
+            >
+              <Eye size={13} aria-hidden="true" />
+              Inspect attached context
+            </button>
+            {contextInventoryOpen && (
+              <ContextInventory
+                mentions={mentions}
+                onClose={() => setContextInventoryOpen(false)}
+              />
+            )}
+          </>
         )}
         <textarea
           ref={promptRef}

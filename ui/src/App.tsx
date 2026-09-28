@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { api, type CommandResult, type Job } from "./api";
 import { Drawer, type DrawerTab } from "./components/Drawer";
 import { Sidebar } from "./components/Sidebar";
@@ -31,12 +31,12 @@ import { useTaskActions, type Consent } from "./hooks/useTaskActions";
 import { useAttachments } from "./hooks/useAttachments";
 import { useComposerExtras } from "./hooks/useComposerExtras";
 import { useConversationEdits } from "./hooks/useConversationEdits";
-import { ReviewView } from "./components/ReviewView";
 import { RewindDialog } from "./components/RewindDialog";
 import { useNavigation } from "./hooks/useNavigation";
 import { useJobControls } from "./hooks/useJobControls";
 import { useDesktopEvents, useSidebar } from "./hooks/useWindow";
 import { useRowActions } from "./hooks/useRowActions";
+import { useRunCheck } from "./hooks/useRunCheck";
 import { useConversationBadges } from "./hooks/useConversationBadges";
 import { useConversationMenu } from "./hooks/useConversationMenu";
 import { useNotificationLinks } from "./hooks/useNotificationLinks";
@@ -54,6 +54,12 @@ import { sameWorkspacePath } from "./lib/trust";
 import { closingPr, issueFollowUp } from "./lib/issues";
 import { exportSession as saveExport } from "./lib/transport";
 import { isActive } from "./lib/jobs";
+
+const ReviewView = lazy(() =>
+  import("./components/ReviewView").then((module) => ({
+    default: module.ReviewView,
+  })),
+);
 
 /** The window. Behaviour lives in `hooks/` (navigation, the approvals and
  * jobs feed, the conversation stream, sending, Compare, shortcuts, theme);
@@ -312,6 +318,9 @@ export default function App() {
 
   const compare = useCompare({
     workspace,
+    unsavedFiles: Object.values(memory.memory.filesBuffers)
+      .filter((buffer) => buffer.draft !== buffer.base)
+      .map((buffer) => buffer.path),
     sessionId,
     sessions,
     selectedRef: nav.selectedRef,
@@ -452,6 +461,18 @@ export default function App() {
       refresh,
       toast,
     });
+  const runCheck = useRunCheck({
+    workspace,
+    sessionId,
+    selectedRef: nav.selectedRef,
+    selection: nav.selection,
+    submittingRef,
+    locked: composerLocked || queueing,
+    setSubmitting,
+    start: conversation.start,
+    pin: scroll.pin,
+    refresh,
+  });
   const rowActions = useRowActions({
     setTranscript: conversation.setTranscript,
     reviewChanges,
@@ -464,6 +485,14 @@ export default function App() {
     openLocal: () => openSettings("local"),
     fork: controls.fork,
     openSession: nav.openSession,
+    runCheck: sessionId
+      ? {
+          workspace,
+          sessionId,
+          disabled: composerLocked || queueing,
+          onRun: runCheck,
+        }
+      : undefined,
   });
   const onDecide = useStableCallback(
     (id: string, answer: ApprovalDecision) => void controls.decide(id, answer),
@@ -632,22 +661,24 @@ export default function App() {
         extras={extras}
         reviewPanel={
           review.target ? (
-            <ReviewView
-              key={review.target.taskId}
-              taskId={review.target.taskId}
-              initialPath={review.target.path}
-              busy={busy}
-              onClose={review.close}
-              toast={toast}
-              refresh={refreshAfterFiles}
-              onAskAgent={(prompt) => {
-                setTask(prompt);
-                review.close();
-                promptRef.current?.focus();
-              }}
-              memory={memory.memory}
-              onMemory={memory.update}
-            />
+            <Suspense fallback={<p role="status">Opening review…</p>}>
+              <ReviewView
+                key={review.target.taskId}
+                taskId={review.target.taskId}
+                initialPath={review.target.path}
+                busy={busy}
+                onClose={review.close}
+                toast={toast}
+                refresh={refreshAfterFiles}
+                onAskAgent={(prompt) => {
+                  setTask(prompt);
+                  review.close();
+                  promptRef.current?.focus();
+                }}
+                memory={memory.memory}
+                onMemory={memory.update}
+              />
+            </Suspense>
           ) : undefined
         }
         worktreeBar={
@@ -769,6 +800,9 @@ export default function App() {
           models: compare.models,
           onModels: compare.setModels,
           uncommitted: git.count,
+          unsavedFiles: Object.values(memory.memory.filesBuffers)
+            .filter((buffer) => buffer.draft !== buffer.base)
+            .map((buffer) => buffer.path),
           web: webAllowed && webEnabled,
           onStart: compare.start,
           onClose: () => {

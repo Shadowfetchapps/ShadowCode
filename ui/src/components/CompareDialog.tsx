@@ -26,6 +26,7 @@ export function CompareDialog({
   models,
   onModels,
   uncommitted,
+  unsavedFiles = [],
   web,
   onStart,
   onClose,
@@ -42,6 +43,8 @@ export function CompareDialog({
   onModels: (models: string[]) => void;
   /** Uncommitted files in the project (they are copied into every lane). */
   uncommitted: number;
+  /** Open editor drafts do not exist in the filesystem snapshot yet. */
+  unsavedFiles?: string[];
   /** Web lookups are on for models that run on ShadowCode's own loop. */
   web?: boolean;
   /** Starts the comparison; a rejection is shown in the dialog. */
@@ -70,7 +73,7 @@ export function CompareDialog({
   }
   async function start() {
     setTried(true);
-    if (check.error || starting) return;
+    if (check.error || unsavedFiles.length || starting) return;
     setStarting(true);
     setError("");
     try {
@@ -225,6 +228,13 @@ export function CompareDialog({
           Your project is not changed until you keep a result.
           {web ? " Web lookups are on for models that support them." : ""}
         </p>
+        {unsavedFiles.length > 0 && (
+          <p className="health-bad compare-error" role="alert">
+            Save or discard these open drafts before comparing: {unsavedFiles.join(", ")}.
+            Compare snapshots files from disk, so unsaved editor text would
+            otherwise be missing.
+          </p>
+        )}
         {error && (
           <p className="health-bad compare-error" role="alert">
             {error}
@@ -242,8 +252,9 @@ export function CompareDialog({
           <button
             type="button"
             className="primary"
-            aria-disabled={Boolean(check.error) || starting}
-            title={check.error || undefined}
+            disabled={unsavedFiles.length > 0 || starting}
+            aria-disabled={Boolean(check.error) || unsavedFiles.length > 0 || starting}
+            title={unsavedFiles.length ? "Save or discard open drafts first" : check.error || undefined}
             onClick={() => void start()}
           >
             {starting && (

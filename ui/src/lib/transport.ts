@@ -1,6 +1,7 @@
 import { invoke as tauriInvoke, isTauri } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { createRemoteBridge } from "./remote";
+import { createSharedNativeEvents } from "./nativeEvents";
 
 /** The window talks to the in-process engine through one bridge: IPC requests,
  * native commands (pickers, external links) and engine wake-up events. */
@@ -23,8 +24,9 @@ const tauriBridge: Bridge = {
   request: (path, method, body) =>
     tauriInvoke("api", { request: { method, path, body: body ?? null } }),
   invoke: (command, args) => tauriInvoke(command, args),
-  listen: (event, handler) =>
+  listen: createSharedNativeEvents((event, handler) =>
     tauriListen(event, (message) => handler(message.payload)),
+  ),
 };
 
 /** A deterministic fake backend is honoured only in builds made with
@@ -154,7 +156,10 @@ export const exportSession = (
   format: "md" | "json" = "md",
 ) => invoke<string | null>("export_session", { sessionId, format });
 
-export const exportDiagnostics = (snapshotId: string, expectedContent: string) =>
+export const exportDiagnostics = (
+  snapshotId: string,
+  expectedContent: string,
+) =>
   invoke<string | null>("export_diagnostics", { snapshotId, expectedContent });
 
 export async function openExternal(url: string) {
