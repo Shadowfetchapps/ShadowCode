@@ -137,15 +137,23 @@ pub fn char_column(line: &str, utf16: usize) -> usize {
     line.chars().count()
 }
 
+/// A server that stops reading its input fills the pipe; a write that cannot
+/// finish in this time gives up instead of blocking the tool (and Stop).
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
 async fn write_frame(writer: &tokio::sync::Mutex<ChildStdin>, message: &Value) -> Result<()> {
     let body = serde_json::to_vec(message)?;
-    let mut writer = writer.lock().await;
-    writer
-        .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
-        .await?;
-    writer.write_all(&body).await?;
-    writer.flush().await?;
-    Ok(())
+    tokio::time::timeout(WRITE_TIMEOUT, async {
+        let mut writer = writer.lock().await;
+        writer
+            .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
+            .await?;
+        writer.write_all(&body).await?;
+        writer.flush().await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .map_err(|_| anyhow!("The language server stopped reading its input"))?
 }
 
 async fn read_frame(reader: &mut BufReader<ChildStdout>) -> Result<Option<Value>> {
@@ -554,10 +562,7 @@ impl Client {
             &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
         )
         .await
-        .inspect_err(|_| {
-            self.shared
-                .mark_dead("Could not write to the language server".into());
-        })?;
+        .inspect_err(|error| self.write_failed(error))?;
         match tokio::time::timeout(timeout, receiver).await {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(message))) => bail!("{method}: {message}"),
@@ -573,11 +578,27 @@ impl Client {
     }
 
     pub async fn notify(&self, method: &str, params: Value) -> Result<()> {
+        if !self.shared.alive.load(Ordering::SeqCst) {
+            let reason = self.shared.exit.lock().ok().and_then(|exit| exit.clone());
+            bail!(
+                "{}",
+                reason.unwrap_or_else(|| "The language server is not running".into())
+            );
+        }
         write_frame(
             &self.shared.writer,
             &json!({"jsonrpc": "2.0", "method": method, "params": params}),
         )
         .await
+        .inspect_err(|error| self.write_failed(error))
+    }
+
+    /// A failed or unfinished write leaves the protocol stream unusable: the
+    /// server is stopped, and the next use starts a fresh one.
+    fn write_failed(&self, error: &anyhow::Error) {
+        self.shared
+            .mark_dead(format!("Could not write to the language server: {error:#}"));
+        self.kill();
     }
 
     /// Current publish counter; diagnostics newer than it came after a change.

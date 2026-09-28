@@ -9,6 +9,7 @@ line that mentions it. Flags:
   --crash-on-open    exit(3) as soon as a document is opened
   --delay-ms N       wait N ms before publishing diagnostics
   --log PATH         append each received method name to PATH
+  --stop-reading     stop reading input after initialization (a hung server)
 """
 import json
 import re
@@ -19,6 +20,7 @@ ARGS = sys.argv[1:]
 CRASH = "--crash-on-open" in ARGS
 DELAY = int(ARGS[ARGS.index("--delay-ms") + 1]) / 1000 if "--delay-ms" in ARGS else 0
 LOG = ARGS[ARGS.index("--log") + 1] if "--log" in ARGS else None
+STOP_READING = "--stop-reading" in ARGS
 
 docs = {}
 config_answer = None
@@ -107,6 +109,9 @@ while True:
     elif method == "initialized":
         send({"jsonrpc": "2.0", "id": 999, "method": "workspace/configuration",
               "params": {"items": [{"section": "python.analysis"}]}})
+        if STOP_READING:
+            while True:
+                time.sleep(60)
     elif method == "textDocument/didOpen":
         if CRASH:
             sys.exit(3)

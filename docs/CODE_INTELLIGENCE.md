@@ -73,6 +73,8 @@ files.
 - One server per project and language. At most `max_servers` (4) run at once;
   starting another stops the one idle the longest.
 - A server idle for `lsp_idle_minutes` (10) stops.
+- A server that stops reading what ShadowCode sends (hung) is stopped after
+  10 seconds; the edit goes ahead and says the file could not be checked.
 - A server that crashes restarts on next use after 2, 4, 8 … seconds (at most
   5 minutes). The status page shows the last error.
 - Memory held per server is bounded: 48 open files (the oldest is closed),
