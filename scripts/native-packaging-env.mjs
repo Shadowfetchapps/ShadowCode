@@ -4,6 +4,8 @@
 // /root/.hermes/... dies with Permission denied. Packaging must construct
 // PATH itself; it must not depend on the human sanitizing the shell.
 import { lstatSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import { chmod, copyFile, mkdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -113,6 +115,29 @@ export function bundleEnvironment(format, runtimeFile) {
   if (!runtimeFile || !path.isAbsolute(runtimeFile))
     throw new Error("The AppImage bundle needs the absolute path of the pinned runtime");
   return { LDAI_RUNTIME_FILE: runtimeFile };
+}
+
+/** linuxdeploy's GTK plugin, reviewed at upstream commit 7a3fbc31 (its MIT
+ * license is pinned in licenses/native/sources.json). Tauri downloads the
+ * plugin from upstream master whenever `target/.tauri` lacks it, so a fresh
+ * machine and a machine with an older cached copy bundled different bytes. */
+export const GTK_PLUGIN = "packaging/linuxdeploy/linuxdeploy-plugin-gtk.sh";
+export const GTK_PLUGIN_SHA256 =
+  "b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171";
+
+/** Put the reviewed GTK plugin where Tauri looks for it, after checking its
+ * digest, so every build uses the same script. */
+export async function installPinnedGtkPlugin(root) {
+  const bytes = await readFile(path.join(root, GTK_PLUGIN));
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  if (digest !== GTK_PLUGIN_SHA256)
+    throw new Error(`${GTK_PLUGIN} does not match its reviewed SHA-256`);
+  const tools = path.join(root, "target/.tauri");
+  await mkdir(tools, { recursive: true });
+  const target = path.join(tools, "linuxdeploy-plugin-gtk.sh");
+  await copyFile(path.join(root, GTK_PLUGIN), target);
+  await chmod(target, 0o755);
+  return target;
 }
 
 const self = fileURLToPath(import.meta.url);

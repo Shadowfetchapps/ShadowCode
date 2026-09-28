@@ -22,6 +22,7 @@ import { applicationNotices, appdirNotices } from "./native-notices.mjs";
 import {
   applyPackagingPath,
   bundleEnvironment,
+  installPinnedGtkPlugin,
 } from "./native-packaging-env.mjs";
 import { buildRuntime, runtimeNotices } from "./native-runtime.mjs";
 import {
@@ -99,6 +100,8 @@ const config = JSON.stringify({
     linux: { deb: { files }, appimage: { files } },
   },
 });
+// Tauri would fetch the GTK plugin from upstream master when it is missing.
+await installPinnedGtkPlugin(root);
 const executable = path.join(root, "target/release/shadowcode");
 const unbundledMarker = Buffer.from("__TAURI_BUNDLE_TYPE_VAR_UNK");
 try {

@@ -15,6 +15,9 @@ import {
   packagingDirs,
   packagingPath,
   SYSTEM_PACKAGING_DIRS,
+  GTK_PLUGIN,
+  GTK_PLUGIN_SHA256,
+  installPinnedGtkPlugin,
 } from "./native-packaging-env.mjs";
 
 const exec = promisify(execFile);
@@ -178,4 +181,23 @@ test("the AppImage bundle uses the pinned runtime, not upstream's newest", () =>
   assert.deepEqual(bundleEnvironment("deb", undefined), {});
   assert.throws(() => bundleEnvironment("appimage", "runtime-x86_64"));
   assert.throws(() => bundleEnvironment("appimage", ""));
+});
+
+test("the reviewed GTK plugin is installed for Tauri, and a changed copy is refused", async () => {
+  const repo = fileURLToPath(new URL("../", import.meta.url));
+  const scratch = await mkdtemp(path.join(tmpdir(), "gtk-plugin-"));
+  try {
+    await mkdir(path.join(scratch, path.dirname(GTK_PLUGIN)), { recursive: true });
+    const { readFile, copyFile, stat } = await import("node:fs/promises");
+    await copyFile(path.join(repo, GTK_PLUGIN), path.join(scratch, GTK_PLUGIN));
+    const target = await installPinnedGtkPlugin(scratch);
+    assert.equal(target, path.join(scratch, "target/.tauri/linuxdeploy-plugin-gtk.sh"));
+    const { createHash } = await import("node:crypto");
+    assert.equal(createHash("sha256").update(await readFile(target)).digest("hex"), GTK_PLUGIN_SHA256);
+    assert.equal((await stat(target)).mode & 0o777, 0o755);
+    await writeFile(path.join(scratch, GTK_PLUGIN), "#!/bin/sh\necho tampered\n");
+    await assert.rejects(installPinnedGtkPlugin(scratch), /reviewed SHA-256/);
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
 });
