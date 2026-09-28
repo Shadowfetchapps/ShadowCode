@@ -6,8 +6,9 @@ and authentication receipts to the exact candidate before publication.
 
 Pushing a `v*` tag starts `.github/workflows/release.yml`. Publication follows
 build/qualification, protected signing review and verification of all seven
-public assets. The current environment permits only `v0.33.1`; later versions
-require reviewed trust-policy, deployment-rule and tooling-pin updates. The workflow uses
+public assets. The signing environment permits only the tag being released
+(`v0.34.0` for 0.34.0); every later version needs reviewed trust-policy,
+deployment-rule and tooling-pin updates. The workflow uses
 `docs/RELEASE_NOTES.md` as the release text.
 
 ## 1. Version files
@@ -145,10 +146,11 @@ Public trust in `release/trust` currently allows epoch 1 and versions 0.33.0–0
 `release/install-policy` fixes the first authenticated version at 0.33.0.
 The `release-signing` environment has the signing secret and requires review by
 `Shadowfetchapps` (User ID `209457103`). Self-review is allowed and GitHub's
-default administrator override remains unchanged. Its sole deployment rule is
-`v0.33.1`; `NATIVE_RELEASE_SIGNING_ENVIRONMENT` points to that environment.
-The reviewed `NATIVE_RELEASE_TOOLING_COMMIT` used for this release is
-`e15c4480e65db5650af012bb2a9773dbe89acf84`.
+default administrator override remains unchanged. For 0.34.0 its sole
+deployment rule is the tag `v0.34.0` (it was `v0.33.1` for 0.33.1);
+`NATIVE_RELEASE_SIGNING_ENVIRONMENT` points to that environment. For 0.34.0,
+`NATIVE_RELEASE_TOOLING_COMMIT` pins the tagged release commit itself, as it
+did for 0.33.1 (`e15c4480e65db5650af012bb2a9773dbe89acf84`).
 
 Before tagging, finish review and push the tooling commit, then set
 `NATIVE_RELEASE_TOOLING_COMMIT` to that exact 40-character SHA. Read back this pin from GitHub configuration before dispatching the release. Verify the environment protections and source/candidate
