@@ -331,8 +331,14 @@ async function settle() {
 const shots = [];
 // Screenshots used in the docs show the window, not a passing notification.
 const DOC_SHOTS = new Set(["picker", "composer-more-ready", "task-complete", "workspace-light", "accounts", "settings-advanced-guardian"]);
+// They also never show the tester's own account: e-mail addresses from the
+// real vendor CLIs are replaced for the capture.
+const MASK_EMAILS = "const w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);const re=/[\\w.+-]+@[\\w-]+(\\.[\\w-]+)+/g;for(let n=w.nextNode();n;n=w.nextNode()){if(re.test(n.nodeValue)){re.lastIndex=0;n.nodeValue=n.nodeValue.replace(re,'you@example.com')}}";
 async function screenshot(name) {
-  if (DOC_SHOTS.has(name)) await execute("document.querySelectorAll('.toast button[aria-label=\"Dismiss notification\"]').forEach(b=>b.click())");
+  if (DOC_SHOTS.has(name)) {
+    await execute("document.querySelectorAll('.toast button[aria-label=\"Dismiss notification\"]').forEach(b=>b.click())");
+    await execute(MASK_EMAILS);
+  }
   await settle();
   // Screenshots are light unless named "-dark".
   await expectTheme(/-dark$/.test(name) ? "dark" : "light", `Screenshot ${name}`);
