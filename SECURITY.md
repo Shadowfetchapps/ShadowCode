@@ -68,9 +68,18 @@ runs Git itself outside the sandbox (checkpoints after each command, the Changes
 view, reviews and Compare), it switches off every `filter.*` clean/smudge/process
 driver the repository's own configuration defines, so a command cannot plant one
 in `.git/config` and have it run unsandboxed later, and merely opening a
-repository does not run one. Drivers from your global or system Git
-configuration, and Git LFS's standard commands, keep working, and staging or
-committing for you keeps the repository's filters.
+repository does not run one. It also stays out of submodules and other nested
+repositories, whose own configuration it does not inspect: its automatic
+status and diffs don't look inside their working trees (new submodule commits
+still show), and its snapshots don't run Git inside them. Signature checks are
+off for its own Git. Drivers from your global or system Git configuration, and
+Git LFS's standard commands, keep working, and staging or committing for you
+keeps the repository's filters. The limit: the sandbox cannot stop a command
+from changing `.git/config` or `.git/hooks`. Git you run in a terminal obeys
+both, as in any repository, and the Changes view's Stage and Commit buttons
+use the repository's filter and signing settings (never its hooks). After
+running code you don't trust, check `.git/config` and `.git/hooks` before
+using Git yourself.
 
 An "allow for this task" command grant covers only the same program and
 subcommand (`cargo test`, `git status`), and never a command wrapper (`timeout`,
