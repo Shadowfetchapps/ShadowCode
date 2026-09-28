@@ -1434,6 +1434,49 @@ async fn settings_load_and_test_refuse_while_a_task_holds_another_model() {
     service.engine.shutdown().await.unwrap();
 }
 
+/// A runtime wrapper script that leaves a child holding its output open
+/// (for example `llama-server "$@" &`) cannot hang the model catalog: the
+/// probe returns and the child is stopped with it.
+#[cfg(unix)]
+#[test]
+fn runtime_probe_does_not_hang_on_a_child_left_behind() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let binary = root.path().join("llama-server");
+    let pidfile = root.path().join("child.pid");
+    fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\nsleep 600 &\necho $! > '{}'\necho 'version: 1 (abcdef0)'\n",
+            pidfile.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let probed = binary.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(local_engine::probe(&probed));
+    });
+    let probe = receiver
+        .recv_timeout(Duration::from_secs(12))
+        .expect("the runtime probe returned");
+    assert!(probe.ok, "{:?}", probe.error);
+    let pid: u64 = fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let started = Instant::now();
+    while pid_alive(pid) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wrapper's child survived the probe"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[tokio::test]
 async fn cancel_during_load_early_exit_tail_and_cpu_fallback() {
     let f = fixture(GPU);

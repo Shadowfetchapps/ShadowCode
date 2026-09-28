@@ -485,6 +485,32 @@ pub fn runtime_env(binary: &Path) -> Vec<(String, std::ffi::OsString)> {
     env
 }
 
+/// The child has exited but is not reaped yet (`WNOWAIT`), so its process
+/// group id still belongs to it.
+#[cfg(unix)]
+fn exited_unreaped(pid: u32) -> bool {
+    // SAFETY: waitid only writes the zeroed siginfo it is given.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        libc::waitid(
+            libc::P_PID,
+            pid,
+            &mut info,
+            libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+        ) == 0
+            && info.si_pid() != 0
+    }
+}
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    if let Ok(pid) = i32::try_from(pid) {
+        // SAFETY: signals only the probe's own process group.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+}
+
 /// Run a runtime command with a bounded wait; returns (success, combined output).
 fn run_probe(binary: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String)> {
     let mut command = Command::new(binary);
@@ -503,36 +529,61 @@ fn run_probe(binary: &Path, args: &[&str], timeout: Duration) -> Result<(bool, S
     let mut child = command
         .spawn()
         .with_context(|| format!("Could not run {}", binary.display()))?;
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let out = std::thread::spawn(move || {
-        let mut text = Vec::new();
-        if let Some(s) = stdout.as_mut() {
-            let _ = s.take(256 * 1024).read_to_end(&mut text);
-        }
-        text
-    });
-    let err = std::thread::spawn(move || {
-        let mut text = Vec::new();
-        if let Some(s) = stderr.as_mut() {
-            let _ = s.take(256 * 1024).read_to_end(&mut text);
-        }
-        text
-    });
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut text = Vec::new();
+            if let Some(pipe) = pipe {
+                let _ = pipe.take(256 * 1024).read_to_end(&mut text);
+            }
+            let _ = sender.send(text);
+        });
+        receiver
+    };
+    let out = read(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let err = read(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
     let started = Instant::now();
     let status = loop {
+        // Anything the runtime left behind in its process group (a wrapper
+        // script's child) is stopped while the leader is not yet reaped, so
+        // its id cannot have been reused, and cannot hold the pipes open.
+        #[cfg(unix)]
+        if exited_unreaped(child.id()) {
+            kill_group(child.id());
+            break Some(child.wait()?);
+        }
+        #[cfg(not(unix))]
         if let Some(status) = child.try_wait()? {
             break Some(status);
         }
         if started.elapsed() > timeout {
+            #[cfg(unix)]
+            kill_group(child.id());
             let _ = child.kill();
             let _ = child.wait();
             break None;
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let mut text = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
-    text.push_str(&String::from_utf8_lossy(&err.join().unwrap_or_default()));
+    // A process outside the group could still hold a pipe: never wait on it
+    // for long.
+    let collect = |receiver: std::sync::mpsc::Receiver<Vec<u8>>| {
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_default()
+    };
+    let mut text = String::from_utf8_lossy(&collect(out)).into_owned();
+    text.push_str(&String::from_utf8_lossy(&collect(err)));
     match status {
         Some(status) => Ok((status.success(), text)),
         None => bail!(
