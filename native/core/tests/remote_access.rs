@@ -485,6 +485,23 @@ async fn secrets_are_not_shown_remotely() {
         .api(&token, "GET", "/api/workspace/file?path=.env", None)
         .await;
     assert_eq!(status, 403, "{body}");
+    // A normalizing spelling is refused by the policy after normalization.
+    let (status, _) = f
+        .api(&token, "GET", "/api/workspace/file?path=.env/", None)
+        .await;
+    assert_eq!(status, 403);
+    // A symlink to the secret file is blanked by the response redaction even
+    // though its name looks innocent.
+    std::os::unix::fs::symlink(".env", f.workspace.join("link.txt")).unwrap();
+    let (status, body) = f
+        .api(&token, "GET", "/api/workspace/file?path=link.txt", None)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !body["content"].as_str().unwrap_or("").contains("TOKEN="),
+        "the secret's contents leaked through a symlink: {body}"
+    );
+    assert_eq!(body["content"], "[secret file hidden over remote access]");
     let (status, body) = f
         .api(&token, "GET", "/api/workspace/file?path=notes.txt", None)
         .await;

@@ -71,6 +71,24 @@ fn query_value(path: &str, key: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
+/// The last real path component, so `.env/`, `./.env` and `a/../.env` are all
+/// judged as `.env` by [`redaction::is_secret_path`].
+fn normalize_secret(path: &str) -> String {
+    use std::path::{Component, Path};
+    let mut normalized = std::path::PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => {}
+        }
+    }
+    normalized.to_string_lossy().into_owned()
+}
+
 fn contains_placeholder(value: &Value) -> bool {
     match value {
         Value::String(text) => {
@@ -166,8 +184,11 @@ pub fn check(path: &str, body: &Value, access: &Access, paths: &AppPaths) -> Res
         return Err(Refusal(MICROPHONE));
     }
     // Any route that reads one file by `?path=` (workspace file and diff,
-    // a task's review of one file, …).
-    if query_value(path, "path").is_some_and(|p| redaction::is_secret_path(&p)) {
+    // a task's review of one file, …). Normalize first so a trailing slash or
+    // `.`/`..` segment cannot slip a secret name past the name check; the
+    // handler additionally resolves symlinks and the response redaction blanks
+    // a `secret_target`.
+    if query_value(path, "path").is_some_and(|p| redaction::is_secret_path(&normalize_secret(&p))) {
         return Err(Refusal(SECRET_FILE));
     }
     if contains_placeholder(body) {
@@ -203,10 +224,14 @@ const HIDDEN_FILE: &str = "[secret file hidden over remote access]";
 fn hide_secret_files(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            let secret = ["path", "file"]
-                .iter()
-                .filter_map(|key| map.get(*key).and_then(Value::as_str))
-                .any(redaction::is_secret_path);
+            // A response whose own handler resolved the read to a secret file
+            // (a symlink or a normalizing spelling) is blanked even when its
+            // visible `path` looks innocent.
+            let secret = map.get("secret_target") == Some(&Value::Bool(true))
+                || ["path", "file"]
+                    .iter()
+                    .filter_map(|key| map.get(*key).and_then(Value::as_str))
+                    .any(redaction::is_secret_path);
             for (key, field) in map.iter_mut() {
                 if secret && CONTENT_FIELDS.contains(&key.as_str()) {
                     match field {

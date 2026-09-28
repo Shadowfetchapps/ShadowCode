@@ -905,7 +905,10 @@ impl ToolExecutor {
             }
             "read_file" => {
                 let path = string(args, "path")?;
-                if crate::redaction::is_secret_path(path) {
+                // Check the name, a normalizing spelling (a trailing slash or
+                // dot segment) and the symlink target, so none reaches a
+                // secret file's contents.
+                if self.workspace.is_secret_target(path) {
                     return Ok(crate::redaction::secret_file_refusal(path));
                 }
                 let file = self.workspace.read(path)?;

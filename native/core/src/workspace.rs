@@ -308,6 +308,25 @@ impl Workspace {
         file.take(limit as u64).read_to_end(&mut bytes)?;
         Ok((bytes, meta.len()))
     }
+    /// True when `path` names a secret file, whether reached directly, through
+    /// a normalizing spelling (a trailing slash or `.` segment) or through a
+    /// symlink that resolves to one inside the workspace. Callers refuse such
+    /// reads so the name used cannot get around [`crate::redaction::is_secret_path`].
+    pub fn is_secret_target(&self, path: &str) -> bool {
+        if crate::redaction::is_secret_path(path) {
+            return true;
+        }
+        let Ok(rel) = self.relative(path) else {
+            return false;
+        };
+        if crate::redaction::is_secret_path(&rel.to_string_lossy()) {
+            return true;
+        }
+        self.dir
+            .canonicalize(&rel)
+            .ok()
+            .is_some_and(|resolved| crate::redaction::is_secret_path(&resolved.to_string_lossy()))
+    }
     pub fn read(&self, path: &str) -> Result<FileContent> {
         let snapshot = self.snapshot(path)?;
         let bytes = snapshot.bytes.context("File not found")?;
