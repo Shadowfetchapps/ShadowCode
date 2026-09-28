@@ -33,7 +33,7 @@ it("Accounts: explicit unknown billing overrides legacy auth labels without inve
   render(<AccountsPage onChanged={vi.fn()} onToast={vi.fn()} />);
   const codex = await screen.findByRole("article", { name: "Codex" });
   expect(
-    within(codex).getByText("Billing unverified · API charges may apply"),
+    within(codex).getByText("Billing not verified · Check your provider account"),
   ).toBeTruthy();
   expect(
     within(codex).queryByText("API key login · billed per token"),

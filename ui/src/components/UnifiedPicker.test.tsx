@@ -141,7 +141,7 @@ it.each([
   [
     "unknown",
     "Billing unverified",
-    "Billing unverified · API charges may apply",
+    "Billing not verified · Check your provider account",
   ],
   ["api_key", "API key", "API key login · billed per token"],
 ])(

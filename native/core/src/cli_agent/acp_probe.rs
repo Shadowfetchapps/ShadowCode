@@ -57,6 +57,9 @@ pub struct AcpProbe {
     /// `authenticate` result: `Some(true)` accepted, `Some(false)` rejected,
     /// `None` when the agent advertised no auth method.
     pub authenticated: Option<bool>,
+    /// The method accepted by `authenticate`, not an account billing identity.
+    /// Advertised methods alone never populate this observation.
+    pub authenticated_method: Option<String>,
     pub session_started: bool,
     pub session_error: Option<String>,
     /// `promptCapabilities.image` from `initialize`.
@@ -283,6 +286,7 @@ async fn probe_inner(
         let stdout = child.stdout.take().context("ACP stdout missing")?;
         let mut reader = BoundedLines::new(stdout, MAX_LINE_BYTES);
         let mut probe = AcpProbe::default();
+        let mut requested_auth_method = None;
         let init = rpc(
             1,
             "initialize",
@@ -389,6 +393,7 @@ async fn probe_inner(
                             })
                             .cloned()
                             .unwrap_or_else(|| probe.auth_methods[0].clone());
+                        requested_auth_method = Some(method.clone());
                         rpc(2, "authenticate", json!({"methodId": method}))
                     };
                     pending.insert(if probe.auth_methods.is_empty() { 3 } else { 2 });
@@ -402,6 +407,7 @@ async fn probe_inner(
                         probe.session_error = Some(format!("authenticate failed: {error}"));
                         break;
                     }
+                    probe.authenticated_method = requested_auth_method.take();
                     let next = rpc(3, "session/new", json!({"cwd": cwd, "mcpServers": []}));
                     pending.insert(3);
                     stdin.write_all(next.as_bytes()).await?;

@@ -30,12 +30,13 @@ for raw in sys.stdin:
     error = None
     if method == 'initialize':
         result = {'agentCapabilities':{'promptCapabilities':{'image':True}},
-                  'authMethods':[{'id':'cursor_login'}],
+                  'authMethods':cfg.get('auth_methods', [{'id':'cursor_login'}]),
                   '_meta':{'modelState':{'currentModelId':'fixture-model',
                        'availableModels':[{'modelId':'fixture-model','name':'Fixture model'}]}}}
         if 'version' in cfg: result['protocolVersion'] = cfg['version']
         if cfg.get('initialize_error'): error = 'fixture handshake failure'
     elif method == 'authenticate':
+        (root / 'selected_auth.json').write_text(json.dumps(frame['params']['methodId']))
         result = {}
         if cfg.get('auth_error'): error = 'authentication required'
     elif method == 'session/new':
@@ -136,7 +137,10 @@ async fn acp_discovery_rejects_unsupported_versions_before_auth_or_session() {
         )
         .await
         .expect_err("an incompatible initialize must not continue discovery");
-        assert!(error.to_string().contains("supports version 1"), "{error}");
+        assert!(
+            error.to_string().contains("supports version 1"),
+            "{error:#}"
+        );
         fake.assert_only_initialize();
     }
 }
@@ -252,4 +256,88 @@ async fn grok_other_probe_failure_retains_existing_models_fallback() {
         .log("invocations.jsonl")
         .iter()
         .any(|args| args == &json!(["models"])));
+}
+
+// An advertised authentication option or successfully selected login method
+// is not an account billing observation. Keep the usable vendor route intact.
+#[tokio::test]
+async fn ready_acp_accounts_do_not_invent_subscription_billing() {
+    for (vendor, selected) in [
+        (Vendor::Cursor, "cursor_login"),
+        (Vendor::Grok, "cached_token"),
+    ] {
+        let fake = Fixture::new(json!({
+            "version": 1,
+            "auth_methods": [
+                {"id": "unselected-fixture-method"},
+                {"id": selected}
+            ]
+        }));
+        let catalog = VendorCatalog::new();
+        let cfg = fake.config(vendor);
+        let ready = catalog.refresh(vendor, &cfg, true).await;
+        let account = ready.to_doctor_json();
+        let rows = catalog.picker_rows(&cfg, false).await;
+        let own_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == vendor.provider())
+            .collect();
+        let observed_method: Value = serde_json::from_str(
+            &fs::read_to_string(fake.root.path().join("selected_auth.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(observed_method, selected);
+        assert_eq!(ready.availability, Availability::Ready);
+        assert_eq!(ready.models[0].id, "fixture-model");
+        assert!(ready.accepts_images);
+        assert_eq!(
+            fake.log("methods.jsonl"),
+            vec![
+                json!("initialize"),
+                json!("authenticate"),
+                json!("session/new")
+            ]
+        );
+        eprintln!(
+            "{vendor:?}: selected_auth={observed_method}, account_billing={}, reported_auth={}, row_billing={:?}",
+            account["billing"], account["account"]["auth_mode"],
+            own_rows.iter().map(|row| &row.billing).collect::<Vec<_>>()
+        );
+        assert_eq!(account["billing"], "unknown");
+        assert_eq!(account["account"]["auth_mode"], selected);
+        let usage_note = if vendor == Vendor::Cursor {
+            "Cursor reports the plan tier only, not remaining allowance"
+        } else {
+            "Grok reports per-session tokens only, not plan allowance"
+        };
+        assert_eq!(ready.usage_note.as_deref(), Some(usage_note));
+        assert!(ready.detail.contains("Billing not reported by this CLI"));
+        assert!(!ready.detail.contains("API charges"));
+        assert!(!own_rows.is_empty());
+        for row in own_rows {
+            assert_eq!(row.availability, Availability::Ready);
+            assert_eq!(row.billing.as_deref(), Some("unknown"));
+            assert!(!row.subtitle.contains("subscription"));
+            assert_eq!(row.group, "subscriptions", "route grouping is unchanged");
+            assert!(row.usage.remaining_percent.is_none());
+            assert_eq!(row.usage.detail, vec![usage_note.to_owned()]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn ready_acp_without_an_auth_method_keeps_billing_and_identity_unknown() {
+    for vendor in [Vendor::Cursor, Vendor::Grok] {
+        let fake = Fixture::new(json!({"version": 1, "auth_methods": []}));
+        let catalog = VendorCatalog::new();
+        let status = catalog.refresh(vendor, &fake.config(vendor), true).await;
+        assert_eq!(status.availability, Availability::Ready);
+        assert_eq!(status.to_doctor_json()["billing"], "unknown");
+        assert!(status.to_doctor_json()["account"]["auth_mode"].is_null());
+        assert_eq!(
+            fake.log("methods.jsonl"),
+            vec![json!("initialize"), json!("session/new")]
+        );
+        assert!(!fake.root.path().join("selected_auth.json").exists());
+    }
 }

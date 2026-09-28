@@ -84,7 +84,7 @@ export function billingWarning(
   target?: { billing?: BillingMode | null } | null,
 ): string | undefined {
   if (target?.billing === "unknown")
-    return "Billing unverified · API charges may apply";
+    return "Billing not verified · Check your provider account";
   if (target?.billing === "api_key") return "API key login · billed per token";
   return undefined;
 }

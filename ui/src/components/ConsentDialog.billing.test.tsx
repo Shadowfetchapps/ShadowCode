@@ -5,7 +5,7 @@ import { ConsentDialog } from "./ConsentDialog";
 afterEach(cleanup);
 
 it.each([
-  "Billing unverified · API charges may apply",
+  "Billing not verified · Check your provider account",
   "API key login · billed per token",
 ])(
   "shows %s before cloud consent and keeps Cancel/Send explicit",

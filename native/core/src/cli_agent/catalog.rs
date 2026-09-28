@@ -176,17 +176,19 @@ impl VendorStatus {
             _ => false,
         }
     }
-    /// Codex's boolean login-status fallback establishes authentication, not
-    /// billing. Only the structured account types establish these two routes;
-    /// an absent or newer, unrecognized type cannot imply a subscription.
+    /// ACP reports login readiness, not account billing. Codex's boolean
+    /// login-status fallback likewise cannot establish subscription billing.
     fn billing_unverified(&self) -> bool {
-        self.vendor == Vendor::Codex
-            && !matches!(
+        match self.vendor {
+            Vendor::Cursor | Vendor::Antigravity | Vendor::Grok => true,
+            Vendor::Codex => !matches!(
                 self.account
                     .as_ref()
                     .and_then(|account| account.auth_mode.as_deref()),
                 Some("chatgpt" | "apiKey")
-            )
+            ),
+            Vendor::Claude => false,
+        }
     }
     fn billing(&self) -> &'static str {
         if self.api_key_login() {
@@ -222,7 +224,7 @@ impl VendorStatus {
         if self.api_key_login() {
             return UsageSnapshot::api_key_login(&provider);
         }
-        if self.billing_unverified() && self.fetched_at > 0.0 {
+        if self.vendor == Vendor::Codex && self.billing_unverified() && self.fetched_at > 0.0 {
             // Do not attach the previous login's plan numbers to a newly
             // probed, unidentified login. Before any probe, persisted receipts
             // remain explicitly stale historical observations as before.
@@ -896,7 +898,11 @@ fn ready_detail(status: &VendorStatus) -> String {
     if status.api_key_login() {
         parts.push("API key login · billed per token".into());
     } else if status.billing_unverified() {
-        parts.push("Billing unverified · API charges may apply".into());
+        parts.push(if status.vendor == Vendor::Codex {
+            "Billing unverified · API charges may apply".into()
+        } else {
+            "Billing not reported by this CLI".into()
+        });
     }
     if let Some(account) = &status.account {
         if let Some(plan) = &account.plan {
@@ -1088,7 +1094,7 @@ async fn probe_acp_vendor(binary: &Path, args: &[&str], status: &mut VendorStatu
                 status.account = Some(AccountInfo {
                     email: None,
                     plan: None,
-                    auth_mode: probe.auth_methods.first().cloned(),
+                    auth_mode: probe.authenticated_method.clone(),
                 });
                 status.detail = ready_detail(status);
                 if let Some(email) = cursor_email(vendor, binary).await {
@@ -1199,6 +1205,61 @@ async fn cursor_email(vendor: Vendor, binary: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acp_billing_is_unreported_without_losing_provider_usage_notes() {
+        for (vendor, method, note) in [
+            (
+                Vendor::Cursor,
+                "cursor_login",
+                "Cursor reports a plan tier only",
+            ),
+            (
+                Vendor::Antigravity,
+                "oauth-personal",
+                "Antigravity reports no plan usage",
+            ),
+            (
+                Vendor::Grok,
+                "cached_token",
+                "Grok reports session tokens only",
+            ),
+        ] {
+            let mut status = VendorStatus::unchecked(vendor, None);
+            status.availability = Availability::Ready;
+            status.fetched_at = crate::now();
+            status.account = Some(AccountInfo {
+                email: None,
+                plan: Some("provider-reported tier".into()),
+                auth_mode: Some(method.into()),
+            });
+            status.usage_note = Some(note.into());
+            assert_eq!(status.billing(), "unknown");
+            assert!(!status.api_key_login());
+            let usage = status.usage_for("default", crate::now());
+            assert_eq!(usage.detail, vec![note.to_owned()]);
+            assert!(usage.remaining_percent.is_none());
+            assert!(ready_detail(&status).contains("Billing not reported by this CLI"));
+        }
+    }
+
+    #[test]
+    fn known_codex_and_claude_billing_observations_remain_distinct() {
+        for (vendor, method, billing) in [
+            (Vendor::Codex, "chatgpt", "subscription"),
+            (Vendor::Codex, "apiKey", "api_key"),
+            (Vendor::Claude, "claude.ai", "subscription"),
+            (Vendor::Claude, "api_key", "api_key"),
+        ] {
+            let mut status = VendorStatus::unchecked(vendor, None);
+            status.account = Some(AccountInfo {
+                email: None,
+                plan: None,
+                auth_mode: Some(method.into()),
+            });
+            assert_eq!(status.billing(), billing);
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
