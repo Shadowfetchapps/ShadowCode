@@ -36,7 +36,7 @@ use tokio_util::sync::CancellationToken;
 static PROJECT_LOCKS: LazyLock<std::sync::Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>> =
     LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
 
-fn project_lock(workspace: &Path) -> Result<Arc<Mutex<()>>> {
+pub(crate) fn project_lock(workspace: &Path) -> Result<Arc<Mutex<()>>> {
     let mut locks = PROJECT_LOCKS
         .lock()
         .map_err(|_| anyhow::anyhow!("Compare lock registry poisoned"))?;
@@ -82,6 +82,33 @@ async fn mutation_lock(workspace: &Path, cancel: &CancellationToken) -> Result<f
     file.try_lock_exclusive()
         .context("Another ShadowCode operation owns this repository; retry after it finishes")?;
     Ok(file)
+}
+
+/// Editor draft writes share Compare's cross-process admission lock when the
+/// selected workspace belongs to a Git repository. Draft recovery also works
+/// for standalone folders, where Compare cannot snapshot and no repository
+/// lock is needed.
+pub(crate) async fn workspace_mutation_lock(
+    workspace: &Path,
+    cancel: &CancellationToken,
+) -> Result<Option<fs::File>> {
+    let probe = git_with(workspace, &["rev-parse", "--show-toplevel"], &[], cancel).await?;
+    if !probe.ok
+        && !probe.truncated
+        && probe
+            .stderr
+            .to_ascii_lowercase()
+            .contains("not a git repository")
+    {
+        return Ok(None);
+    }
+    ensure!(
+        probe.ok,
+        "Could not establish editor draft repository ownership: {}{}",
+        probe.stderr.trim(),
+        probe.stdout.trim()
+    );
+    mutation_lock(workspace, cancel).await.map(Some)
 }
 const LISTED: usize = 20;
 const INDEXED: usize = 100;
@@ -981,6 +1008,16 @@ pub(crate) struct StartOptions<'a> {
     pub owner: Option<&'a JobOwner>,
 }
 
+fn ensure_no_unsaved_editor_drafts(store: &Store, workspace: &Path) -> Result<()> {
+    let paths = store.unsaved_editor_draft_paths(workspace)?;
+    ensure!(
+        paths.is_empty(),
+        "Save or discard open editor drafts before comparing: {}",
+        paths.join(", ")
+    );
+    Ok(())
+}
+
 pub(crate) async fn start(engine: &Engine, options: StartOptions<'_>) -> Result<Record> {
     let cancel = CancellationToken::new();
     let workspace = Workspace::open(&options.workspace)?.path;
@@ -1000,6 +1037,7 @@ pub(crate) async fn start(engine: &Engine, options: StartOptions<'_>) -> Result<
     let lock = project_lock(&workspace)?;
     let _guard = lock.lock().await;
     let _ownership = mutation_lock(&workspace, &cancel).await?;
+    ensure_no_unsaved_editor_drafts(&engine.store(), &workspace)?;
     let base = snapshot(&engine.paths().data, &workspace, &cancel).await?;
     let mut record = Record {
         id: crate::id(),
@@ -1720,6 +1758,32 @@ mod tests {
         assert!(same.try_lock().is_ok());
     }
 
+    #[tokio::test]
+    async fn workspace_mutations_share_compare_repository_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancellationToken::new();
+        git(dir.path(), &["init", "-q"], &cancel).await.unwrap();
+
+        let compare = mutation_lock(dir.path(), &cancel).await.unwrap();
+        let blocked = workspace_mutation_lock(dir.path(), &cancel).await;
+        assert!(
+            blocked.is_err(),
+            "a draft write must not race an active Compare snapshot"
+        );
+
+        drop(compare);
+        assert!(workspace_mutation_lock(dir.path(), &cancel)
+            .await
+            .unwrap()
+            .is_some());
+
+        let standalone = tempfile::tempdir().unwrap();
+        assert!(workspace_mutation_lock(standalone.path(), &cancel)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
     #[test]
     fn apply_errors_name_conflicting_files() {
         let stderr = "error: patch failed: src/a.txt:1\nerror: src/a.txt: patch does not apply\nerror: new.txt: already exists in working directory\n";
@@ -1731,6 +1795,34 @@ mod tests {
         assert_eq!(parse_mode("ask").unwrap(), ("review", "reviewer"));
         assert_eq!(parse_mode("").unwrap(), ("code", "coder"));
         assert!(parse_mode("command").is_err());
+    }
+
+    #[test]
+    fn compare_blocks_on_pending_editor_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("store.sqlite")).unwrap();
+        let workspace = dir.path().join("project");
+        ensure_no_unsaved_editor_drafts(&store, &workspace).unwrap();
+
+        let base = "saved bytes\n";
+        let draft = store
+            .put_editor_draft(
+                &workspace,
+                "src/main.rs",
+                base,
+                "new unsaved bytes\n",
+                &crate::workspace::hash(base.as_bytes()),
+                "missing",
+            )
+            .unwrap();
+        let error = ensure_no_unsaved_editor_drafts(&store, &workspace).unwrap_err();
+        assert!(error.to_string().contains("src/main.rs"));
+        assert!(!error.to_string().contains("new unsaved bytes"));
+
+        store
+            .delete_editor_draft(&workspace, "src/main.rs", &draft.revision)
+            .unwrap();
+        ensure_no_unsaved_editor_drafts(&store, &workspace).unwrap();
     }
 
     fn record(workspace: &Path) -> Record {

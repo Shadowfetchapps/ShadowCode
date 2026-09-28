@@ -15,16 +15,18 @@ fn executable(name: &str) -> Option<PathBuf> {
 }
 impl Service {
     pub(super) async fn project_map(&self, save: bool) -> Result<Value> {
-        let path = self.workspace()?;
-        let reservation = if save {
-            Some(self.mutable_workspace_at(&path)?)
-        } else {
-            None
-        };
+        let selection = self.snapshot_selection()?;
+        let path = selection.workspace.clone();
         let workspace = Arc::new(Workspace::open(&path)?);
         let map = crate::project::inspect(workspace.clone()).await?;
         let rendered = crate::project::render(&map);
-        if let Some(ws) = reservation {
+        if save {
+            let (_project, _ownership) = self.workspace_mutation_guards_at(&workspace.path).await?;
+            ensure!(
+                self.snapshot_selection()?.generation == selection.generation,
+                "Project selection changed; retry saving the project map"
+            );
+            let ws = self.mutable_workspace_at(&workspace.path)?;
             let file = ".shadow/memory/project.md";
             let before = ws.snapshot(file)?;
             let old = before

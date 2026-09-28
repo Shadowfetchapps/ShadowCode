@@ -9,4 +9,19 @@ impl Service {
         let workspace = Workspace::open(&self.workspace()?)?;
         crate::mentions::search(&workspace.path, call.q("q"), call.limit(30, 100))
     }
+
+    pub(super) fn context_preview(&self, call: &Call) -> Result<Value> {
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Body {
+            mentions: Vec<crate::mentions::Mention>,
+        }
+
+        let body: Body = call.body()?;
+        let workspace = Workspace::open(&self.workspace()?)?;
+        let mentions = crate::mentions::validate(&workspace, body.mentions)?;
+        Ok(serde_json::to_value(crate::mentions::preview(
+            &workspace, &mentions,
+        ))?)
+    }
 }

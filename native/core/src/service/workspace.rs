@@ -49,15 +49,89 @@ impl Service {
             }
             ("POST", "/api/workspace/exec") => self.exec(call).await,
             ("GET", "/api/workspace/mentions") => self.blocking(call, Self::mention_search).await,
+            ("POST", "/api/workspace/context-preview") => {
+                self.blocking(call, Self::context_preview).await
+            }
+            ("PUT" | "DELETE", "/api/workspace/editor-draft") => {
+                self.locked_editor_draft(call).await
+            }
+            ("PUT", "/api/workspace/file")
+            | ("PUT", "/api/workspace/instructions")
+            | ("PUT", "/api/workspace/skills")
+            | ("POST", "/api/workspace/attach")
+            | ("POST", "/api/workspace/attach-image") => self.locked_workspace_write(call).await,
             ("GET", "/api/workspace/git") => self.git_status().await,
             ("GET", "/api/workspace/diff") => self.git_diff(call.q("path")).await,
             ("POST", "/api/workspace/diffstat") => self.diff_stats(&call.body).await,
-            ("POST", "/api/workspace/diff/hunk") => self.hunk_action(&call.body).await,
-            ("POST", "/api/workspace/git/add") => self.git_add(&call.body).await,
-            ("POST", "/api/workspace/git/commit") => self.git_commit(call.text("message")).await,
+            ("POST", "/api/workspace/diff/hunk") => {
+                let (service, _project, _ownership) = self.selected_workspace_mutation().await?;
+                service.hunk_action(&call.body).await
+            }
+            ("POST", "/api/workspace/git/add") => {
+                let (service, _project, _ownership) = self.selected_workspace_mutation().await?;
+                service.git_add(&call.body).await
+            }
+            ("POST", "/api/workspace/git/commit") => {
+                let (service, _project, _ownership) = self.selected_workspace_mutation().await?;
+                service.git_commit(call.text("message")).await
+            }
             _ => self.blocking(call, Self::workspace_files).await,
         }
     }
+
+    async fn selected_workspace_mutation(
+        &self,
+    ) -> Result<(
+        Service,
+        tokio::sync::OwnedMutexGuard<()>,
+        Option<std::fs::File>,
+    )> {
+        let selected = self.snapshot_selection()?;
+        let workspace = Workspace::open(&selected.workspace)?.path;
+        let (guard, ownership) = self.workspace_mutation_guards_at(&workspace).await?;
+        ensure!(
+            self.snapshot_selection()?.generation == selected.generation,
+            "Project selection changed; retry the workspace mutation"
+        );
+        let service = self.fork_selection(workspace, selected.session)?;
+        Ok((service, guard, ownership))
+    }
+
+    pub(super) async fn workspace_mutation_guards_at(
+        &self,
+        path: &Path,
+    ) -> Result<(tokio::sync::OwnedMutexGuard<()>, Option<std::fs::File>)> {
+        let workspace = Workspace::open(path)?;
+        let guard = crate::compare::project_lock(&workspace.path)?
+            .lock_owned()
+            .await;
+        let cancel = CancellationToken::new();
+        let ownership = crate::compare::workspace_mutation_lock(&workspace.path, &cancel).await?;
+        Ok((guard, ownership))
+    }
+
+    /// Keep project and repository ownership until the database or blocking
+    /// workspace mutation completes.
+    async fn locked_editor_draft(&self, call: &Arc<Call>) -> Result<Value> {
+        self.locked_workspace_write(call).await
+    }
+
+    async fn locked_workspace_write(&self, call: &Arc<Call>) -> Result<Value> {
+        let (service, guard, ownership) = self.selected_workspace_mutation().await?;
+        let call = call.clone();
+        match tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            let _ownership = ownership;
+            service.workspace_files(&call)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => Err(anyhow::anyhow!("Application command stopped: {error}")),
+        }
+    }
+
     fn workspace_files(&self, call: &Call) -> Result<Value> {
         let body: FileBody = call.body()?;
         match (call.method.as_str(), call.path.as_str()) {

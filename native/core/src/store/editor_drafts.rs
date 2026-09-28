@@ -15,6 +15,23 @@ pub struct EditorDraft {
 }
 
 impl Store {
+    /// Return only paths of recovery drafts that differ from their saved
+    /// base. Compare uses this before snapshotting so it never copies an
+    /// older on-disk file while a recoverable editor buffer is waiting.
+    pub fn unsaved_editor_draft_paths(&self, workspace: &Path) -> Result<Vec<String>> {
+        let db = self.lock()?;
+        let mut query = db.prepare(
+            "SELECT path FROM editor_drafts WHERE workspace=? AND draft<>base ORDER BY path LIMIT 33",
+        )?;
+        let rows = query.query_map([workspace.to_string_lossy().as_ref()], |row| row.get(0))?;
+        let paths = rows.collect::<rusqlite::Result<Vec<String>>>()?;
+        ensure!(
+            paths.len() <= MAX_DRAFTS_PER_PROJECT as usize,
+            "Too many saved editor drafts"
+        );
+        Ok(paths)
+    }
+
     pub fn editor_drafts(&self, workspace: &Path) -> Result<Vec<EditorDraft>> {
         let db = self.lock()?;
         let mut query = db.prepare(
@@ -123,5 +140,49 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lists_pending_editor_draft_paths_without_returning_draft_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("store.sqlite")).unwrap();
+        let workspace = dir.path().join("project");
+        let original = "original\n";
+        let hash = crate::workspace::hash(original.as_bytes());
+
+        store
+            .put_editor_draft(
+                &workspace,
+                "src/a.rs",
+                original,
+                "new secret text\n",
+                &hash,
+                "missing",
+            )
+            .unwrap();
+        store
+            .put_editor_draft(
+                &workspace,
+                "src/b.rs",
+                original,
+                "other draft\n",
+                &hash,
+                "missing",
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.unsaved_editor_draft_paths(&workspace).unwrap(),
+            vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()]
+        );
+        assert!(store
+            .unsaved_editor_draft_paths(&dir.path().join("another-project"))
+            .unwrap()
+            .is_empty());
     }
 }

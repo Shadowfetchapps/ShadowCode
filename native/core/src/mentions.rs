@@ -25,6 +25,38 @@ pub struct Mention {
     pub kind: String,
 }
 
+/// An inspectable description of the exact file/folder attachment layer.
+/// It deliberately excludes file contents; callers get paths, byte/line
+/// bounds and the reason a selection was omitted.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ContextItem {
+    pub path: String,
+    pub kind: String,
+    pub included: bool,
+    pub reason: String,
+    pub bytes: usize,
+    pub total_bytes: Option<usize>,
+    pub from_line: Option<usize>,
+    pub to_line: Option<usize>,
+    pub entries: Vec<String>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct ContextPreview {
+    pub items: Vec<ContextItem>,
+    pub included_bytes: usize,
+    /// Approximate token count for the exact bounded attachment text. This
+    /// is a byte-based estimate, not a model tokenizer measurement.
+    pub estimated_tokens: usize,
+    pub truncated: bool,
+}
+
+struct ContextAssembly {
+    prompt: Option<String>,
+    preview: ContextPreview,
+}
+
 /// Mentions per prompt.
 pub const MAX_MENTIONS: usize = 20;
 /// Entries the search walks; larger trees are searched in part.
@@ -197,64 +229,161 @@ pub fn validate(workspace: &Workspace, mentions: Vec<Mention>) -> Result<Vec<Men
 /// current text (bounded) and each folder's entries. `None` without
 /// mentions.
 pub fn context(workspace: &Workspace, mentions: &[Mention]) -> Option<String> {
+    assemble_context(workspace, mentions).prompt
+}
+
+/// Same bounded resolution used for task prompts, returned without source
+/// text so the UI can explain what ShadowCode will attach before sending.
+pub fn preview(workspace: &Workspace, mentions: &[Mention]) -> ContextPreview {
+    assemble_context(workspace, mentions).preview
+}
+
+fn assemble_context(workspace: &Workspace, mentions: &[Mention]) -> ContextAssembly {
     if mentions.is_empty() {
-        return None;
+        return ContextAssembly {
+            prompt: None,
+            preview: ContextPreview::default(),
+        };
     }
     let mut out = String::from(
         "The user attached these project files and folders with @-mentions. Contents were read when the task started; read a file again before editing it.\n",
     );
     let mut budget = TOTAL_BYTES;
+    let mut preview = ContextPreview::default();
     for mention in mentions.iter().take(MAX_MENTIONS) {
         if mention.kind == "dir" {
             out.push_str(&format!("\n<folder path=\"{}\">\n", mention.path));
             match workspace.list(&mention.path) {
                 Ok(entries) => {
-                    for entry in entries.iter().take(FOLDER_ENTRIES) {
-                        out.push_str(&entry.path);
-                        if entry.kind == "dir" {
-                            out.push('/');
-                        }
+                    let included: Vec<String> = entries
+                        .iter()
+                        .take(FOLDER_ENTRIES)
+                        .map(|entry| {
+                            let suffix = if entry.kind == "dir" { "/" } else { "" };
+                            format!("{}{suffix}", entry.path)
+                        })
+                        .collect();
+                    for entry in &included {
+                        out.push_str(entry);
                         out.push('\n');
                     }
+                    let truncated = entries.len() > FOLDER_ENTRIES;
                     if entries.len() > FOLDER_ENTRIES {
                         out.push_str(&format!(
                             "[{} more entries; list the folder for the rest]\n",
                             entries.len() - FOLDER_ENTRIES
                         ));
                     }
+                    preview.truncated |= truncated;
+                    preview.items.push(ContextItem {
+                        path: mention.path.clone(),
+                        kind: "dir".into(),
+                        included: true,
+                        reason: "Explicit @mention; folder names are attached, not file contents."
+                            .into(),
+                        bytes: included.iter().map(String::len).sum(),
+                        total_bytes: None,
+                        from_line: None,
+                        to_line: None,
+                        entries: included,
+                        truncated,
+                    });
                 }
-                Err(error) => out.push_str(&format!("[Could not list this folder: {error}]\n")),
+                Err(_) => {
+                    out.push_str("[Could not list this folder]\n");
+                    preview.items.push(ContextItem {
+                        path: mention.path.clone(),
+                        kind: "dir".into(),
+                        included: false,
+                        reason: "Folder could not be read when this preview was prepared.".into(),
+                        bytes: 0,
+                        total_bytes: None,
+                        from_line: None,
+                        to_line: None,
+                        entries: Vec::new(),
+                        truncated: false,
+                    });
+                }
             }
             out.push_str("</folder>\n");
             continue;
         }
         out.push_str(&format!("\n<file path=\"{}\">\n", mention.path));
         match workspace.read(&mention.path) {
-            Ok(file) if budget == 0 => {
-                let _ = file;
+            Ok(_file) if budget == 0 => {
                 out.push_str("[Not included: the attached context is full; read the file]\n");
+                preview.truncated = true;
+                preview.items.push(ContextItem {
+                    path: mention.path.clone(),
+                    kind: "file".into(),
+                    included: false,
+                    reason: "The 256 KiB total attachment limit was already reached.".into(),
+                    bytes: 0,
+                    total_bytes: None,
+                    from_line: None,
+                    to_line: None,
+                    entries: Vec::new(),
+                    truncated: true,
+                });
             }
             Ok(file) => {
                 let take = FILE_BYTES.min(budget);
                 let text = crate::tools::truncate(&file.content, take);
                 budget -= text.len();
                 out.push_str(text);
+                let truncated = text.len() < file.content.len();
+                let line_count = text.lines().count();
                 if !text.ends_with('\n') {
                     out.push('\n');
                 }
-                if text.len() < file.content.len() {
+                if truncated {
                     out.push_str(&format!(
                         "[Truncated after {} of {} bytes; read the file for the rest]\n",
                         text.len(),
                         file.content.len()
                     ));
                 }
+                preview.included_bytes += text.len();
+                preview.truncated |= truncated;
+                preview.items.push(ContextItem {
+                    path: mention.path.clone(),
+                    kind: "file".into(),
+                    included: true,
+                    reason: "Explicit @mention; current file text is attached within per-file and total byte limits.".into(),
+                    bytes: text.len(),
+                    total_bytes: Some(file.content.len()),
+                    from_line: (line_count > 0).then_some(1),
+                    to_line: (line_count > 0).then_some(line_count),
+                    entries: Vec::new(),
+                    truncated,
+                });
             }
-            Err(error) => out.push_str(&format!("[Could not read this file: {error}]\n")),
+            Err(_) => {
+                out.push_str("[Could not read this file]\n");
+                preview.items.push(ContextItem {
+                    path: mention.path.clone(),
+                    kind: "file".into(),
+                    included: false,
+                    reason: "File could not be read when this preview was prepared.".into(),
+                    bytes: 0,
+                    total_bytes: None,
+                    from_line: None,
+                    to_line: None,
+                    entries: Vec::new(),
+                    truncated: false,
+                });
+            }
         }
         out.push_str("</file>\n");
     }
-    Some(out)
+    // Keep this estimate tied to the very same bounded prompt text returned to
+    // native execution. Provider tokenizers differ, so the UI labels it as an
+    // estimate rather than presenting it as exact usage.
+    preview.estimated_tokens = out.len().div_ceil(3);
+    ContextAssembly {
+        prompt: Some(out),
+        preview,
+    }
 }
 
 #[cfg(test)]
@@ -339,6 +468,29 @@ mod tests {
         let text = context(&ws, &mentions).unwrap();
         assert!(text.contains("<file path=\"src/main.rs\">\nfn main() {}\n</file>"));
         assert!(text.contains("<folder path=\"src\">\nsrc/components/\nsrc/main.rs\n</folder>"));
+        let inventory = preview(&ws, &mentions);
+        assert_eq!(inventory.items.len(), 2);
+        assert_eq!(inventory.items[0].path, "src/main.rs");
+        assert!(inventory.items[0].included);
+        assert_eq!(inventory.estimated_tokens, text.len().div_ceil(3));
+        assert_eq!(inventory.items[0].from_line, Some(1));
+        assert_eq!(inventory.items[0].to_line, Some(1));
+        assert_eq!(inventory.items[0].total_bytes, Some("fn main() {}\n".len()));
+        assert_eq!(
+            inventory.items[1].entries,
+            ["src/components/", "src/main.rs"]
+        );
+        assert!(!inventory.truncated);
+
+        let missing = preview(
+            &ws,
+            &[Mention {
+                path: "missing.rs".into(),
+                kind: "file".into(),
+            }],
+        );
+        assert!(!missing.items[0].included);
+        assert!(missing.items[0].reason.contains("could not be read"));
         assert!(context(&ws, &[]).is_none());
         assert!(validate(
             &ws,

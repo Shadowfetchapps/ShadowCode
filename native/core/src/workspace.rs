@@ -154,6 +154,49 @@ impl Workspace {
         }
         Ok(rel)
     }
+    /// Resolve a mutation's parent through directory handles, refusing symlink
+    /// components even if the path changed after `writable` validated it.
+    fn mutation_parent(&self, relative: &Path, create: bool) -> Result<(Dir, std::ffi::OsString)> {
+        let name = relative
+            .file_name()
+            .context("Mutation requires a file path")?
+            .to_os_string();
+        let relative_parent = relative
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        #[cfg(unix)]
+        {
+            let mut parent = self.dir.try_clone()?;
+            for part in relative_parent.components() {
+                let Component::Normal(component) = part else {
+                    continue;
+                };
+                let child = match open_mutation_directory(&parent, component) {
+                    Ok(dir) => dir,
+                    Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
+                        match parent.create_dir(component) {
+                            Ok(()) => {}
+                            Err(create_error)
+                                if create_error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                            Err(create_error) => return Err(create_error.into()),
+                        }
+                        open_mutation_directory(&parent, component)?
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                parent = child;
+            }
+            Ok((parent, name))
+        }
+        #[cfg(not(unix))]
+        {
+            if create {
+                self.dir.create_dir_all(relative_parent)?;
+            }
+            Ok((self.dir.open_dir(relative_parent)?, name))
+        }
+    }
     pub fn list(&self, path: &str) -> Result<Vec<FileEntry>> {
         let rel = self.relative(path)?;
         let mut entries = Vec::new();
@@ -313,20 +356,62 @@ impl Workspace {
             "File exceeds the 4 MB edit limit"
         );
         let rel = self.writable(path)?;
-        let before = self.snapshot(path)?;
+        let (parent, name) = match self.mutation_parent(&rel, false) {
+            Ok(target) => target,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                ensure!(
+                    expected.is_none_or(|hash| hash == "missing"),
+                    "File changed since it was read; inspect it again before editing"
+                );
+                self.mutation_parent(&rel, true)?
+            }
+            Err(error) => return Err(error),
+        };
+        let before = match open_mutation_file(&parent, &name) {
+            Ok(file) => {
+                let meta = file.metadata()?;
+                ensure!(meta.is_file(), "Not a regular file");
+                ensure!(
+                    meta.len() <= MAX_FILE_BYTES as u64,
+                    "File exceeds the 4 MB edit limit"
+                );
+                #[cfg(unix)]
+                let mode = {
+                    use cap_std::fs::MetadataExt;
+                    Some(meta.mode() & 0o777)
+                };
+                #[cfg(not(unix))]
+                let mode = None;
+                let mut current = Vec::new();
+                file.take((MAX_FILE_BYTES + 1) as u64)
+                    .read_to_end(&mut current)?;
+                ensure!(
+                    current.len() <= MAX_FILE_BYTES,
+                    "File grew beyond the edit limit"
+                );
+                Snapshot {
+                    hash: Some(hash(&current)),
+                    bytes: Some(current),
+                    mode,
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Snapshot {
+                bytes: None,
+                mode: None,
+                hash: None,
+            },
+            Err(error) => return Err(error.into()),
+        };
         if let Some(expected) = expected {
             ensure!(
                 before.hash.as_deref().unwrap_or("missing") == expected,
                 "File changed since it was read; inspect it again before editing"
             );
         }
-        let parent = rel
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        self.dir.create_dir_all(parent)?;
-        let parent = self.dir.open_dir(parent)?;
-        let name = rel.file_name().context("Missing file name")?;
         let temporary = format!(".shadow-write-{}", crate::id());
         let result = (|| -> Result<()> {
             let mut file =
@@ -365,50 +450,70 @@ impl Workspace {
         self.write(path, edited.as_bytes(), Some(&file.hash))
     }
     pub fn mkdir(&self, path: &str) -> Result<()> {
-        self.dir.create_dir_all(self.writable(path)?)?;
+        let relative = self.writable(path)?;
+        let (parent, name) = self.mutation_parent(&relative, true)?;
+        match parent.create_dir(&name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                open_mutation_directory(&parent, &name)
+                    .context("Destination must be a real directory, not a symlink")?;
+            }
+            Err(error) => return Err(error.into()),
+        }
         Ok(())
     }
     pub(crate) fn remove_empty_dir(&self, path: &str) -> Result<()> {
-        self.dir.remove_dir(self.writable(path)?)?;
+        let relative = self.writable(path)?;
+        let (parent, name) = self.mutation_parent(&relative, false)?;
+        parent.remove_dir(&name)?;
         Ok(())
     }
     pub fn set_mode(&self, path: &str, mode: u32) -> Result<()> {
         #[cfg(unix)]
         {
             use cap_std::fs::{Permissions, PermissionsExt};
-            let file = self.dir.open(self.writable(path)?)?;
+            let relative = self.writable(path)?;
+            let (parent, name) = self.mutation_parent(&relative, false)?;
+            let file = open_mutation_file(&parent, &name)?;
+            ensure!(file.metadata()?.is_file(), "Not a regular file");
             file.set_permissions(Permissions::from_mode(mode & 0o777))?;
         }
         Ok(())
     }
     pub fn delete(&self, path: &str, expected: Option<&str>) -> Result<()> {
         let rel = self.writable(path)?;
-        let snapshot = self.snapshot(path)?;
-        ensure!(snapshot.bytes.is_some(), "File not found");
+        let (parent, name) = self.mutation_parent(&rel, false)?;
+        let file = open_mutation_file(&parent, &name).context("File not found")?;
+        let meta = file.metadata()?;
+        ensure!(meta.is_file(), "Not a regular file");
+        let mut bytes = Vec::new();
+        file.take((MAX_FILE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() <= MAX_FILE_BYTES,
+            "File exceeds the 4 MB edit limit"
+        );
+        let current_hash = hash(&bytes);
         if let Some(expected) = expected {
-            ensure!(
-                snapshot.hash.as_deref() == Some(expected),
-                "File changed since it was read"
-            );
+            ensure!(current_hash == expected, "File changed since it was read");
         }
-        self.dir.remove_file(rel)?;
+        parent.remove_file(&name)?;
         Ok(())
     }
     pub fn move_file(&self, source: &str, destination: &str) -> Result<()> {
         let source = self.writable(source)?;
         let destination = self.writable(destination)?;
+        let (source_parent, source_name) = self.mutation_parent(&source, false)?;
+        let source_meta = source_parent.symlink_metadata(&source_name)?;
+        ensure!(source_meta.is_file(), "Move supports regular files only");
+        let (destination_parent, destination_name) = self.mutation_parent(&destination, true)?;
         ensure!(
-            self.dir.metadata(&source)?.is_file(),
-            "Move supports regular files only"
-        );
-        ensure!(
-            self.dir.symlink_metadata(&destination).is_err(),
+            destination_parent
+                .symlink_metadata(&destination_name)
+                .is_err(),
             "Destination already exists"
         );
-        if let Some(parent) = destination.parent().filter(|p| !p.as_os_str().is_empty()) {
-            self.dir.create_dir_all(parent)?;
-        }
-        self.dir.rename(source, &self.dir, destination)?;
+        source_parent.rename(&source_name, &destination_parent, &destination_name)?;
         Ok(())
     }
     pub fn search(
@@ -524,6 +629,96 @@ impl Workspace {
     }
 }
 
+fn open_mutation_directory(parent: &Dir, name: &std::ffi::OsStr) -> std::io::Result<Dir> {
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        Ok(Dir::from_std_file(
+            parent.open_with(name, &options)?.into_std(),
+        ))
+    }
+    #[cfg(not(unix))]
+    parent.open_dir(name)
+}
+
+fn open_mutation_file(parent: &Dir, name: &std::ffi::OsStr) -> std::io::Result<cap_std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    parent.open_with(name, &options)
+}
+
 pub fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(all(test, unix))]
+mod mutation_parent_tests {
+    use super::Workspace;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn pinned_parent_resolution_rejects_symlink_swapped_after_validation() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let other = project.join("other");
+        std::fs::create_dir_all(project.join("parent")).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("file"), "untouched").unwrap();
+        let workspace = Workspace::open(&project).unwrap();
+
+        // Model an attacker swapping the validated parent before a mutation
+        // obtains its directory capability.
+        let relative = workspace.writable("parent/file").unwrap();
+        std::fs::remove_dir(project.join("parent")).unwrap();
+        symlink("other", project.join("parent")).unwrap();
+
+        assert!(workspace.mutation_parent(&relative, false).is_err());
+        assert!(workspace.mutation_parent(&relative, true).is_err());
+        assert_eq!(
+            std::fs::read_to_string(other.join("file")).unwrap(),
+            "untouched"
+        );
+    }
+
+    #[test]
+    fn empty_directory_removal_uses_the_pinned_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(root.path()).unwrap();
+        workspace.mkdir("nested/child").unwrap();
+        workspace.remove_empty_dir("nested/child").unwrap();
+        workspace.remove_empty_dir("nested").unwrap();
+        assert!(!root.path().join("nested").exists());
+    }
+
+    #[test]
+    fn mutation_leaf_opens_refuse_symlinks_and_nonregular_files() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(root.path()).unwrap();
+        std::fs::write(root.path().join("file"), "keep").unwrap();
+        std::fs::create_dir(root.path().join("directory")).unwrap();
+        symlink("file", root.path().join("file-link")).unwrap();
+        symlink("directory", root.path().join("directory-link")).unwrap();
+        assert!(super::open_mutation_file(&workspace.dir, "file-link".as_ref()).is_err());
+        assert!(super::open_mutation_directory(&workspace.dir, "directory-link".as_ref()).is_err());
+        let fifo = root.path().join("fifo");
+        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: path is a live NUL-terminated string for this call.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert!(workspace.write("fifo", b"no", None).is_err());
+        assert!(workspace.delete("fifo", None).is_err());
+        assert!(workspace.set_mode("fifo", 0o777).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("file")).unwrap(),
+            "keep"
+        );
+    }
 }

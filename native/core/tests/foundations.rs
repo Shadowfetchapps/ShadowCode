@@ -527,6 +527,37 @@ fn workspace_edits_are_atomic_and_reject_stale_context() {
     assert!(ws.edit("repeated", "a", "b", false).is_err());
     assert!(ws.write(".git/config", b"bad", None).is_err());
     assert!(ws.delete("src", None).is_err());
+    ws.mkdir("nested/child").unwrap();
+    ws.write("nested/child/move.txt", b"move me", None).unwrap();
+    ws.set_mode("nested/child/move.txt", 0o600).unwrap();
+    ws.move_file("nested/child/move.txt", "nested/child/moved.txt")
+        .unwrap();
+    assert_eq!(
+        ws.read("nested/child/moved.txt").unwrap().content,
+        "move me"
+    );
+    ws.delete("nested/child/moved.txt", None).unwrap();
+}
+
+#[test]
+fn refused_stale_write_does_not_create_missing_parents() {
+    let root = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(root.path()).unwrap();
+    assert!(ws
+        .write("new/deep/file", b"replacement", Some("stale"))
+        .is_err());
+    assert!(!root.path().join("new").exists());
+}
+
+#[test]
+fn refused_move_does_not_create_destination_parents() {
+    let root = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(root.path()).unwrap();
+    assert!(ws.move_file("missing", "new/deep/file").is_err());
+    assert!(!root.path().join("new").exists());
+    ws.mkdir("directory").unwrap();
+    assert!(ws.move_file("directory", "new/deep/file").is_err());
+    assert!(!root.path().join("new").exists());
 }
 
 #[cfg(unix)]

@@ -212,6 +212,84 @@ async fn editor_drafts_survive_restart_without_overwriting_workspace_files() {
 }
 
 #[tokio::test]
+async fn workspace_mutations_respect_cross_process_compare_lock() {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+
+    let (_root, service) = setup(true);
+    let project = service.workspace().unwrap();
+    init(&project);
+    let source = fs::read_to_string(project.join("sample.txt")).unwrap();
+    let base_hash = shadowcode_core::workspace::hash(source.as_bytes());
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(project.join(".git/shadowcode-compare.lock"))
+        .unwrap();
+    lock_file.try_lock_exclusive().unwrap();
+
+    let draft = json!({"workspace":project,"base":source,"draft":"unsaved edit\n","base_hash":base_hash,"expected_revision":"missing"});
+    let blocked = call(
+        &service,
+        "PUT",
+        "/api/workspace/editor-draft?path=sample.txt",
+        draft.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert!(blocked.to_string().contains("Another ShadowCode operation"));
+    let blocked_file = call(
+        &service,
+        "PUT",
+        "/api/workspace/file?path=sample.txt",
+        json!({"content":"must not race Compare\n","expected_hash":base_hash}),
+    )
+    .await
+    .unwrap_err();
+    assert!(blocked_file
+        .to_string()
+        .contains("Another ShadowCode operation"));
+    let blocked_stage = call(
+        &service,
+        "POST",
+        "/api/workspace/git/add",
+        json!({"paths":["sample.txt"]}),
+    )
+    .await
+    .unwrap_err();
+    assert!(blocked_stage
+        .to_string()
+        .contains("Another ShadowCode operation"));
+    assert_eq!(
+        fs::read_to_string(project.join("sample.txt")).unwrap(),
+        source
+    );
+    drop(lock_file);
+
+    let saved_file = call(
+        &service,
+        "PUT",
+        "/api/workspace/file?path=sample.txt",
+        json!({"content":"file save after Compare\n","expected_hash":base_hash}),
+    )
+    .await
+    .unwrap();
+    assert!(saved_file["hash"].as_str().is_some());
+
+    let saved = call(
+        &service,
+        "PUT",
+        "/api/workspace/editor-draft?path=sample.txt",
+        draft,
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["draft"], "unsaved edit\n");
+}
+
+#[tokio::test]
 async fn manual_mutations_require_trust_and_respect_read_only_mode() {
     let (_root, service) = setup(false);
     let workspace = service.workspace().unwrap();
