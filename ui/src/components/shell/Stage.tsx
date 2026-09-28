@@ -402,6 +402,7 @@ export function Stage({
           queueing,
           onRun: () => void actions.submit({ worktree: true }),
         }}
+        worktreeNote={actions.worktreeBlocked}
       />
       <StatusBar
         busy={busy}

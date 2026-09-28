@@ -116,6 +116,28 @@ it("states vendor-owned checks and unverified claims honestly", () => {
   ).toBeTruthy();
 });
 
+it("the quiet card keeps Run a check in an action row, not stretched across the card", () => {
+  const stopped: TaskActivity = {
+    ...base,
+    changed: [],
+    verification: { status: "not_run", commands: [] },
+    finished: { success: false, cancelled: true, summary: "Stopped" },
+  };
+  render(
+    <TaskSummary
+      activity={stopped}
+      onReview={vi.fn()}
+      runCheck={{ workspace: "/w", sessionId: "s1", onRun: vi.fn() }}
+    />,
+  );
+  const quiet = screen.getByRole("region", { name: "Task summary" });
+  expect(quiet.className).toContain("is-quiet");
+  const check = screen.getByRole("button", { name: "Run a check…" });
+  // A bare button would be a grid item of the card and fill its width.
+  expect(check.parentElement?.className).toContain("task-summary-actions");
+  expect(check.parentElement).not.toBe(quiet);
+});
+
 it("a plan limit is a warning, quiet when nothing changed", () => {
   const limited: TaskActivity = {
     ...base,

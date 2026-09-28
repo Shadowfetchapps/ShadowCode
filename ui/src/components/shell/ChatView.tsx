@@ -9,6 +9,7 @@ import { TaskSteerBar } from "../TaskSteerBar";
 import { WelcomeBanner } from "../WelcomeBanner";
 import type { TaskActivity } from "../../lib/activity";
 import { isProjectTrustError, trustErrorHint } from "../../lib/trust";
+import { readableError } from "../../lib/transport";
 import type { ToastKind } from "../../hooks/useToasts";
 
 export type HistoryState = {
@@ -163,7 +164,7 @@ export function ChatView({
         {error && (
           <div className="notice bad" role="alert">
             <span>
-              {error}
+              {readableError(error)}
               {trustErrorHint(error) ? ` ${trustErrorHint(error)}` : ""}
             </span>
             {isProjectTrustError(error) && canTrust && (

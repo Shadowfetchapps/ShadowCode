@@ -21,7 +21,7 @@ export function WelcomeBanner({
   return (
     <div className="welcome">
       <img src="/icon-192.png" alt="" className="welcome-mark" />
-      <h1>What should we work on?</h1>
+      <h2 className="welcome-title">What should we work on?</h2>
       {needsModel && onChooseModel && (
         <div className="welcome-model-setup">
           <p>Choose a coding agent or local model to start.</p>

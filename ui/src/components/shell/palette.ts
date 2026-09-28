@@ -52,12 +52,38 @@ export function paletteItems(a: PaletteActions): PaletteItem[] {
       run: () => a.panel("terminal"),
     },
     {
+      id: "preview",
+      label: "Preview the running app",
+      run: () => a.panel("preview"),
+    },
+    {
       id: "sessions",
       label: "Manage tasks · rename, branch, export, delete",
       run: () => a.panel("sessions"),
     },
     { id: "accounts", label: "Accounts", run: () => a.settings("accounts") },
     { id: "local", label: "Local models", run: () => a.settings("local") },
+    {
+      id: "code",
+      label: "Code intelligence · language servers and search",
+      run: () => a.settings("code"),
+    },
+    { id: "voice", label: "Voice input", run: () => a.settings("voice") },
+    {
+      id: "permissions",
+      label: "Permissions & network",
+      run: () => a.settings("permissions"),
+    },
+    {
+      id: "appearance",
+      label: "Appearance and notifications",
+      run: () => a.settings("appearance"),
+    },
+    {
+      id: "remote",
+      label: "Remote access · follow tasks from your phone",
+      run: () => a.settings("remote"),
+    },
     {
       id: "goals",
       label: "Goals and milestones",

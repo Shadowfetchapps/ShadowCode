@@ -6,6 +6,7 @@ import {
   type EmbeddingModel,
 } from "../../api";
 import { formatBytes } from "./LocalModelsPage";
+import { LoadError } from "../cards";
 
 const BUSY = new Set(["installing", "downloading", "verifying", "running"]);
 const MAP_SIZES = [
@@ -81,9 +82,7 @@ export function CodeIntelPage({
       <section className="settings-page">
         <h3>Code intelligence</h3>
         {error ? (
-          <p className="health-bad" role="alert">
-            {error}
-          </p>
+          <LoadError message={error} onRetry={load} />
         ) : (
           <p role="status">Reading code intelligence status…</p>
         )}

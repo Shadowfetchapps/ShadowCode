@@ -109,6 +109,18 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.body = body;
   }
+  /** `String(error)` is what the window shows, so it reads as the engine's
+   * sentence without a class-name prefix ("ApiError: …"). */
+  override toString() {
+    return this.message;
+  }
+}
+
+/** Text for an error shown to people: the message alone, without a
+ * JavaScript class prefix such as "Error: " or "ApiError: ". */
+export function readableError(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error ?? "");
+  return text.replace(/^(?:Api|Type|Range|Syntax)?Error: /, "").trim();
 }
 
 function parseErrorBody(text: string): Record<string, unknown> | null {

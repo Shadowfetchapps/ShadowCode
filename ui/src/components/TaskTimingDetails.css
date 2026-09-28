@@ -1,9 +1,29 @@
+/* Disclosures inside a summary card read at the card's own size: no extra
+   margins (the card's grid gap spaces them) and a small, muted marker. */
 .task-timings {
-  margin: 0.7rem 0;
-  font-size: 0.8rem;
+  margin: 0;
+  font-size: 12px;
 }
-.task-timings > summary {
+.task-timings > summary,
+.task-summary-block details > summary {
   cursor: pointer;
+  width: fit-content;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.task-timings > summary:hover,
+.task-summary-block details > summary:hover {
+  color: var(--text);
+}
+.task-timings > summary::marker,
+.task-summary-block details > summary::marker {
+  font-size: 9px;
+  color: var(--muted);
+}
+.task-timings > summary::-webkit-details-marker,
+.task-summary-block details > summary::-webkit-details-marker {
+  font-size: 9px;
+  color: var(--muted);
 }
 .task-timings dl {
   margin: 0.6rem 0;

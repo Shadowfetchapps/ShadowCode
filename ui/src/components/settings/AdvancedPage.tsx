@@ -10,6 +10,7 @@ import { AdvancedTools } from "../AdvancedTools";
 import { McpSettings } from "../McpSettings";
 import { PluginSettings } from "../PluginSettings";
 import { HealthTab, SkillsTab } from "./AdvancedPanels";
+import { LoadError } from "../cards";
 
 /** Goals, background processes and worktrees are used while working, so
  * they live in the drawer's Tools tab rather than here. */
@@ -118,13 +119,18 @@ export function AdvancedPage({
 function McpPanel({ onToast }: { onToast: Toast }) {
   const [catalog, setCatalog] = useState<NativeMcpCatalog | null>(null);
   const [error, setError] = useState("");
-  useEffect(() => {
-    void api
-      .mcpServers()
-      .then(setCatalog)
-      .catch((e) => setError(String(e)));
+  const load = useCallback(async () => {
+    try {
+      setCatalog(await api.mcpServers());
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    }
   }, []);
-  if (error) return <p role="alert">{error}</p>;
+  useEffect(() => {
+    void load();
+  }, [load]);
+  if (error) return <LoadError message={error} onRetry={load} />;
   if (!catalog) return <p role="status">Loading MCP definitions…</p>;
   return (
     <McpSettings catalog={catalog} onChange={setCatalog} onToast={onToast} />
@@ -140,13 +146,18 @@ function PluginsPanel({
 }) {
   const [catalog, setCatalog] = useState<NativePluginCatalog | null>(null);
   const [error, setError] = useState("");
-  useEffect(() => {
-    void api
-      .plugins()
-      .then(setCatalog)
-      .catch((e) => setError(String(e)));
+  const load = useCallback(async () => {
+    try {
+      setCatalog(await api.plugins());
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    }
   }, []);
-  if (error) return <p role="alert">{error}</p>;
+  useEffect(() => {
+    void load();
+  }, [load]);
+  if (error) return <LoadError message={error} onRetry={load} />;
   if (!catalog) return <p role="status">Loading project plugins…</p>;
   return (
     <PluginSettings

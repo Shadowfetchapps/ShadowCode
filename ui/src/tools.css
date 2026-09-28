@@ -362,7 +362,9 @@
 .automation-editor input:not([type="checkbox"]):not([type="radio"]),
 .automation-editor textarea,
 .automation-editor select,
-.issue-pick input:not([type="checkbox"]) {
+.issue-pick input:not([type="checkbox"]),
+.background-form input,
+.worktree-create input {
   background: var(--surface-2);
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
@@ -385,7 +387,9 @@
 .automation-editor input:focus,
 .automation-editor textarea:focus,
 .automation-editor select:focus,
-.issue-pick input:focus {
+.issue-pick input:focus,
+.background-form input:focus,
+.worktree-create input:focus {
   border-color: var(--border-strong);
   background: var(--surface);
 }

@@ -76,6 +76,7 @@ export function ComposerDock({
   voice,
   modes,
   worktree,
+  worktreeNote,
 }: {
   hidden: boolean;
   queue: {
@@ -117,11 +118,19 @@ export function ComposerDock({
   };
   /** "Run in new worktree" (stays discoverable when it cannot apply). */
   worktree?: ComponentProps<typeof RunInWorktreeButton>;
+  /** Why worktrees cannot be used in this project or conversation at all
+   * (shown in the More menu; general reasons such as a missing model are
+   * already shown under the composer). */
+  worktreeNote?: string | null;
 }) {
   const effortIndicator =
     modes?.effortShown && modes.effort !== "default"
       ? modes.effort[0].toUpperCase() + modes.effort.slice(1)
       : undefined;
+  // Unavailable options stay in the More menu so they can be found, with the
+  // reason shown beside them rather than only in a hover tooltip. An empty
+  // composer gets one line instead of the same reason under every option.
+  const needsTask = !composer.task.trim() && !composer.attachments?.length;
   return (
     <div className="composer-wrap" hidden={hidden}>
       <QueuedTasks {...queue} />
@@ -165,7 +174,19 @@ export function ComposerDock({
             {modes?.effortShown && (
               <EffortControl effort={modes.effort} onChange={modes.onEffort} />
             )}
+            {needsTask && (
+              <p className="composer-more-reason">
+                Type a task first to run it in a new worktree or compare models
+                on it.
+              </p>
+            )}
             {worktree && <RunInWorktreeButton {...worktree} />}
+            {worktree && worktreeNote && !needsTask && (
+              // The button's accessible name already carries the reason.
+              <p className="composer-more-reason" aria-hidden="true">
+                {worktreeNote}
+              </p>
+            )}
             <button
               type="button"
               className="compare-btn"
@@ -183,9 +204,12 @@ export function ComposerDock({
               <span className="compare-btn-text">Compare</span>
             </button>
             {compare.reason && (
-              <span id="compare-blocked" className="sr-only">
+              <p
+                id="compare-blocked"
+                className={needsTask ? "sr-only" : "composer-more-reason"}
+              >
                 {compare.reason}
-              </span>
+              </p>
             )}
           </ComposerMoreOptions>
         }

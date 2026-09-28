@@ -35,7 +35,7 @@ const SHORTCUT_GROUPS: { label: string; rows: [string, string][] }[] = [
     label: "Other",
     rows: [
       ["Ctrl+,", "Settings"],
-      ["Ctrl+Shift+E", "Export session as Markdown"],
+      ["Ctrl+Shift+E", "Export this task as Markdown"],
       ["?", "This cheat sheet"],
     ],
   },
@@ -80,13 +80,15 @@ export function Help({
         ))}
       </div>
       <h2 className="help-section-title">What can I ask?</h2>
-      <div className="help-examples">
+      {/* Examples to type, not buttons: a plain list, so nothing looks
+          clickable that is not. */}
+      <ul className="help-examples">
         {EXAMPLE_PROMPTS.map((p) => (
-          <div className="help-example" key={p}>
-            "{p}"
-          </div>
+          <li className="help-example" key={p}>
+            “{p}”
+          </li>
         ))}
-      </div>
+      </ul>
       <p className="hint">ShadowCode {version}</p>
       <div className="row end">
         <button type="button" className="ghost" onClick={onClose}>
