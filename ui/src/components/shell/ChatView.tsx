@@ -97,6 +97,7 @@ export function ChatView({
   onSuggestion,
   needsModel,
   onChooseModel,
+  modelSetup,
   rows,
   commandCards,
   approvals,
@@ -129,6 +130,8 @@ export function ChatView({
   onSuggestion: (prompt: string) => void;
   needsModel: boolean;
   onChooseModel: () => void;
+  /** Shown instead of "Choose a model" (downloads, first model setup). */
+  modelSetup?: ReactNode;
   rows: ReactNode;
   commandCards: CommandResult[];
   approvals: Approval[];
@@ -209,6 +212,7 @@ export function ChatView({
             onSelect={onSuggestion}
             needsModel={needsModel}
             onChooseModel={onChooseModel}
+            modelSetup={modelSetup}
           />
         ) : (
           <>

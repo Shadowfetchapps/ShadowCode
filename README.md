@@ -10,9 +10,10 @@ describe the change, watch the agent work, then review the diff.
 The model can come from a subscription you already have (Codex, Claude Code,
 Cursor, Antigravity or Grok, driven through each vendor's own command-line
 tool), from an [OpenRouter](https://openrouter.ai) API key if you have no
-subscription (hundreds of models, billed per token), or from a GGUF file on
-your computer, run by a llama.cpp runtime that ships with the app. You don't
-need Ollama, LM Studio or any other model server.
+subscription (hundreds of models, billed per token), or from a model that
+runs on your computer through a llama.cpp runtime that ships with the app.
+With no account at all, ShadowCode offers a free model to download that fits
+your computer. You don't need Ollama, LM Studio or any other model server.
 
 ![ShadowCode workspace](docs/images/workspace-light.png)
 
@@ -23,8 +24,10 @@ need Ollama, LM Studio or any other model server.
   says *Usage unavailable* and gives the reason. ShadowCode never makes up a
   figure.
 - **Local models run on your hardware.** A bundled, pinned llama.cpp runs on
-  Vulkan GPUs or the CPU. Models already in an Ollama store can be imported by
-  reference without copying.
+  Vulkan GPUs or the CPU. A short list of free, Apache-2.0 models (Granite,
+  Gemma 4, gpt-oss, Qwen3.6) downloads on request, with a recommendation for
+  your memory and graphics card. Models already in an Ollama store can be
+  imported by reference without copying.
 - **You approve actions.** Choose *Ask before actions* or *Allow project edits*.
   Approval cards show the actual diff or command. After a task you review
   just what it changed, keep or undo each change, and rewind shell commands
@@ -161,9 +164,15 @@ day**; Offline mode pauses it. Distributions can turn it off for everyone.
    project instructions, hooks and plugins can influence or run work.
 2. Choose a permission mode. *Ask before actions* is the default for new
    installs.
-3. Open the picker with `Ctrl+M` or the model button in the composer. Rows that
+3. If no model is ready (no subscription signed in, no OpenRouter key, no
+   local model), choose how ShadowCode should think: **Download a free model
+   to run on this computer** (recommended for your hardware and preselected;
+   size and time are shown, and nothing downloads until you press Download),
+   **Use an OpenRouter key**, or **Sign in to a subscription**. A downloaded
+   model is selected as soon as it is ready.
+4. Open the picker with `Ctrl+M` or the model button in the composer. Rows that
    aren't ready yet point you to **Settings › Accounts** (sign in) or
-   **Settings › Local models** (add a GGUF).
+   **Settings › Local models** (download a free model or add a GGUF).
 
 ## The picker
 
@@ -376,9 +385,19 @@ rate limits are retried automatically. Details: [OpenRouter](docs/OPENROUTER.md)
 
 ![Local models](docs/images/local-models.png)
 
-**Settings › Local models** lists GGUF files you add, either a single file or a
-folder. It shows the runtime, the detected hardware and the loaded model.
-ShadowCode never downloads weights. Removing a row never deletes the file.
+**Settings › Local models** shows the runtime, the detected hardware, the
+loaded model, your models, free models to download, and GGUF files you add
+(a single file or a folder).
+
+- **Free models to download.** A short list of Apache-2.0 GGUF models, from
+  Granite 4.2 3B (2.1 GB) to Qwen3.6 35B-A3B (19 GB), each pinned to one
+  Hugging Face commit and SHA-256. One is recommended for this computer's
+  memory and graphics card. A download starts only when you choose
+  **Download**, checks the free disk space first, can be paused, resumed
+  (even after a restart) or cancelled, and is verified before the model
+  appears. Offline mode refuses downloads. **Delete** removes a downloaded
+  file. See [free models](docs/LOCAL_MODELS.md#download-a-free-model).
+- **Your own files.** Removing a file you added never deletes it.
 
 - **Model metadata comes from the file.** ShadowCode reads the GGUF header for
   architecture, trained context, chat template and tensors, never the file name.
@@ -509,6 +528,7 @@ The editor's project must be trusted in ShadowCode (or start the agent with
 | The update check's last answer | `~/.local/state/shadow-agent/update-check.json` |
 | Webview storage | `~/.local/share/shadow-agent/webview` |
 | llama.cpp runtime (AppImage install) | `~/.local/lib/shadowcode` |
+| Free local models (downloaded from Settings › Local models or the first run) | `~/.local/share/shadow-agent/local-models` |
 | Voice models (installed from Settings › Voice) | `~/.local/share/shadow-agent/voice/models` |
 | Code intelligence: language servers, embedding models, search vectors (installed from Settings › Code intelligence) | `~/.local/share/shadow-agent/code-intel` |
 | Antigravity agent server (installed from Accounts) | `~/.local/share/shadowcode/antigravity-acp/1.2.1` |
@@ -599,6 +619,19 @@ small red PNG. `--switch <id>` continues the conversation on another row and
 checks that consent is asked before the handoff. Vendor CLIs keep their own
 sign-in; OpenRouter rows read the key from `OPENROUTER_API_KEY`, because the
 throwaway profile has no `secrets.env`.
+
+The free-model list has two network checks and one window check, all opt-in
+(they download from Hugging Face). The first re-checks every pin; the second
+downloads one model with a pause and a resume; the third drives the real
+window through a first run with no account (vendor CLIs hidden, empty `HOME`),
+downloads the smallest model (about 2 GB, into a scratch profile), runs one
+short task on it and deletes it:
+
+```bash
+cargo test -p shadowcode-core --lib catalog_matches_hugging_face -- --ignored
+SHADOWCODE_LIVE_DOWNLOAD_DIR=/tmp/models cargo test -p shadowcode-core --lib live_download_pause_resume_verify -- --ignored
+xvfb-run -a dbus-run-session -- node scripts/test-native-first-run.mjs
+```
 
 ## More
 
