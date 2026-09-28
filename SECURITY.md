@@ -381,3 +381,13 @@ OpenAI, Google, xAI, GitHub) or a private key, or when a `.env` or
 `secrets.env` file is tracked, and it never prints the value it found.
 Contributors run it before pushing; `--staged` and `--value-file F` are
 described in [CONTRIBUTING.md](CONTRIBUTING.md#checks).
+
+Dependencies are checked with `cargo audit` and `npm audit --omit=dev` (the
+interface's shipped packages) before a release. Neither reports a known
+vulnerability. `cargo audit` lists six *unmaintained* notices, all for crates
+the GTK and Tauri platform libraries pull in, not ShadowCode's own
+dependencies: `proc-macro-error` (RUSTSEC-2024-0370, a build-time macro helper
+of the GTK bindings) and `unic-char-property`, `unic-char-range`,
+`unic-common`, `unic-ucd-ident` and `unic-ucd-version` (RUSTSEC-2025-0075,
+-0080, -0081, -0098, -0100, via Tauri's `urlpattern`). They have no fix to
+apply here and go away when those libraries move off them.
