@@ -176,7 +176,10 @@ test("the AppImage bundle uses the pinned runtime, not upstream's newest", () =>
   // build-native.mjs stop at its runtime check.
   assert.deepEqual(
     bundleEnvironment("appimage", "/work/target/native-runtime/runtime-x86_64"),
-    { LDAI_RUNTIME_FILE: "/work/target/native-runtime/runtime-x86_64" },
+    {
+      LDAI_RUNTIME_FILE: "/work/target/native-runtime/runtime-x86_64",
+      LDAI_NO_APPSTREAM: "1",
+    },
   );
   assert.deepEqual(bundleEnvironment("deb", undefined), {});
   assert.throws(() => bundleEnvironment("appimage", "runtime-x86_64"));

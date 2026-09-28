@@ -124,6 +124,17 @@ await copyFile(executable, original);
 try {
   for (const format of ["appimage", "deb"]) {
     await copyFile(original, executable);
+    if (format === "appimage") {
+      // Tauri stages AppImage content in bundle/appimage_deb and copies it
+      // into a reused AppDir, so files from an earlier build (an old
+      // metainfo name, for example) would ship again. Start both empty, as a
+      // fresh CI machine does.
+      for (const stale of ["appimage_deb", "appimage/ShadowCode.AppDir"])
+        await rm(path.join(root, "target/release/bundle", stale), {
+          recursive: true,
+          force: true,
+        });
+    }
     await run(
       ["bundle", "--bundles", format, "--ci", "--config", config],
       bundleEnvironment(format, nativeRuntime.runtime),

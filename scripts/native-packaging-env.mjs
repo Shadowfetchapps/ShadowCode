@@ -109,12 +109,19 @@ export function applyPackagingPath(root, options = {}) {
  * linuxdeploy's AppImage plugin download the newest upstream type2-runtime
  * ("continuous"), so the intermediate image changed whenever upstream
  * published one and the runtime check in build-native.mjs failed. Pin it to
- * the reviewed, source-built runtime that the final repack uses anyway. */
+ * the reviewed, source-built runtime that the final repack uses anyway.
+ *
+ * That intermediate image still has Tauri's `ShadowCode.desktop`; the desktop
+ * ID the AppStream metadata names only exists after build-native.mjs
+ * normalizes the AppDir. Some appimagetool builds validate the whole tree and
+ * reject the intermediate image for it, so validation is skipped here only.
+ * The final repack validates the metadata against the normalized launcher,
+ * and check-native-package.mjs validates it strictly in both packages. */
 export function bundleEnvironment(format, runtimeFile) {
   if (format !== "appimage") return {};
   if (!runtimeFile || !path.isAbsolute(runtimeFile))
     throw new Error("The AppImage bundle needs the absolute path of the pinned runtime");
-  return { LDAI_RUNTIME_FILE: runtimeFile };
+  return { LDAI_RUNTIME_FILE: runtimeFile, LDAI_NO_APPSTREAM: "1" };
 }
 
 /** linuxdeploy's GTK plugin, reviewed at upstream commit 7a3fbc31 (its MIT

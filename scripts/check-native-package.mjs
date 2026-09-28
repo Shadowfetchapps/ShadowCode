@@ -144,6 +144,11 @@ async function verifyNotices(directory, includeSystem) {
   };
 }
 async function verifyMetainfo(directory, version) {
+  assert.deepEqual(
+    (await readdir(path.join(directory, "usr/share/metainfo"))).sort(),
+    [metainfoName],
+    "The package must ship exactly one AppStream metadata file",
+  );
   const metainfo = path.join(directory, "usr/share/metainfo", metainfoName);
   assert.equal(
     await digest(metainfo),
