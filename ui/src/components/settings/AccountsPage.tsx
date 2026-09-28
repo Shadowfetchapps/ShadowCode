@@ -1017,6 +1017,15 @@ function OpenRouterCard({
                       : ""
                   }`}
               </p>
+              {info.credits_remaining != null &&
+                (info.credits_remaining > 0 ? (
+                  <p>Account balance: {formatUsd(info.credits_remaining)}</p>
+                ) : (
+                  <p className="health-bad">
+                    Out of credits: add credits on OpenRouter to use paid
+                    models.
+                  </p>
+                ))}
               {info.is_free_tier && (
                 <p className="hint">
                   Free tier: add credits on OpenRouter to use paid models.

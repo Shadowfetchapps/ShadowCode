@@ -512,7 +512,7 @@ fn launch(root: &Path, effort: Option<&str>) -> LaunchOptions {
 }
 
 #[test]
-fn reasoning_effort_reaches_codex_and_claude_only() {
+fn reasoning_effort_reaches_each_vendors_own_control() {
     let root = tempfile::tempdir().unwrap();
     let (_, args) = adapter_for(Vendor::Codex, false).command(&launch(root.path(), Some("high")));
     assert_eq!(
@@ -523,12 +523,26 @@ fn reasoning_effort_reaches_codex_and_claude_only() {
     assert_eq!(&args[..3], ["-c", "model_reasoning_effort=\"low\"", "exec"]);
     let (_, args) = adapter_for(Vendor::Codex, false).command(&launch(root.path(), None));
     assert_eq!(args, ["app-server"]);
+    // Claude Code takes `--effort`; current models think adaptively and
+    // ignore a MAX_THINKING_TOKENS budget, so it is no longer sent.
     let claude = adapter_for(Vendor::Claude, false);
+    let (_, args) = claude.command(&launch(root.path(), Some("medium")));
+    let at = args.iter().position(|a| a == "--effort").expect("--effort");
+    assert_eq!(args[at + 1], "medium");
+    assert!(claude.env(&launch(root.path(), Some("medium"))).is_empty());
+    let (_, args) = claude.command(&launch(root.path(), None));
+    assert!(!args.contains(&"--effort".to_owned()));
+    assert!(claude.env(&launch(root.path(), None)).is_empty());
+    // A Claude Code without `--effort` keeps the thinking budget.
+    let legacy = LaunchOptions {
+        legacy_effort: true,
+        ..launch(root.path(), Some("medium"))
+    };
+    assert!(!claude.command(&legacy).1.contains(&"--effort".to_owned()));
     assert_eq!(
-        claude.env(&launch(root.path(), Some("medium"))),
+        claude.env(&legacy),
         [("MAX_THINKING_TOKENS".to_owned(), "16000".to_owned())]
     );
-    assert!(claude.env(&launch(root.path(), None)).is_empty());
     let cursor = adapter_for(Vendor::Cursor, false);
     assert!(cursor.env(&launch(root.path(), Some("high"))).is_empty());
     let (_, args) = cursor.command(&launch(root.path(), Some("high")));

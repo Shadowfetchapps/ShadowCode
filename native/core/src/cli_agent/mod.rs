@@ -28,6 +28,7 @@ pub mod antigravity_server;
 pub mod auth;
 pub mod catalog;
 pub mod claude;
+pub mod claude_probe;
 pub mod codex;
 pub mod codex_probe;
 pub mod discovery;
@@ -286,7 +287,8 @@ pub enum Update {
     /// ShadowCode session id.
     NativeSession { id: String },
     /// A plan usage snapshot pushed by the runtime during a turn (Codex
-    /// `account/rateLimits/updated`). Never mixed with token accounting.
+    /// `account/rateLimits/updated`, Claude Code `rate_limit_event`). Never
+    /// mixed with token accounting.
     RateLimits(Value),
     /// The account hit its plan limit; the job stops and is not retried.
     LimitReached(String),
@@ -418,6 +420,11 @@ pub struct LaunchOptions {
     /// Reasoning effort for the turn (`low`, `medium`, `high`); `None`
     /// keeps the vendor's default. Only Codex and Claude Code take it.
     pub effort: Option<String>,
+    /// The installed Claude Code predates its `--effort` flag (the catalog
+    /// did not find it in `claude --help`); effort then falls back to the
+    /// `MAX_THINKING_TOKENS` thinking budget, which only models without
+    /// adaptive thinking honour.
+    pub legacy_effort: bool,
     /// Project MCP servers the user enabled, passed to the vendor for this
     /// run (ACP `mcpServers`, Claude `--mcp-config`, Codex `-c mcp_servers`).
     pub mcp_servers: Vec<McpServerSpec>,
@@ -449,8 +456,8 @@ pub trait CliAdapter: Send {
     fn deny_note(&self) -> bool {
         false
     }
-    /// Extra environment for the vendor process (Claude Code's thinking
-    /// budget).
+    /// Extra environment for the vendor process (the thinking budget of a
+    /// Claude Code without `--effort`).
     fn env(&self, _options: &LaunchOptions) -> Vec<(String, String)> {
         Vec::new()
     }

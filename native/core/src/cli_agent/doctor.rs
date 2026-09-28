@@ -107,6 +107,16 @@ async fn run_short_in(
     path_env: Option<&OsStr>,
     home: Option<&Path>,
 ) -> Option<(bool, String)> {
+    run_short_limited(binary, args, path_env, home, 4000).await
+}
+
+async fn run_short_limited(
+    binary: &Path,
+    args: &[&str],
+    path_env: Option<&OsStr>,
+    home: Option<&Path>,
+    limit: usize,
+) -> Option<(bool, String)> {
     let output = if let Some(control) = super::probe_lifecycle::current() {
         control.check().ok()?;
         let mut child = sanitized_command(binary, args, path_env, home)
@@ -154,7 +164,7 @@ async fn run_short_in(
     if text.trim().is_empty() {
         text = String::from_utf8_lossy(&output.stderr).into_owned();
     }
-    Some((output.status.success(), clip(&text, 4000).to_owned()))
+    Some((output.status.success(), clip(&text, limit).to_owned()))
 }
 
 /// Redacted, clipped text of a short read-only command (stdout, else stderr).
@@ -163,9 +173,12 @@ pub async fn short_text(binary: &Path, args: &[&str], path_env: Option<&OsStr>) 
     Some(redact(&text))
 }
 
-/// `<binary> --help`, for feature detection of documented flags.
+/// `<binary> --help`, for feature detection of documented flags. Kept
+/// whole (up to 64 KB): Claude Code's help is about 22 KB and documents
+/// `--effort` and the `--model` aliases past the first 4 KB.
 pub async fn help_text(binary: &Path, path_env: Option<&OsStr>) -> Option<String> {
-    short_text(binary, &["--help"], path_env).await
+    let (_, text) = run_short_limited(binary, &["--help"], path_env, None, 64 * 1024).await?;
+    Some(redact(&text))
 }
 
 /// Documented `codex login status`: exit 0 means signed in. The output is a

@@ -13,6 +13,12 @@
 //! with `control_response` (`behavior: allow|deny`). Interrupts are a
 //! client→CLI `control_request` with subtype `interrupt`.
 //!
+//! Reasoning effort is `--effort <level>`: current Claude models think
+//! adaptively and ignore a thinking budget. A Claude Code without the flag
+//! gets the `MAX_THINKING_TOKENS` budget instead. During a turn the CLI
+//! reports the claude.ai plan windows as `rate_limit_event` frames; they
+//! become the Allowance figures.
+//!
 //! Policy: Anthropic forbids third-party clients from using Pro/Max OAuth
 //! tokens directly; driving the official `claude` binary with the user's own
 //! login is currently tolerated but not guaranteed. ShadowCode never touches
@@ -28,7 +34,9 @@ use std::collections::HashMap;
 const OUTPUT_PREVIEW: usize = 8000;
 
 /// Extended-thinking token budget per reasoning effort, passed as Claude
-/// Code's documented `MAX_THINKING_TOKENS` environment variable.
+/// Code's documented `MAX_THINKING_TOKENS` environment variable to a CLI
+/// that has no `--effort`. Claude Code applies it only to models without
+/// adaptive thinking; on the others it merely keeps thinking on.
 pub fn thinking_budget(effort: &str) -> Option<u32> {
     match effort {
         "low" => Some(4_000),
@@ -44,6 +52,9 @@ pub struct ClaudeAdapter {
     initialized: bool,
     streamed_text: bool,
     turn_text_emitted: bool,
+    /// Reply text after a tool call starts a new paragraph instead of
+    /// running into the text before the call.
+    break_before_text: bool,
     pending_prompt: Option<(String, Vec<PromptImage>)>,
     // Keep the original input private: allow replies must echo the exact
     // requested input, while the approval card receives only its redacted copy.
@@ -85,11 +96,12 @@ impl ClaudeAdapter {
                 // complete message is the only copy.
                 "text" if !self.streamed_text => {
                     if let Some(text) = block["text"].as_str().filter(|t| !t.is_empty()) {
-                        self.turn_text_emitted = true;
-                        step.updates.push(Update::Text(redact(text)));
+                        let text = self.reply_text(text);
+                        step.updates.push(Update::Text(text));
                     }
                 }
                 "tool_use" => {
+                    self.break_before_text = self.turn_text_emitted;
                     let id = block["id"].as_str().unwrap_or("").to_owned();
                     let name = format!("claude.{}", block["name"].as_str().unwrap_or("tool"));
                     self.tool_names.insert(id.clone(), name.clone());
@@ -106,6 +118,18 @@ impl ClaudeAdapter {
         // next message; deltas set it again as they arrive.
         self.streamed_text = false;
         step
+    }
+    /// Redacted reply text; the first text after a tool call starts a new
+    /// paragraph.
+    fn reply_text(&mut self, text: &str) -> String {
+        let paragraph = std::mem::take(&mut self.break_before_text) && self.turn_text_emitted;
+        self.turn_text_emitted = true;
+        let text = redact(text);
+        if paragraph && !text.starts_with('\n') {
+            format!("\n\n{text}")
+        } else {
+            text
+        }
     }
     fn tool_results(&mut self, message: &Value) -> Step {
         let mut step = Step::default();
@@ -244,6 +268,17 @@ impl CliAdapter for ClaudeAdapter {
             args.push("--model".into());
             args.push(options.model.clone());
         }
+        // `--effort <level>` (low, medium, high, xhigh, max). Models that
+        // take no effort (Haiku) ignore it.
+        if let Some(effort) = options
+            .effort
+            .as_deref()
+            .filter(|e| matches!(*e, "low" | "medium" | "high"))
+            .filter(|_| !options.legacy_effort)
+        {
+            args.push("--effort".into());
+            args.push(effort.to_owned());
+        }
         if let Some(session) = options.resume.as_deref().filter(|s| !s.is_empty()) {
             // Documented: `--resume <session-id>` continues the stored
             // conversation from any directory on this machine.
@@ -276,6 +311,7 @@ impl CliAdapter for ClaudeAdapter {
     fn prompt(&mut self, text: &str, images: &[PromptImage]) -> Result<Vec<String>> {
         self.streamed_text = false;
         self.turn_text_emitted = false;
+        self.break_before_text = false;
         if self.started {
             self.turn_active = true;
             Ok(vec![Self::user_message(text, images)])
@@ -323,8 +359,7 @@ impl CliAdapter for ClaudeAdapter {
                     match event["delta"]["text"].as_str() {
                         Some(text) if !text.is_empty() => {
                             self.streamed_text = true;
-                            self.turn_text_emitted = true;
-                            Step::update(Update::Text(redact(text)))
+                            Step::update(Update::Text(self.reply_text(text)))
                         }
                         _ => Step::default(),
                     }
@@ -351,6 +386,26 @@ impl CliAdapter for ClaudeAdapter {
             "user" => self.tool_results(&message["message"].clone()),
             "control_request" => self.control_request(&message),
             "control_response" | "control_cancel_request" | "keep_alive" => Step::default(),
+            // claude.ai plan windows, read by the CLI from the API's
+            // rate-limit headers (`status`: allowed, allowed_warning,
+            // rejected). Only subscription logins report them.
+            "rate_limit_event" => {
+                let info = &message["rate_limit_info"];
+                if !info.is_object() {
+                    return Ok(Step::default());
+                }
+                let mut step = Step::update(Update::RateLimits(info.clone()));
+                if info["status"] == "rejected" && info["isUsingOverage"] != true {
+                    step.updates.push(Update::LimitReached(format!(
+                        "Claude reported its {} limit",
+                        super::usage::claude_window_label(
+                            info["rateLimitType"].as_str().unwrap_or("")
+                        )
+                        .to_lowercase()
+                    )));
+                }
+                step
+            }
             "result" => {
                 self.turn_active = false;
                 let mut step = Step::default();
@@ -451,6 +506,7 @@ impl CliAdapter for ClaudeAdapter {
         options
             .effort
             .as_deref()
+            .filter(|_| options.legacy_effort)
             .and_then(thinking_budget)
             .map(|budget| vec![("MAX_THINKING_TOKENS".to_owned(), budget.to_string())])
             .unwrap_or_default()

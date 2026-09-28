@@ -240,13 +240,38 @@ pub async fn key_info(key: &str) -> Result<Value> {
     let body: Value = serde_json::from_slice(&read_capped(response, MAX_KEY_BYTES).await?)
         .context("OpenRouter returned an unreadable key check")?;
     let data = &body["data"];
+    // The key's limit is not the account balance: a key can have $5 of its
+    // limit left while the account has no credits, and then every paid
+    // request fails with HTTP 402. `GET /credits` reports the balance.
+    let credits_remaining = account_credits(key).await;
     Ok(json!({
         "label": data["label"].as_str().map(|l| crate::redaction::redact_text(l).text).unwrap_or_default(),
         "usage": data["usage"].as_f64().unwrap_or(0.0),
         "limit": data["limit"].as_f64(),
         "limit_remaining": data["limit_remaining"].as_f64(),
         "is_free_tier": data["is_free_tier"].as_bool().unwrap_or(false),
+        "credits_remaining": credits_remaining,
     }))
+}
+
+/// `GET /credits`: credits bought minus credits used on the account, in US
+/// dollars. `None` when OpenRouter does not answer it.
+async fn account_credits(key: &str) -> Option<f64> {
+    let response = client()
+        .ok()?
+        .get(format!("{}/credits", base_url()))
+        .bearer_auth(key)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: Value =
+        serde_json::from_slice(&read_capped(response, MAX_KEY_BYTES).await.ok()?).ok()?;
+    let data = &body["data"];
+    let remaining = data["total_credits"].as_f64()? - data["total_usage"].as_f64()?;
+    remaining.is_finite().then_some(remaining)
 }
 
 /// Check a key with OpenRouter, then store it in the profile secrets file.

@@ -68,6 +68,9 @@ pub struct AcpProbe {
     pub modes: Vec<String>,
     pub models: Vec<AcpModel>,
     pub current_model: Option<String>,
+    /// Values of the session's `thought_level` config option (Grok
+    /// `reasoning_effort`): the reasoning efforts it accepts.
+    pub effort_levels: Vec<String>,
 }
 
 fn sanitized(binary: &Path, args: &[&str], workspace: &Path, path_env: Option<&OsStr>) -> Command {
@@ -133,6 +136,19 @@ pub fn models_from_state(state: &Value) -> (Vec<AcpModel>, Option<String>) {
         });
     }
     (out, current)
+}
+
+/// The values of the `thought_level` config option (the ACP category for a
+/// reasoning-effort choice).
+pub fn effort_levels(options: &Value) -> Vec<String> {
+    options
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|o| o["category"] == "thought_level")
+        .flat_map(|o| o["options"].as_array().into_iter().flatten())
+        .filter_map(|v| v["value"].as_str().map(str::to_owned))
+        .collect()
 }
 
 /// Model rows from ACP `configOptions` (Antigravity): the `select` option with
@@ -434,6 +450,7 @@ async fn probe_inner(
                                 probe.models = models;
                                 probe.current_model = current;
                             }
+                            probe.effort_levels = effort_levels(&result["configOptions"]);
                         }
                     }
                     break;

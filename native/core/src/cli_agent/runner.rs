@@ -1164,9 +1164,11 @@ async fn apply_update(
                         .apply_rate_limits(vendor, &snapshot, &request.options.model)
                         .await
                 }
-                None => super::usage::UsageSnapshot::from_codex(
-                    &json!({"rateLimits": snapshot}),
-                    Some(&request.options.model),
+                None => super::usage::UsageSnapshot::from_vendor(
+                    vendor,
+                    &snapshot,
+                    None,
+                    &request.options.model,
                     crate::now(),
                 ),
             };

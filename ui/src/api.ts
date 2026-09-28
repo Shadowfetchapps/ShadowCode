@@ -268,6 +268,8 @@ export type OpenRouterStatus = {
     limit: number | null;
     limit_remaining: number | null;
     is_free_tier: boolean;
+    /** Account balance in USD (credits bought minus used), when reported. */
+    credits_remaining?: number | null;
   } | null;
   key_error: string | null;
   models: number;

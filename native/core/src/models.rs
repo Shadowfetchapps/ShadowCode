@@ -304,6 +304,29 @@ pub fn type_lists_to_any_of(value: &mut Value) {
 }
 
 /// Loopback endpoints (local runtimes) must never go through an HTTP proxy.
+/// What a provider said about a refused request, as `": <text>"`: the JSON
+/// `error.message` (OpenRouter, OpenAI-style APIs), or for a local runtime
+/// the start of its body. Redacted and at most 600 bytes; empty when the
+/// provider said nothing readable.
+pub(crate) fn provider_error_detail(body: &[u8], local: bool) -> String {
+    let message = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v["error"]["message"]
+                .as_str()
+                .or_else(|| v["error"].as_str())
+                .or_else(|| v["message"].as_str())
+                .map(str::to_owned)
+        })
+        .or_else(|| local.then(|| String::from_utf8_lossy(body).into_owned()));
+    match message.map(|m| crate::redaction::redact_text(m.trim()).text) {
+        Some(text) if !text.is_empty() => {
+            format!(": {}", crate::tools::truncate(&text, 600))
+        }
+        _ => String::new(),
+    }
+}
+
 pub fn is_loopback_endpoint(endpoint: &str) -> bool {
     reqwest::Url::parse(endpoint)
         .ok()
@@ -603,24 +626,26 @@ impl ModelClient {
             if !status.is_success() {
                 let code = status.as_u16();
                 let retry_after = crate::retry::retry_after(response.headers());
-                // Local runtimes explain rejections (for example a prompt larger
-                // than the context window); show a bounded excerpt.
-                let detail = if is_loopback_endpoint(&url) {
-                    let diagnostic_bytes = tokio::time::timeout(Duration::from_secs(5), response.bytes())
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                        .unwrap_or_default();
-                    bytes = diagnostic_bytes.len();
-                    let text = String::from_utf8_lossy(&diagnostic_bytes[..diagnostic_bytes.len().min(600)]).into_owned();
-                    if text.trim().is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {}", text.trim())
+                // Providers explain rejections: a local runtime in text (for
+                // example a prompt larger than the context window), OpenRouter
+                // and OpenAI-style APIs as JSON `error.message` (for example
+                // "This request requires more credits"). Show a bounded,
+                // redacted excerpt.
+                let diagnostic_bytes = tokio::time::timeout(Duration::from_secs(5), async {
+                    let mut body = Vec::new();
+                    let mut stream = response.bytes_stream();
+                    while let Some(Ok(chunk)) = stream.next().await {
+                        body.extend_from_slice(&chunk);
+                        if body.len() >= 16 * 1024 {
+                            break;
+                        }
                     }
-                } else {
-                    String::new()
-                };
+                    body
+                })
+                .await
+                .unwrap_or_default();
+                bytes = diagnostic_bytes.len();
+                let detail = provider_error_detail(&diagnostic_bytes, is_loopback_endpoint(&url));
                 return Err(anyhow::Error::new(crate::retry::ModelFailure::Http {
                     status: code,
                     retry_after,
@@ -629,6 +654,7 @@ impl ModelClient {
                         "Model provider returned HTTP {code}{}{detail}",
                         match code {
                             401 | 403 => "; check the API key",
+                            402 => "; the account is out of credits",
                             404 => "; check the endpoint and model name",
                             429 => "; provider rate limit reached",
                             503 | 529 => "; provider overloaded",
@@ -1254,6 +1280,32 @@ pub async fn detect() -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_errors_show_what_the_provider_said() {
+        // OpenRouter's answer to a request the account cannot pay for.
+        let body = br#"{"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 1133.","code":402}}"#;
+        assert_eq!(
+            provider_error_detail(body, false),
+            ": This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 1133."
+        );
+        // A remote HTML error page is not dumped into the task.
+        assert_eq!(
+            provider_error_detail(b"<html>Bad gateway</html>", false),
+            ""
+        );
+        // A local runtime's plain-text explanation still is, bounded.
+        let long = "context too long ".repeat(100);
+        let detail = provider_error_detail(long.as_bytes(), true);
+        assert!(detail.starts_with(": context too long"));
+        assert!(detail.len() <= 602);
+        assert_eq!(provider_error_detail(b"", true), "");
+        // Keys in a provider message are redacted (built at run time so the
+        // secret scanner does not flag a fixture).
+        let key = format!("sk-or-v1-{}", "0123456789abcdef".repeat(4));
+        let leaked = json!({"error": format!("bad key {key}")}).to_string();
+        assert!(!provider_error_detail(leaked.as_bytes(), false).contains(&key));
+    }
 
     #[test]
     fn loopback_detection_and_llama_schema_rewrite() {

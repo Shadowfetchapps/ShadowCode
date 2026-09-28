@@ -72,6 +72,10 @@ pub struct VendorModel {
     /// The catalog says this model takes image input (Codex
     /// `inputModalities`); protocol-level support is separate.
     pub vision: bool,
+    /// The runtime says whether this model takes a reasoning effort (Claude
+    /// Code `supportsEffort`). `None`: not reported per model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -99,6 +103,10 @@ pub struct VendorStatus {
     /// Approval prompts reach ShadowCode (false: the runtime applies its own
     /// permission settings and never asks).
     pub asks_approval: bool,
+    /// The CLI documents a reasoning-effort flag (`claude --effort`);
+    /// `None` when not checked.
+    #[serde(skip)]
+    pub effort_flag: Option<bool>,
     pub fetched_at: f64,
     pub error: Option<String>,
     /// Raw provider usage payload (Codex rate limits) used to derive per-model
@@ -136,6 +144,7 @@ impl VendorStatus {
             models: Vec::new(),
             accepts_images: false,
             asks_approval: vendor.asks_approval(),
+            effort_flag: None,
             fetched_at: now,
             error: None,
             usage_raw: None,
@@ -245,6 +254,11 @@ impl VendorStatus {
                 };
                 UsageSnapshot::from_codex(raw, model, self.usage_at)
             }
+            (Some(raw), Vendor::Claude) => UsageSnapshot::from_claude(
+                raw,
+                self.account.as_ref().and_then(|a| a.plan.as_deref()),
+                self.usage_at,
+            ),
             _ => UsageSnapshot::unavailable_because(
                 &provider,
                 self.usage_note.as_deref().unwrap_or(""),
@@ -480,8 +494,9 @@ impl VendorCatalog {
         Ok(())
     }
 
-    /// Merge a rate-limit snapshot pushed during a Codex turn
-    /// (`account/rateLimits/updated`) and return the row usage for `model`.
+    /// Merge a rate-limit snapshot pushed during a turn (Codex
+    /// `account/rateLimits/updated`, Claude Code `rate_limit_event`) and
+    /// return the row usage for `model`.
     pub async fn apply_rate_limits(
         &self,
         vendor: Vendor,
@@ -491,22 +506,28 @@ impl VendorCatalog {
         let now = crate::now();
         let mut state = self.state.lock().unwrap();
         let Some(entry) = state.entries.get_mut(&vendor) else {
-            return UsageSnapshot::from_codex(&json!({"rateLimits": snapshot}), Some(model), now);
+            return UsageSnapshot::from_vendor(vendor, snapshot, None, model, now);
         };
-        let raw = entry.usage_raw.get_or_insert_with(|| json!({}));
-        let limit_id = snapshot["limitId"].as_str().unwrap_or("codex").to_owned();
-        let default_id = raw["rateLimits"]["limitId"]
-            .as_str()
-            .unwrap_or("codex")
-            .to_owned();
-        if limit_id == default_id {
-            raw["rateLimits"] = snapshot.clone();
-        }
-        if !raw["rateLimitsByLimitId"].is_object() {
-            raw["rateLimitsByLimitId"] = json!({});
-        }
-        raw["rateLimitsByLimitId"][limit_id.as_str()] = snapshot.clone();
-        let payload = raw.clone();
+        let payload = if vendor == Vendor::Claude {
+            // Each event describes every plan window Claude knows about.
+            entry.usage_raw = Some(snapshot.clone());
+            snapshot.clone()
+        } else {
+            let raw = entry.usage_raw.get_or_insert_with(|| json!({}));
+            let limit_id = snapshot["limitId"].as_str().unwrap_or("codex").to_owned();
+            let default_id = raw["rateLimits"]["limitId"]
+                .as_str()
+                .unwrap_or("codex")
+                .to_owned();
+            if limit_id == default_id {
+                raw["rateLimits"] = snapshot.clone();
+            }
+            if !raw["rateLimitsByLimitId"].is_object() {
+                raw["rateLimitsByLimitId"] = json!({});
+            }
+            raw["rateLimitsByLimitId"][limit_id.as_str()] = snapshot.clone();
+            raw.clone()
+        };
         entry.usage_at = now;
         let usage = entry.usage_for(model, now);
         let row = UsageRow {
@@ -709,6 +730,24 @@ impl VendorCatalog {
             } else if matches!(status.availability, Availability::SignIn) || status.api_key_login()
             {
                 self.drop_persisted(&mut state, vendor);
+            } else if vendor == Vendor::Claude && status.availability == Availability::Ready {
+                // Claude reports plan usage only during turns: keep the
+                // last report of the same account; it turns stale with age.
+                let account = status.account_key();
+                if let Some(previous) = previous
+                    .as_ref()
+                    .filter(|p| p.usage_raw.is_some() && p.account_key() == account)
+                {
+                    status.usage_raw = previous.usage_raw.clone();
+                    status.usage_at = previous.usage_at;
+                } else if let Some(row) = state
+                    .persisted
+                    .get(&vendor)
+                    .filter(|r| r.account == account)
+                {
+                    status.usage_raw = Some(row.payload.clone());
+                    status.usage_at = row.fetched_at;
+                }
             }
             state.entries.insert(vendor, status.clone());
             status
@@ -797,6 +836,7 @@ fn picker_rows_from(statuses: &[VendorStatus], config: &CliAgentsConfig) -> Vec<
                     status.accepts_images && model.vision,
                 );
                 row.is_default = model.is_default;
+                row.reasoning = model.effort;
                 row.billing = Some(status.billing().into());
                 if api_key {
                     row.subtitle = picker::API_KEY_SUBTITLE.into();
@@ -870,6 +910,7 @@ async fn probe_vendor(vendor: Vendor, config: &CliAgentsConfig, now: f64) -> Ven
         models: Vec::new(),
         accepts_images: false,
         asks_approval: vendor.asks_approval(),
+        effort_flag: None,
         fetched_at: now,
         error: None,
         usage_raw: None,
@@ -926,6 +967,7 @@ async fn probe_codex(binary: &Path, status: &mut VendorStatus) {
                     label: m.label,
                     is_default: m.is_default,
                     vision: m.vision,
+                    effort: None,
                 })
                 .collect();
             if probe.logged_in() {
@@ -983,11 +1025,13 @@ async fn probe_codex(binary: &Path, status: &mut VendorStatus) {
     }
 }
 
+/// Why Claude rows show no numbers until a task ran.
+const CLAUDE_USAGE_NOTE: &str =
+    "Claude Code reports plan usage while it runs a task; the figures appear after the next Claude Code task";
+
 async fn probe_claude(binary: &Path, status: &mut VendorStatus) {
     status.accepts_images = true; // documented image source blocks
-    status.usage_note = Some(
-        "Claude Code does not expose plan usage to other apps; open claude.ai to see it".into(),
-    );
+    status.usage_note = Some(CLAUDE_USAGE_NOTE.into());
     let (state, auth_method) = doctor::claude_auth_status(binary, None).await;
     match state {
         doctor::LoginState::LoggedIn => {
@@ -1003,7 +1047,19 @@ async fn probe_claude(binary: &Path, status: &mut VendorStatus) {
                         .into(),
                 );
             }
-            status.models = claude_models(binary).await;
+            let help = doctor::help_text(binary, None).await.unwrap_or_default();
+            status.effort_flag = Some(help.contains("--effort"));
+            match super::claude_probe::probe(binary, None, PROBE_TIMEOUT).await {
+                Ok(probe) if !probe.models.is_empty() => {
+                    status.models = claude_models(&probe);
+                    if let Some(account) = status.account.as_mut() {
+                        account.email = probe.email;
+                        account.plan = probe.subscription;
+                    }
+                }
+                // Older Claude Code without the SDK initialize request.
+                _ => status.models = claude_alias_models(&help),
+            }
             status.detail = ready_detail(status);
         }
         doctor::LoginState::NotLoggedIn => {
@@ -1018,16 +1074,49 @@ async fn probe_claude(binary: &Path, status: &mut VendorStatus) {
     }
 }
 
-/// Claude Code has no model-list command. The row set is its own default
-/// plus the aliases the installed CLI documents in `--help` for `--model`.
-async fn claude_models(binary: &Path) -> Vec<VendorModel> {
+/// The rows of Claude Code's own model picker, from the SDK `initialize`
+/// answer. `default` always comes first.
+fn claude_models(probe: &super::claude_probe::ClaudeProbe) -> Vec<VendorModel> {
+    let mut models: Vec<VendorModel> = probe
+        .models
+        .iter()
+        .map(|m| VendorModel {
+            id: m.id.clone(),
+            label: if m.is_default {
+                "Default".into()
+            } else {
+                m.label.clone()
+            },
+            is_default: m.is_default,
+            vision: true,
+            effort: Some(m.effort),
+        })
+        .collect();
+    if !models.iter().any(|m| m.is_default) {
+        models.insert(
+            0,
+            VendorModel {
+                id: "default".into(),
+                label: "Default".into(),
+                is_default: true,
+                vision: true,
+                effort: None,
+            },
+        );
+    }
+    models
+}
+
+/// Older Claude Code has no model list: its own default plus the aliases
+/// the installed CLI documents in `--help` for `--model`.
+fn claude_alias_models(help: &str) -> Vec<VendorModel> {
     let mut models = vec![VendorModel {
         id: "default".into(),
         label: "Default".into(),
         is_default: true,
         vision: true,
+        effort: None,
     }];
-    let help = doctor::help_text(binary, None).await.unwrap_or_default();
     for alias in ["fable", "opus", "sonnet", "haiku"] {
         if help.contains(&format!("'{alias}'")) {
             models.push(VendorModel {
@@ -1035,6 +1124,7 @@ async fn claude_models(binary: &Path) -> Vec<VendorModel> {
                 label: format!("{} (alias)", capitalize(alias)),
                 is_default: false,
                 vision: true,
+                effort: None,
             });
         }
     }
@@ -1057,7 +1147,7 @@ async fn probe_acp_vendor(binary: &Path, args: &[&str], status: &mut VendorStatu
         Vendor::Antigravity => {
             "Antigravity's agent server reports no plan usage to other apps".into()
         }
-        _ => "Grok reports per-session tokens only, not plan allowance".into(),
+        _ => "Grok reports token counts per task, not plan allowance".into(),
     });
     let antigravity = vendor == Vendor::Antigravity;
     match acp_probe::probe_vendor(binary, args, &workspace, None, PROBE_TIMEOUT, antigravity).await
@@ -1075,6 +1165,12 @@ async fn probe_acp_vendor(binary: &Path, args: &[&str], status: &mut VendorStatu
                     label: m.label.clone(),
                     is_default: m.current || (m.id == "auto" && probe.current_model.is_none()),
                     vision: probe.accepts_images,
+                    // The session's effort option covers low, medium, high.
+                    effort: Some(
+                        ["low", "medium", "high"]
+                            .iter()
+                            .all(|level| probe.effort_levels.iter().any(|l| l == level)),
+                    ),
                 })
                 .collect();
             if status.models.iter().all(|m| !m.is_default) {
@@ -1154,6 +1250,7 @@ async fn probe_acp_vendor(binary: &Path, args: &[&str], status: &mut VendorStatu
                             label: m.label,
                             is_default: m.current,
                             vision: false,
+                            effort: None,
                         })
                         .collect();
                     status.availability = if logged_in {
@@ -1378,12 +1475,14 @@ for line in sys.stdin:
                 label: "GPT-6-Astra".into(),
                 is_default: true,
                 vision: true,
+                effort: None,
             },
             VendorModel {
                 id: "gpt-5.6-luna".into(),
                 label: "GPT-5.6-Luna".into(),
                 is_default: false,
                 vision: true,
+                effort: None,
             },
         ];
         status.usage_raw = Some(json!({

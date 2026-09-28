@@ -68,6 +68,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(401, {"error": {"message": "No auth credentials found"}})
             return self.reply(200, {"data": {"label": "sk-or-v1-abc...xyz", "usage": 1.25,
                                              "limit": 10, "limit_remaining": 8.75, "is_free_tier": False}})
+        if self.path == "/api/v1/credits":
+            if not self.auth():
+                return self.reply(401, {"error": {"message": "No auth credentials found"}})
+            return self.reply(200, {"data": {"total_credits": 20, "total_usage": 13.5}})
         self.reply(404, {})
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
@@ -80,6 +84,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(401, {"error": {"message": "No auth credentials found"}})
         if self.path != "/api/v1/chat/completions":
             return self.reply(404, {})
+        if os.path.exists(os.path.join(HERE, "broke")):
+            return self.reply(402, {"error": {"code": 402, "message":
+                "This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 1133."}})
         done = any(m.get("role") == "tool" for m in messages)
         if body.get("tools") and not done:
             return sse(self, [
@@ -257,6 +264,8 @@ async fn key_models_picker_and_a_task_run_on_the_native_loop() {
     assert_eq!(saved["key_set"], true);
     assert_eq!(saved["key"]["usage"], 1.25);
     assert_eq!(saved["key"]["limit_remaining"], 8.75);
+    // The account balance comes from `GET /credits`, next to the key limit.
+    assert_eq!(saved["key"]["credits_remaining"], 6.5);
     assert_eq!(saved["models"], 2);
     assert_eq!(saved["tool_models"], 1);
     assert!(!saved.to_string().contains("sk-or-good"));
@@ -419,6 +428,24 @@ async fn key_models_picker_and_a_task_run_on_the_native_loop() {
         }
     };
     assert!(refused.to_lowercase().contains("image"), "{refused}");
+
+    // An account out of credit: OpenRouter's own explanation reaches the
+    // task instead of a bare status code.
+    fs::write(fake.dir.path().join("broke"), "").unwrap();
+    let job = call(
+        &service,
+        "POST",
+        "/api/jobs",
+        json!({"task":"hi","model":"api:openrouter:acme/coder"}),
+    )
+    .await
+    .unwrap();
+    let broke = wait_job(&service, job["id"].as_str().unwrap()).await;
+    fs::remove_file(fake.dir.path().join("broke")).unwrap();
+    assert_eq!(broke["status"], "failed", "{broke}");
+    let text = broke.to_string();
+    assert!(text.contains("HTTP 402"), "{text}");
+    assert!(text.contains("can only afford 1133"), "{text}");
 
     // Offline mode: rows are off and nothing is sent.
     let before = fake.requests().len();

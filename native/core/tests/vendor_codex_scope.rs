@@ -22,6 +22,7 @@ fn bound(turn_bound: bool) -> Box<dyn CliAdapter> {
         read_only: false,
         resume: Some("owned-thread".into()),
         effort: None,
+        legacy_effort: false,
         mcp_servers: vec![],
     });
     a.prompt("one", &[]).unwrap();
