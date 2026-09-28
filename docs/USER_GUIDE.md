@@ -245,7 +245,8 @@ reply.
   looked at; Undo writes the file, and only if it hasn't changed since the
   diff was shown. Undoing asks first in ShadowCode's own dialog. Files a
   vendor CLI reported without a checkpoint are compared with the last
-  commit. While a task runs in the project the review is read-only and says
+  commit; such a file that isn't in the last commit is never deleted by
+  Undo, because ShadowCode can't tell whether the task created it. While a task runs in the project the review is read-only and says
   why. **Back to conversation** returns.
 - **Git** (a tab in the review, and the drawer's Changes tab, `Ctrl+Shift+B`)
   shows the whole working tree: compare unstaged and staged hunks, stage a
@@ -267,9 +268,11 @@ reply.
   files that will change. Afterwards a divider marks the conversation
   (*Rewound to here · 2 files restored*) and the notification offers
   **Undo**, which puts the files back as they were just before the rewind
-  (if you haven't changed them since). Rewind doesn't restore Git-ignored
-  files, files over 4 MB, symlinks, Git history or branches, or anything
-  outside the project. It refuses, and changes nothing, if a file was edited
+  (if you haven't changed them since). Rewind puts back file permissions a
+  command changed (`chmod`). It doesn't restore Git-ignored files, files
+  over 4 MB, symlinks, Git history or branches, or anything outside the
+  project; a file that was ignored before a step and not after it (the step
+  changed `.gitignore`) is listed as not covered and never deleted. It refuses, and changes nothing, if a file was edited
   again after the task. After a rewind (or its undo), the next turn is told
   which files changed on disk. A subscription's own conversation isn't told,
   so mention it in your next message.
@@ -408,7 +411,8 @@ panel and at the top of **Settings › Accounts**:
   labelled *Continued automatically*. Nothing leaves your computer and there is
   no quota. The model is the one you pick in the setting, or else the last
   local model you used in this project, or else the first ready local model
-  with tool support.
+  with tool support. A Compare lane never continues on another model: it
+  stops at *Plan limit reached*, so its result stays that model's own.
 - **Ask me.** The conversation shows a card with **Continue on <local model>**
   and **Choose another model**.
 
@@ -485,7 +489,9 @@ keep or discard it.
   hand when it **needs your approval**, a warning sign when it **failed**, and
   a dot when it **finished** while you were elsewhere (until you open it).
 - **Right-click** a conversation (or press the menu key) to **Rename**,
-  **Pin**, **Fork**, **Export** or **Delete** it.
+  **Pin**, **Fork**, **Export** or **Delete** it. Deleting a conversation
+  also deletes its subagents' conversations, unless a fork of it still
+  shows them.
 - `Alt+↑` / `Alt+↓` open the previous or next conversation in the list;
   `Ctrl+Tab` goes back to the one you had open before.
 

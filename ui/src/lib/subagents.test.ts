@@ -98,6 +98,7 @@ describe("subagent runs in the parent transcript", () => {
     )[0];
     expect(statusLabel(base)).toBe("Working…");
     expect(statusLabel({ ...base, status: "cancelled" })).toBe("Stopped");
+    expect(statusLabel({ ...base, status: "interrupted" })).toBe("Interrupted");
     expect(statusLabel({ ...base, status: "failed" })).toBe("Failed");
     expect(statusLabel({ ...base, status: "completed" })).toBe("Done");
   });

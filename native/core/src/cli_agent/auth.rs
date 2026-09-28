@@ -301,6 +301,27 @@ pub fn login_url(line: &str) -> Option<String> {
     (!sensitive).then(|| parsed.to_string())
 }
 
+/// Stop a login child: SIGTERM first, so a wrapper (the npm `codex` script
+/// runs the real program as its child and passes SIGTERM on) can stop its
+/// own login server, then SIGKILL after a short grace period. SIGKILL alone
+/// cannot be passed on, and left that login server listening.
+async fn stop_login(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
+        // SAFETY: the child is not reaped yet, so its PID is still its own.
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        if tokio::time::timeout(Duration::from_secs(3), child.wait())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+    }
+    let _ = child.kill().await;
+}
+
 fn login_command(binary: &Path, args: &[&str]) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(binary);
     command
@@ -432,11 +453,11 @@ pub async fn connect_with_timeout(
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
-                        let _ = child.kill().await;
+                        stop_login(&mut child).await;
                         break (false, "Sign-in cancelled".to_owned());
                     }
                     _ = &mut deadline => {
-                        let _ = child.kill().await;
+                        stop_login(&mut child).await;
                         break (false, format!("Sign-in timed out after {} seconds", timeout.as_secs()));
                     }
                     status = child.wait() => {

@@ -3,6 +3,7 @@
 //! `/props`, and `/v1/chat/completions` (canned tool calls), requires the
 //! per-launch bearer key, records every launch and request, and exits on
 //! SIGTERM. Nothing here touches a GPU or a real model.
+mod support;
 mod vendor_support;
 use serde_json::{json, Value};
 use shadowcode_core::{
@@ -1535,6 +1536,182 @@ async fn load_switch_lease_unload_and_shutdown_stop_the_server() {
     );
 }
 
+/// Settings' Load and Test never wait for a model a running task holds:
+/// they answer at once with a clear message, and work once it is free.
+#[tokio::test]
+async fn settings_load_and_test_refuse_while_a_task_holds_another_model() {
+    let f = fixture(GPU);
+    let a = f.models.join("a.gguf");
+    qwen_like(&a, "qwen3", TOOLS_TEMPLATE);
+    let b = f.models.join("b.gguf");
+    qwen_like(&b, "qwen3", TOOLS_TEMPLATE);
+    Config::patch(
+        &f.paths,
+        json!({"local_engine":{"files":[a.display().to_string(), b.display().to_string()]}}),
+    )
+    .unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let entries = local_engine::scan(&cfg.local_engine);
+    let id_a = entries.iter().find(|e| e.name == "a").unwrap().id.clone();
+    let id_b = entries.iter().find(|e| e.name == "b").unwrap().id.clone();
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let held = service
+        .engine
+        .prepare_model_client(&cfg, &model_for(&id_a), &CancellationToken::new())
+        .await
+        .unwrap();
+    for path in ["/api/local-models/load", "/api/models/test"] {
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            call(&service, "POST", path, json!({"id": id_b})),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{path} waited for the running task"))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("running task is using"), "{path}: {error}");
+    }
+    assert_eq!(lines(&f.bin.join("launches.jsonl")).len(), 1);
+    // The same model is shared, not refused.
+    let loaded = call(
+        &service,
+        "POST",
+        "/api/local-models/load",
+        json!({"id": id_a}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(loaded["loaded"]["id"], id_a.as_str());
+    drop(held);
+    let loaded = tokio::time::timeout(
+        Duration::from_secs(20),
+        call(
+            &service,
+            "POST",
+            "/api/local-models/load",
+            json!({"id": id_b}),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(loaded["loaded"]["id"], id_b.as_str());
+    service.engine.shutdown().await.unwrap();
+}
+
+/// A runtime wrapper script that leaves a child holding its output open
+/// (for example `llama-server "$@" &`) cannot hang the model catalog: the
+/// probe returns and the child is stopped with it.
+#[cfg(unix)]
+#[test]
+fn runtime_probe_does_not_hang_on_a_child_left_behind() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let binary = root.path().join("llama-server");
+    let pidfile = root.path().join("child.pid");
+    fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\nsleep 600 &\necho $! > '{}'\necho 'version: 1 (abcdef0)'\n",
+            pidfile.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let probed = binary.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(local_engine::probe(&probed));
+    });
+    let probe = receiver
+        .recv_timeout(Duration::from_secs(12))
+        .expect("the runtime probe returned");
+    assert!(probe.ok, "{:?}", probe.error);
+    let pid: u64 = fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let started = Instant::now();
+    while pid_alive(pid) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wrapper's child survived the probe"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// LOC-04: another program takes llama-server's port between choosing it and
+/// the server listening. The load retries on a fresh port on the same device
+/// instead of calling it a GPU failure and moving the model to the CPU.
+#[tokio::test]
+async fn an_occupied_port_is_retried_without_a_cpu_fallback() {
+    let f = fixture(GPU);
+    let model = f.models.join("porthold.gguf");
+    qwen_like(&model, "qwen3", TOOLS_TEMPLATE);
+    fs::write(f.bin.join("hold-port-bind"), "hold").unwrap();
+    Config::patch(&f.paths, json!({"local_engine":{"files":[model]}})).unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let id = local_engine::scan(&cfg.local_engine)[0].id.clone();
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let owner = service.clone();
+    let target = id.clone();
+    let loading = tokio::spawn(async move {
+        call(
+            &owner,
+            "POST",
+            "/api/local-models/load",
+            json!({"id": target}),
+        )
+        .await
+    });
+    let held_path = f.bin.join("port-bind-held.json");
+    let held: Value = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(value) = fs::read(&held_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            {
+                return value;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the runtime reached its bind barrier");
+    let port = held["port"].as_u64().unwrap() as u16;
+    // Another program takes the port; the next launch binds at once.
+    let squatter = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    fs::remove_file(f.bin.join("hold-port-bind")).unwrap();
+    {
+        use std::io::Write;
+        let mut barrier =
+            std::os::unix::net::UnixStream::connect(held["socket"].as_str().unwrap()).unwrap();
+        barrier.write_all(b"bind").unwrap();
+    }
+    let loaded = tokio::time::timeout(Duration::from_secs(30), loading)
+        .await
+        .expect("the load finished")
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded["loaded"]["id"], id.as_str(), "{loaded}");
+    let runtime = service.engine.local_runtime().loaded().unwrap();
+    assert!(
+        !runtime.cpu_fallback,
+        "a port conflict is not a GPU failure"
+    );
+    assert_ne!(runtime.port, port);
+    let launches = lines(&f.bin.join("launches.jsonl"));
+    assert_eq!(launches.len(), 2);
+    for launch in &launches {
+        let argv = launch["argv"].to_string();
+        assert!(!argv.contains("\"--device\",\"none\""), "{argv}");
+    }
+    drop(squatter);
+    service.engine.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn cancel_during_load_early_exit_tail_and_cpu_fallback() {
     let f = fixture(GPU);
@@ -2423,6 +2600,53 @@ async fn a_plan_limit_continues_the_conversation_on_a_local_model() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(asked.expect("ask is recorded")["ask"], true);
+
+    // A Compare lane never continues on another model, whatever on_limit says.
+    Config::patch(&f.paths, json!({"limits":{"on_limit":"local"}})).unwrap();
+    let lane = store
+        .create_session(&f.project, "cli:codex", "Compare · Codex")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    store
+        .set_session_meta(&lane, "compare_id", "fixture-compare")
+        .unwrap();
+    let job = call(
+        &service,
+        "POST",
+        "/api/jobs",
+        json!({"workspace": f.project, "task": "Lane", "model": "cli:codex", "session_id": lane, "handoff_consent": true}),
+    )
+    .await
+    .unwrap();
+    let limited = wait_job(&service, job["id"].as_str().unwrap()).await;
+    assert_eq!(limited["status"], "limit_reached");
+    let mut refused = None;
+    for _ in 0..200 {
+        let events = store.events_after(&lane, 0, None, 10_000).unwrap();
+        if let Some(e) = events.iter().find(|e| e["type"] == "limit.fallback") {
+            refused = Some(e["payload"].clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let refused = refused.expect("the lane records why it stopped");
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert!(refused["reason"].as_str().unwrap().contains("Compare lane"));
+    let jobs = call(&service, "GET", "/api/jobs", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(
+        jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|j| j["session_id"] == json!(lane))
+            .count(),
+        1,
+        "no follow-up job in the lane"
+    );
     let jobs = call(&service, "GET", "/api/jobs", Value::Null)
         .await
         .unwrap();
@@ -2437,6 +2661,99 @@ async fn a_plan_limit_continues_the_conversation_on_a_local_model() {
         .count();
     assert_eq!(later, 0, "no follow-up job in ask mode");
     assert!(Config::patch(&f.paths, json!({"limits":{"on_limit":"sometimes"}})).is_err());
+}
+
+/// A local follow-up queued behind other work in one project does not hold
+/// up a local task in another project.
+#[tokio::test]
+async fn a_queued_local_follow_up_does_not_block_another_project() {
+    use shadowcode_core::engine::StartRequest;
+    let slow = support::server(|_, _| {
+        (
+            json!({"choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}),
+            Duration::from_secs(4),
+        )
+    })
+    .await;
+    let f = fixture(GPU);
+    let a = f.models.join("a.gguf");
+    qwen_like(&a, "qwen3", TOOLS_TEMPLATE);
+    let projects: Vec<_> = ["x", "y"]
+        .iter()
+        .map(|name| f._root.path().join(name))
+        .collect();
+    for project in &projects {
+        fs::create_dir(project).unwrap();
+    }
+    Config::patch(
+        &f.paths,
+        json!({"local_engine":{"files":[a]},"trusted_workspaces":projects}),
+    )
+    .unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let id = local_engine::scan(&cfg.local_engine)[0].id.clone();
+    let engine = Engine::open(f.paths.clone()).unwrap();
+    let request = |project: &PathBuf, model: ModelConfig, queue: bool| StartRequest {
+        workspace: project.clone(),
+        task: "Say hello".into(),
+        session_id: None,
+        model: Some(model),
+        mode: "code".into(),
+        queue,
+        images: vec![],
+        web: false,
+    };
+    // Project X: a slow task on another (not managed) model, then a local
+    // follow-up queued behind it in the same conversation.
+    let other = ModelConfig {
+        default: "fixture".into(),
+        name: "fixture".into(),
+        provider: "local".into(),
+        endpoint: slow.endpoint.clone(),
+        api_key_env: "SHADOWCODE_TEST_UNUSED_API_KEY".into(),
+        keep_alive: "5m".into(),
+        context_limit: 16384,
+    };
+    let first = engine
+        .start(request(&projects[0], other, false))
+        .await
+        .unwrap();
+    let mut follow = request(&projects[0], model_for(&id), true);
+    follow.session_id = Some(first.session_id.clone());
+    let follow = engine.start(follow).await.unwrap();
+    // Project Y: a local task starts right away.
+    let second = engine
+        .start(request(&projects[1], model_for(&id), false))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while engine
+            .store()
+            .last_task_event(&second.task_id, "local.runtime_ready")
+            .unwrap()
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the other project's local task started while X was busy");
+    assert_eq!(engine.job(&first.id).unwrap().unwrap().status, "running");
+    assert_eq!(engine.job(&follow.id).unwrap().unwrap().status, "queued");
+    for job in [&first, &follow, &second] {
+        let done = tokio::time::timeout(Duration::from_secs(20), engine.wait(&job.id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(done.status.as_str(), "completed" | "failed"),
+            "{}",
+            done.summary
+        );
+        assert_ne!(done.status, "cancelled");
+    }
+    assert_eq!(slow.requests.lock().unwrap().len(), 1);
+    engine.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -2772,6 +3089,155 @@ async fn compare_runs_two_installed_gguf_models_sequentially_in_offline_mode() {
         &service,
         "POST",
         &format!("/api/compare/{cancelled_id}/discard"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    service.engine.shutdown().await.unwrap();
+}
+
+/// LOC-05: one installed model fails to load in a Compare. Its lane fails
+/// with the runtime's own error (no CPU fallback in a comparison), and the
+/// other lane runs, finishes and keeps its result and receipts.
+#[tokio::test]
+async fn one_local_model_failing_in_compare_leaves_the_other_lane_intact() {
+    let f = fixture(GPU);
+    let crash = f.models.join("crash.gguf");
+    let good = f.models.join("good.gguf");
+    qwen_like(&crash, "qwen3", TOOLS_TEMPLATE);
+    qwen_like(&good, "qwen3", TOOLS_TEMPLATE);
+    fs::write(f.project.join("hello.txt"), "hello\n").unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "base",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&f.project)
+            .status()
+            .unwrap()
+            .success());
+    }
+    Config::patch(&f.paths,json!({"local_engine":{"files":[crash,good]},"network":{"mode":"offline"},"cli_agents":{"enabled":false}})).unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let entries = local_engine::scan(&cfg.local_engine);
+    let id = |name: &str| entries.iter().find(|e| e.name == name).unwrap().id.clone();
+    let (crash_id, good_id) = (id("crash"), id("good"));
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let record = call(
+        &service,
+        "POST",
+        "/api/compare",
+        json!({"workspace":f.project,"task":"Read hello.txt","models":[crash_id,good_id],"web":false}),
+    )
+    .await
+    .unwrap();
+    let record_id = record["id"].as_str().unwrap().to_owned();
+    for lane in record["lanes"].as_array().unwrap() {
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            service.engine.wait(lane["job_id"].as_str().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+    let done = call(
+        &service,
+        "GET",
+        &format!("/api/compare/{record_id}"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert_eq!(done["state"], "done", "{done}");
+    let lane = |model: &str| {
+        done["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|lane| lane["model"] == model)
+            .unwrap()
+            .clone()
+    };
+    let failed = lane(&crash_id);
+    assert_eq!(failed["status"], "failed", "{failed}");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("fake crash loading model"),
+        "{failed}"
+    );
+    let good_lane = lane(&good_id);
+    assert_eq!(good_lane["status"], "completed", "{good_lane}");
+    assert!(good_lane["summary"]
+        .as_str()
+        .unwrap()
+        .contains("hello from the fake model"));
+    assert_eq!(good_lane["local_runtime"]["runtime"]["cpu_fallback"], false);
+    let good_job = service
+        .engine
+        .job(good_lane["job_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    let receipt = service
+        .engine
+        .store()
+        .last_task_event(&good_job.task_id, "verification.summary")
+        .unwrap()
+        .expect("the finished lane keeps its verification receipt");
+    // No automatic CPU retry inside a comparison: one launch per model.
+    let launches = lines(&f.bin.join("launches.jsonl"));
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    assert!(!launches[0]["argv"].to_string().contains("\"none\""));
+    // Reopening keeps both outcomes and the receipt.
+    service.engine.shutdown().await.unwrap();
+    drop(service);
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let reopened = call(
+        &service,
+        "GET",
+        &format!("/api/compare/{record_id}"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    for model in [&crash_id, &good_id] {
+        let before = lane(model);
+        let after = reopened["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|lane| lane["model"] == model.as_str())
+            .unwrap();
+        assert_eq!(after["status"], before["status"]);
+        assert_eq!(after["summary"], before["summary"]);
+        assert_eq!(after["checks"], before["checks"]);
+    }
+    assert_eq!(
+        service
+            .engine
+            .store()
+            .last_task_event(&good_job.task_id, "verification.summary")
+            .unwrap(),
+        Some(receipt)
+    );
+    call(
+        &service,
+        "POST",
+        &format!("/api/compare/{record_id}/discard"),
         Value::Null,
     )
     .await

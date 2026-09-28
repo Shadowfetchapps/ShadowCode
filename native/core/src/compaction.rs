@@ -180,7 +180,17 @@ pub async fn compact(
         Ok(Err(error)) => return Ok(Some(fallback(event, &format!("{error:#}"), None))),
         Err(_) => return Ok(Some(fallback(event, "timeout", None))),
     };
-    let usage = Some(response.usage.clone());
+    // Like an agent step: no reported counts means an estimate, marked as
+    // one, never an exact zero.
+    let mut counted = response.usage.clone();
+    if counted.total_tokens == 0 {
+        counted.prompt_tokens = context::estimate_tokens(&json!(request)) as u64;
+        counted.completion_tokens =
+            context::estimate_tokens(&json!({"text": response.text})) as u64;
+        counted.total_tokens = counted.prompt_tokens + counted.completion_tokens;
+        counted.estimated = true;
+    }
+    let usage = Some(counted);
     let summary = crate::autonomy::public_assistant_text(&response.text);
     let summary = truncate(summary.trim(), MAX_SUMMARY_BYTES)
         .trim()

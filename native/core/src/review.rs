@@ -107,7 +107,9 @@ fn committed(root: &Path, path: &str) -> Option<Option<Vec<u8>>> {
         let repo = git(&["rev-parse", "--is-inside-work-tree"])?;
         return repo.status.success().then_some(None);
     }
-    let blob = git(&["cat-file", "blob", &format!("HEAD:{path}")])?;
+    // `HEAD:./path` is relative to the project folder, which may be a
+    // subfolder of the repository; `HEAD:path` would be from its root.
+    let blob = git(&["cat-file", "blob", &format!("HEAD:./{path}")])?;
     Some(blob.status.success().then_some(blob.stdout))
 }
 
@@ -244,6 +246,13 @@ pub fn undo(
             }
         }
     };
+    // Without a checkpoint, "not in the last commit" does not prove the
+    // task created the file (it may be ignored or untracked and older than
+    // the task), so it is never deleted on that evidence.
+    ensure!(
+        restored.is_some() || now.bytes.is_none() || base.source == "checkpoint",
+        "{path} is not in the last commit and ShadowCode has no copy from before this task, so it cannot tell whether the task created it. Delete it yourself if it should go."
+    );
     match &restored {
         Some(bytes) => {
             ws.write(&path, bytes, Some(&now_hash))?;
@@ -542,6 +551,69 @@ mod tests {
         assert_eq!(
             fs::read_to_string(ws.path.join("keep.txt")).unwrap(),
             "edited by hand\n"
+        );
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    /// A vendor-reported file without a checkpoint row is compared with the
+    /// last commit relative to the project folder (a subfolder of the
+    /// repository here), and a file that is not in the commit is never
+    /// deleted on that evidence alone.
+    #[test]
+    fn vendor_files_without_checkpoints_compare_from_the_project_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let project = repo.join("app");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("a.txt"), "one\n").unwrap();
+        fs::write(repo.join(".gitignore"), ".env\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "base"]);
+        fs::write(project.join(".env"), "SECRET=1\n").unwrap();
+        let store = Store::open(&root.path().join("db")).unwrap();
+        let session = store.create_session(&project, "mock", "").unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let task = store.create_task(&session, "edit").unwrap();
+        let ws = Workspace::open(&project).unwrap();
+        store
+            .add_event(
+                "files.changed",
+                &json!({"paths":["a.txt", ".env"]}),
+                Some(&session),
+                Some(&task),
+            )
+            .unwrap();
+        fs::write(project.join("a.txt"), "two\n").unwrap();
+        fs::write(project.join(".env"), "SECRET=2\n").unwrap();
+        let list = files(&store, &ws, &task).unwrap();
+        assert_eq!(list[0]["path"], "a.txt");
+        assert_eq!(list[0]["status"], "modified", "{list:?}");
+        undo(&store, &ws, &task, "a.txt", None).unwrap();
+        assert_eq!(fs::read_to_string(project.join("a.txt")).unwrap(), "one\n");
+        let error = undo(&store, &ws, &task, ".env", None).unwrap_err();
+        assert!(error.to_string().contains("cannot tell"), "{error}");
+        assert_eq!(
+            fs::read_to_string(project.join(".env")).unwrap(),
+            "SECRET=2\n"
         );
     }
 

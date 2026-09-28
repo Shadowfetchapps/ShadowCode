@@ -437,6 +437,114 @@ async fn worktree_runs_remove_an_untouched_checkout_and_keep_one_with_changes() 
     );
 }
 
+/// A follow-up queued in a worktree run's conversation keeps the worktree:
+/// cleanup never removes a checkout another task is about to use.
+#[tokio::test]
+async fn worktree_cleanup_waits_for_a_queued_follow_up() {
+    let server = support::server(|_, body| {
+        let text = body["messages"].to_string();
+        let answered = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["role"] == "tool");
+        if text.contains("Follow up") && !answered {
+            return (
+                response(
+                    "Writing",
+                    json!([tool(
+                        "write_file",
+                        json!({"path":"follow.txt","content":"kept\n","expected_hash":"missing"})
+                    )]),
+                ),
+                // Still working when the automation's cleanup runs.
+                Duration::from_millis(3000),
+            );
+        }
+        let slow = !text.contains("Follow up");
+        (
+            response("Finished.", json!([])),
+            if slow {
+                Duration::from_millis(1500)
+            } else {
+                Duration::ZERO
+            },
+        )
+    })
+    .await;
+    let fixture = setup(&server.endpoint, false);
+    let service = &fixture.service;
+    let store = service.engine.store();
+    let created = call(
+        service,
+        "POST",
+        "/api/automations",
+        automation("Slow", "worktree"),
+    )
+    .await
+    .unwrap();
+    let id = created["id"].as_str().unwrap().to_owned();
+    call(
+        service,
+        "POST",
+        &format!("/api/automations/{id}/run"),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    // The run's conversation and worktree, while its job is still running.
+    let (sid, checkout) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(run) = store.automation_runs(&id, 1).unwrap().into_iter().next() {
+                if let (Some(sid), Some(tree), Some(_)) =
+                    (run.session_id.clone(), run.worktree.clone(), run.job_id)
+                {
+                    return (sid, PathBuf::from(tree["path"].as_str().unwrap()));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let follow = service
+        .engine
+        .start(shadowcode_core::engine::StartRequest {
+            workspace: checkout.clone(),
+            task: "Follow up: write the note.".into(),
+            session_id: Some(sid.clone()),
+            model: None,
+            mode: "code".into(),
+            queue: true,
+            images: Vec::new(),
+            web: false,
+        })
+        .await
+        .unwrap();
+    let run = finished(&fixture, &id).await;
+    assert_eq!(run.status, "completed", "{run:?}");
+    let follow = tokio::time::timeout(Duration::from_secs(20), service.engine.wait(&follow.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(follow.status, "completed", "{}", follow.summary);
+    let tree = run.worktree.clone().unwrap();
+    assert_ne!(tree["removed"], true, "{run:?}");
+    // Kept because the follow-up used it (or, on a very slow machine, had
+    // already written its file there by the time of the cleanup).
+    assert!(
+        run.detail.contains("was kept") || run.detail.contains(tree["branch"].as_str().unwrap()),
+        "{}",
+        run.detail
+    );
+    assert_eq!(
+        fs::read_to_string(checkout.join("follow.txt")).unwrap(),
+        "kept\n"
+    );
+    let session = store.session(&sid).unwrap().unwrap();
+    assert_eq!(session["workspace"], json!(checkout));
+}
+
 #[tokio::test]
 async fn approval_requests_stop_an_unattended_run() {
     let server = support::server(|_, _| {

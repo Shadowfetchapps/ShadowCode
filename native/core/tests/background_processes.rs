@@ -557,3 +557,40 @@ async fn failed_audit_storage_never_starts_an_unrecorded_process() {
         .exists());
     service.engine.shutdown().await.unwrap();
 }
+
+/// A progress save that fails (the database is briefly unwritable) never
+/// stops the user's running process; saving resumes when it can.
+#[tokio::test]
+async fn a_failed_progress_save_does_not_kill_the_process() {
+    let (_root, service) = setup(true);
+    let task = start(
+        &service,
+        "ticker",
+        "while true; do echo tick; sleep 0.1; done",
+    )
+    .await;
+    let running = until(&service, &task.id, |t| t.status == "RUNNING" && t.pid > 0).await;
+    let pid = running.pid;
+    let db = rusqlite::Connection::open(service.engine.paths().database()).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute_batch("CREATE TRIGGER deny_progress BEFORE UPDATE ON background_processes BEGIN SELECT RAISE(ABORT,'database briefly unavailable'); END;").unwrap();
+    // Several progress ticks fail meanwhile.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(!dead(pid), "the process was killed by a failed save");
+    assert_eq!(
+        service.engine.background().get(&task.id).unwrap().status,
+        "RUNNING"
+    );
+    db.execute_batch("DROP TRIGGER deny_progress;").unwrap();
+    call(
+        &service,
+        "POST",
+        &format!("/api/background/{}/stop", task.id),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let stopped = until(&service, &task.id, |t| t.status != "RUNNING").await;
+    assert_eq!(stopped.status, "CANCELLED");
+    service.engine.shutdown().await.unwrap();
+}

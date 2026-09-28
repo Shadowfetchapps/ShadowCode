@@ -169,6 +169,12 @@ pub fn restore(store: &Store, workspace: &Workspace, task: &str) -> Result<Vec<S
                 }
                 None => workspace.delete(&change.path, Some(current_hash))?,
             }
+        } else if let (Some(mode), Some(current)) = (change.mode, change.current.mode) {
+            // Same content, different permissions (a `chmod` by a command or
+            // a vendor): put the earlier permissions back.
+            if current != mode & 0o777 {
+                workspace.set_mode(&change.path, mode)?;
+            }
         }
         store.execute("UPDATE file_changes SET restored=1 WHERE id=?", [change.id])?;
         restored.push(change.path);

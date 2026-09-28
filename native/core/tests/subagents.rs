@@ -759,3 +759,284 @@ fn spawn_schema_accepts_single_and_batched_tasks() {
     assert!(!filter.permits("mcp__docs__delete"));
     assert!(!filter.permits("mcp__other__search"));
 }
+
+/// The parent task's usage (and its conversation's total) includes what its
+/// subagents used; each child job still reports its own.
+#[tokio::test]
+async fn parent_usage_includes_its_subagents() {
+    let server = fake(move |body| {
+        if child_of(body).is_some() {
+            return (response("Found it.", json!([])), Duration::ZERO);
+        }
+        if last(body)["role"] == "tool" {
+            return (response("Both finished.", json!([])), Duration::ZERO);
+        }
+        (
+            response(
+                "",
+                json!([tool(
+                    "spawn_agent",
+                    json!({"tasks":[
+                        {"agent":"explore","prompt":"Find alpha"},
+                        {"agent":"explore","prompt":"Find beta"}
+                    ]})
+                )]),
+            ),
+            Duration::ZERO,
+        )
+    })
+    .await;
+    let (_root, engine, project) = setup(&server.endpoint, json!({}));
+    let job = engine.start(request(&project, "Search")).await.unwrap();
+    let done = wait(&engine, &job.id, 20).await;
+    assert_eq!(done.status, "completed", "{}", done.summary);
+    // Two parent requests and one request per child, 15 tokens each.
+    assert_eq!(done.usage.total_tokens, 60, "{:?}", done.usage);
+    assert_eq!(done.usage.turns, 4);
+    assert_eq!(done.usage.cost_usd, Some(0.0));
+    let store = engine.store();
+    let session = store.session(&job.session_id).unwrap().unwrap();
+    assert_eq!(session["usage"]["total_tokens"], 60);
+    for run in subagents::list(&store, &job.session_id).unwrap() {
+        let child = engine.job(&run.job_id).unwrap().unwrap();
+        assert_eq!(child.usage.total_tokens, 15);
+        assert_eq!(run.usage["total_tokens"], 15);
+    }
+    let rolled: Vec<_> = events(&engine, &job.session_id, "usage.updated")
+        .into_iter()
+        .filter(|e| e["payload"]["purpose"] == "subagent")
+        .collect();
+    assert_eq!(rolled.len(), 2);
+    assert!(rolled
+        .iter()
+        .all(|e| e["payload"]["turn"]["total_tokens"] == 15));
+    engine.shutdown().await.unwrap();
+}
+
+/// Deleting a conversation deletes its (hidden) subagent conversations, their
+/// run records and saved patches. A fork that still shows a subagent's card
+/// keeps that subagent conversation.
+#[tokio::test]
+async fn deleting_a_conversation_deletes_its_subagent_conversations() {
+    let server = fake(move |body| {
+        match child_of(body).as_deref() {
+            Some("general") => {
+                let turns = body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|m| m["role"] == "tool")
+                    .count();
+                return if turns == 0 {
+                    (
+                        response(
+                            "",
+                            json!([tool(
+                                "edit_file",
+                                json!({"path":"note.txt","old_string":"old","new_string":"new"})
+                            )]),
+                        ),
+                        Duration::ZERO,
+                    )
+                } else {
+                    (response("Edited.", json!([])), Duration::ZERO)
+                };
+            }
+            Some(_) => return (response("Found it.", json!([])), Duration::ZERO),
+            None => {}
+        }
+        if last(body)["role"] == "tool" {
+            // The write child's diff is left unapplied: its patch stays saved.
+            return (response("Done.", json!([])), Duration::ZERO);
+        }
+        let agent = if last_user(body).contains("edit") {
+            json!({"agent":"general","prompt":"Change old to new in note.txt"})
+        } else {
+            json!({"agent":"explore","prompt":"Find the note"})
+        };
+        (
+            response("", json!([tool("spawn_agent", agent)])),
+            Duration::ZERO,
+        )
+    })
+    .await;
+    let (_root, engine, project) = setup(&server.endpoint, json!({}));
+    repository(&project);
+    let store = engine.store();
+    let hidden = |store: &shadowcode_core::store::Store| {
+        store
+            .sessions_listed_with("", 100, None, true, true)
+            .unwrap()
+            .len()
+    };
+
+    // A write child: its conversation, run record and patch go with the parent.
+    let job = engine
+        .start(request(&project, "Please edit the note"))
+        .await
+        .unwrap();
+    let done = wait(&engine, &job.id, 30).await;
+    assert_eq!(done.status, "completed", "{}", done.summary);
+    let runs = subagents::list(&store, &job.session_id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].patch && !runs[0].applied);
+    let patch = engine
+        .paths()
+        .data
+        .join("subagents")
+        .join(format!("{}.patch", runs[0].id));
+    assert!(patch.exists());
+    assert_eq!(hidden(&store), 2);
+    assert!(engine.delete_session(&job.session_id).unwrap());
+    assert!(store.session(&runs[0].session_id).unwrap().is_none());
+    assert!(engine.job(&runs[0].job_id).unwrap().is_none());
+    assert!(subagents::get(&store, &runs[0].id).is_err());
+    assert!(subagents::list(&store, &job.session_id).unwrap().is_empty());
+    assert!(!patch.exists());
+    assert_eq!(hidden(&store), 0);
+    assert_eq!(
+        fs::read_to_string(project.join("note.txt")).unwrap(),
+        "old\n"
+    );
+
+    // A fork keeps the subagent conversation its copied card opens.
+    let job = engine
+        .start(request(&project, "Find the note"))
+        .await
+        .unwrap();
+    let done = wait(&engine, &job.id, 30).await;
+    assert_eq!(done.status, "completed", "{}", done.summary);
+    let run = subagents::list(&store, &job.session_id).unwrap().remove(0);
+    let fork = store.branch_session(&job.session_id, "").unwrap();
+    let fork = fork["id"].as_str().unwrap().to_owned();
+    assert!(engine.delete_session(&job.session_id).unwrap());
+    let child = store.session(&run.session_id).unwrap();
+    assert!(child.is_some(), "the fork still shows this subagent");
+    assert_eq!(
+        store
+            .session_meta(&run.session_id, "subagent_parent")
+            .unwrap()
+            .as_deref(),
+        Some(fork.as_str())
+    );
+    assert!(subagents::get(&store, &run.id).is_ok());
+    assert!(engine.delete_session(&fork).unwrap());
+    assert!(store.session(&run.session_id).unwrap().is_none());
+    assert!(subagents::get(&store, &run.id).is_err());
+    assert_eq!(hidden(&store), 0);
+    engine.shutdown().await.unwrap();
+}
+
+/// A write subagent whose changes cannot be collected (a diff too large here)
+/// keeps its worktree, so its work is not lost.
+#[tokio::test]
+async fn uncollectable_subagent_changes_keep_the_worktree() {
+    let server = fake(move |body| {
+        if child_of(body).as_deref() == Some("general") {
+            if last(body)["role"] == "tool" {
+                assert_eq!(tool_output(&last(body))["success"], true, "{}", last(body));
+                return (response("Wrote big.txt.", json!([])), Duration::ZERO);
+            }
+            return (
+                response(
+                    "",
+                    json!([tool(
+                        "exec",
+                        json!({"command":"python3 -c \"open('big.txt','w').write('a\\n'*4500000)\""})
+                    )]),
+                ),
+                Duration::ZERO,
+            );
+        }
+        if last(body)["role"] == "tool" {
+            return (response("Done.", json!([])), Duration::ZERO);
+        }
+        (
+            response(
+                "",
+                json!([tool(
+                    "spawn_agent",
+                    json!({"agent":"general","prompt":"Write a big file"})
+                )]),
+            ),
+            Duration::ZERO,
+        )
+    })
+    .await;
+    let (_root, engine, project) = setup(
+        &server.endpoint,
+        json!({"permissions":{"mode":"allow_edits","approve_shell":false}}),
+    );
+    repository(&project);
+    let job = engine.start(request(&project, "Big")).await.unwrap();
+    let done = wait(&engine, &job.id, 60).await;
+    assert_eq!(done.status, "completed", "{}", done.summary);
+    let runs = subagents::list(&engine.store(), &job.session_id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert!(
+        runs[0]
+            .notes
+            .iter()
+            .any(|n| n.contains("Could not read") && n.contains("was kept")),
+        "{:?}",
+        runs[0].notes
+    );
+    let kept = shadowcode_core::worktrees::list(engine.paths(), &project).unwrap();
+    assert_eq!(kept.len(), 1, "the worktree with the changes is kept");
+    assert_eq!(
+        fs::metadata(kept[0].path.join("big.txt")).unwrap().len(),
+        9_000_000
+    );
+    engine.shutdown().await.unwrap();
+}
+
+/// A subagent still running when the app stopped is marked interrupted on
+/// the next start, and its card in the parent conversation gets its
+/// `subagent.finished` event instead of spinning forever.
+#[tokio::test]
+async fn subagent_runs_interrupted_by_a_restart_are_finished() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+    let engine = Engine::open(paths.clone()).unwrap();
+    let store = engine.store();
+    let parent = store.create_session(&project, "fixture", "").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let run_id = "0123456789abcdef0123456789abcdef";
+    let record = json!({
+        "id": run_id, "agent": "explore", "mode": "read-only", "model": "fixture",
+        "parent_session": parent, "status": "running", "created_at": 1.0,
+    });
+    store
+        .set_native_meta(&format!("subagent:{run_id}"), &record.to_string())
+        .unwrap();
+    store
+        .add_event(
+            "subagent.started",
+            &json!({"run_id": run_id, "agent": "explore"}),
+            Some(&parent),
+            None,
+        )
+        .unwrap();
+    drop(store);
+    engine.shutdown().await.unwrap();
+    drop(engine);
+
+    let engine = Engine::open(paths).unwrap();
+    let run = subagents::get(&engine.store(), run_id).unwrap();
+    assert_eq!(run.status, "interrupted");
+    assert!(run.error.unwrap().contains("stopped"));
+    let finished = events(&engine, &parent, "subagent.finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["payload"]["run_id"], run_id);
+    assert_eq!(finished[0]["payload"]["status"], "interrupted");
+    engine.shutdown().await.unwrap();
+    drop(engine);
+    // Recovered once only.
+    let engine = Engine::open(AppPaths::isolated(&root.path().join("profile")).unwrap()).unwrap();
+    assert_eq!(events(&engine, &parent, "subagent.finished").len(), 1);
+    engine.shutdown().await.unwrap();
+}

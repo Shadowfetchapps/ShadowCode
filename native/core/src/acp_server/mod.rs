@@ -43,7 +43,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
-    sync::{mpsc, oneshot},
+    sync::{broadcast, mpsc, oneshot},
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
@@ -56,7 +56,12 @@ const LINE_LIMIT: usize = 48_000_000;
 /// Text of one embedded file or buffer, and of the whole prompt.
 const CONTEXT_LIMIT: usize = 400_000;
 const PROMPT_LIMIT: usize = 2_000_000;
+/// Event reads while nothing pushes wake-ups (or an approval waits for its
+/// tool call's event).
 const POLL: Duration = Duration::from_millis(100);
+/// With the engine's push wake-ups, a read still happens this often in case
+/// one was missed.
+const PUSH_BACKSTOP: Duration = Duration::from_secs(2);
 const PICKER_TTL: Duration = Duration::from_secs(60);
 const PICKER_WAIT: Duration = Duration::from_secs(5);
 const MAX_MENTIONS: usize = crate::mentions::MAX_MENTIONS;
@@ -279,9 +284,70 @@ struct Agent {
     pickers: tokio::sync::Mutex<HashMap<PathBuf, (Instant, Vec<ModelChoice>)>>,
     /// Late model-list refreshes, stopped when the connection closes.
     background: Mutex<Vec<tokio::task::AbortHandle>>,
+    /// The engine's wake-up feed when it runs in another process (a desktop
+    /// or `serve`): opened on the first prompt; `Some(None)` when it could not
+    /// be opened, and prompts read their events on a timer instead.
+    view: tokio::sync::Mutex<Option<Option<Arc<crate::control::ViewClient>>>>,
+}
+
+/// Wait until the engine says something happened in `session` (or a
+/// wake-up may have been missed), for at most `backstop`. Without a feed,
+/// just wait.
+async fn next_wake(
+    wake: &mut Option<broadcast::Receiver<Value>>,
+    session: &str,
+    backstop: Duration,
+) {
+    let Some(receiver) = wake.as_mut() else {
+        tokio::time::sleep(backstop).await;
+        return;
+    };
+    let deadline = tokio::time::sleep(backstop);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => return,
+            event = receiver.recv() => match event {
+                Ok(event) => {
+                    let kind = event["type"].as_str().unwrap_or("");
+                    if event["session_id"].as_str() == Some(session) || kind.starts_with("view.") {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => return,
+                Err(broadcast::error::RecvError::Closed) => {
+                    *wake = None;
+                    return;
+                }
+            }
+        }
+    }
 }
 
 impl Agent {
+    /// The engine's push wake-ups: its own broadcast when this process owns
+    /// the engine, otherwise an attached view's notifications.
+    async fn wakeups(&self, session: &Session) -> Option<broadcast::Receiver<Value>> {
+        if let Some(service) = self.backend.service() {
+            return Some(service.engine.subscribe());
+        }
+        let mut view = self.view.lock().await;
+        if view.is_none() {
+            *view = Some(
+                session
+                    .client
+                    .open_view()
+                    .await
+                    .inspect_err(|error| tracing::debug!("ACP prompts poll for events: {error:#}"))
+                    .ok()
+                    .map(Arc::new),
+            );
+        }
+        view.as_ref()
+            .and_then(Option::as_ref)
+            .filter(|view| !view.disconnected())
+            .map(|view| view.subscribe())
+    }
     fn session(&self, params: &Value) -> std::result::Result<Arc<Session>, RpcError> {
         let id = required(params, "sessionId")?;
         self.sessions
@@ -1003,6 +1069,8 @@ impl Agent {
             );
         }
         let mut translator = Translator::new(session.workspace.clone(), false);
+        // Subscribed before the first read, so nothing after it is missed.
+        let mut wake = self.wakeups(session).await;
         let mut cursor = job["event_cursor"].as_i64().unwrap_or(0);
         let mut cancel_sent = false;
         let mut asked: HashSet<String> = HashSet::new();
@@ -1040,12 +1108,20 @@ impl Agent {
             if rows.len() == 512 {
                 continue;
             }
+            let deferred_before = deferred.len();
             if !turn.cancel.is_cancelled() {
                 self.approvals(session, turn, &translator, &mut asked, &mut deferred)
                     .await?;
             }
+            // Push wake-ups replace the 100 ms timer; an approval waiting
+            // for its tool call's event is read again soon.
+            let backstop = if wake.is_some() && deferred.len() == deferred_before {
+                PUSH_BACKSTOP
+            } else {
+                POLL
+            };
             tokio::select! {
-                _ = tokio::time::sleep(POLL) => {}
+                _ = next_wake(&mut wake, &session.id, backstop) => {}
                 _ = turn.cancel.cancelled(), if !cancel_sent => {}
             }
         };
@@ -1374,6 +1450,7 @@ pub async fn serve_io(
         sessions: Mutex::new(HashMap::new()),
         pickers: tokio::sync::Mutex::new(HashMap::new()),
         background: Mutex::new(Vec::new()),
+        view: tokio::sync::Mutex::new(None),
     });
     let (lines_tx, mut lines) = mpsc::channel(64);
     let reading = tokio::spawn(read_lines(reader, lines_tx));
@@ -1460,6 +1537,9 @@ pub async fn serve_io(
     if let Ok(mut background) = agent.background.lock() {
         background.drain(..).for_each(|task| task.abort());
     }
+    if let Some(Some(view)) = agent.view.lock().await.take() {
+        let _ = tokio::time::timeout(Duration::from_secs(5), view.close()).await;
+    }
     drop(agent);
     drop(peer);
     // Everything queued is flushed; a client that stopped reading is not
@@ -1493,6 +1573,46 @@ mod tests {
         assert_eq!(rfc3339(0.0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(1_758_800_000.5), "2025-09-25T11:33:20Z");
         assert_eq!(rfc3339(951_782_400.0), "2000-02-29T00:00:00Z");
+    }
+
+    /// A prompt wakes up for its own conversation's events (and a possibly
+    /// missed wake-up), not for other conversations; without a feed it waits
+    /// for the backstop.
+    #[tokio::test(start_paused = true)]
+    async fn prompts_wake_for_their_own_events() {
+        let (sender, receiver) = broadcast::channel(4);
+        let mut wake = Some(receiver);
+        let long = Duration::from_secs(60);
+        let started = tokio::time::Instant::now();
+        let noise = sender.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let _ = noise.send(json!({"type":"model.stream","session_id":"other"}));
+            let _ = noise.send(json!({"type":"terminal.output"}));
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let _ = noise.send(json!({"type":"model.stream","session_id":"mine"}));
+        });
+        next_wake(&mut wake, "mine", long).await;
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        // A lost wake-up still ends the wait.
+        let started = tokio::time::Instant::now();
+        let replay = sender.clone();
+        tokio::spawn(async move {
+            let _ = replay.send(json!({"type":"view.lagged"}));
+        });
+        next_wake(&mut wake, "mine", long).await;
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // Nothing happens: the backstop.
+        let started = tokio::time::Instant::now();
+        next_wake(&mut wake, "mine", Duration::from_secs(2)).await;
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        // The feed closed: plain waiting from now on.
+        drop(sender);
+        next_wake(&mut wake, "mine", long).await;
+        assert!(wake.is_none());
+        let started = tokio::time::Instant::now();
+        next_wake(&mut wake, "mine", POLL).await;
+        assert_eq!(started.elapsed(), POLL);
     }
 
     #[tokio::test]

@@ -215,12 +215,19 @@ llama-server -m <gguf> --host 127.0.0.1 --port <free> --no-webui --jinja \
 - **CPU fallback.** If the server exits during a GPU start, it is retried once
   on the CPU. The row then says *Loaded · CPU fallback (GPU load failed)*.
   Otherwise the last error, including the server's own stderr, is shown on the
-  row.
+  row. A server that could not listen because another program took its port
+  is not a GPU failure: it is started again on another free port (three tries
+  in all) on the same device.
 - **Cancel.** Loading waits up to 90 seconds for `/health` and can be
   cancelled with **Unload**.
 - **One at a time.** Only one model is loaded. A task holds the loaded model
-  until it ends. While any task holds it, loading another model or unloading
-  is refused with "Another task is using …".
+  until it ends. While any task holds it, **Load**, **Test** or **Unload** of
+  another model is refused at once with "A running task is using …" (a task
+  started on another model waits its turn instead). While another model is
+  still loading, **Load** and **Test** say so and can be tried again. Local
+  tasks in different projects take their turns in the order they were sent;
+  a local follow-up still queued behind other work in its own project does
+  not hold up a local task in another project.
 - **Stop.** Unload, a switch or quitting ShadowCode sends SIGTERM to the
   server's process group, then SIGKILL after 5 seconds. The server also dies
   with ShadowCode (`PR_SET_PDEATHSIG`).

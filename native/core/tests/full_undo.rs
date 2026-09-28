@@ -295,6 +295,91 @@ async fn folders_without_git_use_a_bounded_copy() {
         .contains("Rewind does not cover"));
 }
 
+/// A step that stops ignoring files (it rewrites `.gitignore`) must not make
+/// rewind delete files that existed, ignored, before the step.
+#[tokio::test]
+async fn rewind_never_deletes_files_that_were_ignored_before_the_step() {
+    let f = fixture(shell_config(), |project| {
+        repo(project);
+        fs::write(project.join(".gitignore"), "*.log\nbuild/\n").unwrap();
+        git(project, &["commit", "-qam", "ignore build"]);
+        fs::write(project.join("secret.log"), "keep me").unwrap();
+        fs::create_dir(project.join("build")).unwrap();
+        fs::write(project.join("build/out.bin"), "artifact").unwrap();
+    });
+    let result = exec(
+        &f.tools,
+        "printf 'other\\n' > .gitignore && printf new > fresh.txt",
+    )
+    .await;
+    assert!(result.success, "{} {}", result.error, result.output);
+    let point = &result.output["checkpoint"];
+    assert_eq!(point["method"], "git", "{point}");
+    assert_eq!(sorted(&point["paths"]), [".gitignore", "fresh.txt"]);
+    let skipped: Vec<&str> = point["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["path"].as_str().unwrap())
+        .collect();
+    assert!(skipped.contains(&"secret.log"), "{point}");
+    assert!(skipped.contains(&"build/out.bin"), "{point}");
+    let ws = Workspace::open(&f.project).unwrap();
+    checkpoint::restore(&f.store, &ws, &f.task).unwrap();
+    let read = |p: &str| fs::read_to_string(f.project.join(p)).ok();
+    assert_eq!(read("secret.log").as_deref(), Some("keep me"));
+    assert_eq!(read("build/out.bin").as_deref(), Some("artifact"));
+    assert_eq!(read(".gitignore").as_deref(), Some("*.log\nbuild/\n"));
+    assert_eq!(read("fresh.txt"), None);
+
+    // The same in a folder without Git (its `.gitignore` still applies).
+    let f = fixture(shell_config(), |project| {
+        fs::write(project.join(".gitignore"), "*.log\n").unwrap();
+        fs::write(project.join("secret.log"), "keep me").unwrap();
+    });
+    let result = exec(
+        &f.tools,
+        "printf 'other\\n' > .gitignore && printf new > fresh.txt",
+    )
+    .await;
+    assert!(result.success, "{} {}", result.error, result.output);
+    let point = &result.output["checkpoint"];
+    assert_eq!(point["method"], "copy", "{point}");
+    assert_eq!(sorted(&point["paths"]), [".gitignore", "fresh.txt"]);
+    let ws = Workspace::open(&f.project).unwrap();
+    checkpoint::restore(&f.store, &ws, &f.task).unwrap();
+    let read = |p: &str| fs::read_to_string(f.project.join(p)).ok();
+    assert_eq!(read("secret.log").as_deref(), Some("keep me"));
+    assert_eq!(read("fresh.txt"), None);
+}
+
+/// A permission-only change (`chmod`) is put back by rewind.
+#[cfg(unix)]
+#[tokio::test]
+async fn rewind_restores_permissions_changed_by_a_step() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let f = fixture(shell_config(), |project| {
+        repo(project);
+        fs::write(project.join("run.sh"), "echo hi\n").unwrap();
+        fs::set_permissions(project.join("run.sh"), fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(project.join("tool.sh"), "echo tool\n").unwrap();
+        fs::set_permissions(project.join("tool.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+        git(project, &["add", "run.sh", "tool.sh"]);
+        git(project, &["commit", "-qm", "scripts"]);
+    });
+    let result = exec(&f.tools, "chmod 755 run.sh && chmod 644 tool.sh").await;
+    assert!(result.success, "{} {}", result.error, result.output);
+    assert_eq!(
+        sorted(&result.output["checkpoint"]["paths"]),
+        ["run.sh", "tool.sh"]
+    );
+    let ws = Workspace::open(&f.project).unwrap();
+    checkpoint::restore(&f.store, &ws, &f.task).unwrap();
+    assert_eq!(mode(&f.project.join("run.sh")), 0o644);
+    assert_eq!(mode(&f.project.join("tool.sh")), 0o755);
+}
+
 // ------------------------------------------------------------ vendor ----
 
 async fn call(service: &Service, method: &str, path: &str, body: Value) -> anyhow::Result<Value> {

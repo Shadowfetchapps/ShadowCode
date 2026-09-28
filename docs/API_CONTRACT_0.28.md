@@ -523,10 +523,13 @@ free models, `native/core/src/local_downloads.rs`):
   `Environment=OLLAMA_MODELS`, then `~/.ollama/models`) → `{ ok, local_engine }`.
   Incompatible tags are refused with the reason (e.g. `unsupported architecture gptoss`).
 - `POST /api/local-models/load {id}` → `{ ok, loaded }` (starts llama-server; one at a time;
-  refused with "Another task is using …" while a task holds the loaded model)
+  refused at once with "A running task is using the local model …" while a task holds
+  a different loaded model, or "Another local model is loading" during a load; the same
+  model is shared)
 - `POST /api/local-models/unload` → `{ ok, unloaded: boolean }` (also aborts a load in
   progress; refused while a task holds the model)
-- `POST /api/models/test {id: "local:gguf:…"}` loads and tests a local row.
+- `POST /api/models/test {id: "local:gguf:…"}` loads and tests a local row (refused
+  like `load` instead of waiting for another task's model).
 - `POST /api/jobs` with a `local:gguf:` model (or default) and `images` on a row without
   vision is refused before a job is created.
 
@@ -697,8 +700,11 @@ Usage = {
   status, usage}], usage, cost, cost_estimated, note}`.
 - Event `usage.updated {purpose, turn, job, session}` after every counted
   request: `purpose` is `"turn"` (an agent step), `"compaction"` (a summary
-  request) or `"vendor"` (a finished subscription CLI turn); `turn`, `job` and
-  `session` are `Usage` (`session` includes the running job). The older
+  request), `"vendor"` (a finished subscription CLI turn), `"failed_attempt"`
+  (a failed request whose tokens the provider reported) or `"subagent"` (a
+  finished subagent's whole usage, added to its parent job; `turn` is the
+  subagent's total); `turn`, `job` and `session` are `Usage` (`session`
+  includes the running job). The older
   `usage.updated {vendor, usage}` from a vendor's rate-limit push (Codex) still
   exists and has no `turn`; tell them apart by `vendor`.
 - Event `model.retry {attempt, max_attempts, reason, status, delay_ms,
@@ -707,7 +713,9 @@ Usage = {
   (429), `overloaded` (503/529), `server_error` (408, 425, 500, 502, 504,
   520–528), `stream_error` (the provider's error inside the stream),
   `disconnected` (the stream stopped before its finish marker, or the body
-  failed), `stalled` (no bytes for 120 s) or `connect_failed`. `status` is the
+  failed), `stalled` (no bytes for 120 s, or no response started within 10
+  minutes; a response that keeps streaming has no overall time limit) or
+  `connect_failed`. `status` is the
   HTTP status or null; `retry_after: true` means the wait is the provider's
   `Retry-After`/`Retry-After-Ms`. `discard_message_id` names the streamed
   message of the failed attempt (partial text already shown) so the UI can
@@ -715,7 +723,15 @@ Usage = {
   only on 429/503. At most `agent.model_retries` retries (default 3, max 10);
   waits double from `agent.retry_backoff_sec` with jitter (capped at 30 s); a
   `Retry-After` over 120 s is not waited for. Tool calls run only after a
-  complete response, so a retry never repeats a tool.
+  complete response, so a retry never repeats a tool. A request that is not
+  retried (or runs out of retries) fails the task with the provider's own
+  reason: `Model provider returned HTTP <status>; <hint>: <message>` (hints
+  for 401/403 key, 402 credits, 404 endpoint or model, 429 rate limit,
+  503/529 overload), or `Provider reported an error while generating:
+  <message>` for an error object inside the stream or in an HTTP 200 reply.
+  A remote provider's message comes from its JSON error body only, redacted
+  and at most 300 bytes. A refused request adds no usage unless the provider
+  reported tokens for it.
 - Event `context.compacted {before_estimated_tokens, after_estimated_tokens,
   omitted_messages, response_token_limit, method, preserved, summary?,
   summary_model?, summary_ms?, fallback_reason?}`: `method` is
@@ -753,6 +769,10 @@ See [SUBAGENTS.md](SUBAGENTS.md) for behaviour and definition files.
   usage, steps, depth, notes, created_at, finished_at}`.
 - `GET /api/sessions` hides subagent conversations unless
   `include_subagents=true`; rows carry `subagent_parent`.
+  `DELETE /api/sessions/{id}` also deletes the conversation's subagent
+  conversations (at any depth), their run records and saved patches. One
+  whose `subagent.started` card a fork still shows moves to that fork
+  (`subagent_parent` becomes the fork's id).
   `GET /api/sessions/{id}` adds `subagent_parent` and `subagent_run`.
 - Events (parent conversation): `subagent.started {run_id, agent, description,
   prompt, mode, model, job_id, session_id, depth}`, `subagent.finished {run_id,

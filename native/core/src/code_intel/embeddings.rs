@@ -184,6 +184,25 @@ pub fn start_install(
     true
 }
 
+/// A download that receives nothing for this long has stalled (a dropped
+/// network, a suspended laptop): it fails, and can be started again.
+pub(crate) const DOWNLOAD_STALL: Duration = Duration::from_secs(60);
+
+/// The next piece of a download, or a clear error when none arrives in time.
+pub(crate) async fn next_piece<S, T>(stream: &mut S) -> Result<Option<T>>
+where
+    S: futures_util::Stream<Item = reqwest::Result<T>> + Unpin,
+{
+    match tokio::time::timeout(DOWNLOAD_STALL, futures_util::StreamExt::next(stream)).await {
+        Err(_) => bail!(
+            "The download stalled: nothing arrived for {} seconds. Check the connection and try again.",
+            DOWNLOAD_STALL.as_secs()
+        ),
+        Ok(None) => Ok(None),
+        Ok(Some(piece)) => Ok(Some(piece.context("The download was interrupted")?)),
+    }
+}
+
 /// Stream `url` to `target`, checking the exact size and SHA-256 before the
 /// file appears under its final name.
 pub async fn download(
@@ -201,10 +220,9 @@ pub async fn download(
             .connect_timeout(Duration::from_secs(15))
             .user_agent(concat!("ShadowCode/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        let response = client
-            .get(url)
-            .send()
+        let response = tokio::time::timeout(DOWNLOAD_STALL, client.get(url).send())
             .await
+            .context("huggingface.co did not answer")?
             .context("Could not reach huggingface.co")?;
         ensure!(
             response.status().is_success(),
@@ -216,8 +234,7 @@ pub async fn download(
         let mut done = 0u64;
         let mut stream = futures_util::StreamExt::fuse(response.bytes_stream());
         let mut last_report = Instant::now();
-        while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
-            let chunk = chunk.context("The download was interrupted")?;
+        while let Some(chunk) = next_piece(&mut stream).await? {
             done += chunk.len() as u64;
             ensure!(done <= bytes, "The download is larger than expected");
             hasher.update(&chunk);
@@ -837,6 +854,37 @@ pub fn catalog_json(data_dir: &Path, config: &super::CodeIntelConfig) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A download whose server goes silent fails with a clear message
+    /// instead of showing "downloading" forever. Paused clock: no real wait.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_download_fails_instead_of_hanging() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/model.bin", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nabc")
+                .await
+                .unwrap();
+            // Then nothing, for an hour.
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            drop(socket);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("model.bin");
+        let error = download(&url, "0", 1000, &target, |_| {})
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("stalled"), "{error}");
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        server.abort();
+    }
 
     #[test]
     fn vectors_round_trip_and_normalize() {

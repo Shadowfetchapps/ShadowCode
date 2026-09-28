@@ -44,6 +44,8 @@ const LAST_SEEN_INTERVAL: f64 = 60.0;
 struct Running {
     address: SocketAddr,
     cancel: CancellationToken,
+    /// Disconnects once the server has let go of its listening socket.
+    closed: std::sync::mpsc::Receiver<()>,
 }
 
 #[derive(Default)]
@@ -141,7 +143,15 @@ impl Manager {
     /// Start (or restart) the server on the saved address, or on `bind` for
     /// this run only (`shadowcode serve --remote-address`).
     pub fn start(self: &Arc<Self>, base: &Service, bind: Option<SocketAddr>) -> Result<SocketAddr> {
-        self.stop();
+        // A restart waits (briefly) until the old server has closed its
+        // socket, or binding the same port again fails as "in use".
+        let previous = lock(&self.inner).running.take();
+        if let Some(previous) = previous {
+            previous.cancel.cancel();
+            let _ = previous
+                .closed
+                .recv_timeout(std::time::Duration::from_secs(3));
+        }
         let result = (|| {
             let settings = self.settings()?;
             let address = match bind {
@@ -163,10 +173,12 @@ impl Manager {
             let parent = lock(&self.inner).parent.clone();
             let cancel = parent.map(|p| p.child_token()).unwrap_or_default();
             let shared = http::Shared::new(base.clone(), self.clone(), cancel.clone());
-            tokio::spawn(http::serve(listener, shared));
+            let (closing, closed) = std::sync::mpsc::channel();
+            tokio::spawn(http::serve(listener, shared, closing));
             lock(&self.inner).running = Some(Running {
                 address: bound,
                 cancel,
+                closed,
             });
             Ok(bound)
         })();

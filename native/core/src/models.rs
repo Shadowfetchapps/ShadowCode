@@ -304,6 +304,30 @@ pub fn type_lists_to_any_of(value: &mut Value) {
 }
 
 /// Loopback endpoints (local runtimes) must never go through an HTTP proxy.
+/// What a provider said in an HTTP error reply, bounded and redacted. A
+/// local runtime's reply is shown as it is; a remote provider's only as its
+/// JSON error message (never an HTML error page).
+pub fn provider_error_detail(body: &[u8], local: bool) -> Option<String> {
+    let excerpt = String::from_utf8_lossy(&body[..body.len().min(16 * 1024)]).into_owned();
+    let text = if local {
+        String::from_utf8_lossy(&body[..body.len().min(600)]).into_owned()
+    } else {
+        let value: Value = serde_json::from_str(&excerpt).ok()?;
+        let error = &value["error"];
+        let message = error["message"]
+            .as_str()
+            .or_else(|| error.as_str())
+            .or_else(|| value["message"].as_str())
+            .or_else(|| value["detail"].as_str())?;
+        crate::tools::truncate(message, 300).to_owned()
+    };
+    let text = crate::redaction::redact_text(text.trim()).text;
+    (!text.is_empty()).then_some(text)
+}
+/// How long a provider may take to start answering (prompt processing on a
+/// slow local model can take minutes). The answer itself has no overall
+/// deadline, only the 120-second stall limit between bytes.
+const HEADERS_TIMEOUT: Duration = Duration::from_secs(600);
 pub fn is_loopback_endpoint(endpoint: &str) -> bool {
     reqwest::Url::parse(endpoint)
         .ok()
@@ -334,9 +358,11 @@ impl ModelClient {
         } else {
             config.endpoint.clone()
         };
+        // No overall deadline: a long answer from a slow model may stream for
+        // many minutes. The response must start within `HEADERS_TIMEOUT` and
+        // the stream stalls after 120 seconds without bytes.
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(600))
             .redirect(reqwest::redirect::Policy::none());
         if is_loopback_endpoint(&endpoint) {
             builder = builder.no_proxy();
@@ -597,30 +623,35 @@ impl ModelClient {
         let mut http_status = None;
         let transport: Result<()> = async {
             ensure!(!cancel.is_cancelled(), "Model request cancelled");
-            let response = tokio::select! {_=cancel.cancelled()=>bail!("Model request cancelled"),response=request.send()=>response.context("Could not connect to the model provider")?};
+            let response = tokio::select! {
+                _ = cancel.cancelled() => bail!("Model request cancelled"),
+                response = tokio::time::timeout(HEADERS_TIMEOUT, request.send()) => response
+                    .map_err(|_| crate::retry::ModelFailure::Stalled {
+                        message: format!(
+                            "The model provider did not start its response within {} minutes",
+                            HEADERS_TIMEOUT.as_secs() / 60
+                        ),
+                    })?
+                    .context("Could not connect to the model provider")?,
+            };
             let status = response.status();
             http_status = Some(status.as_u16());
             if !status.is_success() {
                 let code = status.as_u16();
                 let retry_after = crate::retry::retry_after(response.headers());
                 // Local runtimes explain rejections (for example a prompt larger
-                // than the context window); show a bounded excerpt.
-                let detail = if is_loopback_endpoint(&url) {
-                    let diagnostic_bytes = tokio::time::timeout(Duration::from_secs(5), response.bytes())
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                        .unwrap_or_default();
-                    bytes = diagnostic_bytes.len();
-                    let text = String::from_utf8_lossy(&diagnostic_bytes[..diagnostic_bytes.len().min(600)]).into_owned();
-                    if text.trim().is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {}", text.trim())
-                    }
-                } else {
-                    String::new()
-                };
+                // than the context window), and remote providers say why a key
+                // or account was refused; show a bounded excerpt.
+                let local = is_loopback_endpoint(&url);
+                let diagnostic_bytes = tokio::time::timeout(Duration::from_secs(5), response.bytes())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default();
+                bytes = diagnostic_bytes.len();
+                let detail = provider_error_detail(&diagnostic_bytes, local)
+                    .map(|text| format!(": {text}"))
+                    .unwrap_or_default();
                 return Err(anyhow::Error::new(crate::retry::ModelFailure::Http {
                     status: code,
                     retry_after,
@@ -629,6 +660,7 @@ impl ModelClient {
                         "Model provider returned HTTP {code}{}{detail}",
                         match code {
                             401 | 403 => "; check the API key",
+                            402 => "; the provider account needs credits or a payment method",
                             404 => "; check the endpoint and model name",
                             429 => "; provider rate limit reached",
                             503 | 529 => "; provider overloaded",
@@ -913,10 +945,16 @@ impl StreamDecoder {
                 .as_str()
                 .map(str::to_owned)
                 .unwrap_or_else(|| error.to_string());
+            let detail = crate::tools::truncate(&detail, 300).to_owned();
+            let shown = crate::redaction::redact_text(detail.trim()).text;
             return Err(anyhow::Error::new(crate::retry::ModelFailure::Stream {
                 code,
-                detail: crate::tools::truncate(&detail, 300).to_owned(),
-                message: "Provider reported an error while generating".into(),
+                message: if shown.is_empty() {
+                    "Provider reported an error while generating".into()
+                } else {
+                    format!("Provider reported an error while generating: {shown}")
+                },
+                detail,
             }));
         }
         let message = if self.ollama {
@@ -1054,7 +1092,9 @@ impl StreamDecoder {
     }
     fn full_response(&mut self, value: Value) -> Result<()> {
         self.observe_fields(&value);
-        if self.ollama {
+        // An error object in a successful HTTP reply (some providers answer
+        // out-of-credit or moderation errors this way) keeps its message.
+        if self.ollama || value.get("error").is_some_and(|e| !e.is_null()) {
             self.chunk(value, &mut Vec::new())?;
         } else {
             let choice = value["choices"]

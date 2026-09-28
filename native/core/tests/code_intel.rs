@@ -709,3 +709,28 @@ async fn real_servers_smoke() {
     eprintln!("ran: {ran:?}");
     env.pool.stop_all(None).await;
 }
+
+/// A language server that stops reading its input cannot block an edit (or
+/// Stop) forever: the write gives up, the file is reported as unchecked and
+/// the server is stopped.
+#[tokio::test]
+async fn a_server_that_stops_reading_cannot_block_an_edit() {
+    let root = tempfile::tempdir().unwrap();
+    // Larger than a pipe buffer, so writing it needs a reader.
+    let before = "x = 1\n".repeat(60_000);
+    let after = format!("{before}y = 2  # ERROR:new\n");
+    fs::write(root.path().join("big.py"), &after).unwrap();
+    let config = config_with(&["--stop-reading"], json!({}));
+    let env = env_for(root.path(), &config, private_pool());
+    let started = std::time::Instant::now();
+    let report = tokio::time::timeout(
+        Duration::from_secs(45),
+        lsp::check_edits(&env, &[("big.py".into(), Some(before))]),
+    )
+    .await
+    .expect("the edit check gave up on the stuck server")
+    .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(40));
+    assert_eq!(report["checked"], json!([]), "{report}");
+    assert!(report.to_string().contains("stopped reading"), "{report}");
+}

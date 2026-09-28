@@ -570,3 +570,60 @@ async fn engine_shutdown_reaps_post_login_version_helper() {
 async fn engine_shutdown_reaps_post_login_status_fallback() {
     exercise(Case::ShutdownFallback).await;
 }
+
+/// Cancelling a sign-in whose CLI is a wrapper (like the npm `codex` script,
+/// which runs the real program as its child and passes SIGTERM on) also
+/// stops the real login program, instead of leaving it listening.
+#[tokio::test]
+async fn cancelled_login_stops_the_program_behind_a_wrapper() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let fake = FakeCodex::new(root.path(), json!({"auth":"chatgpt"}));
+    let real = fake.dir.join("codex-real");
+    fs::rename(fake.dir.join("codex"), &real).unwrap();
+    let pidfile = fake.dir.join("login-child.pid");
+    fs::write(
+        fake.dir.join("codex"),
+        format!(
+            "#!/bin/bash\nif [ \"$1\" = login ] && [ \"$2\" != status ]; then\n  sleep 600 &\n  child=$!\n  echo $child > '{}'\n  trap 'kill -TERM $child 2>/dev/null; wait $child; exit 143' TERM INT HUP\n  wait $child\n  exit 0\nfi\nexec '{}' \"$@\"\n",
+            pidfile.display(),
+            real.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(fake.dir.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
+    let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+    let agents = cli_agents(&fake);
+    Config::patch(&paths, json!({"cli_agents":agents})).unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let service = Service::open(paths, Some(project)).unwrap();
+    let catalog = service.engine.vendors();
+    let config = CliAgentsConfig::from_value(&agents).unwrap();
+    auth::connect_with_timeout(&catalog, Vendor::Codex, &config, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert!(
+        until(|| pid_from(&pidfile).is_some(), Duration::from_secs(10)).await,
+        "the wrapped login program started"
+    );
+    let pid = pid_from(&pidfile).unwrap();
+    let before = observed_identity(&pidfile).expect("login program running");
+    assert!(catalog.logins().cancel(Vendor::Codex));
+    assert!(
+        until(
+            || ownership_gone(&before, &process_snapshot(pid)),
+            Duration::from_secs(8)
+        )
+        .await,
+        "the login program behind the wrapper survived cancellation"
+    );
+    assert!(
+        until(
+            || !catalog.logins().status(Vendor::Codex)["done"].is_null(),
+            Duration::from_secs(8)
+        )
+        .await
+    );
+    service.engine.shutdown().await.unwrap();
+}

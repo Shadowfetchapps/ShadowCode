@@ -327,6 +327,69 @@ fn save(store: &Store, record: &RunRecord) -> Result<()> {
     }
     store.set_native_meta(&record_key(&record.id), &serde_json::to_string(record)?)
 }
+/// After a restart: runs still marked running were stopped with the app.
+/// Each is marked interrupted and its parent conversation gets the
+/// `subagent.finished` event it never received, so its card stops showing
+/// progress. Returns how many were recovered.
+pub fn recover(store: &Store) -> Result<usize> {
+    let _guard = RECORDS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Subagent record lock poisoned"))?;
+    let rows = store.query(
+        "SELECT value FROM native_meta WHERE key LIKE 'subagent:%'",
+        [],
+    )?;
+    let mut recovered = 0;
+    for row in rows {
+        let Some(mut record) = row["value"]
+            .as_str()
+            .and_then(|text| serde_json::from_str::<RunRecord>(text).ok())
+        else {
+            continue;
+        };
+        if record.status != "running" || valid_id(&record.id).is_err() {
+            continue;
+        }
+        record.status = "interrupted".into();
+        record.error = Some("ShadowCode stopped before this subagent finished.".into());
+        record.finished_at = Some(crate::now());
+        if record.mode == "write" {
+            record
+                .notes
+                .push("Its worktree, if one was left, is listed in Tools › Worktrees.".into());
+        }
+        store.set_native_meta(&record_key(&record.id), &serde_json::to_string(&record)?)?;
+        if store.session(&record.parent_session)?.is_some() {
+            store.add_event(
+                "subagent.finished",
+                &json!({
+                    "run_id": record.id,
+                    "agent": record.agent,
+                    "description": record.description,
+                    "mode": record.mode,
+                    "model": record.model,
+                    "status": record.status,
+                    "summary": "",
+                    "error": record.error,
+                    "job_id": record.job_id,
+                    "session_id": record.session_id,
+                    "files": [],
+                    "files_truncated": false,
+                    "binary_files": [],
+                    "patch": false,
+                    "usage": record.usage,
+                    "steps": record.steps,
+                    "notes": record.notes,
+                    "interrupted": true,
+                }),
+                Some(&record.parent_session),
+                (!record.parent_task.is_empty()).then_some(record.parent_task.as_str()),
+            )?;
+        }
+        recovered += 1;
+    }
+    Ok(recovered)
+}
 /// Runs started from one parent conversation, oldest first.
 pub fn list(store: &Store, parent_session: &str) -> Result<Vec<RunRecord>> {
     let ids: Vec<String> = store
@@ -340,6 +403,14 @@ fn patch_path(engine: &Engine, id: &str) -> Result<PathBuf> {
     let dir = engine.paths().data.join("subagents");
     crate::paths::private_directory(&dir)?;
     Ok(dir.join(format!("{id}.patch")))
+}
+/// Remove the saved patches of deleted runs (their conversation was
+/// deleted). A patch that is already gone is fine.
+pub fn remove_patches(paths: &crate::paths::AppPaths, runs: &[String]) {
+    let dir = paths.data.join("subagents");
+    for id in runs.iter().filter(|id| valid_id(id).is_ok()) {
+        let _ = std::fs::remove_file(dir.join(format!("{id}.patch")));
+    }
 }
 
 struct TaskArgs {
@@ -664,10 +735,23 @@ impl SubagentHost {
                     "prompt_tokens": job.usage.prompt_tokens,
                     "completion_tokens": job.usage.completion_tokens,
                     "total_tokens": job.usage.total_tokens,
+                    "cost_usd": job.usage.cost_usd,
                     "estimated": job.usage_is_estimated,
                 });
                 if job.status != "completed" {
                     record.error = Some(job.summary.clone());
+                }
+                // The parent task's usage covers its subagents, whatever
+                // their outcome: a failed child still used tokens.
+                if let Err(error) = self.engine.add_child_usage(
+                    &self.parent.job_id,
+                    &self.parent.events,
+                    &job.usage,
+                    job.usage_is_estimated,
+                ) {
+                    record.notes.push(format!(
+                        "Could not add this run's usage to the task: {error:#}"
+                    ));
                 }
             }
             Err(error) => {
@@ -685,25 +769,34 @@ impl SubagentHost {
             // Collect whatever the child changed, even after a failure, then
             // always remove the worktree and its branch.
             let collect = CancellationToken::new();
-            match self.collect(&record.id, &path, &base, &collect).await {
+            let collected = match self.collect(&record.id, &path, &base, &collect).await {
                 Ok((files, truncated, binary, text)) => {
                     record.files = files;
                     record.files_truncated = truncated;
                     record.binary_files = binary;
                     record.patch = !text.is_empty();
                     diff = text;
+                    true
                 }
-                Err(error) => record
-                    .notes
-                    .push(format!("Could not read the subagent's changes: {error:#}")),
-            }
-            if let Err(error) =
-                worktrees::dispose(self.engine.paths(), &self.parent.workspace, &id, collect).await
-            {
-                record.notes.push(format!(
-                    "The worktree {} was kept: {error:#}",
-                    path.display()
-                ));
+                Err(error) => {
+                    // Its changes exist only in the worktree: keep it.
+                    record.notes.push(format!(
+                        "Could not read the subagent's changes: {error:#}. Its worktree was kept at {} so nothing is lost; review or remove it in Tools › Worktrees.",
+                        path.display()
+                    ));
+                    false
+                }
+            };
+            if collected {
+                if let Err(error) =
+                    worktrees::dispose(self.engine.paths(), &self.parent.workspace, &id, collect)
+                        .await
+                {
+                    record.notes.push(format!(
+                        "The worktree {} was kept: {error:#}",
+                        path.display()
+                    ));
+                }
             }
         }
         record.finished_at = Some(crate::now());

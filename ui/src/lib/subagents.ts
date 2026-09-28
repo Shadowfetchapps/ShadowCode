@@ -146,6 +146,8 @@ export function statusLabel(run: SubagentRun) {
       return "Done";
     case "cancelled":
       return "Stopped";
+    case "interrupted":
+      return "Interrupted";
     case "limit_reached":
       return "Plan limit reached";
     default:

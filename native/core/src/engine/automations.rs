@@ -589,6 +589,18 @@ impl Engine {
         // A worktree with no edits is removed; one with edits is kept for
         // review in Tools › Worktrees.
         if let Some((record, path)) = &worktree {
+            // A follow-up the user queued in the run's conversation (or a
+            // plan-limit continuation) may use the worktree next: it is
+            // only removed while nothing else runs or waits there, and the
+            // reservations keep new work out while it is inspected and
+            // removed.
+            let idle = match (
+                self.reserve_workspace(path),
+                self.0.background.reserve_idle_workspace(path),
+            ) {
+                (Ok(tasks), Ok(background)) => Some((tasks, background)),
+                _ => None,
+            };
             let inspection = crate::worktrees::inspect(
                 self.paths(),
                 &workspace,
@@ -597,6 +609,10 @@ impl Engine {
             )
             .await;
             match inspection {
+                Ok(_) if idle.is_none() => notes.push(format!(
+                    "Another task or background process is using its worktree at {}, so it was kept.",
+                    path.display()
+                )),
                 Ok(found) if found.head == record.base_commit && untouched(&found.status) => {
                     let sid = job.session_id.clone();
                     let main = workspace.clone();

@@ -19,7 +19,9 @@ active names are rejected within the same project.
 The runner drains stdout and stderr continuously, including output without a
 newline. It preserves UTF-8 characters split across reads and keeps the most
 recent 64 KB of combined output in memory and SQLite. When that limit is reached,
-the panel indicates that older output was omitted. This is a log tail, not a
+the panel indicates that older output was omitted. If saving the output fails
+for a moment (a busy database), the process keeps running and the next save
+catches up. This is a log tail, not a
 complete terminal recording or interactive shell; stdin is closed.
 
 The process list sends a 4 KB preview per entry so a large history does not

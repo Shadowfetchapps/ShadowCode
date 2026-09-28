@@ -133,6 +133,12 @@ struct Running {
     turn: TurnOptions,
     /// Set for subagent jobs (`engine::child`).
     child: Option<ChildLink>,
+    /// A managed local job reached the front of its project's queue and now
+    /// waits for the local runtime (`await_local_job`).
+    local_waiting: AtomicBool,
+    /// ...and was let through; no other top-level local job starts until it
+    /// has finished.
+    local_admitted: AtomicBool,
 }
 #[derive(Default)]
 struct QueueState {
@@ -205,6 +211,7 @@ impl Engine {
         store.recover_goals()?;
         store.recover_automation_runs()?;
         store.recover_background()?;
+        crate::subagents::recover(&store)?;
         let background = Arc::new(BackgroundManager::new(store.clone(), profile_lock.clone()));
         let (sender, _) = broadcast::channel(1024);
         // Loads persisted usage so "Last checked …" is known before a refresh.
@@ -279,6 +286,41 @@ impl Engine {
         }
         crate::local_engine::prepare(&config.local_engine, model, &self.0.local_llama, cancel).await
     }
+    /// `prepare_model_client` for Settings (Load, Test): a managed local
+    /// model that would have to wait for the runtime (another model is in use
+    /// by a task, or is loading) is refused at once with a clear message,
+    /// instead of leaving the page waiting for that task to end.
+    pub async fn prepare_model_client_now(
+        &self,
+        config: &Config,
+        model: &ModelConfig,
+        cancel: &CancellationToken,
+    ) -> Result<crate::local_engine::PreparedModel> {
+        if crate::openrouter::is_openrouter(model) || !crate::local_engine::is_managed(model) {
+            return self.prepare_model_client(config, model, cancel).await;
+        }
+        let local = &self.0.local_llama;
+        crate::local_engine::prepare_with_progress(
+            &config.local_engine,
+            model,
+            local,
+            cancel,
+            true,
+            &|progress| match progress {
+                crate::local_runtime::Progress::Loading => Ok(()),
+                crate::local_runtime::Progress::Waiting => match local.loaded() {
+                    Some(loaded) if local.in_use() > 0 => bail!(
+                        "A running task is using the local model {}, and only one local model runs at a time. Stop that task or wait for it to finish, then try again.",
+                        loaded.name
+                    ),
+                    _ => bail!(
+                        "Another local model is loading. Try again when it has finished."
+                    ),
+                },
+            },
+        )
+        .await
+    }
     pub fn delete_session(&self, id: &str) -> Result<bool> {
         let goals = self
             .0
@@ -309,7 +351,13 @@ impl Engine {
             "Wait for the manual operation to finish before deleting this session"
         );
         crate::worktree_tasks::ensure_deletable(&self.0.store, id)?;
-        self.0.store.delete_session(id)
+        // Its subagent conversations and run records go with it.
+        let Some(runs) = self.0.store.delete_session_tree(id)? else {
+            return Ok(false);
+        };
+        drop(queues);
+        crate::subagents::remove_patches(self.paths(), &runs);
+        Ok(true)
     }
     pub fn reserve_workspace(&self, workspace: &Path) -> Result<WorkspaceReservation> {
         let workspace = crate::workspace::reservation_path(workspace)?;
@@ -748,6 +796,8 @@ impl Engine {
             turn_plan,
             turn: context.turn,
             child: None,
+            local_waiting: AtomicBool::new(false),
+            local_admitted: AtomicBool::new(false),
         });
         if running.command.is_none() && crate::local_engine::is_managed(&running.config.model) {
             self.0
@@ -1115,11 +1165,15 @@ impl Engine {
     }
     /// Top-level managed tasks enter in submission order across workspaces.
     /// Waiting precedes the general worker permit so queued local jobs cannot
-    /// occupy every worker while their predecessor waits to start.
+    /// occupy every worker while their predecessor waits to start. Only jobs
+    /// that reached the front of their own project's queue take part: a
+    /// local follow-up still queued behind other work in one project never
+    /// holds up a local task in another.
     async fn await_local_job(&self, running: &Running) -> Result<()> {
         if running.command.is_some() || !crate::local_engine::is_managed(&running.config.model) {
             return Ok(());
         }
+        running.local_waiting.store(true, Ordering::Release);
         loop {
             let changed = self.0.local_job_changed.notified();
             tokio::pin!(changed);
@@ -1138,10 +1192,20 @@ impl Engine {
                     item.upgrade()
                         .is_some_and(|job| !job.finished.load(Ordering::Acquire))
                 });
-                queue
-                    .front()
-                    .and_then(Weak::upgrade)
-                    .is_some_and(|job| std::ptr::eq(job.as_ref(), running))
+                let jobs: Vec<_> = queue.iter().filter_map(Weak::upgrade).collect();
+                let busy = jobs.iter().any(|job| {
+                    job.local_admitted.load(Ordering::Acquire)
+                        && !std::ptr::eq(job.as_ref(), running)
+                });
+                let first = !busy
+                    && jobs
+                        .iter()
+                        .find(|job| job.local_waiting.load(Ordering::Acquire))
+                        .is_some_and(|job| std::ptr::eq(job.as_ref(), running));
+                if first {
+                    running.local_admitted.store(true, Ordering::Release);
+                }
+                first
             };
             if ready {
                 return Ok(());
@@ -1187,13 +1251,7 @@ impl Engine {
                 // together with its removal from the queue below (no await in
                 // between), which rewind and follow-up starts rely on.
                 if let Err(error) = self.finish(&job, result, plan) {
-                    if let Ok(mut record) = job.record.lock() {
-                        record.status = "failed".into();
-                        record.summary = format!("Could not persist final task state: {error:#}");
-                    }
-                    job.finished.store(true, Ordering::Release);
-                    job.done.notify_waiters();
-                    self.0.local_job_changed.notify_waiters();
+                    self.finish_after_failed_save(&job, &error);
                 }
                 // A subscription ran out: keep going on a local model when
                 // the user chose that (limits.on_limit = "local").
@@ -1306,6 +1364,19 @@ impl Engine {
         let from = crate::cli_agent::Vendor::from_provider(&provider)
             .map(|v| v.product_label())
             .unwrap_or("The model");
+        // A Compare lane is scored as its own model's work: another model
+        // continuing in it would be credited to the lane's model.
+        if self
+            .0
+            .store
+            .session_meta(&job.session_id, keys::COMPARE_ID)?
+            .is_some()
+        {
+            return self.note_limit_fallback(
+                &job,
+                json!({"ok":false,"from":from,"reason":"A Compare lane keeps its own model, so it did not continue on a local model."}),
+            );
+        }
         let Some((id, name)) = self.local_fallback(&config, &job.workspace).await? else {
             return self.note_limit_fallback(
                 &job,
@@ -1437,6 +1508,49 @@ impl Engine {
         running.done.notify_waiters();
         self.0.local_job_changed.notify_waiters();
         Ok(())
+    }
+    /// `finish` could not save the final state (for example a database
+    /// error). The job still ends: it is marked failed in memory and, as far
+    /// as the database allows, in its saved row with a terminal event, so the
+    /// conversation shows a failure instead of a task that runs forever.
+    fn finish_after_failed_save(&self, running: &Running, error: &anyhow::Error) {
+        let record = running.record.lock().ok().map(|mut record| {
+            record.status = "failed".into();
+            record.summary = format!("Could not save the final task state: {error:#}");
+            record.finished_at = Some(crate::now());
+            record.result = Some(json!({
+                "success": false,
+                "cancelled": false,
+                "summary": record.summary,
+                "usage": record.usage,
+                "usage_is_estimated": record.usage_is_estimated,
+            }));
+            record.clone()
+        });
+        if let Some(mut record) = record {
+            self.0.approvals.deny_task(&record.task_id);
+            let payload = record.result.clone().unwrap_or(Value::Null);
+            if let Ok(event) = self.0.store.add_event(
+                "agent.completed",
+                &payload,
+                Some(&record.session_id),
+                Some(&record.task_id),
+            ) {
+                record.event_cursor = event["id"].as_i64().unwrap_or(record.event_cursor);
+                if let Ok(mut current) = running.record.lock() {
+                    current.event_cursor = record.event_cursor;
+                }
+                let _ = self.0.sender.send(event);
+            }
+            let _ = self.0.store.save_job(&json!(record));
+            let _ = self.0.store.execute(
+                "UPDATE tasks SET status='failed',summary=?,completed_at=? WHERE id=?",
+                rusqlite::params![record.summary, crate::now(), record.task_id],
+            );
+        }
+        running.finished.store(true, Ordering::Release);
+        running.done.notify_waiters();
+        self.0.local_job_changed.notify_waiters();
     }
     async fn run(&self, running: &Running) -> Result<(String, Value)> {
         // Queue removal and starting work share this lock. A stale queue button
@@ -1843,6 +1957,7 @@ impl Engine {
                 .lock()
                 .map_err(|_| anyhow!("Job lock poisoned"))?;
             record.usage.add(&turn);
+            record.usage_is_estimated |= turn.estimated;
             self.0.store.save_job(&json!(*record))?;
             record.usage.clone()
         };

@@ -14,7 +14,10 @@
 //!
 //! Not covered: Git-ignored files, files over 4 MB, symlinks, submodules,
 //! files using a Git filter (for example LFS), empty directories, and Git
-//! state itself (HEAD, branches, the index, stashes).
+//! state itself (HEAD, branches, the index, stashes). A file that was ignored
+//! before the step and is no longer ignored after it (the step changed
+//! `.gitignore`) is reported as not covered, never recorded as created, so
+//! rewind cannot delete a file that existed before the step.
 use super::{record_external, CheckpointConfig};
 use crate::{
     store::Store,
@@ -53,7 +56,8 @@ pub struct Before {
 }
 enum Kind {
     Git(Box<GitBase>),
-    Copy(BTreeMap<String, Entry>),
+    /// The files, and when the copy started.
+    Copy(BTreeMap<String, Entry>, SystemTime),
     Unavailable(String),
     NotNeeded,
 }
@@ -64,7 +68,20 @@ struct GitBase {
     tree: String,
     reference: Option<String>,
     large_before: HashSet<String>,
+    /// Ignored files, and ignored folders (ending in `/`), before the step.
+    ignored_before: HashSet<String>,
 }
+impl GitBase {
+    fn was_ignored(&self, relative: &str) -> bool {
+        self.ignored_before.contains(relative)
+            || self
+                .ignored_before
+                .iter()
+                .any(|entry| entry.ends_with('/') && relative.starts_with(entry.as_str()))
+    }
+}
+/// Why a file that seems new is not recorded as created by the step.
+const WAS_IGNORED: &str = "existed before this step but was ignored, so it was not captured";
 struct Entry {
     bytes: Option<Vec<u8>>,
     mode: u32,
@@ -255,8 +272,9 @@ pub async fn before(
         Ok(None) => {
             let dir = workspace.to_path_buf();
             let (files, bytes) = (config.max_copy_files, config.max_copy_bytes);
+            let started = SystemTime::now();
             match tokio::task::spawn_blocking(move || copy_before(&dir, files, bytes)).await {
-                Ok(Ok(files)) => Kind::Copy(files),
+                Ok(Ok(files)) => Kind::Copy(files, started),
                 Ok(Err(reason)) => Kind::Unavailable(reason),
                 Err(error) => Kind::Unavailable(format!("the file copy failed ({error})")),
             }
@@ -292,9 +310,10 @@ pub async fn after(
             ..Outcome::default()
         }),
         Kind::Git(base) => git_after(*base, store, workspace, task).await,
-        Kind::Copy(files) => {
+        Kind::Copy(files, started) => {
             let dir = workspace.path.clone();
-            let changes = tokio::task::spawn_blocking(move || copy_after(&dir, files)).await??;
+            let changes =
+                tokio::task::spawn_blocking(move || copy_after(&dir, files, started)).await??;
             let (paths, skipped) = record(store, workspace, task, changes)?;
             Ok(Outcome {
                 method: "copy",
@@ -463,6 +482,26 @@ async fn git_before(
             stage(dir, &index, index_dir.path()).await?
         }
     };
+    // Ignored folders are listed once (`--directory`), not file by file.
+    let ignored_before = git(
+        dir,
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "--",
+            ".",
+        ],
+        Some(&index),
+    )
+    .await?
+    .split(|b| *b == 0)
+    .filter(|s| !s.is_empty())
+    .filter_map(|raw| std::str::from_utf8(raw).ok().map(str::to_owned))
+    .collect();
     let tree = line(git(dir, &["write-tree"], Some(&index)).await?);
     let message = format!("ShadowCode checkpoint before {label}");
     let mut args = vec![
@@ -490,6 +529,7 @@ async fn git_before(
         tree,
         reference,
         large_before,
+        ignored_before,
     }))
 }
 
@@ -603,6 +643,8 @@ async fn git_after(
             change.skip = Some("symlink or submodule".into());
         } else if old_mode == "000000" && base.large_before.contains(&relative) {
             change.skip = Some("was larger than 4 MB before".into());
+        } else if old_mode == "000000" && base.was_ignored(&relative) {
+            change.skip = Some(WAS_IGNORED.into());
         } else if filtered.contains(&full) {
             change.skip = Some("uses a Git filter such as LFS".into());
         } else if old_mode != "000000" {
@@ -756,10 +798,24 @@ fn copy_before(
     Ok(files)
 }
 
-fn copy_after(dir: &Path, mut before: BTreeMap<String, Entry>) -> Result<Vec<Change>> {
+fn copy_after(
+    dir: &Path,
+    mut before: BTreeMap<String, Entry>,
+    started: SystemTime,
+) -> Result<Vec<Change>> {
     let mut changes = Vec::new();
     for (relative, meta) in walk(dir) {
         match before.remove(&relative) {
+            // Not in the copy but last written before it was taken: it was
+            // ignored then (the step changed `.gitignore`), not created.
+            None if meta.modified().is_ok_and(|modified| modified < started) => {
+                changes.push(Change {
+                    path: relative,
+                    before: None,
+                    before_mode: None,
+                    skip: Some(WAS_IGNORED.into()),
+                })
+            }
             None => changes.push(Change {
                 path: relative,
                 before: None,

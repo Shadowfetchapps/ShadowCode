@@ -25,8 +25,10 @@ server is installed from **Settings › Accounts** (see
 - **Connect** runs the login command with your environment, minus provider API
   keys. The vendor opens your browser or prints a URL or device code, and
   **Settings › Accounts** shows those lines. One sign-in per vendor can run at
-  a time. It can be cancelled and stops after 10 minutes. When it finishes,
-  ShadowCode checks the account again.
+  a time. It can be cancelled and stops after 10 minutes; cancelling asks the
+  login command to stop (SIGTERM, so a wrapper such as the npm `codex` script
+  stops the program behind it too) and forces it after 3 seconds. When it
+  finishes, ShadowCode checks the account again.
 - **Returning to Accounts.** Active sign-ins are recovered without starting
   another login. Each provider retains its own instructions and Cancel
   control. If cancellation is already in progress, the card continues to
@@ -73,6 +75,8 @@ the `agy` CLI's print mode could not do.
   pick it again.
 - **Temp files.** Each launch gets its own temp directory under
   `~/.local/share/shadowcode/antigravity-acp/runs`, removed afterwards.
+  Directories a crash left there are removed at the next launch once they
+  are a day old.
 - **Hosts without IPv6.** The server refuses to start without an IPv6
   loopback (`::1`); on such hosts ShadowCode passes the server's own
   `--enforce_kernel_ipv6_support=false` switch.
