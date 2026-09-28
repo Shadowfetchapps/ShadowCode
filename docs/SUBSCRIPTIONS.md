@@ -87,14 +87,21 @@ the `agy` CLI's print mode could not do.
 | --- | --- | --- | --- | --- | --- |
 | Runtime | `codex app-server` (JSON-RPC 2.0) | `claude -p --output-format stream-json --input-format stream-json --verbose --include-partial-messages --permission-prompts host` | `cursor-agent acp` (Agent Client Protocol) | `agy_acp_server.par --uid=` (Agent Client Protocol) | `grok agent stdio` (ACP) |
 | Sign-in check | app-server `account/read` (falls back to `codex login status`) | `claude auth status` | ACP `initialize` → `authenticate` → `session/new` | ACP `initialize` → `authenticate` (`oauth-personal`) → `session/new`; a printed Google sign-in link means *Sign in* | ACP handshake (falls back to `grok models`) |
-| Models | app-server `model/list` | *Default* plus the aliases (`fable`, `opus`, `sonnet`, `haiku`) that the installed `claude --help` lists | ACP session models. Exact IDs, including bracketed parameters, set with `session/set_model`. *Auto* is Cursor's own router | The `model` option of `session/new`'s `configOptions`, set with `session/set_config_option` | ACP session models |
+| Models | app-server `model/list` | The list Claude Code's own model picker shows, from the SDK `initialize` request (*Default*, the aliases and full model names). A Claude Code without it gets *Default* plus the aliases its `--help` lists | ACP session models. Exact IDs, including bracketed parameters, set with `session/set_model`. *Auto* is Cursor's own router | The `model` option of `session/new`'s `configOptions`, set with `session/set_config_option` | ACP session models. A resumed session is switched with `session/set_config_option` |
+| Reasoning effort | `turn/start.effort` (plus `-c model_reasoning_effort` for new threads) | `--effort <level>`, for models that report effort support; a Claude Code without `--effort` gets the `MAX_THINKING_TOKENS` budget | Part of Cursor's model IDs; no separate control | Part of the model IDs (`…-low`, `…-high`) | The session's `reasoning_effort` option (`session/set_config_option`) |
 | Image input | Yes (`localImage`), for models that accept images | Yes (base64 image blocks) | When ACP `initialize` reports image support | Yes: ACP `initialize` reports image support | No: ACP reports `image: false` |
 | Approvals reach ShadowCode | Yes: command and file-change requests | Yes: `can_use_tool` control requests | Yes: `session/request_permission` | Yes: `session/request_permission` (questions it asks are skipped with a note) | Yes: `session/request_permission` |
 | Plan/Review (read-only) | `sandbox: read-only` | `--permission-mode plan` | ACP mode `plan`, when offered | ShadowCode denies its requests | Not enforced by Grok |
 | Resume | `thread/resume` | `--resume <session>` | `session/load` | `session/load` | `session/load` |
-| Usage shown | Plan rate-limit windows per quota pool | *Usage unavailable* | *Usage unavailable* | *Usage unavailable* | *Usage unavailable* |
+| Usage shown | Plan rate-limit windows per quota pool | 5-hour and weekly plan windows, reported during tasks | *Usage unavailable* | *Usage unavailable* | *Usage unavailable* (token counts per task) |
 
 Grok isn't one of the featured vendors: its rows are listed after the others.
+
+Checked live on 2026-09-28 with the current releases: Codex 0.158.0 (npm
+`latest`), Claude Code 2.1.284 (npm `latest`; `stable` is 2.1.277), Cursor
+Agent 2026.09.26, Grok 1.0.41 (`stable`) and Antigravity agent server 1.2.1
+(ACP registry). Older installs keep working: the model list, the effort flag
+and usage reporting are detected from what the installed CLI offers.
 
 ## Usage
 
@@ -106,12 +113,17 @@ ShadowCode shows only what a vendor reports. It never estimates a figure.
   used and remaining, reset times, the plan, and credits when Codex reports
   them. Models that share a pool show the same numbers. Some models draw on a
   separate pool.
-- **Claude Code** has no plan usage interface for other apps. The row says
-  *Usage unavailable* and links to `claude.ai/settings/usage`.
+- **Claude Code** reports the claude.ai plan windows while it runs a task
+  (stream-json `rate_limit_event`, read from Anthropic's rate-limit headers):
+  the 5-hour and weekly windows, percent used and reset times. The row shows
+  them after the first Claude Code task, keeps them across restarts, and
+  marks them *Last checked …* as they age. Before that it says *Usage
+  unavailable* and links to `claude.ai/settings/usage`. The plan name
+  (for example *Claude Max*) comes from the account check.
 - **Cursor** reports its plan tier but no remaining allowance, so the row says
   *Usage unavailable*.
 - **Antigravity**'s agent server reports no plan usage to other programs.
-- **Grok** reports per-session token counts only.
+- **Grok** reports the token counts of each task (shown with the task's usage), not a plan allowance.
 
 After a restart, the last Codex snapshot is loaded from the database and marked
 *Last checked …* until the next check. A snapshot older than 30 minutes is
@@ -129,10 +141,32 @@ row is never billed per token behind your back.
 
 If a vendor reports a plan limit, the job stops with the status
 `limit_reached`. ShadowCode doesn't retry. The detected messages include Codex
-`usageLimitExceeded`, "usage limit", "rate limit reached" and "quota exceeded".
+`usageLimitExceeded`, a Claude Code `rate_limit_event` whose status is
+`rejected` (unless extra usage covers it), "usage limit", "rate limit
+reached" and "quota exceeded". Cursor answers a prompt its plan no longer
+covers with the reply "Upgrade your plan to continue" and an ordinary end of
+turn; a reply that is only that notice also stops the job at the limit.
 The affected rows become unavailable with the reason, and a banner offers
 **Choose model**. ShadowCode never buys credits, redeems resets or turns on
 overages.
+
+## Reasoning effort
+
+The composer's *More › Effort* choice (*low*, *medium*, *high*) goes to each
+vendor's own control, and only where the chosen model takes one:
+
+- **Codex**: `turn/start` carries `effort`. A resumed thread keeps the effort
+  stored with it, so the per-turn value is what changes it; new threads also
+  get `-c model_reasoning_effort`.
+- **Claude Code**: `--effort <level>`. Current Claude models think
+  adaptively and ignore a thinking-token budget, so `MAX_THINKING_TOKENS` is
+  only used for a Claude Code that has no `--effort`. Models that take no
+  effort (Haiku) hide the control.
+- **Grok**: the session's `reasoning_effort` option, set with
+  `session/set_config_option` before the prompt. If Grok refuses a level,
+  the task keeps Grok's own setting and says so.
+- **Cursor** and **Antigravity** put the effort in their model IDs
+  (`…[effort=high]`, `…-low`), so pick the model with the effort you want.
 
 ## Codex exec fallback
 

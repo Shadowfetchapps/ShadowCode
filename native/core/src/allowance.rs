@@ -76,10 +76,23 @@ fn openrouter_row(status: &Value) -> Value {
         ("no_key", "No API key".to_owned(), None)
     } else if let Some(error) = status["key_error"].as_str() {
         ("unavailable", error.to_owned(), None)
+    } else if key["credits_remaining"]
+        .as_f64()
+        .is_some_and(|credits| credits <= 0.0)
+    {
+        // The account balance, not the key's limit, decides whether a paid
+        // request is accepted.
+        (
+            "limit_reached",
+            "Out of credits · add credits on OpenRouter".to_owned(),
+            Some(0.0),
+        )
     } else {
         let used = key["usage"].as_f64().unwrap_or(0.0);
+        let credits = key["credits_remaining"].as_f64();
         match (key["limit"].as_f64(), key["limit_remaining"].as_f64()) {
             (Some(limit), Some(left)) if limit > 0.0 => {
+                let left = credits.map_or(left, |credits| left.min(credits));
                 let percent = (left / limit * 100.0).clamp(0.0, 100.0);
                 let state = if left <= 0.0 {
                     "limit_reached"
@@ -94,7 +107,10 @@ fn openrouter_row(status: &Value) -> Value {
                     Some(percent),
                 )
             }
-            _ => ("ok", format!("${used:.2} used · no limit set"), None),
+            _ => match credits {
+                Some(credits) => ("ok", format!("${credits:.2} credit left"), None),
+                None => ("ok", format!("${used:.2} used · no limit set"), None),
+            },
         }
     };
     json!({
@@ -107,6 +123,7 @@ fn openrouter_row(status: &Value) -> Value {
         "used": key["usage"],
         "limit": key["limit"],
         "limit_remaining": key["limit_remaining"],
+        "credits_remaining": key["credits_remaining"],
         "usage_url": status["activity_url"],
     })
 }
@@ -206,6 +223,27 @@ mod tests {
         assert_eq!(rows[5]["state"], "ok");
         assert_eq!(rows[6]["headline"], "No quota · 1 model ready");
         assert_eq!(rows[6]["fallback"]["name"], "qwen3:14b");
+    }
+
+    #[test]
+    fn openrouter_account_credits_beat_the_keys_limit() {
+        // Seen live: the key had $5.00 of its limit left while the account
+        // balance was below zero, and every paid request failed with 402.
+        let broke = openrouter_row(&json!({"key_set":true,"key":{
+            "usage":0.01,"limit":5.0,"limit_remaining":4.99,"credits_remaining":-0.17}}));
+        assert_eq!(broke["state"], "limit_reached");
+        assert_eq!(
+            broke["headline"],
+            "Out of credits · add credits on OpenRouter"
+        );
+        assert_eq!(broke["remaining_percent"], 0.0);
+        let low = openrouter_row(&json!({"key_set":true,"key":{
+            "usage":0.5,"limit":5.0,"limit_remaining":4.5,"credits_remaining":0.25}}));
+        assert_eq!(low["headline"], "$0.25 of $5.00 left");
+        assert_eq!(low["state"], "low");
+        let open = openrouter_row(&json!({"key_set":true,"key":{
+            "usage":1.5,"limit":null,"credits_remaining":8.5}}));
+        assert_eq!(open["headline"], "$8.50 credit left");
     }
 
     #[test]

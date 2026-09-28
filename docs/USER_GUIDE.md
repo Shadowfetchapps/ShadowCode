@@ -129,8 +129,10 @@ effort stays marked on the **More** button.
   *More › Effort*: *default*, *low*, *medium* or *high*, remembered per
   model. It maps to OpenRouter's `reasoning.effort`,
   the thinking switch of local models whose chat template has one (off for
-  *low*), Codex's `model_reasoning_effort` and Claude Code's thinking budget.
-  Cursor, Grok and Antigravity don't take one, so the control is hidden.
+  *low*), Codex's per-turn `effort`, Claude Code's `--effort` and Grok's
+  `reasoning_effort` session option. Models without one (Claude Haiku) hide
+  the control; Cursor and Antigravity put the effort in their model names
+  instead (for example *Gemini 3.8 Flash (Low)*).
 
 If a task is already running, pressing `Enter` queues the message as a
 follow-up.
@@ -424,10 +426,12 @@ models**.
 The **Allowance** button in the status bar opens one list of everything you
 can run and how much of it is left, as each source reports it:
 
-- **Subscriptions**: the reported usage windows with reset times (Codex), the
-  plan, *Plan limit reached*, or *Usage not reported* for vendors that expose
-  none. Signed-out or missing tools link to **Settings › Accounts**.
-- **OpenRouter**: credits left of your key's limit, or what has been spent.
+- **Subscriptions**: the reported usage windows with reset times (Codex;
+  Claude Code after its first task), the plan, *Plan limit reached*, or
+  *Usage not reported* for vendors that expose none. Signed-out or missing
+  tools link to **Settings › Accounts**.
+- **OpenRouter**: credits left of your key's limit or of your account
+  balance, whichever is smaller, *Out of credits*, or what has been spent.
 - **On this computer**: how many local models are ready. There is no quota,
   and the **When a plan runs out** setting lives here.
 

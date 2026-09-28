@@ -13,14 +13,22 @@ use super::{
     Update, Vendor, VendorAnswer,
 };
 
+/// The composer's reasoning effort, when it is one Codex accepts.
+fn effort(options: &LaunchOptions) -> Option<&str> {
+    options
+        .effort
+        .as_deref()
+        .filter(|effort| matches!(*effort, "low" | "medium" | "high"))
+}
+
 /// `-c model_reasoning_effort="…"` (Codex's documented config key), placed
-/// before the subcommand so it applies to the whole session.
+/// before the subcommand. It sets the effort of threads the process starts;
+/// a resumed app-server thread keeps its stored effort, so app-server turns
+/// also carry `turn/start.effort`.
 fn effort_override(options: &LaunchOptions) -> Vec<String> {
-    match options.effort.as_deref() {
-        Some(effort @ ("low" | "medium" | "high")) => {
-            vec!["-c".into(), format!("model_reasoning_effort=\"{effort}\"")]
-        }
-        _ => Vec::new(),
+    match effort(options) {
+        Some(effort) => vec!["-c".into(), format!("model_reasoning_effort=\"{effort}\"")],
+        None => Vec::new(),
     }
 }
 use anyhow::{bail, Result};
@@ -80,6 +88,10 @@ pub struct CodexAppServerAdapter {
     pending_prompt: Option<(String, Vec<PromptImage>)>,
     pending_approvals: std::collections::HashMap<String, String>,
     streamed_message_ids: std::collections::HashSet<String>,
+    /// The agent message whose text was shown last in this turn. The next
+    /// message (Codex's commentary, then its final answer) starts a new
+    /// paragraph instead of running into it.
+    last_text_item: Option<String>,
     options: Option<LaunchOptions>,
     turn_active: bool,
     resume_failed: bool,
@@ -109,6 +121,13 @@ impl CodexAppServerAdapter {
         let mut params = json!({"threadId":thread,"input":input});
         if let Some(options) = &self.options {
             params["cwd"] = json!(options.workspace);
+            // "Override the reasoning effort for this turn and subsequent
+            // turns": the only effort control a resumed thread honours
+            // (Codex 0.158 keeps a resumed thread's stored effort even when
+            // the process was started with `-c model_reasoning_effort`).
+            if let Some(effort) = effort(options) {
+                params["effort"] = json!(effort);
+            }
         }
         send.push(rpc_request(id, "turn/start", params));
         Ok(send)
@@ -118,6 +137,7 @@ impl CodexAppServerAdapter {
         self.turn_start_id = None;
         self.turn_active = false;
         self.streamed_message_ids.clear();
+        self.last_text_item = None;
         self.early_bytes = 0;
         let mut send: Vec<_> = self
             .early_frames
@@ -183,8 +203,18 @@ impl CodexAppServerAdapter {
         if thread_warning {
             return None;
         }
+        // A resumed thread repeats its previous turn's token usage right
+        // after `thread/resume` (Codex 0.158). That notification carries no
+        // authority and belongs to an earlier turn: drop it quietly instead
+        // of warning on every follow-up, and never count it.
+        let stale_usage =
+            method == "thread/tokenUsage/updated" && message.get("id").is_none_or(Value::is_null);
         if !self.turn_active {
-            return Some(Self::reject_scope(message));
+            return Some(if stale_usage {
+                Step::default()
+            } else {
+                Self::reject_scope(message)
+            });
         }
         // Legacy approvals have no turn field. Accept only after a current
         // turn is authoritatively bound, and only for its matching thread.
@@ -200,7 +230,13 @@ impl CodexAppServerAdapter {
             return Some(Self::reject_scope(message));
         };
         if let Some(owned) = self.turn_id.as_deref() {
-            return (turn != owned).then(|| Self::reject_scope(message));
+            return (turn != owned).then(|| {
+                if stale_usage {
+                    Step::default()
+                } else {
+                    Self::reject_scope(message)
+                }
+            });
         }
         if self.turn_start_id.is_none() {
             return Some(Self::reject_scope(message));
@@ -394,7 +430,10 @@ impl CodexAppServerAdapter {
                     self.streamed_message_ids.insert(item.to_owned());
                 }
                 match params["delta"].as_str() {
-                    Some(delta) if !delta.is_empty() => Step::update(Update::Text(redact(delta))),
+                    Some(delta) if !delta.is_empty() => {
+                        let item = params["itemId"].as_str().unwrap_or("");
+                        Step::update(Update::Text(self.message_text(item, delta)))
+                    }
                     _ => Step::default(),
                 }
             }
@@ -493,6 +532,19 @@ impl CodexAppServerAdapter {
             _ => Step::default(),
         }
     }
+    /// Redacted text of agent message `item`; the first text of a new
+    /// message in the turn starts a new paragraph.
+    fn message_text(&mut self, item: &str, text: &str) -> String {
+        let text = redact(text);
+        let new_message = self.last_text_item.as_deref() != Some(item);
+        let paragraph = new_message && self.last_text_item.is_some();
+        self.last_text_item = Some(item.to_owned());
+        if paragraph && !text.starts_with('\n') {
+            format!("\n\n{text}")
+        } else {
+            text
+        }
+    }
     fn item_completed(&mut self, item: &Value) -> Step {
         let id = item["id"].as_str().unwrap_or("").to_owned();
         match item["type"].as_str().unwrap_or("") {
@@ -503,7 +555,9 @@ impl CodexAppServerAdapter {
                     return Step::default();
                 }
                 match item["text"].as_str() {
-                    Some(text) if !text.is_empty() => Step::update(Update::Text(redact(text))),
+                    Some(text) if !text.is_empty() => {
+                        Step::update(Update::Text(self.message_text(&id, text)))
+                    }
                     _ => Step::default(),
                 }
             }

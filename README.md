@@ -219,10 +219,10 @@ no evidence.
 | Vendor | Runtime ShadowCode starts | Connect runs | Models come from | Image input | Approvals reach ShadowCode | Usage shown |
 | --- | --- | --- | --- | --- | --- | --- |
 | Codex | `codex app-server` (JSON-RPC) | `codex login` | app-server `model/list` | Yes (`localImage`), per model | Yes: command and file-change requests. Codex runs in its own sandbox (`workspace-write`, or `read-only` for Plan/Review) | Rate-limit windows per quota pool (for example 5-hour and weekly), reset times, plan, and credits only when reported |
-| Claude Code | `claude -p --output-format stream-json --input-format stream-json --permission-prompts host` | `claude auth login` | *Default* plus the aliases listed in `claude --help` | Yes (image blocks) | Yes, through `--permission-prompts host`. Claude's own settings can pre-approve tools without asking | *Usage unavailable*: Claude Code exposes no plan usage to other apps |
+| Claude Code | `claude -p --output-format stream-json --input-format stream-json --permission-prompts host` | `claude auth login` | Claude Code's own model list (SDK `initialize`): *Default*, aliases and full model names | Yes (image blocks) | Yes, through `--permission-prompts host`. Claude's own settings can pre-approve tools without asking | 5-hour and weekly plan windows and reset times, reported during tasks |
 | Cursor | `cursor-agent acp` (Agent Client Protocol) | `cursor-agent login` | ACP session models, with exact IDs | When ACP `initialize` advertises image support | Yes, through ACP permission requests | *Usage unavailable*: Cursor reports its plan tier, not the remaining allowance |
 | Antigravity | Google's ACP agent server `agy_acp_server.par` (installed from Accounts) | Google sign-in through the server's `authenticate` | The `model` config option of the ACP session | Yes (ACP image support) | Yes, through ACP permission requests | *Usage unavailable*: the server reports no plan usage |
-| Grok | `grok agent stdio` (ACP) | `grok login` | ACP session models (falls back to `grok models`) | No: ACP reports `image: false` | Yes, through ACP. Grok has no read-only mode, so Plan/Review is not enforced by Grok | *Usage unavailable*: Grok reports per-session tokens only |
+| Grok | `grok agent stdio` (ACP) | `grok login` | ACP session models (falls back to `grok models`) | No: ACP reports `image: false` | Yes, through ACP. Grok has no read-only mode, so Plan/Review is not enforced by Grok | *Usage unavailable*: Grok reports token counts per task only |
 
 - **API keys are never used.** Vendor CLIs start with provider API-key
   variables such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` removed from their
@@ -249,9 +249,9 @@ dl.google.com, checksum-verified); **Connect** signs in with Google.
 
 The **Allowance** button in the status bar lists every way you can run a
 model and how much of it is left: each subscription's reported usage windows
-and reset times (or *Usage not reported*), OpenRouter credits left on your
-key, and the local models that are ready (no quota). Only reported figures
-are shown.
+and reset times (or *Usage not reported*), OpenRouter credits left (the
+smaller of your key's limit and your account balance), and the local models
+that are ready (no quota). Only reported figures are shown.
 
 When a subscription reports its plan limit, ShadowCode can keep going on a
 local model: the same conversation continues on a model on this computer,
@@ -377,7 +377,9 @@ when it has no tool support. Search the picker by name or slug to find one.
 These models run on ShadowCode's own agent loop, the same one local models
 use, so your permission mode, approvals, checkpoints, the **Web** toggle,
 image attachments (*Vision* rows) and review all apply. Every token is billed to your OpenRouter account; the Accounts card
-shows credits used and your key's limit. Each job and conversation records its
+shows credits used, your key's limit and the account balance, and a refused
+request shows OpenRouter's own explanation (for example that the account is
+out of credits). Each job and conversation records its
 tokens and cost (`/cost`), Claude and Gemini requests use prompt caching, and
 rate limits are retried automatically. Details: [OpenRouter](docs/OPENROUTER.md).
 
@@ -609,14 +611,21 @@ they are not part of the suite. `live_vendor_turn` runs one short real turn
 through the same service the window uses, in a throwaway profile and project:
 
 ```bash
-cargo run -p shadowcode-core --example live_vendor_turn -- <picker id> [--second|--command|--web|--image|--switch <id>]
+cargo run -p shadowcode-core --example live_vendor_turn -- <picker id> [--second|--command|--file|--mcp|--web|--image|--switch <id>|--model-switch <id>] [--effort <level>] [--binary <path>]
 ```
 
 `--second` sends a follow-up to check resume. `--command` asks for one
 harmless shell command and approves it through the approval API. `--web`
 gives the task web tools (ShadowCode's own loop only). `--image` attaches a
 small red PNG. `--switch <id>` continues the conversation on another row and
-checks that consent is asked before the handoff. Vendor CLIs keep their own
+checks that consent is asked before the handoff. `--model-switch <id>` sends
+the follow-up on another model of the same vendor (its own session is
+resumed). `--file` asks for one file edit and `--mcp` enables a small stdio
+MCP server for the project and asks the vendor to call it, both approved
+through the approval API. `--effort <level>` sends the composer's reasoning
+effort, `--prompt <text>` replaces the first prompt, and `--binary <path>`
+runs another copy of the vendor CLI (a newer release in a scratch folder).
+`--openrouter-cache <file>` starts from a saved OpenRouter model list. Vendor CLIs keep their own
 sign-in; OpenRouter rows read the key from `OPENROUTER_API_KEY`, because the
 throwaway profile has no `secrets.env`.
 

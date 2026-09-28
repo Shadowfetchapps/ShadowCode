@@ -93,6 +93,27 @@ fn operation_identity(tool: &Value) -> Value {
     json!([tool["kind"], tool["rawInput"], proposal])
 }
 
+/// How much of a prompt's reply is kept to recognise a plan-limit notice.
+const TURN_TEXT_BYTES: usize = 400;
+
+/// A whole reply that is only a plan-limit notice (Cursor's "Upgrade your
+/// plan to continue", or a short line with the usage-limit wording
+/// `is_limit_error` knows). Longer replies are ordinary answers that may
+/// mention limits.
+fn plan_limit_reply(text: &str) -> bool {
+    let text = text.trim();
+    text.to_ascii_lowercase().starts_with("upgrade your plan") && text.len() < 300
+        || (text.len() < 120 && super::is_limit_error(text))
+}
+
+/// The session config option (`configOptions`) with this id or category.
+fn config_option<'a>(options: &'a Value, key: &str) -> Option<&'a Value> {
+    options
+        .as_array()?
+        .iter()
+        .find(|o| o["category"] == key || o["id"] == key)
+}
+
 /// Shown when the Antigravity server has no valid Google sign-in.
 pub const ANTIGRAVITY_SIGN_IN: &str = "Antigravity isn't signed in, or its sign-in expired. Choose Connect for Antigravity in Settings › Accounts.";
 
@@ -227,6 +248,18 @@ pub struct AcpAdapter {
     session_load_id: Option<u64>,
     session_new_id: Option<u64>,
     set_model_id: Option<u64>,
+    /// `session/set_config_option` for the reasoning effort, not answered yet.
+    effort_id: Option<u64>,
+    /// The start of this prompt's reply (at most `TURN_TEXT_BYTES`) and
+    /// whether a tool ran: a reply that is only a plan-limit notice ends
+    /// the job as `limit_reached`.
+    turn_text: String,
+    turn_tools: bool,
+    /// A `usage_update` reported this prompt's tokens.
+    turn_usage: bool,
+    /// Reply text after a tool call starts a new paragraph instead of
+    /// running into the text before the call.
+    break_before_text: bool,
     prompt_id: Option<u64>,
     session_id: Option<String>,
     pending_prompt: Option<(String, Vec<PromptImage>)>,
@@ -272,6 +305,11 @@ impl AcpAdapter {
             session_load_id: None,
             session_new_id: None,
             set_model_id: None,
+            effort_id: None,
+            turn_text: String::new(),
+            turn_tools: false,
+            turn_usage: false,
+            break_before_text: false,
             prompt_id: None,
             session_id: None,
             pending_prompt: None,
@@ -320,6 +358,10 @@ impl AcpAdapter {
         let id = self.id();
         self.prompt_id = Some(id);
         self.prompt_active = true;
+        self.turn_text.clear();
+        self.turn_tools = false;
+        self.turn_usage = false;
+        self.break_before_text = false;
         self.tool_outputs.clear();
         self.tool_evidence.clear();
         self.observed_tool_ids.clear();
@@ -378,8 +420,12 @@ impl AcpAdapter {
         )
     }
     /// Steps after a session exists: plan mode for read-only tasks, an exact
-    /// model id when the picker chose one, then the queued prompt.
-    fn after_session(&mut self, session: &str, modes: &Value) -> Result<Step> {
+    /// model id when the picker chose one, the reasoning effort where the
+    /// session offers it, then the queued prompt. `result` is the answer to
+    /// `session/new` or `session/load`.
+    fn after_session(&mut self, session: &str, result: &Value) -> Result<Step> {
+        let modes = &result["modes"];
+        let config = &result["configOptions"];
         let mut step = Step::update(Update::NativeSession {
             id: session.to_owned(),
         });
@@ -396,29 +442,34 @@ impl AcpAdapter {
                     json!({"sessionId":session,"modeId":"plan"}),
                 ));
             }
+            let picked =
+                !options.model.is_empty() && options.model != "default" && options.model != "auto";
             // Antigravity lists its models as the `model` config option and
-            // switches with `session/set_config_option`.
-            if self.vendor == Vendor::Antigravity
-                && !options.model.is_empty()
-                && options.model != "default"
-                && options.model != "auto"
-            {
-                let set_id = self.id();
-                self.set_model_id = Some(set_id);
-                self.switching = true;
-                step.send.push(request(
-                    set_id,
-                    "session/set_config_option",
-                    json!({"sessionId":session,"configId":"model","value":options.model}),
-                ));
+            // switches with `session/set_config_option`. Grok offers the
+            // same option; its `--model` flag chooses the model of a new
+            // session only, so a resumed session is switched here.
+            let config_model = match self.vendor {
+                Vendor::Antigravity => Some("model".to_owned()),
+                Vendor::Grok => config_option(config, "model")
+                    .filter(|o| o["currentValue"].as_str() != Some(options.model.as_str()))
+                    .and_then(|o| o["id"].as_str().map(str::to_owned)),
+                _ => None,
+            };
+            if picked {
+                if let Some(config_id) = config_model {
+                    let set_id = self.id();
+                    self.set_model_id = Some(set_id);
+                    self.switching = true;
+                    step.send.push(request(
+                        set_id,
+                        "session/set_config_option",
+                        json!({"sessionId":session,"configId":config_id,"value":options.model}),
+                    ));
+                }
             }
             // Cursor ignores `--model` in ACP mode for parameterised ids and
             // only accepts the exact ids it listed in `session/new`.
-            if self.vendor == Vendor::Cursor
-                && !options.model.is_empty()
-                && options.model != "default"
-                && options.model != "auto"
-            {
+            if self.vendor == Vendor::Cursor && picked {
                 let set_id = self.id();
                 self.set_model_id = Some(set_id);
                 self.switching = true;
@@ -428,8 +479,39 @@ impl AcpAdapter {
                     json!({"sessionId":session,"modelId":options.model}),
                 ));
             }
+            // Reasoning effort: the session's `thought_level` option (Grok
+            // `reasoning_effort`), when it offers the chosen level.
+            if let Some(effort) = options.effort.as_deref() {
+                if let Some(option) = config_option(config, "thought_level").filter(|o| {
+                    o["currentValue"].as_str() != Some(effort)
+                        && o["options"]
+                            .as_array()
+                            .is_some_and(|values| values.iter().any(|v| v["value"] == effort))
+                }) {
+                    let set_id = self.id();
+                    self.effort_id = Some(set_id);
+                    self.switching = true;
+                    step.send.push(request(
+                        set_id,
+                        "session/set_config_option",
+                        json!({"sessionId":session,"configId":option["id"],"value":effort}),
+                    ));
+                }
+            }
         }
         if !self.switching {
+            if let Some((prompt, images)) = self.pending_prompt.take() {
+                step.send.extend(self.start_prompt(&prompt, &images)?);
+            }
+        }
+        Ok(step)
+    }
+    /// A model or effort switch was answered; the queued prompt goes out
+    /// once none is outstanding.
+    fn switch_answered(&mut self) -> Result<Step> {
+        let mut step = Step::default();
+        if self.set_model_id.is_none() && self.effort_id.is_none() {
+            self.switching = false;
             if let Some((prompt, images)) = self.pending_prompt.take() {
                 step.send.extend(self.start_prompt(&prompt, &images)?);
             }
@@ -464,8 +546,27 @@ impl AcpAdapter {
                     self.vendor.binary()
                 );
             }
+            if Some(id) == self.effort_id {
+                // Keep the session's own effort rather than fail the task.
+                self.effort_id = None;
+                let effort = self
+                    .options
+                    .as_ref()
+                    .and_then(|o| o.effort.clone())
+                    .unwrap_or_default();
+                let mut step = self.switch_answered()?;
+                step.updates.insert(
+                    0,
+                    Update::Warning(format!(
+                        "{} did not accept reasoning effort `{effort}` ({text}); it keeps its own setting",
+                        self.vendor.product_label()
+                    )),
+                );
+                return Ok(step);
+            }
             if Some(id) == self.set_model_id {
                 self.switching = false;
+                self.effort_id = None;
                 self.pending_prompt = None;
                 return Ok(Step::update(Update::TurnFailed(format!(
                     "{} does not accept model `{}` ({text}). Pick the model again from the list.",
@@ -553,7 +654,7 @@ impl AcpAdapter {
                 .unwrap_or_default();
             self.session_id = Some(session.clone());
             self.phase = Phase::Session;
-            return self.after_session(&session, &res["modes"]);
+            return self.after_session(&session, res);
         }
         if Some(id) == self.session_new_id {
             let Some(session) = res["sessionId"].as_str() else {
@@ -562,16 +663,16 @@ impl AcpAdapter {
             let session = session.to_owned();
             self.session_id = Some(session.clone());
             self.phase = Phase::Session;
-            return self.after_session(&session, &res["modes"]);
+            return self.after_session(&session, res);
         }
         if Some(id) == self.set_model_id {
-            // The model is in place; now send the queued prompt.
-            self.switching = false;
-            let mut step = Step::default();
-            if let Some((prompt, images)) = self.pending_prompt.take() {
-                step.send.extend(self.start_prompt(&prompt, &images)?);
-            }
-            return Ok(step);
+            // The model is in place; the queued prompt follows.
+            self.set_model_id = None;
+            return self.switch_answered();
+        }
+        if Some(id) == self.effort_id {
+            self.effort_id = None;
+            return self.switch_answered();
         }
         if Some(id) == self.prompt_id {
             self.prompt_active = false;
@@ -581,7 +682,38 @@ impl AcpAdapter {
             self.tool_names.clear();
             self.pending_permissions.clear();
             let stop = res["stopReason"].as_str().unwrap_or("end_turn");
-            return Ok(match stop {
+            // Token counts of the prompt (ACP `usage`; Grok puts them in
+            // `_meta.usage`), unless `usage_update` already reported them.
+            let usage = [&res["usage"], &res["_meta"]["usage"]]
+                .into_iter()
+                .find(|u| u["inputTokens"].is_u64() && u["outputTokens"].is_u64())
+                .filter(|_| !self.turn_usage)
+                .map(|u| Update::Usage {
+                    input: u["inputTokens"].as_u64().unwrap_or(0),
+                    output: u["outputTokens"].as_u64().unwrap_or(0),
+                    cached: u["cachedReadTokens"].as_u64().unwrap_or(0),
+                });
+            // Cursor answers a prompt its plan no longer covers with the
+            // notice as the whole reply ("Upgrade your plan to continue")
+            // and an ordinary `end_turn`.
+            if self.vendor == Vendor::Cursor
+                && stop == "end_turn"
+                && !self.turn_tools
+                && plan_limit_reply(&self.turn_text)
+            {
+                let notice = redact(self.turn_text.trim());
+                return Ok(Step {
+                    send: Vec::new(),
+                    updates: usage
+                        .into_iter()
+                        .chain([Update::LimitReached(format!(
+                            "{}: {notice}",
+                            self.vendor.product_label()
+                        ))])
+                        .collect(),
+                });
+            }
+            let mut step = match stop {
                 "cancelled" => Step::update(Update::TurnCompleted {
                     text: None,
                     interrupted: true,
@@ -607,7 +739,11 @@ impl AcpAdapter {
                     text: None,
                     interrupted: false,
                 }),
-            });
+            };
+            if let Some(usage) = usage {
+                step.updates.insert(0, usage);
+            }
+            return Ok(step);
         }
         Ok(Step::default())
     }
@@ -746,10 +882,25 @@ impl AcpAdapter {
     fn session_update(&mut self, update: &Value) -> Step {
         match update["sessionUpdate"].as_str().unwrap_or("") {
             "agent_message_chunk" => match update["content"]["text"].as_str() {
-                Some(text) if !text.is_empty() => Step::update(Update::Text(redact(text))),
+                Some(text) if !text.is_empty() => {
+                    let paragraph = std::mem::take(&mut self.break_before_text)
+                        && !self.turn_text.trim().is_empty();
+                    if self.turn_text.len() < TURN_TEXT_BYTES {
+                        let room = TURN_TEXT_BYTES - self.turn_text.len();
+                        self.turn_text.push_str(&clip(text, room));
+                    }
+                    let text = redact(text);
+                    Step::update(Update::Text(if paragraph && !text.starts_with('\n') {
+                        format!("\n\n{text}")
+                    } else {
+                        text
+                    }))
+                }
                 _ => Step::default(),
             },
             "tool_call" => {
+                self.turn_tools = true;
+                self.break_before_text = true;
                 let remembered = self.remember_tool(update, ToolOrigin::Initial);
                 let update = &remembered.metadata;
                 let id = update["toolCallId"].as_str().unwrap_or("").to_owned();
@@ -797,11 +948,14 @@ impl AcpAdapter {
                     update["inputTokens"].as_u64(),
                     update["outputTokens"].as_u64(),
                 ) {
-                    (Some(input), Some(output)) => Step::update(Update::Usage {
-                        input,
-                        output,
-                        cached: update["cachedReadTokens"].as_u64().unwrap_or(0),
-                    }),
+                    (Some(input), Some(output)) => {
+                        self.turn_usage = true;
+                        Step::update(Update::Usage {
+                            input,
+                            output,
+                            cached: update["cachedReadTokens"].as_u64().unwrap_or(0),
+                        })
+                    }
                     _ => Step::default(),
                 }
             }

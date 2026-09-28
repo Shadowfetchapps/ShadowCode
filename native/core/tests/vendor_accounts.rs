@@ -480,6 +480,7 @@ async fn run_fake(
                 read_only,
                 resume: None,
                 effort: None,
+                legacy_effort: false,
                 mcp_servers: Vec::new(),
             },
             config: &config,

@@ -292,6 +292,159 @@ impl UsageSnapshot {
     }
 }
 
+impl UsageSnapshot {
+    /// A plan snapshot pushed during a turn, in the vendor's own shape.
+    pub fn from_vendor(
+        vendor: super::Vendor,
+        snapshot: &Value,
+        plan: Option<&str>,
+        model: &str,
+        now: f64,
+    ) -> Self {
+        match vendor {
+            super::Vendor::Claude => Self::from_claude(snapshot, plan, now),
+            _ => Self::from_codex(&json!({ "rateLimits": snapshot }), Some(model), now),
+        }
+    }
+
+    /// Map Claude Code's `rate_limit_event.rate_limit_info` (stream-json).
+    /// The CLI reads it from the claude.ai rate-limit response headers:
+    /// `unifiedWindows` holds the 5-hour and weekly windows with
+    /// `utilization` as a fraction; without it only the limiting window
+    /// (`rateLimitType`, `utilization`) is known. `status` is `allowed`,
+    /// `allowed_warning` or `rejected`. All models of the plan share it.
+    pub fn from_claude(info: &Value, plan: Option<&str>, now: f64) -> Self {
+        const PROVIDER: &str = "cli:claude";
+        let window = |kind: &str, value: &Value| {
+            let used = value["utilization"].as_f64().filter(|u| u.is_finite())? * 100.0;
+            let used = used.max(0.0);
+            Some(UsageWindow {
+                label: claude_window_label(kind),
+                used_percent: used,
+                remaining_percent: (100.0 - used).clamp(0.0, 100.0),
+                window_minutes: match kind {
+                    "five_hour" => Some(300),
+                    k if k.starts_with("seven_day") => Some(10080),
+                    _ => None,
+                },
+                resets_at: value["resetsAt"].as_f64(),
+            })
+        };
+        let mut windows: Vec<UsageWindow> = Vec::new();
+        let mut kinds: Vec<&str> = Vec::new();
+        if let Some(unified) = info["unifiedWindows"].as_object() {
+            for (kind, value) in unified {
+                if let Some(w) = window(kind, value) {
+                    windows.push(w);
+                    kinds.push(kind);
+                }
+            }
+        }
+        let limiting = info["rateLimitType"].as_str().unwrap_or("");
+        if !limiting.is_empty() && !kinds.contains(&limiting) {
+            if let Some(w) = window(limiting, info) {
+                windows.push(w);
+                kinds.push(limiting);
+            }
+        }
+        // Shortest window first (5-hour, then weekly ones).
+        let mut order: Vec<usize> = (0..windows.len()).collect();
+        order.sort_by_key(|&i| (windows[i].window_minutes.unwrap_or(u64::MAX), kinds[i]));
+        let windows: Vec<UsageWindow> = order.iter().map(|&i| windows[i].clone()).collect();
+        let kinds: Vec<&str> = order.iter().map(|&i| kinds[i]).collect();
+        let status = info["status"].as_str().unwrap_or("");
+        let overage = info["isUsingOverage"] == true;
+        let limit_reached = status == "rejected" && !overage;
+        let plan = plan.map(str::to_owned);
+        if windows.is_empty() {
+            let mut snap = if limit_reached {
+                Self::limit_reached(
+                    PROVIDER,
+                    "Claude Code reported that the plan limit is reached",
+                )
+            } else {
+                let mut snap = Self::unavailable(PROVIDER);
+                snap.detail
+                    .push("Claude Code reported no usage figures for this plan".into());
+                snap
+            };
+            snap.last_refresh = Some(now);
+            snap.plan = plan;
+            if let Some(reset) = info["resetsAt"].as_f64() {
+                snap.detail
+                    .push(format!("Resets in {}", format_until(reset, now)));
+            }
+            return snap;
+        }
+        // The limiting window when Claude names it, otherwise the fullest.
+        let primary = kinds
+            .iter()
+            .position(|k| *k == limiting)
+            .unwrap_or_else(|| {
+                (0..windows.len())
+                    .max_by(|&a, &b| windows[a].used_percent.total_cmp(&windows[b].used_percent))
+                    .unwrap_or(0)
+            });
+        let head = &windows[primary];
+        let label = if limit_reached {
+            format!("Plan limit reached · {}", head.label)
+        } else {
+            format!("{:.0}% remaining · {}", head.remaining_percent, head.label)
+        };
+        let mut detail = Vec::new();
+        if let Some(plan) = &plan {
+            detail.push(format!("Claude plan: {plan}"));
+        }
+        for window in &windows {
+            let mut line = format!("{}: {:.0}% used", window.label, window.used_percent);
+            if let Some(reset) = window.resets_at {
+                line.push_str(&format!(" · resets in {}", format_until(reset, now)));
+            }
+            detail.push(line);
+        }
+        if status == "allowed_warning" {
+            detail.push("Claude Code warns that this plan is close to its limit".into());
+        }
+        if overage {
+            detail.push("Using extra usage beyond the plan (reported by Claude Code)".into());
+        }
+        detail.push("Shared by all Claude models on this plan".into());
+        Self {
+            state: if limit_reached {
+                STATE_LIMIT_REACHED.into()
+            } else {
+                STATE_OK.into()
+            },
+            label,
+            detail,
+            plan,
+            pool: None,
+            pool_shared: true,
+            remaining_percent: Some(head.remaining_percent),
+            windows,
+            credits: None,
+            limit_reached,
+            last_refresh: Some(now),
+            provider_usage_url: usage_url(PROVIDER),
+        }
+    }
+}
+
+/// Display name of a Claude plan window (`rateLimitType` and the keys of
+/// `unifiedWindows`).
+pub fn claude_window_label(kind: &str) -> String {
+    match kind {
+        "five_hour" => "5-hour".into(),
+        "seven_day" => "Weekly".into(),
+        "seven_day_opus" => "Weekly (Opus)".into(),
+        "seven_day_sonnet" => "Weekly (Sonnet)".into(),
+        "seven_day_overage_included" => "Weekly incl. extra usage".into(),
+        "overage" => "Extra usage".into(),
+        "" => "Plan".into(),
+        other => other.replace('_', " "),
+    }
+}
+
 fn product_name(provider: &str) -> &str {
     match provider {
         "cli:codex" | "Codex" => "Codex",

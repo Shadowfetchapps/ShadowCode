@@ -7,6 +7,12 @@
 //!
 //! Usage: cargo run --example live_vendor_turn -- cli:grok:grok-4.7 [--second]
 //! `--second` sends a follow-up to check native session resume.
+//! `--binary <path>` runs another copy of the vendor CLI (a newer release in
+//! a scratch prefix) through `cli_agents.<vendor>_binary`. `--effort <level>`
+//! sends the composer's reasoning effort. `--model-switch <picker id>` sends
+//! the follow-up on another model of the same vendor. `--file` asks for one
+//! file edit through an approval. `--mcp` enables a small stdio MCP server
+//! for the project and asks the vendor to call it.
 use serde_json::{json, Value};
 use shadowcode_core::{
     config::Config,
@@ -14,6 +20,13 @@ use shadowcode_core::{
     service::{Request, Service},
 };
 use std::time::Duration;
+
+fn which(name: &str) -> Option<String> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
+        .map(|path| path.display().to_string())
+}
 
 async fn call(service: &Service, method: &str, path: &str, body: Value) -> anyhow::Result<Value> {
     service
@@ -37,7 +50,74 @@ async fn main() -> anyhow::Result<()> {
     std::fs::write(project.join("README.md"), "# scratch\n")?;
     let paths = AppPaths::isolated(&root.path().join("profile"))?;
     Config::patch(&paths, json!({"trusted_workspaces":[project]}))?;
+    let args: Vec<String> = std::env::args().collect();
+    let flag_value = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|pos| args.get(pos + 1).cloned())
+    };
+    if let Some(binary) = flag_value("--binary") {
+        let vendor = target
+            .trim_start_matches("cli:")
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        Config::patch(
+            &paths,
+            json!({"cli_agents":{format!("{vendor}_binary"): binary}}),
+        )?;
+        println!("binary: {binary}");
+    }
+    // --openrouter-cache <file>: start from a saved OpenRouter model list
+    // (`openrouter-models.json`) instead of downloading it.
+    if let Some(cache) = flag_value("--openrouter-cache") {
+        std::fs::create_dir_all(&paths.state)?;
+        std::fs::copy(&cache, paths.state.join("openrouter-models.json"))?;
+    }
+    let effort = flag_value("--effort");
+    let model_switch = flag_value("--model-switch");
+    let file = std::env::args().any(|a| a == "--file");
+    let mcp = std::env::args().any(|a| a == "--mcp");
     let service = Service::open(paths, Some(project.clone()))?;
+    if mcp {
+        // A dependency-free stdio MCP server with one tool that returns a
+        // fixed word, enabled for this project like the MCP page does.
+        std::fs::write(
+            project.join("probe-mcp.mjs"),
+            r#"import { createInterface } from "node:readline";
+const send = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") send(msg.id, { protocolVersion: msg.params.protocolVersion, serverInfo: { name: "probe", version: "1" }, capabilities: { tools: {} } });
+  else if (msg.method === "tools/list") send(msg.id, { tools: [{ name: "shadow_probe", description: "Returns the ShadowCode probe word.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } }] });
+  else if (msg.method === "tools/call") send(msg.id, { content: [{ type: "text", text: "MCPWORD-7391" }] });
+  else if (msg.id !== undefined) send(msg.id, {});
+});
+"#,
+        )?;
+        let node = which("node").ok_or_else(|| anyhow::anyhow!("node is not on PATH"))?;
+        call(
+            &service,
+            "POST",
+            "/api/mcp/servers",
+            json!({"definition":{"name":"probe","command":[node, project.join("probe-mcp.mjs")]}}),
+        )
+        .await?;
+        let catalog = call(&service, "GET", "/api/mcp/servers", json!({})).await?;
+        let entry = catalog["servers"]
+            .as_array()
+            .and_then(|s| s.iter().find(|e| e["id"] == "config:probe").cloned())
+            .ok_or_else(|| anyhow::anyhow!("probe MCP server was not registered: {catalog}"))?;
+        call(
+            &service,
+            "POST",
+            "/api/mcp/activation",
+            json!({"workspace":project,"server":"config:probe","hash":entry["hash"],"enabled":true}),
+        )
+        .await?;
+        println!("mcp: probe server enabled");
+    }
     // --compare <other id>: race this model against another on a small bug
     // in a scratch git repository, keep the first lane that changed the
     // file, and check the fix reached the project.
@@ -168,7 +248,18 @@ async fn main() -> anyhow::Result<()> {
     let row = picker["targets"]
         .as_array()
         .and_then(|rows| rows.iter().find(|r| r["id"] == target.as_str()).cloned())
-        .ok_or_else(|| anyhow::anyhow!("{target} is not a picker row"))?;
+        .ok_or_else(|| {
+            let prefix = target.split(':').take(2).collect::<Vec<_>>().join(":");
+            let rows: Vec<String> = picker["targets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r["id"].as_str())
+                .filter(|id| id.starts_with(&prefix))
+                .map(str::to_owned)
+                .collect();
+            anyhow::anyhow!("{target} is not a picker row; rows: {rows:?}")
+        })?;
     println!(
         "row: {} | {} | {} | usage: {}",
         row["name"], row["availability_label"], row["subtitle"], row["usage"]["label"]
@@ -209,7 +300,11 @@ async fn main() -> anyhow::Result<()> {
         &["What colour is the attached image? Reply with one word."]
     } else if command {
         &["Run the shell command `date +%Y` in the project folder and reply with only its output."]
-    } else if second {
+    } else if file {
+        &["Create a file named hello.txt in the project folder containing exactly the text: hi from shadowcode\nThen reply with the word DONE."]
+    } else if mcp {
+        &["Call the MCP tool shadow_probe from the probe MCP server and reply with exactly the text it returned, nothing else."]
+    } else if second || model_switch.is_some() {
         &[
             "Reply with exactly the word ALPHA and nothing else. Do not use any tools.",
             "What single word did you reply with last time? Reply with just that word. Do not use any tools.",
@@ -217,9 +312,24 @@ async fn main() -> anyhow::Result<()> {
     } else {
         &["Reply with exactly the word ALPHA and nothing else. Do not use any tools."]
     };
+    // --prompt <text> replaces the first prompt (e.g. a command that needs
+    // the vendor to ask for permission outside its sandbox).
+    let custom = flag_value("--prompt");
     let mut session: Option<String> = None;
-    for prompt in prompts {
-        let mut body = json!({"task": prompt, "model": target, "workspace": project, "web": web});
+    for (index, prompt) in prompts.iter().enumerate() {
+        let prompt = match (&custom, index) {
+            (Some(custom), 0) => custom.as_str(),
+            _ => *prompt,
+        };
+        // The follow-up of --model-switch runs on the other model.
+        let model = match (&model_switch, &session) {
+            (Some(other), Some(_)) => other.clone(),
+            _ => target.clone(),
+        };
+        let mut body = json!({"task": prompt, "model": model, "workspace": project, "web": web});
+        if let Some(effort) = &effort {
+            body["effort"] = json!(effort);
+        }
         if image {
             body["images"] = json!(["red.png"]);
             body["handoff_consent"] = json!(true);
@@ -247,7 +357,7 @@ async fn main() -> anyhow::Result<()> {
                     service.engine.shutdown().await?;
                     anyhow::bail!("turn did not finish in 240 s");
                 },
-                _ = tokio::time::sleep(Duration::from_millis(300)), if command => {
+                _ = tokio::time::sleep(Duration::from_millis(300)), if command || file || mcp => {
                     let pending = call(&service, "GET", "/api/approvals", json!({})).await?;
                     for approval in pending["approvals"].as_array().into_iter().flatten() {
                         println!("approval asked: kind={} command={} reason={}", approval["kind"], approval["command"], approval["reason"]);
@@ -268,6 +378,7 @@ async fn main() -> anyhow::Result<()> {
                 .map(|s| s.chars().take(200).collect::<String>()),
             done["error"].as_str()
         );
+        println!("job usage: {}", done["usage"]);
         if let Some(sid) = &session {
             let events = service.engine.store().events_after(sid, 0, None, 10_000)?;
             let kinds: Vec<String> = events
@@ -277,6 +388,7 @@ async fn main() -> anyhow::Result<()> {
             println!("events: {}", kinds.join(","));
             for e in &events {
                 if e["type"] == "vendor.session"
+                    || e["type"] == "model.switched"
                     || e["type"] == "limit.reached"
                     || e["type"] == "usage.updated"
                     || e["type"] == "agent.warning"
@@ -288,12 +400,22 @@ async fn main() -> anyhow::Result<()> {
         // A completed job is not enough: the minimal text/resume smoke must
         // preserve the exact answer. In particular, duplicate stream/result
         // text must make this executable fail rather than merely print it.
-        let expected_word = !web && !image && !command;
+        let expected_word = !web && !image && !command && !file && !mcp && custom.is_none();
         let answer = done["result"]["summary"]
             .as_str()
             .or(done["result"]["text"].as_str())
             .unwrap_or("")
             .trim();
+        if file {
+            println!(
+                "hello.txt: {:?}",
+                std::fs::read_to_string(project.join("hello.txt")).ok()
+            );
+        }
+        if mcp && !answer.contains("MCPWORD-7391") {
+            service.engine.shutdown().await?;
+            anyhow::bail!("live smoke failed: the MCP tool's word is missing from the answer");
+        }
         if done["status"] != "completed" || (expected_word && answer != "ALPHA") {
             service.engine.shutdown().await?;
             anyhow::bail!(

@@ -65,11 +65,15 @@ pub struct PickerTarget {
     /// The runtime's own default model.
     pub is_default: bool,
     pub usage: UsageSnapshot,
+    /// The runtime said whether this model takes a reasoning effort (Claude
+    /// Code `supportsEffort`); `None` leaves it to the vendor's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
 }
 
 impl PickerTarget {
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut row = json!({
             "id": self.id,
             "provider": self.provider,
             "account": self.account,
@@ -88,7 +92,11 @@ impl PickerTarget {
             "tools": self.tools,
             "is_default": self.is_default,
             "usage": self.usage,
-        })
+        });
+        if let Some(reasoning) = self.reasoning {
+            row["reasoning"] = json!(reasoning);
+        }
+        row
     }
 }
 
@@ -144,6 +152,7 @@ pub fn vendor_target(
         tools: true,
         is_default: auto || model == "default",
         usage,
+        reasoning: None,
     }
 }
 

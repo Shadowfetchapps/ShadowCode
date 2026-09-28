@@ -13,6 +13,7 @@ fn launch(workspace: &Path) -> LaunchOptions {
         read_only: false,
         resume: None,
         effort: None,
+        legacy_effort: false,
         mcp_servers: Vec::new(),
     }
 }

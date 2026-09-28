@@ -6,11 +6,14 @@
 //! |--------------------|------------------------------------------------------|
 //! | OpenRouter         | request field `reasoning.effort` (models that list `reasoning`) |
 //! | llama.cpp (GGUF)   | `chat_template_kwargs.enable_thinking`: off for low, on for medium/high, on templates with the switch |
-//! | Codex              | `-c model_reasoning_effort="…"`                      |
-//! | Claude Code        | `MAX_THINKING_TOKENS` thinking budget                |
-//! | Cursor, Grok, Antigravity | none; the composer hides the control      |
+//! | Codex              | `turn/start.effort` (and `-c model_reasoning_effort="…"` for new threads and `codex exec`) |
+//! | Claude Code        | `--effort <level>`; a CLI without the flag gets the `MAX_THINKING_TOKENS` budget |
+//! | Grok (and any ACP agent with a `thought_level` option) | `session/set_config_option` on that option (Grok `reasoning_effort`) |
+//! | Cursor             | none: the effort is part of Cursor's model ids; the composer hides the control |
 //!
-//! Picker rows say whether the control applies with `reasoning: true`.
+//! Picker rows say whether the control applies with `reasoning: true`; a
+//! vendor that reports it per model (Claude Code, ACP agents) decides it
+//! per row.
 use crate::cli_agent::Vendor;
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
@@ -29,8 +32,12 @@ pub fn parse(value: &str) -> Result<Option<String>> {
 /// The effort a vendor CLI receives (`LaunchOptions::effort`).
 pub fn vendor(vendor: Vendor, effort: Option<&str>) -> Option<String> {
     match vendor {
-        Vendor::Codex | Vendor::Claude => effort.map(str::to_owned),
-        Vendor::Cursor | Vendor::Antigravity | Vendor::Grok => None,
+        // The ACP adapter applies it only when the session offers a
+        // `thought_level` option with that value.
+        Vendor::Codex | Vendor::Claude | Vendor::Grok | Vendor::Antigravity => {
+            effort.map(str::to_owned)
+        }
+        Vendor::Cursor => None,
     }
 }
 
@@ -59,8 +66,19 @@ pub fn native_body(openrouter: bool, extra: Option<Value>, effort: Option<&str>)
 pub fn row_supports(row: &Value) -> bool {
     let id = row["id"].as_str().unwrap_or("");
     if let Some(model) = crate::cli_agent::resolve_vendor(id) {
-        return Vendor::from_provider(&model.provider)
-            .is_some_and(|v| vendor(v, Some("medium")).is_some());
+        let Some(runtime) = Vendor::from_provider(&model.provider) else {
+            return false;
+        };
+        if vendor(runtime, Some("medium")).is_none() {
+            return false;
+        }
+        // The runtime's own per-model answer (Claude Code `supportsEffort`,
+        // an ACP `thought_level` option) wins; otherwise Codex and Claude
+        // Code always take it and ACP agents only when they said so.
+        return match row["reasoning"].as_bool() {
+            Some(reported) => reported,
+            None => matches!(runtime, Vendor::Codex | Vendor::Claude),
+        };
     }
     if id.starts_with("local:gguf:") {
         return row["local"]["thinking_switch"] == true;
@@ -88,7 +106,7 @@ mod tests {
             Some("high")
         );
         assert_eq!(vendor(Vendor::Cursor, Some("high")), None);
-        assert_eq!(vendor(Vendor::Grok, Some("high")), None);
+        assert_eq!(vendor(Vendor::Grok, Some("high")).as_deref(), Some("high"));
         assert_eq!(
             native_body(true, None, Some("high")).unwrap(),
             json!({"reasoning":{"effort":"high"}})
@@ -116,7 +134,20 @@ mod tests {
     fn picker_rows_say_where_the_control_applies() {
         assert!(row_supports(&json!({"id":"cli:codex:gpt-5"})));
         assert!(row_supports(&json!({"id":"cli:claude"})));
+        assert!(row_supports(
+            &json!({"id":"cli:claude:opus","reasoning":true})
+        ));
+        assert!(!row_supports(
+            &json!({"id":"cli:claude:haiku","reasoning":false})
+        ));
         assert!(!row_supports(&json!({"id":"cli:cursor:auto"})));
+        assert!(!row_supports(
+            &json!({"id":"cli:cursor:auto","reasoning":true})
+        ));
+        assert!(!row_supports(&json!({"id":"cli:grok:grok-4.7"})));
+        assert!(row_supports(
+            &json!({"id":"cli:grok:grok-4.7","reasoning":true})
+        ));
         assert!(row_supports(
             &json!({"id":"local:gguf:ab","local":{"thinking_switch":true}})
         ));

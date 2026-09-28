@@ -1753,6 +1753,13 @@ impl Engine {
         };
         let native_key = keys::native_session(vendor.id());
         let resume = self.0.store.session_meta(&job.session_id, &native_key)?;
+        // A Claude Code without `--effort` gets a thinking budget instead.
+        let legacy_effort = self
+            .0
+            .vendors
+            .cached(vendor)
+            .await
+            .is_some_and(|status| status.effort_flag == Some(false));
         if let Some((from, to)) = &running.turn_plan.model_switch {
             // The vendor's own mechanism switches the model on the resumed
             // session (Codex thread/resume model, Cursor session/set_model,
@@ -1769,6 +1776,7 @@ impl Engine {
             read_only: running.config.permissions.level == crate::config::PermissionLevel::ReadOnly,
             resume,
             effort: crate::effort::vendor(vendor, running.turn.effort.as_deref()),
+            legacy_effort,
             #[cfg(unix)]
             mcp_servers: crate::mcp::vendor::servers(&running.workspace, &running.config),
             #[cfg(not(unix))]

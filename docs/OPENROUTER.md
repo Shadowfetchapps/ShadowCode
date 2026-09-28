@@ -20,8 +20,10 @@ shown again, logged, or passed to other tools. **Remove key** deletes it. An
 the stored key. Either way the key is removed from the environment of every
 subscription CLI ShadowCode starts.
 
-The card shows the key's label, credits used, its limit and what is left, and
-how many models are available. **Open OpenRouter activity** links to
+The card shows the key's label, credits used, its limit and what is left, the
+account balance (`GET /api/v1/credits`), and how many models are available. A
+key's limit is not the balance: a key can have most of its limit left while
+the account has no credits, and then the card says *Out of credits*. **Open OpenRouter activity** links to
 OpenRouter's own usage page.
 
 ## Pick a model
@@ -73,4 +75,6 @@ automatically (see the [user guide](USER_GUIDE.md)).
 - **No key**: the group shows only *Add an OpenRouter API key…*, which opens
   **Settings › Accounts**. A task sent to an `api:openrouter:` ID without a
   key is refused before it starts.
-- **Rejected or out of credit**: OpenRouter's error is shown on the task.
+- **Rejected or out of credit**: OpenRouter's error is shown on the task,
+  for example "Model provider returned HTTP 402; the account is out of
+  credits: This request requires more credits, or fewer max_tokens…".
