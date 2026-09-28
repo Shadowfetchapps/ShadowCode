@@ -57,6 +57,11 @@ pub struct LocalEngineConfig {
     pub llama_binary: String,
     /// Upper bound for the server context window; 0 means the default (16384).
     pub context_size: u64,
+    /// Folder of models downloaded from the built-in catalog
+    /// (`<data>/local-models`). Set by `Config::load`, never saved: the
+    /// finished files there are listed without being registered.
+    #[serde(skip)]
+    pub downloads: Option<PathBuf>,
 }
 
 fn usable_config_path(value: &str) -> bool {
@@ -1093,6 +1098,18 @@ pub fn candidates(config: &LocalEngineConfig) -> Vec<Candidate> {
         .map(|p| canonical(Path::new(p)))
         .collect();
     let mut out = Vec::new();
+    // Finished catalog downloads, under the catalog's name (some files carry
+    // a placeholder `general.name`).
+    if let Some(dir) = &config.downloads {
+        for (model, path) in crate::local_downloads::installed(dir) {
+            out.push(Candidate {
+                path,
+                name: Some(model.name.to_owned()),
+                mmproj: Some(None),
+                source: "download",
+            });
+        }
+    }
     for import in &config.imports {
         out.push(Candidate {
             path: PathBuf::from(&import.path),
@@ -1412,6 +1429,10 @@ pub fn remove(config: &LocalEngineConfig, key: &str) -> Result<LocalEngineConfig
         .as_ref()
         .map(|e| e.path.clone())
         .unwrap_or_else(|| key.to_owned());
+    ensure!(
+        entry.as_ref().is_none_or(|e| e.source != "download"),
+        "ShadowCode downloaded this model. Choose Delete to remove it and free its disk space."
+    );
     let before = (next.files.len(), next.directories.len(), next.imports.len());
     next.files.retain(|p| p != &path);
     next.directories.retain(|p| p != &path);

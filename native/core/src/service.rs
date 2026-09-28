@@ -66,6 +66,7 @@ mod goals;
 mod inspection;
 mod issues;
 mod jobs;
+mod local_downloads;
 mod memory;
 mod model_catalog;
 #[cfg(target_os = "linux")]

@@ -383,6 +383,7 @@ impl Config {
                 config.apply_runtime(false);
             }
         }
+        config.local_engine.downloads = Some(crate::local_downloads::dir(paths));
         Ok(config)
     }
     /// True when the app must not make helper network requests (account and

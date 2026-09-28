@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { api, type CommandResult, type Job } from "./api";
+import { api, type CommandResult, type DownloadModel, type Job } from "./api";
 import { Drawer, type DrawerTab } from "./components/Drawer";
 import { Sidebar } from "./components/Sidebar";
 import { Onboarding } from "./components/Onboarding";
@@ -203,6 +203,29 @@ export default function App() {
   const commandWaiting = queueing && task.trim().startsWith("/");
 
   const selectedTarget = pickerTargets.find((t) => t.id === modelChoice);
+  const selectedRef = useRef(selectedTarget);
+  selectedRef.current = selectedTarget;
+  // A free model finished downloading (in the empty conversation or in
+  // Settings): it joins the picker, and is chosen when nothing is chosen yet.
+  const adopted = useRef(new Map<string, number>());
+  const adoptDownload = useStableCallback((model: DownloadModel) => {
+    const id = model.model_id;
+    if (!id || Date.now() - (adopted.current.get(id) || 0) < 10000) return;
+    adopted.current.set(id, Date.now());
+    void picker.reload().then(() => {
+      if (!selectedRef.current) {
+        void nav.selectTarget(id);
+        toast(
+          `${model.name} is ready. Ask it anything about this project.`,
+          "ok",
+        );
+      } else
+        toast(
+          `${model.name} is downloaded and ready in the model picker.`,
+          "ok",
+        );
+    });
+  });
   const canAttachImages = selectedTarget?.vision === true;
   const { webAllowed } = composerAccess(
     cfg,
@@ -530,9 +553,13 @@ export default function App() {
   if (nav.needsOnboard)
     return (
       <Onboarding
-        onDone={() => {
+        onDone={(next) => {
           nav.setNeedsOnboard(false);
           void nav.boot();
+          if (next === "openrouter")
+            openSettings("accounts", { vendor: "openrouter" });
+          else if (next === "subscription") openSettings("accounts");
+          else if (next === "local") openSettings("local");
         }}
       />
     );
@@ -631,6 +658,7 @@ export default function App() {
         targets={pickerTargets}
         pickerLoaded={picker.loaded}
         onRefreshModels={() => picker.reload(true)}
+        onModelDownloaded={adoptDownload}
         pickerOpen={pickerOpen}
         setPickerOpen={setPickerOpen}
         selectedTarget={selectedTarget}
@@ -778,6 +806,7 @@ export default function App() {
             promptRef.current?.focus();
           },
           onCatalogChanged: reloadCatalog,
+          onModelDownloaded: adoptDownload,
           onSave: async (values) => {
             try {
               await api.saveConfig(values);

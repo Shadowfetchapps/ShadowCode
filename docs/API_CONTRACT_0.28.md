@@ -462,7 +462,7 @@ through a route without the engine (e.g. `/api/accounts`).
 
 ```
 {
-  id: "local:gguf:<hash>", name, path, bytes, source: "file"|"directory"|"ollama",
+  id: "local:gguf:<hash>", name, path, bytes, source: "file"|"directory"|"ollama"|"download",
   architecture: string|null, context_train: number|null, context_tokens: number,
   compatible: boolean, reason: string,
   vision: boolean, mmproj: string|null, tools: boolean, tools_reason: string,
@@ -482,6 +482,38 @@ projector; after load it is what the server reports in `/props`
 `modalities.vision`. Projector, vocabulary-only and embedding GGUFs are not
 listed as models.
 
+`source: "download"` rows are finished catalog downloads found in
+`<data>/local-models` (not in `config.yaml`), named from the catalog.
+
+`GET /api/local-models/downloads` → `DownloadCatalog` (the built-in list of
+free models, `native/core/src/local_downloads.rs`):
+
+```
+{
+  directory, free_bytes: number|null, offline: boolean,
+  hardware: { ram_bytes, vram_bytes: number|null, gpu: string|null },
+  recommended: string|null, recommended_fit: "gpu"|"cpu"|"tight"|null,
+  busy: boolean,            // a download or resume check runs
+  models: [{ id, name, publisher, summary, file, bytes, sha256, license, license_url,
+             source_url, quantization, architecture, memory_bytes, min_memory_bytes,
+             fit: "gpu"|"cpu"|"tight"|"no", recommended, supported, unsupported_reason,
+             state: "available"|"downloading"|"checking"|"paused"|"failed"|"installed",
+             done, total, bytes_per_second, error: string|null,
+             model_id: "local:gguf:…"|null, path: string|null }]
+}
+```
+
+- `POST /api/local-models/downloads/start {id}` starts or resumes (HTTP range)
+  one download in the background and returns the catalog. Refused in offline
+  mode, for an architecture the runtime lacks, when already downloaded, while
+  another download runs, and when the free space is short. A running download
+  re-reads the network mode every 2 seconds and stops (state `failed`, partial
+  file kept) when offline mode is turned on.
+- `POST /api/local-models/downloads/pause {id}` keeps the partial file;
+  `…/cancel {id}` stops and deletes it (and clears a failure);
+  `…/delete {id}` unloads the model if loaded (refused while a task uses it)
+  and deletes the file. Each returns the catalog.
+- `POST /api/local-models/remove` refuses a `download` row ("Choose Delete").
 - `POST /api/local-models/add {path}` (file or folder) → `{ ok, local_engine }`;
   a projector/vocab/embedding file is refused with the reason.
 - `POST /api/local-models/remove {id}` or `{path}` → `{ ok, deleted_weights: false, detail, local_engine }`;
