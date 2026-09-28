@@ -293,6 +293,126 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Every `/api/<family>` the engine dispatches, with the remote-access
+    /// decision made for it. A family missing here fails
+    /// `every_api_family_has_a_remote_access_decision`: decide whether a
+    /// paired device may use it (and add a refusal above when not) before
+    /// listing it.
+    const REVIEWED_FAMILIES: &[(&str, &str)] = &[
+        ("remote", "refused: managed on this computer"),
+        ("preview", "refused: loopback proxies and local processes"),
+        ("terminals", "refused unless terminals are allowed"),
+        ("background", "refused unless terminals are allowed"),
+        (
+            "workspace",
+            "allowed; exec needs terminals; editor drafts refused; secret paths hidden",
+        ),
+        (
+            "commands",
+            "allowed; /run, /test <cmd>, /background need terminals",
+        ),
+        ("voice", "allowed; the host microphone is never switched on"),
+        ("compare", "allowed: agent work, approvals apply"),
+        ("compares", "allowed"),
+        ("agents", "allowed"),
+        ("subagents", "allowed"),
+        ("worktrees", "allowed"),
+        ("parallel", "allowed"),
+        ("worktree-tasks", "allowed"),
+        ("sandbox", "allowed: status and scratch cleanup"),
+        ("sessions", "allowed; profile folders refused"),
+        ("projects", "allowed; profile folders refused"),
+        ("events", "allowed"),
+        ("resolve", "allowed"),
+        ("jobs", "allowed: tasks run with approvals"),
+        ("run", "allowed"),
+        ("approvals", "allowed: the device answers approvals"),
+        ("checkpoints", "allowed"),
+        ("goals", "allowed"),
+        (
+            "automations",
+            "allowed: trusted projects, never auto-approve",
+        ),
+        ("issues", "allowed"),
+        ("review", "allowed; secret files hidden"),
+        ("feed", "allowed"),
+        (
+            "git",
+            "allowed: status, branches, push and PRs as in the window",
+        ),
+        ("code-intel", "allowed"),
+        ("config", "allowed: full settings control, as in the window"),
+        ("routing", "allowed"),
+        ("onboarding", "allowed"),
+        ("health", "allowed"),
+        ("version", "allowed"),
+        ("doctor", "allowed"),
+        (
+            "diagnostic-exports",
+            "allowed: allow-listed check results only",
+        ),
+        ("guardian", "allowed"),
+        ("about", "allowed: version, install kind, links"),
+        (
+            "updates",
+            "allowed: notify-only check, 30 s manual throttle",
+        ),
+        ("accounts", "allowed; tokens never returned"),
+        ("cli-agents", "allowed"),
+        ("openrouter", "allowed; the stored key is never returned"),
+        ("allowance", "allowed"),
+        ("providers", "allowed"),
+        ("models", "allowed"),
+        ("picker", "allowed"),
+        ("local-models", "allowed"),
+        ("plugins", "allowed: install runs nothing"),
+        ("mcp", "allowed: activation is hash-pinned"),
+        ("hooks", "allowed: activation is hash-pinned"),
+        ("sqlite", "allowed: read-only inspection"),
+        ("memory", "allowed"),
+    ];
+
+    #[test]
+    fn every_api_family_has_a_remote_access_decision() {
+        let source = include_str!("../service.rs");
+        let start = source
+            .find("match call.family() {")
+            .expect("the dispatcher's family match");
+        let end = start
+            + source[start..]
+                .find("_ => Err(call.unavailable()),\n        }\n    }")
+                .expect("the end of the dispatcher");
+        let mut families = Vec::new();
+        for line in source[start..end].lines() {
+            let Some((head, _)) = line.split_once("=>") else {
+                continue;
+            };
+            if head.contains('(') {
+                continue; // an inner (method, path) arm
+            }
+            families.extend(head.split('"').skip(1).step_by(2).map(str::to_owned));
+        }
+        assert!(families.len() > 40, "parsed {families:?}");
+        let reviewed: Vec<&str> = REVIEWED_FAMILIES.iter().map(|(f, _)| *f).collect();
+        for family in &families {
+            assert!(
+                reviewed.contains(&family.as_str()),
+                "/api/{family} has no remote-access decision: review it and add it to REVIEWED_FAMILIES in remote/policy.rs"
+            );
+        }
+        // The refusals listed are enforced.
+        let (_dir, paths) = paths();
+        let access = Access {
+            allow_terminals: false,
+        };
+        for family in ["remote", "preview", "terminals", "background"] {
+            assert!(
+                check(&format!("/api/{family}"), &Value::Null, &access, &paths).is_err(),
+                "{family}"
+            );
+        }
+    }
+
     fn paths() -> (tempfile::TempDir, AppPaths) {
         let dir = tempfile::tempdir().unwrap();
         let paths = AppPaths::isolated(dir.path()).unwrap();
