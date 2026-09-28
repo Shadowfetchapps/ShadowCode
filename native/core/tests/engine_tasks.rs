@@ -725,8 +725,9 @@ async fn terminal_receipts_survive_passing_check_then_provider_response_failure(
                 )]),
             )
         } else {
-            // A malformed provider response fails in ModelClient, before the
-            // native agent's normal verification-summary completion path.
+            // A provider error in place of a response fails in ModelClient,
+            // before the native agent's normal verification-summary
+            // completion path, and keeps the provider's own reason.
             json!({"error":{"message":"fixture provider response failure"}})
         };
         (answer, Duration::ZERO)
@@ -750,9 +751,9 @@ async fn terminal_receipts_survive_passing_check_then_provider_response_failure(
     let result = wait(&engine, &job.id).await;
     assert_eq!(result.status, "failed");
     assert!(
-        result
-            .summary
-            .contains("Provider returned no completion choices"),
+        result.summary.contains(
+            "Provider reported an error while generating: fixture provider response failure"
+        ),
         "{}",
         result.summary
     );
