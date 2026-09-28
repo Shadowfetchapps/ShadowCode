@@ -1,6 +1,6 @@
 # Native isolated worktrees
 
-> **Advanced.** This is reached through Settings › Advanced › Worktrees. For the everyday workflow see the [user guide](USER_GUIDE.md), [subscriptions](SUBSCRIPTIONS.md) and [local models](LOCAL_MODELS.md).
+> **Advanced.** This is reached through the drawer's Tools › Worktrees. For the everyday workflow see the [user guide](USER_GUIDE.md), [subscriptions](SUBSCRIPTIONS.md) and [local models](LOCAL_MODELS.md).
 
 The native engine can create a Git worktree on a separate `shadowcode/<ID>` branch
 from an existing local commit or branch. Staged, unstaged and untracked changes
@@ -12,7 +12,7 @@ shadowcode --workspace /path/to/repository worktree --create
 shadowcode --workspace /path/to/repository worktree --create --reference main
 ```
 
-In the native desktop, open **Settings › Advanced › Worktrees**. The panel shows the source
+In the native desktop, open the drawer's **Tools › Worktrees** (`Ctrl+K`, *Worktrees*). The panel shows the source
 project and managed checkouts, creates from a chosen local reference, and opens a
 checkout through the normal trust flow. **Inspect removal** shows its exact path,
 branch, commit and status before enabling **Remove clean worktree**. Dirty reviews
@@ -95,7 +95,7 @@ Trust and writable/idle source requirements also apply. Open and trust the new
 checkout explicitly. The original record remains in the active inventory until
 its underlying checkout is repaired and reviewed for removal. Automatic repair of damaged paths remains open.
 
-In **Settings › Advanced › Worktrees**, choose **Review missing checkout** for the affected
+In **Tools › Worktrees**, choose **Review missing checkout** for the affected
 record. The focused review shows its missing path, retained branch and exact
 commit, together with the uncommitted-file limitation. **Restore in new worktree**
 creates the separate checkout; **Cancel recovery** closes the review without
@@ -136,7 +136,7 @@ filesystem writers idle during review and return, as with ordinary Git merges.
 After committing or aborting, the record's last-operation status is historical;
 future actions inspect the actual Git state again.
 
-In **Settings › Advanced › Worktrees**, choose **Review return**. The focused review shows
+In **Tools › Worktrees**, choose **Review return**. The focused review shows
 both branches and commits, the source path, and a keyboard-scrollable incoming
 diff. **Keep changes isolated** cancels the review. **Prepare merge in source**
 requires that exact review and creates no commit. The resulting card explains
@@ -175,7 +175,7 @@ verification fails, the source remains intact and the partial destination stays
 recorded for inspection; no automatic deletion hides evidence. Temporary patches
 use private files and are removed on ordinary completion/error.
 
-In desktop Settings › Advanced › Worktrees, choose **Review current edits**. The review
+In the desktop's Tools › Worktrees, choose **Review current edits**. The review
 shows the source HEAD, separate staged and unstaged patches, untracked file
 names and sizes, and any intent-to-add entries. **Copy into new worktree** uses
 that reviewed HEAD regardless of the separate creation reference field. The
@@ -190,7 +190,7 @@ invent an identity or modify your Git identity settings.
 
 ## Repair missing Git connections
 
-Use **Settings › Advanced › Worktrees › Review connection repair** when the original managed
+Use **Tools › Worktrees › Review connection repair** when the original managed
 checkout still exists but its `.git` file or the repository's corresponding
 `gitdir` connection is missing. The review identifies the checkout, retained
 branch/commit and which connection is missing. **Restore Git connection** writes

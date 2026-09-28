@@ -1,8 +1,8 @@
 # Background processes in the native desktop
 
-> **Advanced.** This is reached through Settings › Advanced › Background. For the everyday workflow see the [user guide](USER_GUIDE.md), [subscriptions](SUBSCRIPTIONS.md) and [local models](LOCAL_MODELS.md).
+> **Advanced.** This is reached through the drawer's Tools › Processes. For the everyday workflow see the [user guide](USER_GUIDE.md), [subscriptions](SUBSCRIPTIONS.md) and [local models](LOCAL_MODELS.md).
 
-Open **Settings › Advanced › Background**.
+Open the drawer's **Tools › Processes** (`Ctrl+K`, *Background processes*).
 Give the process a name, enter its command, and choose **Start process**. This is
 also available through `/background start <name> <command>`; `/background list`
 and `/background stop <id>` inspect and stop a process. It is

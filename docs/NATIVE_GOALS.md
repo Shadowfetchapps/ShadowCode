@@ -1,12 +1,12 @@
 # Goals in the native desktop
 
-> **Advanced.** This is reached through Settings › Advanced › Goals. For the everyday workflow see the [user guide](USER_GUIDE.md), [subscriptions](SUBSCRIPTIONS.md) and [local models](LOCAL_MODELS.md).
+> **Advanced.** This is reached through the drawer's Tools › Goals. For the everyday workflow see the [user guide](USER_GUIDE.md), [subscriptions](SUBSCRIPTIONS.md) and [local models](LOCAL_MODELS.md).
 
 ShadowCode stores goals, milestones, their task IDs, and
 run state in the same SQLite database as conversation history. Goals imported
 from 0.19 retain their original checklist and completion state.
 
-Open **Settings › Advanced › Goals**, describe the desired outcome, then use
+Open the drawer's **Tools › Goals** (`Ctrl+K`, *Goals and milestones*), describe the desired outcome, then use
 **Plan** to save it or **Plan & run** to begin. New goals start with three visible
 milestones: inspect the project and define acceptance checks, implement the
 change, and run the checks. The inspection milestone uses read-only Plan mode.
