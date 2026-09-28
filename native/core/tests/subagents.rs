@@ -926,3 +926,117 @@ async fn deleting_a_conversation_deletes_its_subagent_conversations() {
     assert_eq!(hidden(&store), 0);
     engine.shutdown().await.unwrap();
 }
+
+/// A write subagent whose changes cannot be collected (a diff too large here)
+/// keeps its worktree, so its work is not lost.
+#[tokio::test]
+async fn uncollectable_subagent_changes_keep_the_worktree() {
+    let server = fake(move |body| {
+        if child_of(body).as_deref() == Some("general") {
+            if last(body)["role"] == "tool" {
+                assert_eq!(tool_output(&last(body))["success"], true, "{}", last(body));
+                return (response("Wrote big.txt.", json!([])), Duration::ZERO);
+            }
+            return (
+                response(
+                    "",
+                    json!([tool(
+                        "exec",
+                        json!({"command":"python3 -c \"open('big.txt','w').write('a\\n'*4500000)\""})
+                    )]),
+                ),
+                Duration::ZERO,
+            );
+        }
+        if last(body)["role"] == "tool" {
+            return (response("Done.", json!([])), Duration::ZERO);
+        }
+        (
+            response(
+                "",
+                json!([tool(
+                    "spawn_agent",
+                    json!({"agent":"general","prompt":"Write a big file"})
+                )]),
+            ),
+            Duration::ZERO,
+        )
+    })
+    .await;
+    let (_root, engine, project) = setup(
+        &server.endpoint,
+        json!({"permissions":{"mode":"allow_edits","approve_shell":false}}),
+    );
+    repository(&project);
+    let job = engine.start(request(&project, "Big")).await.unwrap();
+    let done = wait(&engine, &job.id, 60).await;
+    assert_eq!(done.status, "completed", "{}", done.summary);
+    let runs = subagents::list(&engine.store(), &job.session_id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert!(
+        runs[0]
+            .notes
+            .iter()
+            .any(|n| n.contains("Could not read") && n.contains("was kept")),
+        "{:?}",
+        runs[0].notes
+    );
+    let kept = shadowcode_core::worktrees::list(engine.paths(), &project).unwrap();
+    assert_eq!(kept.len(), 1, "the worktree with the changes is kept");
+    assert_eq!(
+        fs::metadata(kept[0].path.join("big.txt")).unwrap().len(),
+        9_000_000
+    );
+    engine.shutdown().await.unwrap();
+}
+
+/// A subagent still running when the app stopped is marked interrupted on
+/// the next start, and its card in the parent conversation gets its
+/// `subagent.finished` event instead of spinning forever.
+#[tokio::test]
+async fn subagent_runs_interrupted_by_a_restart_are_finished() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+    let engine = Engine::open(paths.clone()).unwrap();
+    let store = engine.store();
+    let parent = store.create_session(&project, "fixture", "").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let run_id = "0123456789abcdef0123456789abcdef";
+    let record = json!({
+        "id": run_id, "agent": "explore", "mode": "read-only", "model": "fixture",
+        "parent_session": parent, "status": "running", "created_at": 1.0,
+    });
+    store
+        .set_native_meta(&format!("subagent:{run_id}"), &record.to_string())
+        .unwrap();
+    store
+        .add_event(
+            "subagent.started",
+            &json!({"run_id": run_id, "agent": "explore"}),
+            Some(&parent),
+            None,
+        )
+        .unwrap();
+    drop(store);
+    engine.shutdown().await.unwrap();
+    drop(engine);
+
+    let engine = Engine::open(paths).unwrap();
+    let run = subagents::get(&engine.store(), run_id).unwrap();
+    assert_eq!(run.status, "interrupted");
+    assert!(run.error.unwrap().contains("stopped"));
+    let finished = events(&engine, &parent, "subagent.finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["payload"]["run_id"], run_id);
+    assert_eq!(finished[0]["payload"]["status"], "interrupted");
+    engine.shutdown().await.unwrap();
+    drop(engine);
+    // Recovered once only.
+    let engine = Engine::open(AppPaths::isolated(&root.path().join("profile")).unwrap()).unwrap();
+    assert_eq!(events(&engine, &parent, "subagent.finished").len(), 1);
+    engine.shutdown().await.unwrap();
+}

@@ -32,7 +32,9 @@ choose **New automation**:
     folder is never touched. When the run changed nothing, the worktree is
     removed afterwards and the conversation points back at the project. When
     it changed files, the worktree and its `shadowcode/<id>` branch are kept:
-    review or bring the changes back from **Tools › Worktrees**.
+    review or bring the changes back from **Tools › Worktrees**. It is also
+    kept while another task (a follow-up you sent in the run's conversation)
+    or a background process is using it.
   - _In the project folder_: the run waits behind any task already running
     there.
   - _Read-only, even in Code mode_. A run never gets more permission than the

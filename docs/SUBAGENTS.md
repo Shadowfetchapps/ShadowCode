@@ -25,7 +25,11 @@ conversation. It can start one, or several at once with `tasks`.
   diff and applies it with `apply_agent_changes`. That is an ordinary patch:
   it is checkpointed, can be rewound, and asks for approval in **Ask** mode.
   Write subagents need a Git repository with at least one commit. Binary
-  changes are listed but not applied.
+  changes are listed but not applied. If the changes cannot be collected
+  (for example, the diff is too large), the worktree is kept and its path
+  is given, so nothing is lost; find it in **Tools › Worktrees**. A subagent
+  still running when ShadowCode stopped is shown as *Interrupted* after the
+  next start.
 - **Approvals.** When a subagent needs approval (a shell command, or an edit
   in its worktree in **Ask** mode), the card appears in the parent
   conversation. Its reason starts with `Subagent <name>:`.

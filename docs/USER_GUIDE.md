@@ -225,7 +225,8 @@ reply.
   looked at; Undo writes the file, and only if it hasn't changed since the
   diff was shown. Undoing asks first in ShadowCode's own dialog. Files a
   vendor CLI reported without a checkpoint are compared with the last
-  commit. While a task runs in the project the review is read-only and says
+  commit; such a file that isn't in the last commit is never deleted by
+  Undo, because ShadowCode can't tell whether the task created it. While a task runs in the project the review is read-only and says
   why. **Back to conversation** returns.
 - **Git** (a tab in the review, and the drawer's Changes tab, `Ctrl+Shift+B`)
   shows the whole working tree: compare unstaged and staged hunks, stage a
@@ -247,9 +248,11 @@ reply.
   files that will change. Afterwards a divider marks the conversation
   (*Rewound to here · 2 files restored*) and the notification offers
   **Undo**, which puts the files back as they were just before the rewind
-  (if you haven't changed them since). Rewind doesn't restore Git-ignored
-  files, files over 4 MB, symlinks, Git history or branches, or anything
-  outside the project. It refuses, and changes nothing, if a file was edited
+  (if you haven't changed them since). Rewind puts back file permissions a
+  command changed (`chmod`). It doesn't restore Git-ignored files, files
+  over 4 MB, symlinks, Git history or branches, or anything outside the
+  project; a file that was ignored before a step and not after it (the step
+  changed `.gitignore`) is listed as not covered and never deleted. It refuses, and changes nothing, if a file was edited
   again after the task. After a rewind (or its undo), the next turn is told
   which files changed on disk. A subscription's own conversation isn't told,
   so mention it in your next message.

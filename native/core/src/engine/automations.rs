@@ -596,7 +596,22 @@ impl Engine {
                 CancellationToken::new(),
             )
             .await;
+            // A follow-up the user queued in the run's conversation (or a
+            // plan-limit continuation) may use the worktree next: it is
+            // only removed while nothing else runs or waits there, and the
+            // reservations keep new work out until it is gone.
+            let idle = match (
+                self.reserve_workspace(path),
+                self.0.background.reserve_idle_workspace(path),
+            ) {
+                (Ok(tasks), Ok(background)) => Some((tasks, background)),
+                _ => None,
+            };
             match inspection {
+                Ok(_) if idle.is_none() => notes.push(format!(
+                    "Another task or background process is using its worktree at {}, so it was kept.",
+                    path.display()
+                )),
                 Ok(found) if found.head == record.base_commit && untouched(&found.status) => {
                     let sid = job.session_id.clone();
                     let main = workspace.clone();

@@ -205,6 +205,7 @@ impl Engine {
         store.recover_goals()?;
         store.recover_automation_runs()?;
         store.recover_background()?;
+        crate::subagents::recover(&store)?;
         let background = Arc::new(BackgroundManager::new(store.clone(), profile_lock.clone()));
         let (sender, _) = broadcast::channel(1024);
         // Loads persisted usage so "Last checked …" is known before a refresh.
