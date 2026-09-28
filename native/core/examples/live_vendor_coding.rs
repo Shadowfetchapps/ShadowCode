@@ -1403,12 +1403,26 @@ mod tests {
         let a = "call_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6";
         let b = "call_Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4";
         let mut adapter = cli_agent::adapter_for(Vendor::Codex, false);
+        adapter.on_start(&cli_agent::LaunchOptions {
+            workspace: Path::new("/fixture").to_owned(),
+            ..Default::default()
+        });
+        adapter.prompt("fixture", &[]).unwrap();
+        adapter
+            .on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2}}"#)
+            .unwrap();
+        adapter
+            .on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"fixture-thread"}}}"#)
+            .unwrap();
+        adapter
+            .on_line(r#"{"jsonrpc":"2.0","id":3,"result":{"turn":{"id":"fixture-turn"}}}"#)
+            .unwrap();
         for (method, id, command) in [
             ("item/started", a, CHECK_COMMAND),
             ("item/started", b, "echo unrelated"),
             ("item/completed", b, "echo unrelated"),
         ] {
-            let frame = json!({"jsonrpc":"2.0","method":method,"params":{"item":{"type":"commandExecution","id":id,"command":command,"cwd":"/fixture","status":"completed","exitCode":0,"aggregatedOutput":"Ran 5 tests in 0.001s\n\nOK"}}});
+            let frame = json!({"jsonrpc":"2.0","method":method,"params":{"threadId":"fixture-thread","turnId":"fixture-turn","item":{"type":"commandExecution","id":id,"command":command,"cwd":"/fixture","status":"completed","exitCode":0,"aggregatedOutput":"Ran 5 tests in 0.001s\n\nOK"}}});
             for update in adapter.on_line(&frame.to_string()).unwrap().updates {
                 let (kind, payload) = match update {
                     Update::ToolStarted { id, name, detail } => (

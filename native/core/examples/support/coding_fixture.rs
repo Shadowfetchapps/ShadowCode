@@ -11,7 +11,7 @@ use std::{fs, io::Read, path::Path, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 pub const CHECK_COMMAND: &str = "python3 -m unittest -q";
-pub const TASK: &str = "Fix helpers.py. clamp(x, lo, hi) must constrain x to the inclusive bounds and raise ValueError when lo > hi. unique(items) must preserve first-occurrence order, support unhashable elements, and leave the input unchanged. chunks(items, size) must return a list of consecutive chunks with a possibly shorter final chunk, return [] for empty input, leave the input unchanged, and raise ValueError for size <= 0. Inspect the files with tools. Edit only helpers.py; preserve test_helpers.py unchanged. Then run exactly `python3 -m unittest -q` with exec and no cwd parameter. Report the observed result.";
+pub const TASK: &str = "Fix helpers.py. clamp(x, lo, hi) must constrain x to the inclusive bounds and raise ValueError when lo > hi. unique(items) must preserve first-occurrence order, support unhashable elements, and leave the input unchanged. chunks(items, size) must return a list of consecutive chunks with a possibly shorter final chunk, return [] for empty input, leave the input unchanged, and raise ValueError for size <= 0. Inspect the files with tools. Edit only helpers.py; preserve test_helpers.py unchanged. Then run exactly `python3 -m unittest -q` with exec from the project root; explicitly set the project as cwd when the tool accepts a cwd/working-directory argument. Report the observed result.";
 pub const SOURCE: &str = "def clamp(x, lo, hi):\n    return x\n\ndef unique(items):\n    return items\n\ndef chunks(items, size):\n    return [items]\n";
 pub const TESTS: &str = r#"import unittest
 from helpers import clamp, unique, chunks
