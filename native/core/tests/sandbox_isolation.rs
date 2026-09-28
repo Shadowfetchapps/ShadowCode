@@ -256,12 +256,33 @@ fn landlock_limits_commands_when_bubblewrap_is_missing() {
         return;
     };
     let ws = tempfile::tempdir().unwrap();
+    // A named Unix socket outside the workspace and temporary folders (like the
+    // D-Bus session bus or ShadowCode's own control socket under /run/user):
+    // reachable only where Landlock grants ResolveUnix, which the fallback
+    // grants only under the workspace and temporary folders.
+    let socket_path = probe_dir.path().join("outside.sock");
+    let abi = shadowcode_core::sandbox::status(&shadowcode_core::config::Config::default())
+        ["landlock_abi"]
+        .as_i64()
+        .unwrap_or(0);
+    let check_socket = abi >= 9 && Path::new("/usr/bin/python3").exists();
+    let _listener =
+        check_socket.then(|| std::os::unix::net::UnixListener::bind(&socket_path).unwrap());
+    let socket_probe = if check_socket {
+        format!(
+            "python3 -c \"import socket,sys; s=socket.socket(socket.AF_UNIX); \
+sys.exit(0 if s.connect_ex('{}')==0 else 1)\" 2>/dev/null && exit 14\n",
+            socket_path.display()
+        )
+    } else {
+        String::new()
+    };
     std::env::set_var("PATH", "");
     let script = format!(
         r#"PATH=/usr/bin:/bin
 cat "{probe}" > /dev/null 2>&1 && exit 11
 touch "{dir}/created-by-sandbox" 2>/dev/null && exit 12
-printf ok > written.txt || exit 13
+{socket_probe}printf ok > written.txt || exit 13
 exit 0
 "#,
         probe = probe.display(),
