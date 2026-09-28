@@ -226,14 +226,21 @@ const execute = (script, args = []) => wd("POST", `/session/${session}/execute/s
 async function composerControlsFit(label) {
   const problems = await execute(`
     const panel = document.querySelector('form.composer').getBoundingClientRect();
+    // WebKitGTK keeps geometry for the content of a closed <details> (it is
+    // skipped, not removed), so the closed More menu's options are left out
+    // here; hit testing below proves they cannot catch a click.
+    const closedMenu = el => { const d = el.closest('details'); return d && !d.open && !el.closest('summary'); };
     const controls = [...document.querySelectorAll('.composer-footer button, .composer-footer select')]
-      .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden')
-      .map(el => ({name: el.getAttribute('aria-label') || el.textContent.trim(), box: el.getBoundingClientRect()}));
+      .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden' && !closedMenu(el))
+      .map(el => ({el, name: el.getAttribute('aria-label') || el.textContent.trim(), box: el.getBoundingClientRect()}));
     const problems = controls.length < 4 ? ['missing composer controls'] : [];
     for (const [index, control] of controls.entries()) {
       const r = control.box;
       if (r.left < panel.left - 1 || r.right > panel.right + 1 || r.top < panel.top - 1 || r.bottom > panel.bottom + 1)
         problems.push('outside composer: ' + control.name);
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      if (!hit || !(control.el === hit || control.el.contains(hit)))
+        problems.push('covered: ' + control.name);
       for (const other of controls.slice(index + 1)) {
         const b = other.box;
         if (Math.min(r.right, b.right) - Math.max(r.left, b.left) > 1 && Math.min(r.bottom, b.bottom) - Math.max(r.top, b.top) > 1)
