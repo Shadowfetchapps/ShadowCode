@@ -613,3 +613,55 @@ async fn ntfy_messages_follow_the_shared_decision() {
     cancel.cancel();
     f.manager.stop();
 }
+
+/// Moving the server from this computer only to every address on the same
+/// port restarts it there, instead of failing because the old server still
+/// held the port. The runtime's only worker is kept busy during the change,
+/// so the old server cannot close its socket on its own first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn changing_the_address_restarts_on_the_same_port() {
+    ui_files();
+    let dir = tempfile::tempdir().unwrap();
+    let paths = AppPaths::isolated(&dir.path().join("profile")).unwrap();
+    let workspace = dir.path().join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let service = Service::open(paths, Some(workspace)).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let status = service
+        .dispatch(Request {
+            method: "PUT".into(),
+            path: "/api/remote".into(),
+            body: json!({"enabled": true, "address": "127.0.0.1", "port": port}),
+        })
+        .await
+        .unwrap();
+    assert_eq!(status["error"], Value::Null, "{status}");
+    assert_eq!(
+        service.remote().address(),
+        Some(SocketAddr::from(([127, 0, 0, 1], port)))
+    );
+    let (started, busy) = std::sync::mpsc::channel();
+    let hold = tokio::spawn(async move {
+        started.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+    });
+    busy.recv().unwrap();
+    let (manager, owner) = (service.remote().clone(), service.clone());
+    let status = tokio::task::spawn_blocking(move || {
+        manager.configure(&owner, &json!({"address": "0.0.0.0"}))
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    hold.await.unwrap();
+    assert_eq!(status["error"], Value::Null, "{status}");
+    assert_eq!(
+        service.remote().address(),
+        Some(SocketAddr::from(([0, 0, 0, 0], port)))
+    );
+    service.remote().stop();
+}

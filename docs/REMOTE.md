@@ -12,7 +12,9 @@ Remote access is **off by default** and only devices you pair can connect.
 
 **In the desktop app:** open **Settings › Remote access** and turn on
 **Turn on remote access**. It listens on `127.0.0.1:7390` (this computer
-only) until you choose another address.
+only) until you choose another address. Choosing another address or port
+restarts the server there (on the same port too: the old one is closed
+first).
 
 **Without a window:** run the headless engine with the web server:
 

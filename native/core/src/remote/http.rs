@@ -152,7 +152,12 @@ fn close_views(views: Vec<Service>) {
 }
 
 /// Accept connections until the manager stops this server.
-pub(super) async fn serve(listener: TcpListener, shared: Arc<Shared>) {
+/// `closing` is dropped as soon as the listening socket is closed.
+pub(super) async fn serve(
+    listener: TcpListener,
+    shared: Arc<Shared>,
+    closing: std::sync::mpsc::Sender<()>,
+) {
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut connections = JoinSet::new();
     loop {
@@ -188,6 +193,7 @@ pub(super) async fn serve(listener: TcpListener, shared: Arc<Shared>) {
         }
     }
     drop(listener);
+    drop(closing);
     connections.abort_all();
     while connections.join_next().await.is_some() {}
     let views: Vec<Service> = shared
