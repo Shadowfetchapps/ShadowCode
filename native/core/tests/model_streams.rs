@@ -924,3 +924,42 @@ fn unindexed_duplicate_object_calls_are_refused_without_losing_later_usage() {
         }
     }
 }
+
+/// A remote provider's refusal shows its JSON error message, redacted and
+/// bounded, never an HTML error page; a local runtime's reply is shown as is.
+#[test]
+fn provider_error_details_are_the_providers_own_redacted_message() {
+    use shadowcode_core::models::provider_error_detail;
+    assert_eq!(
+        provider_error_detail(br#"{"error":{"message":"Insufficient credits"}}"#, false).as_deref(),
+        Some("Insufficient credits")
+    );
+    assert_eq!(
+        provider_error_detail(br#"{"message":"Model not found"}"#, false).as_deref(),
+        Some("Model not found")
+    );
+    assert_eq!(
+        provider_error_detail(br#"{"error":"quota exhausted"}"#, false).as_deref(),
+        Some("quota exhausted")
+    );
+    assert_eq!(
+        provider_error_detail(b"<html><body>502 Bad Gateway</body></html>", false),
+        None
+    );
+    let key = format!("{}{}", "sk-proj-", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789");
+    let shown = provider_error_detail(
+        json!({"error":{"message":format!("Incorrect API key provided: {key}")}})
+            .to_string()
+            .as_bytes(),
+        false,
+    )
+    .unwrap();
+    assert!(shown.starts_with("Incorrect API key provided"), "{shown}");
+    assert!(!shown.contains("AbCdEfGh"), "{shown}");
+    let long = json!({"error":{"message":"x".repeat(5000)}}).to_string();
+    assert!(provider_error_detail(long.as_bytes(), false).unwrap().len() <= 300);
+    assert_eq!(
+        provider_error_detail(b"the request exceeds the available context size", true).as_deref(),
+        Some("the request exceeds the available context size")
+    );
+}

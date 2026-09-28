@@ -138,12 +138,7 @@ impl Engine {
             queues.jobs.remove(&job.id);
         }
         if let Err(error) = finished {
-            if let Ok(mut record) = running.record.lock() {
-                record.status = "failed".into();
-                record.summary = format!("Could not persist final task state: {error:#}");
-            }
-            running.finished.store(true, Ordering::Release);
-            running.done.notify_waiters();
+            self.finish_after_failed_save(&running, &error);
         }
         running.snapshot()
     }

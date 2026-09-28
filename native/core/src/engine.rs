@@ -1229,13 +1229,7 @@ impl Engine {
                 // together with its removal from the queue below (no await in
                 // between), which rewind and follow-up starts rely on.
                 if let Err(error) = self.finish(&job, result, plan) {
-                    if let Ok(mut record) = job.record.lock() {
-                        record.status = "failed".into();
-                        record.summary = format!("Could not persist final task state: {error:#}");
-                    }
-                    job.finished.store(true, Ordering::Release);
-                    job.done.notify_waiters();
-                    self.0.local_job_changed.notify_waiters();
+                    self.finish_after_failed_save(&job, &error);
                 }
                 // A subscription ran out: keep going on a local model when
                 // the user chose that (limits.on_limit = "local").
@@ -1479,6 +1473,49 @@ impl Engine {
         running.done.notify_waiters();
         self.0.local_job_changed.notify_waiters();
         Ok(())
+    }
+    /// `finish` could not save the final state (for example a database
+    /// error). The job still ends: it is marked failed in memory and, as far
+    /// as the database allows, in its saved row with a terminal event, so the
+    /// conversation shows a failure instead of a task that runs forever.
+    fn finish_after_failed_save(&self, running: &Running, error: &anyhow::Error) {
+        let record = running.record.lock().ok().map(|mut record| {
+            record.status = "failed".into();
+            record.summary = format!("Could not save the final task state: {error:#}");
+            record.finished_at = Some(crate::now());
+            record.result = Some(json!({
+                "success": false,
+                "cancelled": false,
+                "summary": record.summary,
+                "usage": record.usage,
+                "usage_is_estimated": record.usage_is_estimated,
+            }));
+            record.clone()
+        });
+        if let Some(mut record) = record {
+            self.0.approvals.deny_task(&record.task_id);
+            let payload = record.result.clone().unwrap_or(Value::Null);
+            if let Ok(event) = self.0.store.add_event(
+                "agent.completed",
+                &payload,
+                Some(&record.session_id),
+                Some(&record.task_id),
+            ) {
+                record.event_cursor = event["id"].as_i64().unwrap_or(record.event_cursor);
+                if let Ok(mut current) = running.record.lock() {
+                    current.event_cursor = record.event_cursor;
+                }
+                let _ = self.0.sender.send(event);
+            }
+            let _ = self.0.store.save_job(&json!(record));
+            let _ = self.0.store.execute(
+                "UPDATE tasks SET status='failed',summary=?,completed_at=? WHERE id=?",
+                rusqlite::params![record.summary, crate::now(), record.task_id],
+            );
+        }
+        running.finished.store(true, Ordering::Release);
+        running.done.notify_waiters();
+        self.0.local_job_changed.notify_waiters();
     }
     async fn run(&self, running: &Running) -> Result<(String, Value)> {
         // Queue removal and starting work share this lock. A stale queue button

@@ -3572,3 +3572,202 @@ async fn repeated_result_paths_advise_once_without_suppressing_reread_edit_or_ch
         }
     }
 }
+
+/// An HTTP server that answers every request with one fixed status and JSON
+/// body, counting the requests.
+async fn refusing_server(
+    status: u16,
+    body: Value,
+) -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = count.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut request = vec![0; 65536];
+            let _ = socket.read(&mut request).await;
+            let text = body.to_string();
+            let _ = socket
+                .write_all(format!("HTTP/1.1 {status} ERR\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).as_bytes())
+                .await;
+        }
+    });
+    (endpoint, count, task)
+}
+
+fn terminal_events(events: &[Value], task_id: &str) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|e| e["type"] == "agent.completed" && e["task_id"] == task_id)
+        .cloned()
+        .collect()
+}
+
+/// RUN-02: a task that fails before any model output (the provider cannot be
+/// reached, or preparing the request fails inside the engine) ends as failed
+/// with one terminal event carrying a clear reason, before and after a
+/// restart, so the conversation shows the failure instead of a spinner.
+#[tokio::test]
+async fn failures_before_streaming_end_the_conversation_with_a_clear_reason() {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1", closed.local_addr().unwrap());
+    drop(closed);
+    let (root, engine) = setup(&endpoint);
+    Config::patch(engine.paths(), json!({"agent":{"model_retries":0}})).unwrap();
+    let job = engine
+        .start(request(root.path(), "Say hello", None))
+        .await
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    assert_eq!(result.status, "failed");
+    assert!(
+        result
+            .summary
+            .contains("Could not connect to the model provider"),
+        "{}",
+        result.summary
+    );
+    assert_eq!((result.usage.total_tokens, result.usage.turns), (0, 0));
+    let (saved, events) = reopen_terminal_job(engine, result).await;
+    let terminal = terminal_events(&events, &saved.task_id);
+    assert_eq!(terminal[0]["payload"]["success"], false);
+    assert_eq!(terminal[0]["payload"]["summary"], saved.summary.as_str());
+    assert!(!events
+        .iter()
+        .any(|e| e["type"] == "model.delta" && e["task_id"] == saved.task_id));
+
+    // A failure inside the engine after the task started running.
+    let server = support::server(|_, _| (response("Hello.", json!([])), Duration::ZERO)).await;
+    let (root, engine) = setup(&server.endpoint);
+    let mut start = request(root.path(), "Describe the picture", None);
+    start.images = vec!["missing-picture.png".into()];
+    let job = engine.start(start).await.unwrap();
+    let result = wait(&engine, &job.id).await;
+    assert_eq!(result.status, "failed");
+    assert!(
+        result.summary.contains("missing-picture.png"),
+        "{}",
+        result.summary
+    );
+    assert!(server.requests.lock().unwrap().is_empty());
+    let (saved, events) = reopen_terminal_job(engine, result).await;
+    assert_eq!(terminal_events(&events, &saved.task_id).len(), 1);
+}
+
+/// PRV-01: an expired or wrong key, an account out of credits and an
+/// exhausted quota end the task with the provider's own explanation, and no
+/// usage is invented for the refused request.
+#[tokio::test]
+async fn provider_refusals_are_explained_and_record_no_usage() {
+    let cases = [
+        (
+            401,
+            json!({"error":{"message":"Invalid API key provided","code":401}}),
+            vec!["HTTP 401", "check the API key", "Invalid API key provided"],
+        ),
+        (
+            402,
+            json!({"error":{"message":"Insufficient credits. Add more to continue.","code":402}}),
+            vec!["HTTP 402", "credits", "Insufficient credits"],
+        ),
+        (
+            429,
+            json!({"error":{"message":"You exceeded your current quota","code":"insufficient_quota"}}),
+            vec!["HTTP 429", "rate limit", "exceeded your current quota"],
+        ),
+        // Some providers answer with an error object and HTTP 200.
+        (
+            200,
+            json!({"error":{"message":"Insufficient credits. Add more to continue.","code":402}}),
+            vec!["Insufficient credits"],
+        ),
+    ];
+    for (status, body, needles) in cases {
+        let (endpoint, requests, task) = refusing_server(status, body).await;
+        let (root, engine) = setup(&endpoint);
+        Config::patch(engine.paths(), json!({"agent":{"model_retries":0}})).unwrap();
+        let job = engine
+            .start(request(root.path(), "Say hello", None))
+            .await
+            .unwrap();
+        let result = wait(&engine, &job.id).await;
+        assert_eq!(result.status, "failed", "{status}");
+        for needle in needles {
+            assert!(
+                result.summary.contains(needle),
+                "{status}: {needle} missing from {}",
+                result.summary
+            );
+        }
+        assert_eq!(
+            (
+                result.usage.total_tokens,
+                result.usage.turns,
+                result.usage.cost_usd
+            ),
+            (0, 0, None),
+            "{status}"
+        );
+        assert!(!result.usage_is_estimated);
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let events = engine
+            .store()
+            .recent_events(&result.session_id, 300)
+            .unwrap();
+        assert!(!events.iter().any(|e| e["type"] == "usage.updated"));
+        assert_eq!(terminal_events(&events, &result.task_id).len(), 1);
+        engine.shutdown().await.unwrap();
+        task.abort();
+    }
+}
+
+/// A final state that cannot be saved the normal way (here its task row is
+/// gone) still ends the job as failed in the database, with a terminal
+/// event, so the conversation can be stopped, read and deleted.
+#[tokio::test]
+async fn a_final_state_that_cannot_be_saved_still_ends_the_task() {
+    let server =
+        support::server(|_, _| (response("Done.", json!([])), Duration::from_millis(800))).await;
+    let (root, engine) = setup(&server.endpoint);
+    let job = engine
+        .start(request(root.path(), "Say hello", None))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while server.requests.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let db = rusqlite::Connection::open(engine.paths().database()).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute("DELETE FROM tasks WHERE id=?", [&job.task_id])
+        .unwrap();
+    let result = wait(&engine, &job.id).await;
+    assert_eq!(result.status, "failed");
+    assert!(result
+        .summary
+        .contains("Could not save the final task state"));
+    let saved: Job = serde_json::from_value(engine.store().job(&job.id).unwrap().unwrap()).unwrap();
+    assert_eq!(saved.status, "failed");
+    let events = engine.store().recent_events(&job.session_id, 100).unwrap();
+    assert_eq!(terminal_events(&events, &job.task_id).len(), 1);
+    assert!(engine
+        .store()
+        .current_job(&job.session_id, false)
+        .unwrap()
+        .is_none());
+    assert!(engine.delete_session(&job.session_id).unwrap());
+    engine.shutdown().await.unwrap();
+}

@@ -689,7 +689,15 @@ Usage = {
   only on 429/503. At most `agent.model_retries` retries (default 3, max 10);
   waits double from `agent.retry_backoff_sec` with jitter (capped at 30 s); a
   `Retry-After` over 120 s is not waited for. Tool calls run only after a
-  complete response, so a retry never repeats a tool.
+  complete response, so a retry never repeats a tool. A request that is not
+  retried (or runs out of retries) fails the task with the provider's own
+  reason: `Model provider returned HTTP <status>; <hint>: <message>` (hints
+  for 401/403 key, 402 credits, 404 endpoint or model, 429 rate limit,
+  503/529 overload), or `Provider reported an error while generating:
+  <message>` for an error object inside the stream or in an HTTP 200 reply.
+  A remote provider's message comes from its JSON error body only, redacted
+  and at most 300 bytes. A refused request adds no usage unless the provider
+  reported tokens for it.
 - Event `context.compacted {before_estimated_tokens, after_estimated_tokens,
   omitted_messages, response_token_limit, method, preserved, summary?,
   summary_model?, summary_ms?, fallback_reason?}`: `method` is
