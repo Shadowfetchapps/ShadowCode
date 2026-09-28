@@ -233,8 +233,8 @@ plan runs out** to **Ask me** to choose each time. Details:
 
 ## Compare
 
-**Compare** (next to **Send**) runs one task on 2 or 3 models, each
-in its own Git worktree that starts from your latest commit plus your
+**Compare** (in the composer's **More** menu) runs one task on 2 or 3
+models, each in its own Git worktree that starts from your latest commit plus your
 uncommitted work. Your checkout is not touched while they work. The
 **Comparisons** view shows the lanes side by side: files changed, checks run,
 time and usage, and a link to each lane's conversation. **Keep** one result to
@@ -248,8 +248,10 @@ a comparison. Details: [compare](docs/COMPARE.md).
 
 - **Composer.** Type `@` to attach project files or folders (or a
   subagent), ↑ for earlier prompts, and switch between **Code**, **Plan**
-  and **Ask**. An effort control appears for models that support one. Your
-  messages can be edited and resent, retried or copied.
+  and **Ask**. Model, mode, permission and web controls stay visible; **More**
+  holds reasoning effort, Compare and Worktree to keep the message area clear.
+  A non-default effort remains marked on the **More** button.
+  Your messages can be edited and resent, retried or copied.
 - **Editor.** Open project files with syntax highlighting, find/replace,
   undo/redo and recovery drafts. Saving checks whether the file changed on
   disk before replacing it.
@@ -290,9 +292,9 @@ subscription CLIs bring their own agents.
 
 ## Parallel tasks
 
-**Worktree** (next to **Send**, or `Ctrl+Shift+Enter`) starts a task in its
-own worktree of the project, so it runs while another task works in your
-checkout. When it is done, **Apply to project** (checked with `git apply
+Choose **Worktree** in the composer's **More** menu (or press
+`Ctrl+Shift+Enter`) to start a task in its own worktree of the project, so it
+runs while another task works in your checkout. When it is done, **Apply to project** (checked with `git apply
 --check` first; conflicting files are listed and nothing is written), **Keep
 as branch** or **Discard**. The sidebar marks conversations that are running,
 need your approval, failed or finished while you were elsewhere; desktop

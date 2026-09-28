@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A calmer composer.** Model, Code / Plan / Ask, permissions and Web stay
+  in view; reasoning effort, Compare and Worktree move under **More**, which
+  closes with Escape or an outside click. A non-default effort stays marked
+  on the button, and `Ctrl+Shift+Enter` still starts a worktree task
+  directly. Compare and Worktree explain why they are unavailable without
+  closing the menu or pretending to run.
+- **Richer AppStream metadata** (feature list, bug tracker, developer,
+  content rating and release history). The package check now validates it
+  strictly and requires the newest listed release to be the packaged
+  version.
 - Refresh visible check evidence after editor saves, editor-observed disk changes and relevant same-session engine events. Hide old passing results immediately and discard refresh responses superseded by an edit. This change is not included in the published 0.33.1 packages.
 
 ## 0.33.1: Reliability and daily workflow

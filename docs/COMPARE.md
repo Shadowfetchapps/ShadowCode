@@ -1,6 +1,7 @@
 # Compare
 
-Compare sends one task to 2 or 3 models. Each model works in its own
+Open **More › Compare** in the composer to send one task to 2 or 3 models.
+Each model works in its own
 lane, which is a managed Git worktree on a `shadowcode/<ID>` branch. When the
 lanes finish, you keep one result. Its changes are applied to your project's
 working tree, and every lane worktree and its branch is removed.

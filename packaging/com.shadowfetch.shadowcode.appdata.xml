@@ -29,11 +29,6 @@
     <binary>shadowcode</binary>
   </provides>
   <releases>
-    <release version="0.33.2" date="2026-09-28">
-      <description>
-        <p>Less-frequent composer controls move under More, finished tasks refresh their check results after edits, and the documentation and screenshots match the current app.</p>
-      </description>
-    </release>
     <release version="0.33.1" date="2026-09-28">
       <description>
         <p>Reliability and daily workflow: an editor with drafts, Run a check on finished tasks, sign-in recovery, safer Compare and the first signed release.</p>

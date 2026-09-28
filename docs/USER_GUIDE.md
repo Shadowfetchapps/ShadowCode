@@ -71,6 +71,14 @@ default for new conversations.
 
 Type in the composer and press `Enter`. `Shift+Enter` adds a line.
 
+The composer keeps your model, **Code / Plan / Ask**, permission and **Web**
+choices in view. Open **More** for reasoning effort, **Compare** and
+**Worktree**; press `Escape` or click outside to close it. `Ctrl+Shift+Enter`
+starts a worktree task without opening the menu, and a non-default reasoning
+effort stays marked on the **More** button.
+
+![More task options in the composer](images/composer-more.png)
+
 - **Attachments.** Attach text files or up to four images per message. Images
   are accepted only when the selected row is marked Vision. Attachments are
   copied into `<project>/.shadow/attachments/`.
@@ -97,9 +105,9 @@ Type in the composer and press `Enter`. `Shift+Enter` adds a line.
   mode for the next message. *Plan* and *Ask* are read-only: the agent reads
   the project and answers or writes a plan, and nothing is changed.
   `/plan` and `/review` do the same for one message.
-- **Reasoning effort.** Where the chosen model has an effort setting, a
-  *Effort* control appears next to the model: *default*, *low*, *medium* or
-  *high*, remembered per model. It maps to OpenRouter's `reasoning.effort`,
+- **Reasoning effort.** Where the chosen model has an effort setting, choose
+  *More › Effort*: *default*, *low*, *medium* or *high*, remembered per
+  model. It maps to OpenRouter's `reasoning.effort`,
   the thinking switch of local models whose chat template has one (off for
   *low*), Codex's `model_reasoning_effort` and Claude Code's thinking budget.
   Cursor, Grok and Antigravity don't take one, so the control is hidden.
@@ -404,8 +412,8 @@ reached its limit. **Refresh** checks the vendor accounts again.
 
 ## Compare models
 
-Not sure which model suits a task? Type it, then press **Compare** next to
-**Send** and choose 2 or 3 models (at most one on this computer). Each works
+Not sure which model suits a task? Type it, open **More › Compare**, and
+choose 2 or 3 models (at most one on this computer). Each works
 in its own copy of the project, starting from your latest commit plus any
 uncommitted work, so your files stay as they are until you choose.
 
@@ -430,8 +438,8 @@ lanes use your plan, OpenRouter lanes are billed per token. Details:
 ## Run tasks side by side
 
 A project runs one task at a time in its folder. To start another while one
-is working, type it and press **Worktree** next to **Send** (or
-`Ctrl+Shift+Enter`). While a task is running, the button reads **Run now in
+is working, type it and choose **More › Worktree** (or press
+`Ctrl+Shift+Enter`). While a task is running, the menu item reads **Run now in
 worktree** instead of queueing.
 
 The new task gets its own conversation and its own copy of the project,
