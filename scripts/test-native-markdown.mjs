@@ -4,7 +4,8 @@
 // Build ui/dist and the desktop binary first, then run:
 //   node scripts/run-native-x11.mjs node scripts/test-native-markdown.mjs
 // This qualifies the supplied native binary under Xvfb/X11 and WebKitGTK.
-// It does not qualify Wayland, an AppImage package, or native UI performance.
+// An AppImage may be supplied with --appimage-extract-and-run to qualify the
+// exact packaged executable. It does not qualify Wayland or UI performance.
 //
 // SHADOW_DESKTOP_BINARY  binary (default target/debug/shadowcode)
 // SHADOW_TAURI_DRIVER    tauri-driver executable (default tauri-driver on PATH)
@@ -15,16 +16,20 @@ import assert from 'node:assert/strict';
 import { capturePrivateSession, writePrivateSessionReport } from './native-test-session.mjs';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { matchesPackagedExecutable } from './native-process-ownership.mjs';
 
 const privateSession = await capturePrivateSession();
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const binary = await realpath(process.env.SHADOW_DESKTOP_BINARY || path.join(repo, 'target/debug/shadowcode'));
+const binaryArgs = JSON.parse(process.env.SHADOW_DESKTOP_ARGS || '[]');
+assert.ok(Array.isArray(binaryArgs) && binaryArgs.every((arg) => typeof arg === 'string'), 'SHADOW_DESKTOP_ARGS must be a JSON array of strings');
 const driverBinary = process.env.SHADOW_TAURI_DRIVER || 'tauri-driver';
 const webkitDriver = process.env.SHADOW_WEBKIT_DRIVER;
 const artifactParent = path.resolve(process.env.SHADOW_NATIVE_ARTIFACTS || path.join(repo, 'artifacts/native-markdown'));
@@ -38,6 +43,23 @@ const workerPath = `/assets/${workers[0]}`;
 const workerBytes = await readFile(path.join(repo, 'ui/dist', workerPath.slice(1)));
 const expectedWorkerSha256 = createHash('sha256').update(workerBytes).digest('hex');
 const scratch = await mkdtemp(path.join(tmpdir(), 'shadowcode-native-markdown-'));
+const headerHandle = await open(binary, 'r');
+const appImageHeader = Buffer.alloc(11);
+try { await headerHandle.read(appImageHeader, 0, appImageHeader.length, 0); }
+finally { await headerHandle.close(); }
+let packagedExecutableSha256;
+if (appImageHeader.subarray(8, 11).equals(Buffer.from([0x41, 0x49, 0x02]))) {
+  assert.ok(binaryArgs.includes('--appimage-extract-and-run') || process.env.APPIMAGE_EXTRACT_AND_RUN === '1',
+    'AppImage Markdown qualification requires --appimage-extract-and-run');
+  const run = promisify(execFile);
+  const extractedRoot = path.join(scratch, 'squashfs-root');
+  await run(binary, ['--appimage-extract', 'usr/bin/shadowcode'], { cwd: scratch, timeout: 30000 });
+  const packagedExecutable = path.join(extractedRoot, 'usr/bin/shadowcode');
+  const packagedStat = await stat(packagedExecutable);
+  assert.ok(packagedStat.isFile() && (packagedStat.mode & 0o111), 'AppImage contains an executable usr/bin/shadowcode');
+  packagedExecutableSha256 = createHash('sha256').update(await readFile(packagedExecutable)).digest('hex');
+  await rm(extractedRoot, { recursive: true, force: true });
+}
 const profile = path.join(scratch, 'profile');
 const project = path.join(scratch, 'project');
 await mkdir(project, { recursive: true });
@@ -137,8 +159,10 @@ async function native(command, args = {}) {
 }
 const api = (route) => native('api', { request: { method: 'GET', path: route, body: null } });
 const report = {
-  scope: 'Native Tauri Markdown module worker under Xvfb/X11 WebKitGTK; not Wayland, AppImage package, or UI performance qualification',
-  binary, artifacts, workerPath, expectedScript, expectedWorkerSha256,
+  scope: packagedExecutableSha256
+    ? 'AppImage Tauri Markdown module worker under Xvfb/X11 WebKitGTK; not Wayland or UI performance qualification'
+    : 'Native Tauri Markdown module worker under Xvfb/X11 WebKitGTK; not Wayland or AppImage package qualification',
+  binary, binaryArgs, packagedExecutableSha256, artifacts, workerPath, expectedScript, expectedWorkerSha256,
   profile, project, cli_agents_enabled: false, network_mode: 'offline',
 };
 async function sameOwnedGroup(identity, group = driver.pid) {
@@ -165,13 +189,24 @@ async function signalOwnedGroup(signal, group = driver.pid, members = ownedGroup
 async function matchesOwnedApp(identity) {
   if (!await sameProcess(identity)) return false;
   try {
-    const executable = await readlink(`/proc/${identity.pid}/exe`);
-    if (executable !== binary) return false;
-    const args = (await readFile(`/proc/${identity.pid}/cmdline`, 'utf8')).split('\0');
-    const exactOption = (name, value) => args.filter(arg => arg === name).length === 1
-      && args.indexOf(name) > 0 && args[args.indexOf(name) + 1] === value;
-    return exactOption('--profile', profile)
-      && exactOption('--workspace', project) && await sameProcess(identity);
+    const hasPrivateArguments = async () => {
+      const args = (await readFile(`/proc/${identity.pid}/cmdline`, 'utf8')).split('\0');
+      const exactOption = (name, value) => args.filter(arg => arg === name).length === 1
+        && args.indexOf(name) > 0 && args[args.indexOf(name) + 1] === value;
+      return exactOption('--profile', profile) && exactOption('--workspace', project);
+    };
+    const executableMatches = async () => {
+      const executable = await readlink(`/proc/${identity.pid}/exe`);
+      const runningSha256 = packagedExecutableSha256
+        ? createHash('sha256').update(await readFile(`/proc/${identity.pid}/exe`)).digest('hex')
+        : undefined;
+      return matchesPackagedExecutable({ runningPath: executable, launchedPath: binary,
+        runningSha256, packagedSha256: packagedExecutableSha256 });
+    };
+    if (!await hasPrivateArguments() || !await executableMatches()) return false;
+    // Revalidate the executable and private launch scope after reading its
+    // bytes, so an exec or PID reuse cannot turn a partial match into authority.
+    return await hasPrivateArguments() && await executableMatches() && await sameProcess(identity);
   } catch { return false; }
 }
 async function captureAppGroup() {
@@ -223,7 +258,7 @@ try {
   await until('WebDriver startup', (remaining) => wd('GET', '/status', undefined, remaining));
   launchRequested = true;
   session = (await wd('POST', '/session', { capabilities: { alwaysMatch: { 'tauri:options': {
-    application: binary, args: ['--profile', profile, '--workspace', project],
+    application: binary, args: [...binaryArgs, '--profile', profile, '--workspace', project],
   } } } })).sessionId;
   await wd('POST', `/session/${session}/timeouts`, { script: 20000, implicit: 0, pageLoad: 30000 });
   await until('Native application ready', (remaining) => execute('return !!window.__TAURI_INTERNALS__ && !!document.querySelector(".app-shell, textarea, #onboarding-folder")', [], remaining));
@@ -232,6 +267,12 @@ try {
   assert.equal(report.version.runtime, 'rust');
   const candidate = await processIdentity(report.version.pid);
   assert.ok(candidate, 'Native API reports a live process');
+  report.appExecutable = {
+    path: await readlink(`/proc/${candidate.pid}/exe`),
+    sha256: packagedExecutableSha256
+      ? createHash('sha256').update(await readFile(`/proc/${candidate.pid}/exe`)).digest('hex')
+      : null,
+  };
   assert.equal(await matchesOwnedApp(candidate), true, 'Native process belongs to this exact binary, private profile and workspace');
   appIdentity = candidate;
   await captureAppGroup();

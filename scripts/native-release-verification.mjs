@@ -11,7 +11,7 @@ import { pathToFileURL } from 'node:url';
 const version = String.raw`VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")`;
 const packaged = `${version}\nBINARY="$GITHUB_WORKSPACE/target/release/bundle/appimage/ShadowCode_${'${VERSION}'}_amd64.AppImage"`;
 export const GATES = {
-  'release-tests': { script: 'node --test --test-reporter=tap scripts/test-native-release.mjs scripts/test-native-release-verification.mjs scripts/test-publisher-auth.mjs scripts/test-native-release-signing.mjs scripts/test-native-test-session.mjs' },
+  'release-tests': { script: 'node --test --test-reporter=tap scripts/test-native-release.mjs scripts/test-native-release-verification.mjs scripts/test-publisher-auth.mjs scripts/test-native-release-signing.mjs scripts/test-native-test-session.mjs scripts/test-clean-host-mcp-receipt.mjs scripts/test-clean-host-container.mjs\nnode scripts/test-native-process-ownership.mjs' },
   'release-auth': { script: 'node scripts/check-secrets.mjs\nnode --test --test-reporter=tap scripts/test-native-release-auth.mjs scripts/test-check-secrets.mjs', scope: 'Publisher authentication parser, crypto, replay and private-snapshot fixtures with ephemeral keys; production signing and installer integration are separate.' },
   'release-tag': { script: `${version}\n` + String.raw`test "$GITHUB_REF_NAME" = "v$VERSION"
 test "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)" = "$VERSION"
@@ -25,6 +25,8 @@ CARGO_TERM_COLOR=never SHADOWCODE_CLEANUP_BUILT_FIXTURE="$GITHUB_WORKSPACE" SHAD
 grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' artifacts/built-project-cleanup/test.log`, scope: 'Release-profile cleanup over the actual npm-installed ui/node_modules and built ui/dist on the CI host, with entries/bytes/time reported. Full multi-GiB Cargo-cache qualification is separate.' },
   'native-behavior': { script: 'node scripts/test-native-cli.mjs\nnode scripts/test-native-stress.mjs\nnode scripts/test-native-tui.mjs\nnode scripts/test-native-mcp-server.mjs\nSHADOW_MCP_TRANSPORT=http node scripts/test-native-mcp-server.mjs' },
   'native-window': { script: "cargo +1.95.0 install tauri-driver --version 2.0.6 --locked\nnode scripts/run-native-x11.mjs node scripts/test-native-desktop.mjs\nnode scripts/run-native-x11.mjs node scripts/test-native-markdown.mjs", scope: 'Native fixture window and embedded Markdown worker under the real security policy; authenticated cloud-consent check is optional and reported separately. This is X11 source-binary evidence, not Wayland or standalone package qualification.' },
+  'native-endurance': { script: `SHADOW_NATIVE_ENDURANCE=1 SHADOW_NATIVE_ARTIFACTS=artifacts/native-endurance node scripts/run-native-x11.mjs node scripts/test-native-desktop.mjs
+node --input-type=module -e 'import assert from "node:assert/strict"; import { readFileSync } from "node:fs"; const receipt = JSON.parse(readFileSync("artifacts/native-endurance/native-endurance.json", "utf8")); assert.equal(receipt.passed, true); assert.equal(receipt.completed, 100);'`, scope: '100 sequential short command tasks through the real X11/WebKit window with explicit approvals and resource/listener measurements; the shared smoke optional cloud-consent observation is reported separately. Separate from representative long-stream input latency, physical Wayland, GPU inference and release-package endurance.' },
   'managed-runtime': { script: 'bash scripts/build-llama.cpp.sh --no-user-install\nnode --test --test-reporter=tap scripts/test-llama-runtime.mjs' },
   packages: { artifacts: true, script: `${version}\n` + String.raw`node scripts/build-native.mjs
 node --test --test-reporter=tap scripts/test-native-packaging-env.mjs
@@ -32,11 +34,12 @@ node scripts/check-native-package.mjs "target/release/bundle/appimage/ShadowCode
 node scripts/test-native-runtime-write-errors.mjs
 node scripts/test-native-runtime-sources.mjs
 node scripts/test-native-runtime.mjs` },
-  'clean-host-packages': { artifacts: true, unchanged: true, scope: 'Both packages installed or extracted in a network-disabled Debian 13 runtime container; offline CLI status, Debian launcher/icon metadata and a visible first GUI window under Xvfb. GUI interaction, physical Wayland, local inference, model downloads and installer rollback remain separate.', script: `${version}\n` + String.raw`docker build -f scripts/clean-host-runtime.Dockerfile -t shadowcode-clean-runtime:ci scripts
+  'clean-host-packages': { artifacts: true, unchanged: true, scope: 'Both packages installed or extracted in a network-disabled Debian 13 runtime container; offline CLI status, Debian launcher/icon metadata, packaged MCP stdio initialize/tool discovery and a visible first GUI window under Xvfb. Interactive GUI tasks, physical Wayland, local inference, model downloads and installer rollback remain separate.', script: `${version}\n` + String.raw`docker build -f scripts/clean-host-runtime.Dockerfile -t shadowcode-clean-runtime:ci scripts
 node scripts/test-clean-host-packages.mjs "target/release/bundle/appimage/ShadowCode_${'${VERSION}'}_amd64.AppImage" "target/release/bundle/deb/ShadowCode_${'${VERSION}'}_amd64.deb" artifacts/native-package/SHA256SUMS` },
   'packaged-behavior': { artifacts: true, unchanged: true, scope: 'Packaged fixture behavior on the CI build host; authenticated cloud-consent check is optional and reported separately.', script: `${packaged}\n` + String.raw`SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_CLI_ARGS='["--appimage-extract-and-run"]' node scripts/test-native-cli.mjs
 SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_CLI_ARGS='["--appimage-extract-and-run"]' node scripts/test-native-tui.mjs
 SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_DESKTOP_ARGS='["--appimage-extract-and-run","ui"]' SHADOW_NATIVE_DEFAULT_PROFILE=1 node scripts/run-native-x11.mjs node scripts/test-native-desktop.mjs
+SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_DESKTOP_ARGS='["--appimage-extract-and-run"]' node scripts/run-native-x11.mjs node scripts/test-native-markdown.mjs
 SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_CLI_ARGS='["--appimage-extract-and-run"]' SHADOW_MCP_TRANSPORT=http node scripts/test-native-mcp-server.mjs
 npm --prefix scripts/native-mcp-peer ci --ignore-scripts --no-audit --no-fund
 SHADOW_DESKTOP_BINARY="$BINARY" SHADOW_CLI_ARGS='["--appimage-extract-and-run"]' node scripts/test-native-mcp-peer.mjs` },
@@ -76,7 +79,7 @@ export function inspectLine(gate, raw, requiredSkips, optional) {
     else requiredSkips.add(line);
     return;
   }
-  if (['native-window', 'packaged-behavior'].includes(gate) && line === 'ok  no Ready cloud row on this machine: consent step skipped') {
+  if (['native-window', 'native-endurance', 'packaged-behavior'].includes(gate) && line === 'ok  no Ready cloud row on this machine: consent step skipped') {
     optional.add('Authenticated cloud-consent check skipped: no Ready cloud row.'); return;
   }
   if (/^ok .*# SKIP\b/i.test(line) || /^# (?:skipped|todo) [1-9]\d*$/.test(line)

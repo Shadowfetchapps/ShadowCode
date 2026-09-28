@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths: ['native/**', 'vendor/**', 'scripts/fixtures/native-glib-variant.rs', 'scripts/fixtures/native-runtime-write-errors.c', 'src-tauri/**', 'ui/**', 'licenses/native/**', 'packaging/native-runtime/**', 'packaging/native-app-run.sh', 'packaging/llama.cpp/**', 'packaging/shadow-agent.desktop', 'tools/llama.cpp.pin', 'tools/glslc-flatpak.sh', 'scripts/build-llama.cpp.sh', 'scripts/*llama*.mjs', 'scripts/install-appimage.sh', 'scripts/install-release-state.sh', 'scripts/installer-auth-fixtures.mjs', 'scripts/test-install-auth.mjs', 'release/**', 'scripts/test-install-appimage.sh', 'scripts/test-clean-host-packages.mjs', 'scripts/clean-host-runtime.Dockerfile', 'scripts/clean-host-gui-smoke.sh', 'scripts/*native*.mjs', 'scripts/publisher-fixtures.mjs', 'scripts/test-publisher-auth.mjs', 'scripts/native-packaging-env.sh', 'scripts/native-release-auth-lib.sh', 'scripts/verify-native-release.sh', 'scripts/check-secrets.mjs', 'scripts/test-check-secrets.mjs', 'scripts/native-mcp-peer/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/native.yml', '.github/workflows/release.yml']
+    paths: ['native/**', 'vendor/**', 'scripts/fixtures/native-glib-variant.rs', 'scripts/fixtures/native-runtime-write-errors.c', 'src-tauri/**', 'ui/**', 'licenses/native/**', 'packaging/native-runtime/**', 'packaging/native-app-run.sh', 'packaging/llama.cpp/**', 'packaging/shadow-agent.desktop', 'tools/llama.cpp.pin', 'tools/glslc-flatpak.sh', 'scripts/build-llama.cpp.sh', 'scripts/*llama*.mjs', 'scripts/install-appimage.sh', 'scripts/install-release-state.sh', 'scripts/installer-auth-fixtures.mjs', 'scripts/test-install-auth.mjs', 'release/**', 'scripts/test-install-appimage.sh', 'scripts/test-clean-host-*.mjs', 'scripts/clean-host-*.mjs', 'scripts/clean-host-mcp-smoke.sh', 'scripts/fixtures/native-*.mjs', 'scripts/clean-host-runtime.Dockerfile', 'scripts/clean-host-gui-smoke.sh', 'scripts/*native*.mjs', 'scripts/publisher-fixtures.mjs', 'scripts/test-publisher-auth.mjs', 'scripts/native-packaging-env.sh', 'scripts/native-release-auth-lib.sh', 'scripts/verify-native-release.sh', 'scripts/check-secrets.mjs', 'scripts/test-check-secrets.mjs', 'scripts/native-mcp-peer/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/native.yml', '.github/workflows/release.yml']
 permissions:
   contents: read
 jobs:
@@ -23,7 +23,7 @@ jobs:
       - name: Native window dependencies
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libasound2-dev patchelf webkit2gtk-driver xvfb appstream dbus-daemon dbus-bin
       - name: Test release staging and immutable retry behavior
-        run: node --test scripts/test-native-release.mjs scripts/test-native-release-verification.mjs scripts/test-publisher-auth.mjs scripts/test-native-release-signing.mjs scripts/test-native-test-session.mjs
+        run: node --test scripts/test-native-release.mjs scripts/test-native-release-verification.mjs scripts/test-publisher-auth.mjs scripts/test-native-release-signing.mjs scripts/test-native-test-session.mjs scripts/test-clean-host-mcp-receipt.mjs scripts/test-clean-host-container.mjs && node scripts/test-native-process-ownership.mjs
       - name: Verify publisher authentication and private release snapshots
         run: node --test scripts/test-native-release-auth.mjs scripts/test-check-secrets.mjs
       - name: Package version
@@ -88,6 +88,8 @@ jobs:
         run: node scripts/run-native-x11.mjs node scripts/test-native-desktop.mjs
       - name: Exercise the embedded Markdown worker under the native security policy
         run: node scripts/run-native-x11.mjs node scripts/test-native-markdown.mjs
+      - name: Qualify 100 sequential tasks through the native window
+        run: node scripts/native-release-verification.mjs run native-endurance
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -95,6 +97,7 @@ jobs:
           path: |
             artifacts/native
             artifacts/native-markdown
+            artifacts/native-endurance
             artifacts/native-x11
       - run: cargo +1.95.0 build --release -p shadowcode-core --examples --locked
       - name: Check pinned-source failures and mirror recovery
@@ -150,6 +153,12 @@ jobs:
           SHADOW_NATIVE_DEFAULT_PROFILE: '1'
           SHADOW_NATIVE_ARTIFACTS: artifacts/native-package/window
         run: node scripts/run-native-x11.mjs node scripts/test-native-desktop.mjs
+      - name: Exercise the packaged Markdown worker under its native security policy
+        env:
+          SHADOW_DESKTOP_BINARY: ${{ github.workspace }}/target/release/bundle/appimage/ShadowCode_${{ env.VERSION }}_amd64.AppImage
+          SHADOW_DESKTOP_ARGS: '["--appimage-extract-and-run"]'
+          SHADOW_NATIVE_ARTIFACTS: artifacts/native-package/markdown
+        run: node scripts/run-native-x11.mjs node scripts/test-native-markdown.mjs
       - name: Exercise the packaged native MCP server
         env:
           SHADOW_DESKTOP_BINARY: ${{ github.workspace }}/target/release/bundle/appimage/ShadowCode_${{ env.VERSION }}_amd64.AppImage

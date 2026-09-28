@@ -39,7 +39,10 @@ export async function runNativeX11(argv, {
   const sessionFile = path.join(artifacts, 'private-session.json');
   const command = ['env', ...['DISPLAY','XAUTHORITY','WAYLAND_DISPLAY','WAYLAND_SOCKET','XDG_CURRENT_DESKTOP','XDG_SESSION_DESKTOP','DESKTOP_SESSION','DBUS_SESSION_BUS_ADDRESS','DBUS_SESSION_BUS_PID','DBUS_SESSION_BUS_WINDOWID','DBUS_STARTER_ADDRESS','DBUS_STARTER_BUS_TYPE'].flatMap(key => ['-u', key]),
     'GDK_BACKEND=x11', 'XDG_SESSION_TYPE=x11', `XDG_RUNTIME_DIR=${runtime}`, `SHADOW_NATIVE_SESSION_REPORT=${sessionFile}`,
-    'xvfb-run', '-a', '-s', '-screen 0 1440x1100x24', 'dbus-run-session', '--', ...argv];
+    // This UI exercises no OpenGL surface. Some host NVIDIA EGL stacks crash
+    // Xvfb while initializing GLX, leaving a display number but no X server.
+    // Disabling GLX keeps the controlled UI session on software rendering.
+    'xvfb-run', '-a', '-s', '-screen 0 1440x1100x24 -extension GLX', 'dbus-run-session', '--', ...argv];
   const report = { schema: 1, scope: 'Controlled Xvfb/X11, private D-Bus/runtime; HOME and account config/data/state/cache roots preserved. Not physical Wayland/desktop or portal feature qualification.',
     argv, artifacts, runtime, runtime_mode: '0700', command_exit: null, output_complete: false, external_boundary: [], failures: [], ok: false };
   try {

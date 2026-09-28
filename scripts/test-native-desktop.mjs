@@ -5,7 +5,7 @@
 // they are installed, read-only probes done by the app itself), a local GGUF
 // row served by a test-double llama-server (scripts/fake-llama-server.py, no
 // GPU, no weights), approvals, the activity timeline, the summary card, the
-// Changes drawer, reload persistence, Settings pages, the cloud consent dialog
+// Changes drawer, native file editing, reload persistence, Settings pages, the cloud consent dialog
 // (always cancelled: no vendor turn ever runs), Stop, light/dark/compact
 // layouts with axe checks, and process cleanup after quit.
 //
@@ -17,10 +17,14 @@
 //   SHADOW_TAURI_DRIVER     tauri-driver path (default: tauri-driver on PATH)
 //   SHADOW_WEBKIT_DRIVER    WebKitWebDriver path (passed as --native-driver)
 //   SHADOW_NATIVE_ARTIFACTS screenshots/reports directory (default artifacts/native)
+//   SHADOW_NATIVE_ENDURANCE=1 adds the required dedicated UI-03 100-task phase
 //   SHADOW_EXPECT_VENDORS   e.g. "codex=Ready,claude=Sign in": exact picker
 //                           availability expected for vendors on this machine
 import assert from "node:assert/strict";
 import { capturePrivateSession, writePrivateSessionReport } from "./native-test-session.mjs";
+import { EDITOR_FILE, OTHER_FILE, seedNativeEditorFixtures, nativeEditorBeforeReload, nativeEditorAfterReload } from "./fixtures/native-editor-smoke.mjs";
+import { nativeRunCheck } from "./fixtures/native-run-check-smoke.mjs";
+import { nativeEndurance } from "./fixtures/native-endurance-smoke.mjs";
 import { createServer } from "node:http";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -53,11 +57,14 @@ const profile = path.join(scratch, "profile");
 const runtimeDir = path.join(scratch, "runtime");
 const modelsDir = path.join(scratch, "models");
 const configDirectory = path.join(profile, "config/shadow-agent");
-for (const dir of [project, configDirectory, runtimeDir, modelsDir, path.join(scratch, "tmp")]) await mkdir(dir, { recursive: true });
+// The app canonicalizes each XDG root before opening the native backend, so
+// create all isolated roots up front (not just the config directory).
+for (const dir of [project, configDirectory, path.join(profile, "data"), path.join(profile, "state"), path.join(profile, "cache"), runtimeDir, modelsDir, path.join(scratch, "tmp")]) await mkdir(dir, { recursive: true });
 
 // Disposable git project.
 await writeFile(path.join(project, "README.md"), "# Window test\nA disposable workspace.\n");
-for (const args of [["init", "-q"], ["add", "README.md"], ["commit", "-qm", "Window fixture base"]])
+await seedNativeEditorFixtures(project);
+for (const args of [["init", "-q"], ["add", "README.md", EDITOR_FILE, OTHER_FILE], ["commit", "-qm", "Window fixture base"]])
   await run("git", ["-c", "core.hooksPath=/dev/null", "-c", "user.name=Window Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: project });
 
 // Test-double llama-server runtime: binary + COMMIT + architectures.txt, the
@@ -525,6 +532,8 @@ try {
   await until("Changes diff", () => execute("return /Hello from ShadowCode/.test(document.querySelector('[aria-label=\"Drawer\"], .drawer')?.innerText||'')"), 15000);
   await screenshot("changes");
   await accessibility("changes");
+  const editorContext = { wd, session, execute, until, visible, click, clickButton, type, note, screenshot, project, artifacts };
+  await nativeEditorBeforeReload(editorContext);
   await click("button.drawer-close");
   note("Changes drawer shows the hello.txt diff");
 
@@ -547,6 +556,10 @@ try {
   await screenshot("reloaded");
   assert.equal(await execute("return document.documentElement.dataset.theme"), "light", "The saved light theme survives a reload");
   note("reload restores the conversation, summary card and the conversation's model");
+  await nativeEditorAfterReload(editorContext);
+  await nativeRunCheck({ wd, session, execute, until, visible, clickButton, fill, approve, screenshot, note, jobsFor, modelRequests, sessionId, project, artifacts });
+  if (process.env.SHADOW_NATIVE_ENDURANCE === "1")
+    await nativeEndurance({ wd, session, execute, until, visible, clickButton, fill, screenshot, note, api, jobsFor, modelRequests, sessionId, project, profile, artifacts, appPid, descendants });
 
   // ------------------------------------------------------------ settings
   await openSettings("Accounts");

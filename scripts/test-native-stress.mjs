@@ -3,6 +3,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import {
   mkdtemp,
   mkdir,
@@ -31,7 +33,8 @@ const projects = Array.from({ length: 4 }, (_, i) =>
 );
 const children = new Set(),
   sockets = new Set(),
-  samples = [];
+  samples = [],
+  sequentialSamples = [];
 let fixtureError,
   requests = 0,
   hangs = 0,
@@ -153,7 +156,7 @@ model.on("connection", (socket) => {
   sockets.add(socket);
   socket.on("close", () => sockets.delete(socket));
 });
-async function sample(round) {
+async function sample(round, target = samples) {
   const pid = server.child.pid;
   const status = await readFile(`/proc/${pid}/status`, "utf8");
   const rssKiB = Number(status.match(/^VmRSS:\s+(\d+)/m)?.[1]);
@@ -178,7 +181,7 @@ async function sample(round) {
     "Completed work must leave no engine-owned child processes",
   );
   const value = { round, rssKiB, fds, threads: tasks.length };
-  samples.push(value);
+  target.push(value);
   return value;
 }
 try {
@@ -215,6 +218,10 @@ try {
     "shadowcode",
     "Measure the native executable directly",
   );
+  const binaryHash = createHash("sha256");
+  for await (const chunk of createReadStream(`/proc/${server.child.pid}/exe`))
+    binaryHash.update(chunk);
+  const binarySha256 = binaryHash.digest("hex");
   const completed = [];
   for (let round = 1; round <= 50; round++) {
     const jobs = await Promise.all(
@@ -264,6 +271,45 @@ try {
     last.fds <= baseline.fds + 12,
     "File descriptors grew beyond the fixed allowance",
   );
+  assert.ok(
+    Math.max(...samples.map((point) => point.threads)) <= baseline.threads + 4,
+    "Engine thread count grew beyond the fixed allowance",
+  );
+  // Explicit UI-03 acceptance workload: one fixture task must finish before
+  // the next starts. Keep it in addition to the concurrent cross-project run.
+  const warmup = await cli(["run", "SEQUENTIAL UI-03 warm-up"]);
+  assert.equal(warmup.status, "completed");
+  const sequentialBaseline = await sample(0, sequentialSamples);
+  const sequentialIds = [];
+  for (let index = 1; index <= 100; index++) {
+    const task = await cli(["run", `SEQUENTIAL UI-03 fixture ${index}`]);
+    assert.equal(task.status, "completed", `Sequential task ${index}`);
+    sequentialIds.push(task.id);
+    if (index % 25 === 0) {
+      const point = await sample(index, sequentialSamples);
+      console.log(
+        `Sequential UI-03 ${index}/100; RSS ${point.rssKiB} KiB, ${point.fds} descriptors`,
+      );
+    }
+  }
+  assert.equal(new Set(sequentialIds).size, 100, "Sequential task IDs must be unique");
+  const sequentialLast = sequentialSamples.at(-1);
+  assert.ok(
+    Math.max(...sequentialSamples.map((point) => point.rssKiB)) < 384 * 1024,
+    "Engine RSS exceeded 384 MiB during sequential tasks",
+  );
+  assert.ok(
+    Math.max(...sequentialSamples.map((point) => point.threads)) <= sequentialBaseline.threads + 4,
+    "Engine thread count grew during sequential tasks",
+  );
+  assert.ok(
+    sequentialLast.rssKiB - sequentialBaseline.rssKiB < 64 * 1024,
+    "Engine RSS grew by 64 MiB during 100 sequential tasks",
+  );
+  assert.ok(
+    sequentialLast.fds <= sequentialBaseline.fds + 12,
+    "File descriptors grew during the sequential workload",
+  );
   database = new DatabaseSync(path.join(profile, "state/shadow-agent.db"), {
     readOnly: true,
   });
@@ -271,7 +317,13 @@ try {
     .prepare("SELECT payload FROM desktop_jobs")
     .all()
     .map((r) => JSON.parse(r.payload));
-  assert.equal(rows.filter((r) => r.status === "completed").length, 200);
+  assert.equal(rows.filter((r) => r.status === "completed").length, 301);
+  const rowIds = new Set(rows.map((row) => row.id));
+  assert.ok(sequentialIds.every((id) => rowIds.has(id)));
+  assert.ok(
+    sequentialIds.every((id) => rows.find((row) => row.id === id)?.status === "completed"),
+    "Every sequential task must have a persisted completed state",
+  );
   assert.equal(rows.filter((r) => r.status === "cancelled").length, 5);
   assert.equal(
     rows.filter((r) => ["running", "queued", "cancelling"].includes(r.status))
@@ -294,7 +346,16 @@ try {
     JSON.stringify(
       {
         passed: true,
-        completed: 200,
+        binarySha256,
+        completed: 301,
+        concurrentCompleted: 200,
+        sequentialUi03: {
+          required: 100,
+          completed: sequentialIds.length,
+          uniqueIds: new Set(sequentialIds).size,
+          samples: sequentialSamples,
+          rssGrowthKiB: sequentialLast.rssKiB - sequentialBaseline.rssKiB,
+        },
         cancelled: 5,
         subprocessFloods: 10,
         requests,

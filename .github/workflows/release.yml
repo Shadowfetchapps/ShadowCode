@@ -87,6 +87,8 @@ jobs:
         run: node scripts/native-release-verification.mjs run native-behavior
       - name: Exercise the native desktop window
         run: node scripts/native-release-verification.mjs run native-window
+      - name: Qualify 100 sequential tasks through the native window
+        run: node scripts/native-release-verification.mjs run native-endurance
       - name: Preserve native window and Markdown worker diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -95,6 +97,7 @@ jobs:
           path: |
             artifacts/native
             artifacts/native-markdown
+            artifacts/native-endurance
             artifacts/native-x11
       - name: Build the managed llama.cpp runtime (Vulkan + all CPU variants)
         run: node scripts/native-release-verification.mjs run managed-runtime

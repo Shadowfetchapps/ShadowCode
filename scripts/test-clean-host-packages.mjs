@@ -2,9 +2,10 @@
 // The image contains only runtime dependencies; the host never installs them.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
+import { validateCleanHostMcp } from "./clean-host-mcp-receipt.mjs";
+import { runCleanHostContainer } from "./clean-host-container.mjs";
 
 const [appimageArg, debArg, sumsArg] = process.argv.slice(2);
 if (!appimageArg || !debArg || !sumsArg)
@@ -38,29 +39,15 @@ const image =
   process.env.SHADOW_CLEAN_HOST_RUNTIME_IMAGE || "shadowcode-clean-runtime:ci";
 const marker = "__SHADOW_CLEAN_STATUS__";
 function container(args, label) {
-  const result = spawnSync(
+  return runCleanHostContainer({
     executable,
-    [
-      "run",
-      "--rm",
-      "--network=none",
-      "--security-opt=no-new-privileges",
-      ...args,
-    ],
-    {
-      encoding: "utf8",
-      timeout: 120_000,
-      maxBuffer: 2 * 1024 * 1024,
-    },
-  );
-  if (result.error || result.status !== 0)
-    throw new Error(
-      `${label} failed (${result.status}): ${result.error || ""}\n${result.stdout}\n${result.stderr}`,
-    );
-  return result.stdout;
+    label,
+    args: ["--network=none", "--security-opt=no-new-privileges", ...args],
+  });
 }
 function statusContainer(args, label) {
   const output = container(args, label);
+  validateCleanHostMcp(output);
   const start = output.indexOf(`${marker}\n`);
   assert.ok(start >= 0, `${label} did not print a status receipt`);
   const receipt = JSON.parse(output.slice(start + marker.length + 1));
@@ -68,7 +55,7 @@ function statusContainer(args, label) {
   assert.equal(receipt.permissions.network, false);
   assert.deepEqual(receipt.jobs, []);
   console.log(
-    `${label}: installed runtime, offline CLI status and isolated project passed`,
+    `${label}: offline CLI status, MCP stdio and isolated project passed`,
   );
 }
 
@@ -97,6 +84,7 @@ statusContainer(
     git -C /tmp/project init -q
     printf 'clean-host fixture\\n' > /tmp/project/README.md
     /opt/ShadowCode.AppImage --help >/dev/null
+    /usr/local/bin/shadowcode-clean-mcp-smoke /opt/ShadowCode.AppImage /tmp/mcp-profile /tmp/mcp-project
     printf '${marker}\\n'
     /opt/ShadowCode.AppImage --profile /tmp/profile --workspace /tmp/project --json status
   `,
@@ -122,6 +110,7 @@ statusContainer(
       git -C /tmp/project init -q
       printf "clean-host fixture\\n" > /tmp/project/README.md
       /usr/bin/shadowcode --help >/dev/null
+      /usr/local/bin/shadowcode-clean-mcp-smoke /usr/bin/shadowcode /tmp/mcp-profile /tmp/mcp-project
       printf "${marker}\\n"
       /usr/bin/shadowcode --profile /tmp/profile --workspace /tmp/project --json status
     '

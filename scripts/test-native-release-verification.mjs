@@ -263,7 +263,7 @@ test('GLib backport verification is a required release gate with no optional ski
 test('clean-host package qualification is required and bound to the verified artifacts', () => {
   const gate = 'clean-host-packages';
   assert(REQUIRED_GATES.includes(gate));
-  assert.match(GATES[gate].scope, /visible first GUI window.*GUI interaction.*remain separate/);
+  assert.match(GATES[gate].scope, /packaged MCP stdio.*visible first GUI window.*Interactive GUI tasks.*remain separate/);
   assert.match(GATES[gate].script, /docker build -f scripts\/clean-host-runtime\.Dockerfile/);
   assert.match(GATES[gate].script, /test-clean-host-packages\.mjs.*SHA256SUMS/);
   const missing = complete(); delete missing.gates[gate];

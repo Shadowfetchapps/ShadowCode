@@ -53,8 +53,56 @@ exit 1
 `, { mode: 0o755 });
   await signFixture(file, f.key); return file;
 }
-function passed(result) { assert.equal(result.error, undefined); assert.equal(result.status, 0, result.stderr || result.stdout); }
-function refused(result) { assert.equal(result.error, undefined, 'Installer timed out'); assert.notEqual(result.status, 0, result.stdout); }
+function processObserved(result) {
+  // Some supported Node/Linux combinations report EPERM while reaping a
+  // child tree that deliberately SIGKILLs installer processes. A real
+  // spawn/exec failure has no successful status; trust the child's observed
+  // exit evidence, but never reinterpret a timeout or other spawn error.
+  assert.ok(!result.error || result.error.code === 'EPERM', result.error?.message);
+}
+function passed(result) {
+  processObserved(result);
+  assert.equal(result.signal, null, 'Successful installer must exit normally');
+  assert.equal(result.status, 0, result.error?.message || result.stderr || result.stdout);
+}
+function refused(result) {
+  processObserved(result);
+  assert.equal(result.signal, null, 'A signal or timeout is not installer refusal');
+  assert.ok(Number.isInteger(result.status) && result.status > 0,
+    result.error?.message || result.stderr || result.stdout || 'Installer did not exit with refusal');
+}
+function killed(result, boundary) {
+  processObserved(result);
+  assert.equal(result.status, null, 'Injected SIGKILL must have signal exit evidence');
+  assert.equal(result.signal, 'SIGKILL', 'Only the intentional SIGKILL is accepted');
+  assert.ok(result.stderr.split('\n').includes(`Injected SIGKILL at ${boundary}`),
+    `Missing exact injected SIGKILL boundary: ${boundary}`);
+}
+
+test('installer result guards reject timeout and unknown signal evidence', () => {
+  const timeout = spawnSync('/bin/sh', ['-c', 'exec sleep 2'], { encoding: 'utf8', timeout: 30 });
+  assert.ok(timeout.error, 'Exercise a real child deadline');
+  assert.throws(() => refused(timeout));
+  assert.throws(() => passed(timeout));
+  assert.throws(() => killed({ ...timeout, stderr: 'Injected SIGKILL at fixture\n' }, 'fixture'));
+  for (const signal of ['SIGTERM', 'SIGKILL', 'SIGSEGV'])
+    assert.throws(() => refused({ status: null, signal, stderr: '' }));
+  assert.throws(() => refused({ status: 1, signal: null, error: { code: 'ETIMEDOUT' } }));
+});
+test('installer result guards preserve EPERM only with valid observed exits', () => {
+  const error = Object.assign(new Error('post-reap EPERM'), { code: 'EPERM' });
+  assert.doesNotThrow(() => passed({ status: 0, signal: null, error }));
+  assert.doesNotThrow(() => refused({ status: 1, signal: null, error }));
+  assert.throws(() => passed({ status: null, signal: null, error }));
+  assert.throws(() => refused({ status: null, signal: null, error }));
+});
+test('intentional SIGKILL requires the matching injected boundary', () => {
+  const result = spawnSync('/bin/sh', ['-c', 'printf "Injected SIGKILL at fixture\\n" >&2; kill -KILL $$'], { encoding: 'utf8', timeout: 1000 });
+  killed(result, 'fixture');
+  assert.throws(() => refused(result));
+  assert.throws(() => killed(result, 'other-boundary'));
+  assert.throws(() => killed({ ...result, signal: 'SIGTERM' }, 'fixture'));
+});
 async function accepted(f) { return readlink(path.join(f.state, 'accepted')); }
 async function faultWrapper(f) {
   const bin = path.join(f.root, 'fault-bin'); await mkdir(bin);
@@ -122,7 +170,7 @@ test('missing managed state is refused while an unsigned legacy app can migrate 
 });
 for (const boundary of ['initial-state', 'new-runtime']) test(`first-install SIGKILL at ${boundary} recovers absence without lowering accepted state`, async t => {
   const f = await fixture(t), file = await candidate(f), faults = await faultWrapper(f);
-  const result = f.run([file], { ...faults, AUTH_FAULT: boundary }); refused(result); assert.match(result.stderr, /Injected SIGKILL/);
+  const result = f.run([file], { ...faults, AUTH_FAULT: boundary }); killed(result, boundary);
   const receipt = await accepted(f); await rm(path.dirname(file), { recursive: true });
   passed(f.run(['--recover'])); assert.equal(await accepted(f), receipt);
   await missing(f.library); await missing(path.join(f.home, 'Applications/ShadowCode.AppImage')); await missing(f.journal);
@@ -130,7 +178,7 @@ for (const boundary of ['initial-state', 'new-runtime']) test(`first-install SIG
 for (const boundary of ['record', 'accepted', 'old-runtime', 'new-runtime']) test(`upgrade SIGKILL at ${boundary} preserves the proven high-water and recovers prior runtime`, async t => {
   const f = await fixture(t), first = await candidate(f), next = await candidate(f, '0.28.1');
   passed(f.run([first])); const prior = await accepted(f), faults = await faultWrapper(f);
-  const result = f.run([next], { ...faults, AUTH_FAULT: boundary }); refused(result); assert.match(result.stderr, /Injected SIGKILL/);
+  const result = f.run([next], { ...faults, AUTH_FAULT: boundary }); killed(result, boundary);
   const current = await accepted(f); assert.equal(current === prior, boundary === 'record');
   await rm(path.dirname(next), { recursive: true }); passed(f.run(['--recover'])); assert.equal(await accepted(f), current);
   assert.equal(await readlink(path.join(f.home, 'Applications/ShadowCode.AppImage')), 'ShadowCode-0.28.0-x86_64.AppImage');
@@ -147,7 +195,7 @@ test('failed accepted-pointer publication does not mutate the previous runtime a
 test('activation marker recovers only while launcher and desktop identities remain unchanged', async t => {
   const f = await fixture(t), first = await candidate(f), next = await candidate(f, '0.28.1');
   passed(f.run([first])); const faults = await faultWrapper(f);
-  refused(f.run([next], { ...faults, AUTH_FAULT: 'activation' })); const receipt = await accepted(f);
+  killed(f.run([next], { ...faults, AUTH_FAULT: 'activation' }), 'activation'); const receipt = await accepted(f);
   const schema = path.join(f.journal, 'schema');
   await writeFile(schema, '2\n');
   const legacy = f.run(['--recover']); refused(legacy); assert.match(legacy.stderr, /activation already started/);
@@ -165,7 +213,7 @@ test('activation marker recovers only while launcher and desktop identities rema
 test('interruption after active-link replacement recovers only with unchanged desktop integration', async t => {
   const f = await fixture(t), first = await candidate(f), next = await candidate(f, '0.28.1');
   passed(f.run([first])); const faults = await faultWrapper(f);
-  refused(f.run([next], { ...faults, AUTH_FAULT: 'link' })); const receipt = await accepted(f);
+  killed(f.run([next], { ...faults, AUTH_FAULT: 'link' }), 'link'); const receipt = await accepted(f);
   const desktop = path.join(f.home, '.local/share/applications/shadow-agent.desktop');
   const priorDesktop = await readFile(desktop, 'utf8');
   await writeFile(desktop, `${priorDesktop}external edit\n`);
@@ -178,7 +226,7 @@ test('interruption after active-link replacement recovers only with unchanged de
 });
 test('first-install interruption after active-link replacement restores recorded absence', async t => {
   const f = await fixture(t), first = await candidate(f), faults = await faultWrapper(f);
-  refused(f.run([first], { ...faults, AUTH_FAULT: 'link' }));
+  killed(f.run([first], { ...faults, AUTH_FAULT: 'link' }), 'link');
   const receipt = await accepted(f);
   assert.equal(await readlink(path.join(f.home, 'Applications/ShadowCode.AppImage')), 'ShadowCode-0.28.0-x86_64.AppImage');
   passed(f.run(['--recover']));
@@ -200,7 +248,7 @@ test('state-pointer traversal and receipt tampering refuse execution and preserv
 test('legacy schema1 field set recovers without auth policy, state or original candidate', async t => {
   const f = await fixture(t), first = await candidate(f), next = await candidate(f, '0.28.1');
   passed(f.run([first])); const faults = await faultWrapper(f);
-  refused(f.run([next], { ...faults, AUTH_FAULT: 'new-runtime' }));
+  killed(f.run([next], { ...faults, AUTH_FAULT: 'new-runtime' }), 'new-runtime');
   // All schema1 fields/identities are retained unchanged in schema2. Derive the
   // historical field set from a real interrupted replacement, without shipping
   // an extra unsigned installer executable in the repository.
@@ -214,7 +262,7 @@ test('legacy schema1 field set recovers without auth policy, state or original c
 test('receipt recovery accepts a retained historical key after current epoch and version floors advance', async t => {
   const f = await fixture(t), first = await candidate(f), next = await candidate(f, '0.28.1');
   passed(f.run([first])); const faults = await faultWrapper(f);
-  refused(f.run([next], { ...faults, AUTH_FAULT: 'new-runtime' })); const receipt = await accepted(f);
+  killed(f.run([next], { ...faults, AUTH_FAULT: 'new-runtime' }), 'new-runtime'); const receipt = await accepted(f);
   const policy = path.join(f.bundle, 'release/trust/policy');
   await writeFile(policy, (await readFile(policy, 'utf8')).replace('minimum-epoch=1', 'minimum-epoch=2').replace('minimum-version=0.28.0', 'minimum-version=0.28.2'));
   await rm(f.marker); passed(f.run(['--recover'])); await missing(f.marker); assert.equal(await accepted(f), receipt);
@@ -222,7 +270,7 @@ test('receipt recovery accepts a retained historical key after current epoch and
 });
 for (const [boundary, mode] of [['intent', 'kill'], ['initial-state', 'fail']]) test(`first-install ${mode} before accepted-state publication recovers recorded absence`, async t => {
   const f = await fixture(t), file = await candidate(f), faults = await faultWrapper(f);
-  const result = f.run([file], { ...faults, AUTH_FAULT: boundary, AUTH_FAULT_MODE: mode }); refused(result); assert.match(result.stderr, /Injected/);
+  const result = f.run([file], { ...faults, AUTH_FAULT: boundary, AUTH_FAULT_MODE: mode }); if (mode === 'kill') killed(result, boundary); else refused(result); assert.match(result.stderr, /Injected/);
   await missing(f.state); await stat(f.journal); await missing(f.library);
   await rm(path.dirname(file), { recursive: true }); await rm(f.marker);
   passed(f.run(['--recover'])); await missing(f.marker); await missing(f.journal); await missing(f.state);
@@ -261,7 +309,7 @@ test('a flush failure after pointer advancement preserves the higher receipt and
 test('schema2 receipt-binding tampering prevents recovery mutation and preserves every transaction artifact', async t => {
   const f = await fixture(t), first = await candidate(f), next = await candidate(f, '0.28.1');
   passed(f.run([first])); const faults = await faultWrapper(f);
-  refused(f.run([next], { ...faults, AUTH_FAULT: 'new-runtime' }));
+  killed(f.run([next], { ...faults, AUTH_FAULT: 'new-runtime' }), 'new-runtime');
   const field = path.join(f.journal, 'accepted-record-sha256'), original = await readFile(field);
   const before = await readFile(path.join(f.library, 'COMMIT')), previous = await readFile(path.join(`${f.library}.previous`, 'COMMIT'));
   await writeFile(field, `${'0'.repeat(64)}\n`);

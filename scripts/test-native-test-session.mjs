@@ -199,7 +199,7 @@ const timer=setInterval(()=>{if(existsSync(root+'/release')||Date.now()>=deadlin
     await writeFile(path.join(directory, 'bus.conf'), `<busconfig><type>session</type><listen>unix:tmpdir=/tmp</listen><auth>EXTERNAL</auth><servicedir>${directory}/services</servicedir><policy context="default"><allow own="*"/><allow send_destination="*"/><allow receive_sender="*"/></policy><limit name="service_start_timeout">2000</limit></busconfig>`);
     // Intercept Xvfb only. The production wrapper still creates its private
     // runtime and executes a real dbus-run-session with only our fake service.
-    await writeFile(path.join(directory, 'bin/xvfb-run'), '#!/bin/bash\nset -euo pipefail\n[[ "$1" = -a && "$2" = -s && "$3" = "-screen 0 1440x1100x24" ]]\nshift 3\nexec "$@"\n');
+    await writeFile(path.join(directory, 'bin/xvfb-run'), '#!/bin/bash\nset -euo pipefail\n[[ "$1" = -a && "$2" = -s && "$3" = "-screen 0 1440x1100x24 -extension GLX" ]]\nshift 3\nexec "$@"\n');
     await writeFile(path.join(directory, 'bin/dbus-run-session'), `#!/bin/bash\nexec /usr/bin/dbus-run-session --config-file ${quote(path.join(directory,'bus.conf'))} "$@"\n`);
     for (const file of ['xvfb-run','dbus-run-session']) await chmod(path.join(directory,'bin',file),0o755);
     await writeFile(path.join(directory, 'harness.mjs'), `import assert from 'node:assert/strict';
@@ -252,15 +252,19 @@ test('both required CI paths install D-Bus before session fixtures and preserve 
   assert(GATES['release-tests'].script.includes('scripts/test-native-test-session.mjs'));
   assert.equal(GATES['native-window'].script.split('node scripts/run-native-x11.mjs node scripts/test-native-').length,3);
   assert(GATES['packaged-behavior'].script.includes('node scripts/run-native-x11.mjs node scripts/test-native-desktop.mjs'));
+  assert(GATES['packaged-behavior'].script.includes('node scripts/run-native-x11.mjs node scripts/test-native-markdown.mjs'));
+  assert(GATES['native-endurance'].script.includes('node scripts/run-native-x11.mjs node scripts/test-native-desktop.mjs'));
   for(const name of ['native.yml','release.yml']) {
     const text=await readFile(new URL(`../.github/workflows/${name}`,import.meta.url),'utf8');
     const fixtures=text.indexOf(name==='native.yml'?'run: node --test scripts/test-native-release.mjs':'run: node scripts/native-release-verification.mjs run release-tests');
     assert(fixtures>0);
     const dependencies=text.indexOf('dbus-daemon dbus-bin'); assert(dependencies>=0&&dependencies<fixtures);
     assert(text.includes('artifacts/native-x11'));
+    assert(text.includes('run: node scripts/native-release-verification.mjs run native-endurance'));
+    assert(text.includes('artifacts/native-endurance'));
     if(name==='native.yml') {
       assert(text.includes('scripts/test-native-test-session.mjs'));
-      assert.equal(text.split('run: node scripts/run-native-x11.mjs node scripts/test-native-').length,4);
+      assert.equal(text.split('run: node scripts/run-native-x11.mjs node scripts/test-native-').length,5);
       assert(text.includes("'scripts/*native*.mjs'"));
     }
   }
