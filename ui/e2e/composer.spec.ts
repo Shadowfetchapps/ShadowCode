@@ -47,6 +47,10 @@ async function chooseLocal(page: Page) {
   await search.press("Enter");
   await expect(page.getByRole("listbox")).toHaveCount(0);
 }
+async function openMore(page: Page) {
+  const more = page.locator("details.composer-more");
+  if (!(await more.getAttribute("open"))) await more.locator("summary").click();
+}
 async function runTask(page: Page, text: string) {
   await prompt(page).fill(text);
   await send(page).click();
@@ -69,6 +73,7 @@ test("@ attaches files, effort and mode reach the engine, ↑ recalls the prompt
   await expect(
     page.getByRole("list", { name: "Mentioned files and folders" }),
   ).toContainText("src/app.ts");
+  await openMore(page);
   await page.getByLabel("Reasoning effort").selectOption("high");
   await page.getByRole("radio", { name: "Plan" }).click();
   await send(page).click();
@@ -84,7 +89,8 @@ test("@ attaches files, effort and mode reach the engine, ↑ recalls the prompt
   });
   // The effort is remembered for this model.
   await page.reload();
-  await expect(page.getByLabel("Reasoning effort")).toHaveValue("high");
+  await openMore(page);
+  await expect(page.locator(".effort-control select")).toHaveValue("high");
   await prompt(page).press("ArrowUp");
   await expect(prompt(page)).toHaveValue("Explain @src/app.ts");
   await prompt(page).press("ArrowDown");

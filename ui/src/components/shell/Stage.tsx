@@ -167,6 +167,14 @@ export function Stage({
       ? "Applies to your next message"
       : undefined;
   const hasContent = Boolean(task.trim() || files.attachments.length);
+  const worktreeReason =
+    actions.worktreeBlocked ||
+    (!hasContent
+      ? "Add a task or attachment first"
+      : !selectedTarget
+        ? (actions.sendBlocked ?? "Choose a model first")
+        : (actions.sendBlocked ??
+          (composerLocked ? "Wait until the composer is ready" : null)));
   const focusWith = (text: string) => {
     setTask(text);
     promptRef.current?.focus();
@@ -389,7 +397,7 @@ export function Stage({
           onOpenSettings: () => openSettings("voice"),
         }}
         worktree={{
-          reason: actions.worktreeBlocked,
+          reason: worktreeReason,
           enabled: actions.canRunInWorktree,
           queueing,
           onRun: () => void actions.submit({ worktree: true }),

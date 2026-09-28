@@ -425,6 +425,7 @@ it("a Codex plan limit continues on the local model in the same conversation", a
 
 it("Compare runs a task on two models in hidden lanes, opens a lane and returns", async () => {
   await boot();
+  fireEvent.click(document.querySelector("details.composer-more > summary")!);
   const compare = screen.getByRole("button", { name: "Compare" });
   await waitFor(() =>
     expect(compare.getAttribute("title")).toMatch(/Type a task/),
@@ -481,6 +482,7 @@ it("Compare runs a task on two models in hidden lanes, opens a lane and returns"
       "Compare · qwen3:14b",
     ),
   );
+  fireEvent.click(document.querySelector("details.composer-more > summary")!);
   expect(
     screen.getByRole("button", { name: "Compare" }).getAttribute("title"),
   ).toMatch(/one model's copy/);
@@ -496,6 +498,7 @@ it("Compare runs a task on two models in hidden lanes, opens a lane and returns"
   await waitFor(() =>
     expect(screen.queryByText(/Part of a comparison/)).toBeNull(),
   );
+  fireEvent.click(document.querySelector("details.composer-more > summary")!);
   expect(fake.state.selected).toBe("/work/demo");
 });
 

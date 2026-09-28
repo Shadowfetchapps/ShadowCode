@@ -246,8 +246,8 @@ export function CompareView({
               <strong>No comparisons in this project yet.</strong>
             </p>
             <p className="hint">
-              Type a task and choose Compare next to Send to run it on two or
-              three models at once.
+              Type a task and choose More › Compare to run it on two or three
+              models at once.
             </p>
           </div>
         ) : !record ? (

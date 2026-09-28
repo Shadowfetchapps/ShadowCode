@@ -41,6 +41,10 @@ async function chooseLocal(page: Page) {
   await search.press("Enter");
   await expect(page.getByRole("listbox")).toHaveCount(0);
 }
+async function openMore(page: Page) {
+  const more = page.locator("details.composer-more");
+  if (!(await more.getAttribute("open"))) await more.locator("summary").click();
+}
 
 test("a paused task keeps new conversations in the same checkout queued", async ({
   page,
@@ -90,11 +94,12 @@ test("runs a second task in a new worktree beside a running one and applies it",
   await prompt(page).fill("Fix add in the main checkout");
   await page.getByRole("button", { name: "Send task" }).click();
   // While it runs, Send would queue; the worktree runs now instead.
+  await prompt(page).fill("Add a regression test");
+  await openMore(page);
   const now = page.getByRole("button", {
     name: "Run now in a new worktree instead of queueing",
   });
   await expect(now).toBeVisible();
-  await prompt(page).fill("Add a regression test");
   await prompt(page).press("Control+Shift+Enter");
   const bar = page.getByRole("region", {
     name: "This conversation runs in its own worktree",
@@ -141,8 +146,11 @@ test("runs a second task in a new worktree beside a running one and applies it",
   ).toBe(true);
   // The conversation now belongs to the project, where a new worktree can
   // be started again.
+  await openMore(page);
   await expect(
-    page.getByRole("button", { name: "Run in a new worktree" }),
+    page.getByRole("button", {
+      name: /Run in a new worktree unavailable: Add a task or attachment first/,
+    }),
   ).toBeVisible();
 });
 
@@ -154,6 +162,7 @@ test("a conflicting apply lists the files and keeps the worktree; discard remove
   });
   await chooseLocal(page);
   await prompt(page).fill("Try something risky");
+  await openMore(page);
   await page.getByRole("button", { name: "Run in a new worktree" }).click();
   const bar = page.getByRole("region", {
     name: "This conversation runs in its own worktree",

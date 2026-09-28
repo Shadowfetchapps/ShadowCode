@@ -1,4 +1,4 @@
-// Real Tauri/WebKit window test for the 0.28 desktop app.
+// Real Tauri/WebKit window test for the current ShadowCode desktop app.
 //
 // Drives the actual `shadowcode` binary through tauri-driver + WebKitWebDriver:
 // first-run onboarding, the unified model picker (real vendor CLI rows when
@@ -455,6 +455,19 @@ try {
   await screenshot("welcome-light");
   await accessibility("welcome-light");
   note(`quiet welcome with ${suggestions.length} suggestions, one picker, attachment button`);
+
+  // Infrequent options stay one click away without crowding the composer.
+  assert.equal(await execute("return document.querySelector('.composer-more')?.open"), false);
+  await click("details.composer-more > summary");
+  await until("More task options open", () => execute("return document.querySelector('.composer-more')?.open"));
+  const moreOptions = await execute("return document.querySelector('.composer-more-menu').innerText");
+  assert.match(moreOptions, /Compare/);
+  assert.match(moreOptions, /Worktree/);
+  await screenshot("composer-more");
+  await accessibility("composer-more");
+  await click("details.composer-more > summary");
+  await until("More task options close", () => execute("return !document.querySelector('.composer-more')?.open"));
+  note("More keeps Compare and Worktree discoverable, closes by clicking its trigger");
 
   // ------------------------------------------------------------ picker
   await until("Picker loaded", async () => !/Loading models/.test(await execute("return document.querySelector('.unified-picker-current').textContent")), 60000);

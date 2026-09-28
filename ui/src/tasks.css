@@ -108,6 +108,9 @@
   .worktree-btn-text {
     display: none;
   }
+  .composer-more-menu .worktree-btn-text {
+    display: inline;
+  }
 }
 .worktree-bar {
   width: 100%;

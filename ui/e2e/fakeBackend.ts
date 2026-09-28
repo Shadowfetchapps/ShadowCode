@@ -1981,7 +1981,7 @@ export function installFakeBackend(options: FakeOptions = {}) {
     if (method === "GET" && path === "/api/health")
       return {
         ok: true,
-        version: "0.28.0-test",
+        version: "0.33.0",
         workspace,
         trusted: true,
         permissions: state.config.permissions,
@@ -3102,7 +3102,7 @@ export function installFakeBackend(options: FakeOptions = {}) {
     if (path === "/api/workspace/attach")
       return { path: `.shadow/attachments/${body.filename}`, kind: "text" };
     if (path === "/api/doctor")
-      return { ok: true, version: "0.28.0-test", checks: [], suggestions: [] };
+      return { ok: true, version: "0.33.0-test", checks: [], suggestions: [] };
     // Settings › Remote access (desktop only).
     const remoteView = () => {
       const r = state.remote;

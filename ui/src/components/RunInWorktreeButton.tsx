@@ -1,34 +1,37 @@
 import { GitBranchPlus } from "lucide-react";
 
-/** Next to Send: start this message as a new conversation in a fresh
- * worktree of the project (Ctrl+Shift+Enter), so it runs beside a task in
- * the main checkout instead of waiting in the queue. */
+/** Start this message as a new conversation in a fresh worktree of the
+ * project (More menu or Ctrl+Shift+Enter), beside a task in the main checkout. */
 export function RunInWorktreeButton({
   reason,
   enabled,
   queueing,
   onRun,
 }: {
-  /** Why it cannot be used here (hidden entirely when set). */
+  /** Why it cannot be used here. The disabled item stays visible so the user
+   * can discover the feature and understand the current limitation. */
   reason: string | null;
   enabled: boolean;
   /** Another task is running here: Send would queue. */
   queueing: boolean;
   onRun: () => void;
 }) {
-  if (reason) return null;
   const label = queueing
     ? "Run now in a new worktree instead of queueing"
     : "Run in a new worktree";
+  const disabled = !enabled || Boolean(reason);
   return (
     <button
       type="button"
       className={`worktree-btn${queueing ? " emphasis" : ""}`}
-      aria-label={label}
-      title={`${label} (Ctrl+Shift+Enter). It starts from the project's current files, including uncommitted work; you apply, keep or discard the result.`}
-      aria-disabled={!enabled}
+      aria-label={reason ? `${label} unavailable: ${reason}` : label}
+      title={
+        reason ||
+        `${label} (Ctrl+Shift+Enter). It starts from the project's current files, including uncommitted work; you apply, keep or discard the result.`
+      }
+      aria-disabled={disabled}
       onClick={() => {
-        if (enabled) onRun();
+        if (!disabled) onRun();
       }}
     >
       <GitBranchPlus size={15} aria-hidden="true" />

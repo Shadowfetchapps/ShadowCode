@@ -72,7 +72,7 @@ export function Composer({
   onSubmit,
   onSubmitWorktree,
   onStop,
-  compare,
+  more,
   voice,
   mentions = [],
   onMention,
@@ -106,8 +106,8 @@ export function Composer({
   /** Ctrl+Shift+Enter: run in a new worktree (when possible now). */
   onSubmitWorktree?: () => void;
   onStop: () => void;
-  /** The Compare button, next to Send. */
-  compare?: ReactNode;
+  /** Optional, less-frequent controls in a compact disclosure. */
+  more?: ReactNode;
   /** The dictation mic button, next to Attach. */
   voice?: ReactNode;
   /** Files and folders picked from the @ menu (chips). Without
@@ -479,7 +479,7 @@ export function Composer({
           {controls}
           <span className="grow" />
           <span className="composer-hint">{hint}</span>
-          {compare}
+          {more}
           {busy && (
             <button
               type="button"

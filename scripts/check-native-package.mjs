@@ -142,12 +142,21 @@ async function verifyNotices(directory, includeSystem) {
     noticeFiles: new Set(files.map((file) => file.file)).size,
   };
 }
-async function verifyMetainfo(directory) {
+async function verifyMetainfo(directory, version) {
   const metainfo = path.join(directory, "usr/share/metainfo", metainfoName);
   assert.equal(
     await digest(metainfo),
     await digest(metainfoSource),
     "The package must ship the reviewed AppStream metadata unchanged",
+  );
+  // Software centres show the newest <release>; it must be this package.
+  const newest = (await readFile(metainfo, "utf8")).match(
+    /<release\s+version="([^"]+)"/,
+  );
+  assert.equal(
+    newest?.[1],
+    version,
+    "The newest AppStream <release> must be the packaged version",
   );
   const desktop = await readFile(
     path.join(directory, "usr/share/applications", DESKTOP_FILE),
@@ -155,7 +164,11 @@ async function verifyMetainfo(directory) {
   );
   assert.match(desktop, /^Name=ShadowCode$/m);
   assert.match(desktop, /^Type=Application$/m);
-  await run("appstreamcli", ["validate", "--no-net", metainfo], options);
+  await run(
+    "appstreamcli",
+    ["validate", "--strict", "--no-net", metainfo],
+    options,
+  );
 }
 try {
   const version = (
@@ -168,7 +181,8 @@ try {
   assert.match(version, /^ShadowCode \d+\.\d+\.\d+$/);
   await run(appimagePath, ["--appimage-extract"], { ...options, cwd: scratch });
   const appdir = path.join(scratch, "squashfs-root");
-  await verifyMetainfo(appdir);
+  const packaged = version.replace(/^ShadowCode /, "");
+  await verifyMetainfo(appdir, packaged);
   assert.equal(
     await digest(path.join(appdir, "AppRun")),
     await digest(
@@ -283,7 +297,7 @@ try {
   assert.equal(/libpython/i.test(dependencies), false);
   const deb = path.join(scratch, "deb");
   await run("dpkg-deb", ["--extract", debPath, deb], options);
-  await verifyMetainfo(deb);
+  await verifyMetainfo(deb, packaged);
   const debNotices = await verifyNotices(deb, false);
   const debRuntime = await verifyRuntimeDirectory(
     path.join(deb, RUNTIME_LOCATION),

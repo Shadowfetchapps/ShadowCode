@@ -26,6 +26,12 @@ const trigger = (page: Page) =>
 const prompt = (page: Page) =>
   page.getByRole("textbox", { name: "Message ShadowCode" });
 const send = (page: Page) => page.getByRole("button", { name: "Send task" });
+async function openCompare(page: Page) {
+  const more = page.locator("details.composer-more");
+  if (!(await more.evaluate((element) => (element as HTMLDetailsElement).open)))
+    await more.locator("summary").click();
+  return more.getByRole("button", { name: "Compare", exact: true });
+}
 const fakeLog = (page: Page) =>
   page.evaluate(
     () =>
@@ -923,6 +929,10 @@ test("settings sections are accessible and trap focus", async ({ page }) => {
     "Advanced",
   ]) {
     await dialog.getByRole("button", { name: section, exact: true }).click();
+    if (section === "Accounts")
+      await page.screenshot({ path: "test-results/accounts.png" });
+    if (section === "Local models")
+      await page.screenshot({ path: "test-results/local-models.png" });
     const results = await new AxeBuilder({ page })
       .include('[role="dialog"]')
       .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
@@ -956,6 +966,50 @@ test("the window works at its 520 px minimum width", async ({ page }) => {
   const box = await menu.boundingBox();
   expect(box && box.x >= 0 && box.x + box.width <= 520).toBe(true);
   await page.screenshot({ path: "test-results/compact.png", fullPage: true });
+  await page.keyboard.press("Escape");
+  const more = page.locator("details.composer-more");
+  await more.locator("summary").click();
+  const moreBox = await more.locator(".composer-more-menu").boundingBox();
+  expect(moreBox && moreBox.x >= 0 && moreBox.x + moreBox.width <= 520).toBe(
+    true,
+  );
+  await page.keyboard.press("Escape");
+});
+
+test("less-frequent composer options stay discoverable and close with Escape", async ({
+  page,
+}) => {
+  await chooseBySearch(page, "qwen3:14b");
+  await prompt(page).fill("Fix a bug in the task view");
+  await page.screenshot({ path: "test-results/workspace-light.png" });
+  const more = page.locator("details.composer-more");
+  await expect(more).not.toHaveAttribute("open", "");
+  await more.locator("summary").click();
+  await expect(more).toHaveAttribute("open", "");
+  await expect(
+    more.getByRole("button", { name: "Compare", exact: true }),
+  ).toBeVisible();
+  await expect(more.getByLabel("Reasoning effort")).toBeVisible();
+  await expect(
+    more.getByRole("button", { name: "Run in a new worktree" }),
+  ).toBeVisible();
+  await expect(more.locator(".composer-more-heading")).toHaveText(
+    "More task options",
+  );
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await axeClean(page);
+  await page.screenshot({ path: "test-results/composer-more.png" });
+  await page.keyboard.press("Escape");
+  await expect(more).not.toHaveAttribute("open", "");
+  await page.evaluate(() => (document.documentElement.dataset.theme = "dark"));
+  await page.evaluate(() =>
+    (document.activeElement as HTMLElement | null)?.blur(),
+  );
+  await page.screenshot({ path: "test-results/workspace-dark.png" });
 });
 
 test("Allowance shows what is left; in Ask mode a plan limit offers to continue on this computer", async ({
@@ -1105,7 +1159,7 @@ async function pickSlot(page: Page, slot: number, text: string) {
 test("compares a local and a cloud model, keeps one and counts the win", async ({
   page,
 }) => {
-  const compare = page.getByRole("button", { name: "Compare", exact: true });
+  const compare = await openCompare(page);
   await expect(compare).toHaveAttribute("aria-disabled", "true");
   await expect(compare).toHaveAttribute("title", /Type a task/);
   await prompt(page).fill("Fix the add function");
@@ -1234,7 +1288,7 @@ test("compares a local and a cloud model, keeps one and counts the win", async (
     .getByRole("button", { name: "Back to conversation", exact: true })
     .click();
   await prompt(page).fill("Tidy the README");
-  await page.getByRole("button", { name: "Compare", exact: true }).click();
+  await (await openCompare(page)).click();
   const again = page.getByRole("dialog", { name: "Compare models" });
   // The last lineup is remembered.
   await expect(
@@ -1272,7 +1326,7 @@ test("requires open editor drafts to be saved before Compare snapshots the proje
   await expect(editor).toBeVisible();
   await editor.fill("# Unsaved README draft\n");
 
-  await page.getByRole("button", { name: "Compare", exact: true }).click();
+  await (await openCompare(page)).click();
   const dialog = page.getByRole("dialog", { name: "Compare models" });
   await pickSlot(page, 1, "qwen3:14b");
   await pickSlot(page, 2, "GPT-6-Astra");
@@ -1286,7 +1340,7 @@ test("requires open editor drafts to be saved before Compare snapshots the proje
   await dialog.getByRole("button", { name: "Close Compare" }).click();
   await drawer.getByRole("button", { name: "Save", exact: true }).click();
   await expect(drawer.getByText("Saved", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Compare", exact: true }).click();
+  await (await openCompare(page)).click();
   const readyDialog = page.getByRole("dialog", { name: "Compare models" });
   await expect(
     readyDialog.getByText(/Save or discard these open drafts/),
@@ -1317,7 +1371,7 @@ test("Compare rejects a recovery draft saved by another editor window", async ({
     );
   });
   await prompt(page).fill("Compare the existing model results");
-  await page.getByRole("button", { name: "Compare", exact: true }).click();
+  await (await openCompare(page)).click();
   const dialog = page.getByRole("dialog", { name: "Compare models" });
   await pickSlot(page, 1, "qwen3:14b");
   await pickSlot(page, 2, "GPT-6-Astra");
@@ -1343,7 +1397,7 @@ test("a lane's approval is answered in its conversation; a conflicting Keep name
     fake.compare.conflict = true;
   });
   await prompt(page).fill("Add a regression test for add");
-  await page.getByRole("button", { name: "Compare", exact: true }).click();
+  await (await openCompare(page)).click();
   await pickSlot(page, 1, "qwen3:14b");
   await pickSlot(page, 2, "GPT-6-Luna");
   await page

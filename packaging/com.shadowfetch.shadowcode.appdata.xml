@@ -7,10 +7,20 @@
   <summary>Run coding agents and local models in one workspace</summary>
   <description>
     <p>ShadowCode brings coding agents and local GGUF models into one desktop workspace. Choose a model for each task, review proposed changes, and decide when commands may run.</p>
-    <p>Use supported coding tools through their existing sign-ins, or run compatible local models with the bundled llama.cpp runtime. Conversations, changes, and task checks stay visible in the same project.</p>
+    <p>Use supported coding tools through their existing sign-ins, an OpenRouter API key, or compatible local models run by the bundled llama.cpp runtime. Conversations, changes, and task checks stay visible in the same project.</p>
+    <ul>
+      <li>Approve actions, then review, keep or undo each change a task made.</li>
+      <li>Run tasks side by side in Git worktrees, or compare models on the same task.</li>
+      <li>Shell commands run in a sandbox that hides your home folder.</li>
+    </ul>
   </description>
   <launchable type="desktop-id">com.shadowfetch.shadowcode.desktop</launchable>
   <url type="homepage">https://github.com/Shadowfetchapps/ShadowCode</url>
+  <url type="bugtracker">https://github.com/Shadowfetchapps/ShadowCode/issues</url>
+  <developer id="com.shadowfetch">
+    <name>Shadowfetch</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
   <categories>
     <category>Development</category>
     <category>IDE</category>
@@ -18,4 +28,21 @@
   <provides>
     <binary>shadowcode</binary>
   </provides>
+  <releases>
+    <release version="0.33.2" date="2026-09-28">
+      <description>
+        <p>Less-frequent composer controls move under More, finished tasks refresh their check results after edits, and the documentation and screenshots match the current app.</p>
+      </description>
+    </release>
+    <release version="0.33.1" date="2026-09-28">
+      <description>
+        <p>Reliability and daily workflow: an editor with drafts, Run a check on finished tasks, sign-in recovery, safer Compare and the first signed release.</p>
+      </description>
+    </release>
+    <release version="0.32.0" date="2026-09-26">
+      <description>
+        <p>Subagents, code intelligence, a real shell sandbox, parallel tasks, remote access, editor integration, automations, preview and voice input.</p>
+      </description>
+    </release>
+  </releases>
 </component>

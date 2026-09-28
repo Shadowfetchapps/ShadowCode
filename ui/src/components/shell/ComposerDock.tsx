@@ -10,6 +10,7 @@ import {
   WebToggle,
   type PermissionMode,
 } from "../ComposerControls";
+import { ComposerMoreOptions } from "../ComposerMoreOptions";
 import { EffortControl, ModeToggle } from "../ComposerModes";
 import { QueuedTasks } from "../QueuedTasks";
 import type { Effort, TaskMode } from "../../lib/effort";
@@ -87,7 +88,7 @@ export function ComposerDock({
     onOpen: (id: string) => void;
   };
   plan: PlanStep[];
-  composer: Omit<ComposerProps, "picker" | "controls" | "compare">;
+  composer: Omit<ComposerProps, "picker" | "controls" | "more">;
   picker: ComponentProps<typeof UnifiedPicker>;
   permission: {
     mode: PermissionMode;
@@ -114,9 +115,13 @@ export function ComposerDock({
     effortShown: boolean;
     onEffort: (effort: Effort) => void;
   };
-  /** "Run in new worktree" (hidden when `reason` says it cannot apply). */
+  /** "Run in new worktree" (stays discoverable when it cannot apply). */
   worktree?: ComponentProps<typeof RunInWorktreeButton>;
 }) {
+  const effortIndicator =
+    modes?.effortShown && modes.effort !== "default"
+      ? modes.effort[0].toUpperCase() + modes.effort.slice(1)
+      : undefined;
   return (
     <div className="composer-wrap" hidden={hidden}>
       <QueuedTasks {...queue} />
@@ -139,9 +144,6 @@ export function ComposerDock({
         }
         controls={
           <>
-            {modes?.effortShown && (
-              <EffortControl effort={modes.effort} onChange={modes.onEffort} />
-            )}
             {modes && <ModeToggle mode={modes.mode} onChange={modes.onMode} />}
             <PermissionControl {...permission} />
             {network.mode === "offline" ? (
@@ -158,8 +160,11 @@ export function ComposerDock({
             ) : null}
           </>
         }
-        compare={
-          <>
+        more={
+          <ComposerMoreOptions indicator={effortIndicator}>
+            {modes?.effortShown && (
+              <EffortControl effort={modes.effort} onChange={modes.onEffort} />
+            )}
             {worktree && <RunInWorktreeButton {...worktree} />}
             <button
               type="button"
@@ -170,7 +175,9 @@ export function ComposerDock({
                 compare.reason ||
                 "Run this task on 2–3 models at once and keep the best result"
               }
-              onClick={compare.onOpen}
+              onClick={() => {
+                if (!compare.reason && !compare.locked) compare.onOpen();
+              }}
             >
               <GitCompareArrows size={15} aria-hidden="true" />
               <span className="compare-btn-text">Compare</span>
@@ -180,7 +187,7 @@ export function ComposerDock({
                 {compare.reason}
               </span>
             )}
-          </>
+          </ComposerMoreOptions>
         }
       />
     </div>

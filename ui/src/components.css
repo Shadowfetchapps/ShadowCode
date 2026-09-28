@@ -222,6 +222,78 @@ button.link {
   display: grid;
   gap: 8px;
 }
+.composer-more {
+  position: relative;
+  flex-shrink: 0;
+}
+.composer-more-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--pill);
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  list-style: none;
+}
+.composer-more-trigger::-webkit-details-marker {
+  display: none;
+}
+.composer-more-trigger:hover,
+.composer-more[open] > .composer-more-trigger {
+  background: var(--hover);
+  color: var(--text);
+}
+.composer-more-indicator {
+  border-radius: var(--pill);
+  padding: 1px 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+}
+.composer-more-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 35;
+  display: grid;
+  justify-items: stretch;
+  gap: 5px;
+  min-width: 235px;
+  max-width: min(320px, 86vw);
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+.composer-more-heading {
+  padding: 2px 7px 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.composer-more-menu > .compare-btn,
+.composer-more-menu > .worktree-btn {
+  width: 100%;
+  min-height: 34px;
+  justify-content: flex-start;
+  border-radius: 8px;
+}
+.composer-more-menu > .effort-control {
+  width: 100%;
+  justify-content: space-between;
+  padding: 0 7px;
+}
+.composer-more-menu > .effort-control select {
+  max-width: 180px;
+}
 .mode-options {
   border: 0;
   margin: 0 0 12px;
@@ -1564,6 +1636,15 @@ div.activity-step {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+.composer-more-menu .compare-btn-text {
+  position: static;
+  width: auto;
+  height: auto;
+  clip: auto;
+  clip-path: none;
+  overflow: visible;
+  white-space: nowrap;
 }
 .compare-lane-actions button:disabled {
   opacity: 0.55;
