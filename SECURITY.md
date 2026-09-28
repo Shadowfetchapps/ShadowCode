@@ -51,7 +51,11 @@ as your Linux user. ShadowCode's own `exec` tool limits what they can reach:
   entry names that address or `localhost`. Raw TCP, UDP and DNS have no route
   out. Programs that ignore proxy variables simply fail to connect. The filter
   sees host names, not URLs or request bodies: an allowed host can receive
-  anything the command sends. Allowlist mode needs bubblewrap and
+  anything the command sends, and a host behind a shared CDN can pass a
+  request on to another site on that CDN. With shell network `on`, the
+  command shares this computer's network namespace: it can reach services
+  listening on loopback (a local model server, a database) and the X
+  server's abstract socket. Allowlist mode needs bubblewrap and
   unprivileged user namespaces. Without them the command is refused and never
   run unfiltered.
 
@@ -332,7 +336,9 @@ default).
   [docs/NATIVE_MCP.md](docs/NATIVE_MCP.md).
 - **Plugins and hooks.** [Plugins](docs/NATIVE_PLUGINS.md) install without
   running anything. [Hooks](docs/NATIVE_HOOKS.md) need explicit activation
-  pinned to the exact definition. Enabled commands run as your user.
+  pinned to the exact definition. Enabled commands run as your user, outside
+  the command sandbox; a hook that runs a project script or `npm run …` runs
+  whatever that script says at the time, including edits a task made.
 - **MCP servers** need explicit per-project activation pinned to the reviewed
   content hash. An MCP definition committed in a project (`project:` source)
   cannot reference a provider or first-party key (the OpenRouter, Anthropic,
