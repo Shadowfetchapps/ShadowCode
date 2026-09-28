@@ -143,6 +143,20 @@ pub fn check(path: &str, body: &Value, access: &Access, paths: &AppPaths) -> Res
     if parts == ["workspace", "exec"] && !access.allow_terminals {
         return Err(Refusal(TERMINALS_OFF));
     }
+    // Slash commands reach the same runners from inside the engine, where
+    // this policy does not look again: `/run` and `/test <command>` use the
+    // direct command runner, `/background` starts and stops processes.
+    if parts == ["commands", "run"] {
+        let name = body["name"].as_str().unwrap_or("");
+        let args = body["args"].as_str().unwrap_or("").trim();
+        let direct = matches!(name, "run" | "background") || (name == "test" && !args.is_empty());
+        if direct && !access.allow_terminals {
+            return Err(Refusal(TERMINALS_OFF));
+        }
+        if matches!(name, "diff" | "why") && !args.is_empty() && redaction::is_secret_path(args) {
+            return Err(Refusal(SECRET_FILE));
+        }
+    }
     if family == "voice"
         && matches!(
             parts.get(1).copied(),
@@ -285,6 +299,39 @@ mod tests {
             );
             assert!(check(path, &Value::Null, &on, &paths).is_ok());
         }
+        // Slash commands that run a command directly are the same runner.
+        for body in [
+            json!({"name": "run", "args": "make deploy"}),
+            json!({"name": "test", "args": "cargo test"}),
+            json!({"name": "background", "args": "start web npm run dev"}),
+            json!({"name": "background", "args": "stop abc"}),
+        ] {
+            assert_eq!(
+                check("/api/commands/run", &body, &off, &paths),
+                Err(Refusal(TERMINALS_OFF)),
+                "{body}"
+            );
+            assert!(check("/api/commands/run", &body, &on, &paths).is_ok());
+        }
+        for body in [
+            json!({"name": "test", "args": ""}),
+            json!({"name": "plan", "args": "tidy the parser"}),
+            json!({"name": "git"}),
+        ] {
+            assert!(
+                check("/api/commands/run", &body, &off, &paths).is_ok(),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            check(
+                "/api/commands/run",
+                &json!({"name": "diff", "args": ".env.local"}),
+                &on,
+                &paths
+            ),
+            Err(Refusal(SECRET_FILE))
+        );
         // Routes that start agent work (tasks, automations, reviews) are
         // allowed: their commands still go through approvals.
         for path in [

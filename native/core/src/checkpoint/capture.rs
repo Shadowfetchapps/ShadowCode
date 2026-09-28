@@ -187,6 +187,9 @@ fn sanitize(component: &str) -> String {
 }
 
 async fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<Vec<u8>> {
+    // Checkpoints run right after shell commands, which may have changed
+    // `.git/config`: never run the repository's own filter drivers.
+    let guard = crate::git_guard::args_async(dir).await?;
     let mut command = tokio::process::Command::new("git");
     command
         .args([
@@ -203,6 +206,7 @@ async fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<Vec<u8>>
             "-c",
             "maintenance.auto=false",
         ])
+        .args(&guard)
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
@@ -808,6 +812,47 @@ fn copy_after(dir: &Path, mut before: BTreeMap<String, Entry>) -> Result<Vec<Cha
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A shell command can write `.git/config`; the checkpoint that follows
+    /// runs Git outside the sandbox and must not run a filter it defines.
+    #[tokio::test]
+    async fn checkpoints_never_run_repository_filters() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("a.txt"), b"one\n").unwrap();
+        run(&repo, &["add", "a.txt"]);
+        run(&repo, &["commit", "-qm", "base"]);
+        let marker = root.path().join("filter-ran");
+        let command = format!("touch '{}'; cat", marker.display());
+        run(&repo, &["config", "filter.probe.clean", &command]);
+        run(&repo, &["config", "filter.probe.smudge", &command]);
+        std::fs::write(repo.join(".gitattributes"), b"* filter=probe\n").unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+        std::fs::write(repo.join("a.txt"), b"two\n").unwrap();
+        std::fs::write(repo.join("new.txt"), b"new\n").unwrap();
+        let before = before(&repo, "s1", "test", &CheckpointConfig::default()).await;
+        assert!(
+            matches!(before.kind, Kind::Git(_)),
+            "the checkpoint is still taken"
+        );
+        assert!(!marker.exists(), "the checkpoint ran a repository filter");
+    }
 
     #[test]
     fn simple_readers_skip_the_checkpoint() {

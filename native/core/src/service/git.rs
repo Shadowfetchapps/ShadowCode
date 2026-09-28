@@ -22,6 +22,12 @@ impl Service {
             "-c".into(),
             "core.quotepath=false".into(),
         ];
+        // Reading the project (status, diffs, logs) never runs the
+        // repository's own filter drivers; staging and committing for you
+        // keep them, as Git in a terminal would (`crate::git_guard`).
+        if !writes_for_the_user(&args) {
+            base.extend(crate::git_guard::args_async(workspace).await?);
+        }
         base.extend(args);
         let refs: Vec<_> = base.iter().map(String::as_str).collect();
         Ok(json!(
@@ -298,4 +304,60 @@ pub fn parse_hunks(diff: &str) -> Vec<Value> {
         hunks.push(hunk);
     }
     hunks
+}
+
+/// Git commands that change the project's real index, history or files at
+/// the user's request (Changes view buttons). They keep the repository's
+/// filters so, for example, git-crypt still encrypts what is committed.
+fn writes_for_the_user(args: &[String]) -> bool {
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        if matches!(word.as_str(), "-c" | "-C") {
+            words.next();
+        } else if !word.starts_with('-') {
+            return matches!(
+                word.as_str(),
+                "add"
+                    | "commit"
+                    | "apply"
+                    | "restore"
+                    | "reset"
+                    | "checkout"
+                    | "switch"
+                    | "stash"
+                    | "rm"
+                    | "mv"
+                    | "merge"
+                    | "rebase"
+                    | "cherry-pick"
+                    | "revert"
+            );
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::writes_for_the_user;
+
+    #[test]
+    fn only_user_requested_writes_keep_repository_filters() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for write in [
+            &["add", "--", "a"][..],
+            &["-c", "user.name=x", "commit", "-m", "m"],
+            &["apply", "--cached", "-"],
+        ] {
+            assert!(writes_for_the_user(&args(write)), "{write:?}");
+        }
+        for read in [
+            &["status", "--porcelain=v1"][..],
+            &["diff", "--no-ext-diff"],
+            &["-c", "x=commit", "log", "-1"],
+            &["ls-files", "--others"],
+        ] {
+            assert!(!writes_for_the_user(&args(read)), "{read:?}");
+        }
+    }
 }

@@ -422,6 +422,10 @@ pub(crate) async fn git_with(
         "-c",
         "core.quotepath=false",
     ];
+    // Lane snapshots and diffs run automatically after agent turns: never
+    // with the repository's own filter drivers (`crate::git_guard`).
+    let guard = crate::git_guard::args_async(dir).await?;
+    flags.extend(guard.iter().map(String::as_str));
     flags.extend_from_slice(args);
     let mut spec = ProcessSpec::command("git", &flags, dir.into());
     spec.timeout = Duration::from_secs(300);

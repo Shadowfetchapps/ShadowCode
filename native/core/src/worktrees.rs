@@ -83,6 +83,10 @@ async fn git(source: &Path, args: &[&str], cancel: CancellationToken) -> Result<
         "-c",
         "color.ui=false",
     ];
+    // Worktree diffs and change copies never run the repository's own
+    // filter drivers (`crate::git_guard`), like worktree preparation.
+    let guard = crate::git_guard::args_async(source).await?;
+    flags.extend(guard.iter().map(String::as_str));
     flags.extend_from_slice(args);
     let mut spec = ProcessSpec::command("git", &flags, source.into());
     spec.timeout = Duration::from_secs(120);

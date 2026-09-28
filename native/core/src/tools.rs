@@ -867,6 +867,11 @@ impl ToolExecutor {
             "git_clean" => vec!["clean".into(), "-fd".into()],
             _ => bail!("Unknown Git tool"),
         };
+        // The read-only tools run without approval: they never run the
+        // repository's own filter drivers (`crate::git_guard`).
+        if matches!(name, "git_status" | "git_diff" | "git_log") {
+            command.extend(crate::git_guard::args_async(&self.workspace.path).await?);
+        }
         command.append(&mut git);
         let refs: Vec<_> = command.iter().map(String::as_str).collect();
         let mut spec = ProcessSpec::command("git", &refs, self.workspace.path.clone());
