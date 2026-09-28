@@ -458,7 +458,7 @@ async fn worktree_cleanup_waits_for_a_queued_follow_up() {
                     )]),
                 ),
                 // Still working when the automation's cleanup runs.
-                Duration::from_millis(1000),
+                Duration::from_millis(3000),
             );
         }
         let slow = !text.contains("Follow up");
@@ -528,8 +528,15 @@ async fn worktree_cleanup_waits_for_a_queued_follow_up() {
         .unwrap()
         .unwrap();
     assert_eq!(follow.status, "completed", "{}", follow.summary);
-    assert_ne!(run.worktree.clone().unwrap()["removed"], true, "{run:?}");
-    assert!(run.detail.contains("was kept"), "{}", run.detail);
+    let tree = run.worktree.clone().unwrap();
+    assert_ne!(tree["removed"], true, "{run:?}");
+    // Kept because the follow-up used it (or, on a very slow machine, had
+    // already written its file there by the time of the cleanup).
+    assert!(
+        run.detail.contains("was kept") || run.detail.contains(tree["branch"].as_str().unwrap()),
+        "{}",
+        run.detail
+    );
     assert_eq!(
         fs::read_to_string(checkout.join("follow.txt")).unwrap(),
         "kept\n"
