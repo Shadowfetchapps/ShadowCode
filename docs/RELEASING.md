@@ -141,7 +141,7 @@ run green. Existing 0.33.0 receipts do not qualify the new package bytes.
 The first-authenticated install boundary remains 0.33.0; do not silently move
 this durable boundary.
 
-Public trust in `release/trust` currently allows epoch 1 and versions 0.33.0–0.33.1;
+Public trust in `release/trust` currently allows epoch 1 and versions 0.33.0–0.34.0;
 `release/install-policy` fixes the first authenticated version at 0.33.0.
 The `release-signing` environment has the signing secret and requires review by
 `Shadowfetchapps` (User ID `209457103`). Self-review is allowed and GitHub's

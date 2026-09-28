@@ -73,7 +73,7 @@ inputs:
   version:
     description: ShadowCode release to download (without the leading v).
     required: false
-    default: 0.33.1
+    default: 0.34.0
   appimage-sha256:
     description: >-
       Optional SHA-256 of the AppImage. When set it must match as well as the

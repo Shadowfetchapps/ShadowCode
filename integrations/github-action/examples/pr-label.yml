@@ -35,7 +35,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: Shadowfetchapps/ShadowCode/integrations/github-action@v0.33.1
+      - uses: Shadowfetchapps/ShadowCode/integrations/github-action@v0.34.0
         with:
           task: >-
             Review the changes on this branch against

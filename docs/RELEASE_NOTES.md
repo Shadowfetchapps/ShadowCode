@@ -1,4 +1,62 @@
-# ShadowCode 0.33.1
+# ShadowCode 0.34.0
+
+ShadowCode 0.34.0 is ready for everyone: you can start with no account at all,
+the app tells you when an update is out, and a full quality pass fixed dozens
+of bugs across the engine, the window, the vendors and security. The 0.33.1
+notes follow below.
+
+## Start with nothing
+
+- **No account needed.** Open a project and ShadowCode offers a free model
+  that runs on your own computer, picked for your memory and graphics card,
+  with its size and download time. You can also add an OpenRouter key or
+  sign in to a subscription.
+- **Five free models** to choose from in Settings › Local models, from a
+  2 GB model for small laptops to a 19 GB one for big GPUs. Each download is
+  checked against a pinned fingerprint, can be paused and resumed, and never
+  starts on its own.
+
+## Easier every day
+
+- **A calmer composer.** Effort, Compare and Worktree now live under
+  **More**, so the message area stays clear.
+- **Clearer when something goes wrong.** Errors read as plain sentences with
+  a **Try again** button, and the status bar says "Not connected" when the
+  engine is down.
+- **Keyboard friendly.** Escape closes every dialog, and the Tasks panel can
+  be driven entirely from the keyboard.
+- **Update notice.** ShadowCode checks for a new release at most once a day,
+  sends nothing about you, and tells you how to update your kind of install.
+  **Settings › About** shows the version and license.
+
+## Works with today's tools
+
+Checked live against the current Codex, Claude Code, Cursor, Grok and
+Antigravity releases. Claude Code now shows its real models and plan usage,
+effort settings work for Claude Code, Codex and Grok, and OpenRouter shows
+your account balance.
+
+## Safer and more reliable
+
+- Rewind and Undo can no longer delete files that existed before a task.
+- Slow local models on a CPU are no longer cut off mid-answer, and a long
+  prompt can take up to 15 minutes to start without being cancelled.
+- A security audit closed ways secret files could be read, tightened "Allow
+  for this task", blocked DNS rebinding against remote access, and found no
+  known vulnerabilities in dependencies.
+- The Debian package passes lintian cleanly and is ready for distributions,
+  with a man page and shell completions.
+
+## Download
+
+`ShadowCode_0.34.0_amd64.AppImage`, `ShadowCode_0.34.0_amd64.deb` and
+`ShadowCode_0.34.0_appimage-runtime-sources.tar.gz`, with `SHA256SUMS`,
+`RELEASE-MANIFEST.json`, `RELEASE-AUTH` and `RELEASE-AUTH.sig`. Install the
+AppImage with the authenticated installer described in the
+[README](../README.md#install); the signature is checked before anything
+runs.
+
+## Published 0.33.1
 
 [ShadowCode 0.33.1](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.33.1) was published on September 28, 2026 from `e15c4480e65db5650af012bb2a9773dbe89acf84`. It improves editing, explicit verification, provider sign-in recovery and long-running desktop reliability. Historical notes below retain their original versions and scope.
 

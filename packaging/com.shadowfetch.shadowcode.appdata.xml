@@ -29,6 +29,11 @@
     <binary>shadowcode</binary>
   </provides>
   <releases>
+    <release version="0.34.0" date="2026-09-28">
+      <description>
+        <p>Start with no account using a free model that runs on your computer, see when an update is out, and benefit from a full reliability, polish, vendor and security pass.</p>
+      </description>
+    </release>
     <release version="0.33.1" date="2026-09-28">
       <description>
         <p>Reliability and daily workflow: an editor with drafts, Run a check on finished tasks, sign-in recovery, safer Compare and the first signed release.</p>

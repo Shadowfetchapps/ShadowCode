@@ -1,18 +1,87 @@
 # Changelog
 
-## Unreleased
+## 0.34.0: Ready for everyone
 
-- **A calmer composer.** Model, Code / Plan / Ask, permissions and Web stay
-  in view; reasoning effort, Compare and Worktree move under **More**, which
-  closes with Escape or an outside click. A non-default effort stays marked
-  on the button, and `Ctrl+Shift+Enter` still starts a worktree task
-  directly. Compare and Worktree explain why they are unavailable without
-  closing the menu or pretending to run.
-- **Richer AppStream metadata** (feature list, bug tracker, developer,
-  content rating and release history). The package check now validates it
-  strictly and requires the newest listed release to be the packaged
-  version.
-- Refresh visible check evidence after editor saves, editor-observed disk changes and relevant same-session engine events. Hide old passing results immediately and discard refresh responses superseded by an edit. Visible task summaries refresh together through one batched request (`POST /api/jobs/verification-refresh`, up to 32 jobs sharing one workspace fingerprint) on a shared five-second cadence; offscreen cards and hidden windows don't poll. Not included in the published 0.33.1 packages.
+For people starting out:
+- **Start with no account.** If no model is ready after you open a project,
+  the first run offers a free model to run on this computer (recommended for
+  your memory and graphics card, with its size and download time), an
+  OpenRouter key, or a subscription.
+- **Free models built in.** Settings › Local models lists five Apache-2.0
+  models, from Granite 4.2 3B (2.1 GB) to Qwen3.6 35B-A3B (19 GB), each
+  pinned to an exact Hugging Face file and checked with SHA-256. Downloads
+  start only on click, can be paused and resumed (even after a restart),
+  check disk space first and stop in offline mode. gpt-oss now runs from its
+  upstream file.
+- **Updates you can see.** At most once a day ShadowCode asks GitHub for the
+  newest release (no identifiers sent) and shows a quiet notice with the right
+  way to update. New **Settings › About** shows version, commit, install
+  type, license and NOTICE. Distributions can switch the check off in
+  `/etc/shadowcode/policy.yaml` or at build time.
+
+Everyday use:
+- **A calmer composer.** Reasoning effort, Compare and Worktree move under
+  **More** (Escape or an outside click closes it); `Ctrl+Shift+Enter` still
+  starts a worktree task. Unavailable options say why.
+- **Polish everywhere.** Errors read as plain sentences with **Try again**;
+  Escape closes every dialog and shortcuts no longer act behind one; the
+  status bar says "Not connected" when the engine is down; the drawer's
+  **Tasks** panel has keyboard-reachable Rename, Fork, Export and a confirmed
+  Delete; a sidebar hidden by a narrow window comes back; `/new` keeps typed
+  text until the new task opens. Every screen passes axe in light and dark.
+- Visible task summaries refresh their check results together in one batched
+  request after edits.
+
+Vendors, verified live on current releases (Codex 0.158.0, Claude Code
+2.1.284, Cursor Agent 2026.09.26, Grok 1.0.41, Antigravity agent server
+1.2.1):
+- Claude Code lists its real models, honours effort through `--effort` and
+  shows its 5-hour and weekly usage in Allowance.
+- Codex applies effort on follow-ups and no longer warns on every resume;
+  Grok switches models on resumed conversations and takes an effort setting;
+  a Cursor "Upgrade your plan" reply ends as a plan limit; replies no longer
+  run together after a tool call.
+- OpenRouter shows your account balance and explains refused requests with
+  the provider's own message.
+
+Reliability (each fix has a regression test):
+- Rewind and Undo never delete files that existed before a task, and rewind
+  restores permission changes.
+- Automations, write subagents and cleanup keep any worktree that still holds
+  work; subagent usage counts toward the parent task and subagent
+  conversations are deleted with their parent.
+- Long answers from slow local models are no longer cut off after ten
+  minutes, and a CPU-only machine may take up to 15 minutes to start
+  answering a long prompt; a taken port no longer moves a model to the CPU;
+  local tasks in different projects no longer block each other.
+- Compare lanes never continue on another model after a plan limit; hung
+  language servers, runtime wrapper scripts, stalled downloads, background
+  save errors, remote address changes and cancelled sign-ins can no longer
+  hang or leave processes behind. `shadowcode acp` follows progress through
+  push events; the voice model is freed after five idle minutes.
+
+Security and privacy:
+- Secret files can no longer be read through odd spellings or symlinks; keys
+  are redacted from stored terminal, slash-command and hook output; @-mentions
+  skip secret files.
+- "Allow for this task" no longer covers wrappers, interpreters or
+  `git -c`; ShadowCode never runs a repository's own Git filters and stays out
+  of nested repositories.
+- Remote access answers only its own host names (no DNS rebinding) and every
+  API family has an explicit remote-access decision; the Landlock fallback
+  restricts Unix sockets and signals; the network allow-list judges
+  IPv4-mapped IPv6 correctly; a local conversation never starts a cloud
+  subagent. `cargo audit` and `npm audit` report no known vulnerabilities.
+
+Packaging:
+- The Debian package passes lintian with no errors or warnings: copyright and
+  NOTICE, changelog, man page, bash/zsh/fish completions (also
+  `shadowcode completions`), icons at every size, correct dependencies, and
+  purging it leaves your data in place. `docs/DISTRIBUTING.md` explains how
+  to verify, ship and configure ShadowCode.
+- Richer AppStream metadata, validated strictly on every package build.
+- The AppImage build uses the pinned, source-built runtime instead of
+  upstream's newest.
 
 ## 0.33.1: Reliability and daily workflow
 
