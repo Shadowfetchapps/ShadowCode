@@ -963,3 +963,70 @@ fn provider_error_details_are_the_providers_own_redacted_message() {
         Some("the request exceeds the available context size")
     );
 }
+
+/// A response that keeps streaming for longer than ten minutes (a large
+/// answer from a slow local model) is not cut off by an overall request
+/// deadline; only a stream with no bytes for 120 seconds stalls. Runs on
+/// tokio's paused clock, so it takes no real time.
+#[tokio::test(start_paused = true)]
+async fn long_steady_streams_are_not_cut_off_by_a_total_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = AppPaths::isolated(root.path()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let count = socket.read(&mut buffer).await.unwrap();
+            request.extend_from_slice(&buffer[..count]);
+            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                let length = headers
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:")?.trim().parse().ok())
+                    .unwrap_or(0usize);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+        }
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        // Twelve minutes of steady output, one piece a minute.
+        for n in 0..12 {
+            let piece = sse(json!({"choices":[{"delta":{"content":format!("{n} ")}}]}));
+            socket.write_all(piece.as_bytes()).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+        let end =
+            sse(json!({"choices":[{"delta":{},"finish_reason":"stop"}]})) + "data: [DONE]\n\n";
+        socket.write_all(end.as_bytes()).await.unwrap();
+    });
+    let client = ModelClient::new(
+        ModelConfig {
+            provider: "local".into(),
+            name: "fixture".into(),
+            endpoint,
+            ..Default::default()
+        },
+        &paths,
+    )
+    .unwrap();
+    let result = client
+        .chat(
+            &[json!({"role":"user","content":"write a lot"})],
+            &[],
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.text, "0 1 2 3 4 5 6 7 8 9 10 11 ");
+    server.await.unwrap();
+}

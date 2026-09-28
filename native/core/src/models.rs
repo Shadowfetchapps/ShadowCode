@@ -324,6 +324,10 @@ pub fn provider_error_detail(body: &[u8], local: bool) -> Option<String> {
     let text = crate::redaction::redact_text(text.trim()).text;
     (!text.is_empty()).then_some(text)
 }
+/// How long a provider may take to start answering (prompt processing on a
+/// slow local model can take minutes). The answer itself has no overall
+/// deadline, only the 120-second stall limit between bytes.
+const HEADERS_TIMEOUT: Duration = Duration::from_secs(600);
 pub fn is_loopback_endpoint(endpoint: &str) -> bool {
     reqwest::Url::parse(endpoint)
         .ok()
@@ -354,9 +358,11 @@ impl ModelClient {
         } else {
             config.endpoint.clone()
         };
+        // No overall deadline: a long answer from a slow model may stream for
+        // many minutes. The response must start within `HEADERS_TIMEOUT` and
+        // the stream stalls after 120 seconds without bytes.
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(600))
             .redirect(reqwest::redirect::Policy::none());
         if is_loopback_endpoint(&endpoint) {
             builder = builder.no_proxy();
@@ -617,7 +623,17 @@ impl ModelClient {
         let mut http_status = None;
         let transport: Result<()> = async {
             ensure!(!cancel.is_cancelled(), "Model request cancelled");
-            let response = tokio::select! {_=cancel.cancelled()=>bail!("Model request cancelled"),response=request.send()=>response.context("Could not connect to the model provider")?};
+            let response = tokio::select! {
+                _ = cancel.cancelled() => bail!("Model request cancelled"),
+                response = tokio::time::timeout(HEADERS_TIMEOUT, request.send()) => response
+                    .map_err(|_| crate::retry::ModelFailure::Stalled {
+                        message: format!(
+                            "The model provider did not start its response within {} minutes",
+                            HEADERS_TIMEOUT.as_secs() / 60
+                        ),
+                    })?
+                    .context("Could not connect to the model provider")?,
+            };
             let status = response.status();
             http_status = Some(status.as_u16());
             if !status.is_success() {

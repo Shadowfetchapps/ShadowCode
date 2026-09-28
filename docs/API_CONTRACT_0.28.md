@@ -681,7 +681,9 @@ Usage = {
   (429), `overloaded` (503/529), `server_error` (408, 425, 500, 502, 504,
   520–528), `stream_error` (the provider's error inside the stream),
   `disconnected` (the stream stopped before its finish marker, or the body
-  failed), `stalled` (no bytes for 120 s) or `connect_failed`. `status` is the
+  failed), `stalled` (no bytes for 120 s, or no response started within 10
+  minutes; a response that keeps streaming has no overall time limit) or
+  `connect_failed`. `status` is the
   HTTP status or null; `retry_after: true` means the wait is the provider's
   `Retry-After`/`Retry-After-Ms`. `discard_message_id` names the streamed
   message of the failed attempt (partial text already shown) so the UI can

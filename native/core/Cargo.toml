@@ -73,3 +73,5 @@ cpal = { version = "=0.18.2", default-features = false }
 
 [dev-dependencies]
 toml = "=0.9.12"
+# The same tokio, with its paused test clock (no new crate).
+tokio = { version = "1", features = ["full", "test-util"] }
