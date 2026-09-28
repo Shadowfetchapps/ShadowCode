@@ -169,14 +169,23 @@ async fn cancelled_checkout_leaves_a_recovery_record_and_source_intact() {
     git(&project, &["add", ".gitattributes"]);
     git(&project, &["commit", "-qm", "Checkout fixture"]);
     let marker = root.path().join("filter-started");
-    git(
-        &project,
-        &[
-            "config",
-            "filter.slow.smudge",
-            &format!("touch '{}'; sleep 60; cat", marker.display()),
-        ],
-    );
+    // ShadowCode never runs filter drivers from the repository's own
+    // configuration (`git_guard`), so the slow driver lives in global scope,
+    // which a command in the project cannot write. Git reads
+    // `$XDG_CONFIG_HOME/git/config` as global configuration, and the process
+    // runner passes XDG_CONFIG_HOME through. Only this test's repository
+    // names the `slow` filter.
+    let xdg = root.path().join("xdg");
+    fs::create_dir_all(xdg.join("git")).unwrap();
+    fs::write(
+        xdg.join("git/config"),
+        format!(
+            "[filter \"slow\"]\n\tsmudge = \"touch '{}'; sleep 60; cat\"\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::env::set_var("XDG_CONFIG_HOME", &xdg);
     let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
     let cancel = CancellationToken::new();
     let worker_paths = paths.clone();
