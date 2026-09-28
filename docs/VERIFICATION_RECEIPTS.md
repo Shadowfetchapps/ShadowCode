@@ -56,3 +56,7 @@ This fallback reads only typed verification events and performs no workspace has
 Receipt events and summary fields are additive to existing persisted events. Legacy command-only rows remain readable but cannot establish verification. Vendor-owned verification retains its distinct provenance and is not promoted into local evidence. A cancelled or failed task cannot publish an aggregate verified result.
 
 Regression coverage includes the original `printf test` false-positive, no-command model claims, explicit configuration, edits after a check, exact-command recovery, unrelated failures, cancellation/skipped/stale states, missing fingerprints, uncommitted content, rename behavior, ignored scope, goal acceptance, and UI labels. See `engine_tasks`, `goals`, `verification::tests`, `autonomy::tests`, and `ui/src/lib/activity.test.ts` for executable cases.
+
+## 0.33.0 local package preflight
+
+At `7a38fcc6196f04cae846ed0dbb6cc2a14a3afb4b`, both Linux packages passed content/runtime/notices checks, offline CLI/MCP and fresh-profile first windows. The exact AppImage passed 20 X11 desktop groups, native Markdown checks, 21 CLI scenario groups and runtime extraction/lifetime/source-rebuild checks. All 961 tracked build inputs and both package hashes were unchanged across the build/checks. These unsigned preflight artifacts are not a signed release or proof of completed remote native CI. Exact hashes, receipts and remaining scope are in the implementation ledger.

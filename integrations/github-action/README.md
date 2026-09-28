@@ -49,7 +49,7 @@ command line runs directly.
 | `github-token`      | `github.token`                    | Used only for the comment or pull request, after ShadowCode finished.                                              |
 | `issue-number`      | the event's issue or pull request | Where to comment.                                                                                                  |
 | `base`              | the checked-out branch            | Target branch of the pull request.                                                                                 |
-| `version`           | `0.32.0`                          | ShadowCode release to run. `approval: approve` needs the release that ships this action or later.                  |
+| `version`           | `0.33.0`                          | ShadowCode release to run. `approval: approve` needs the release that ships this action or later.                  |
 | `appimage-sha256`   | empty                             | Optional extra pin for the AppImage's SHA-256.                                                                     |
 | `working-directory` | the workspace                     | Project folder.                                                                                                    |
 
