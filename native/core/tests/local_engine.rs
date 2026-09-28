@@ -190,6 +190,40 @@ class Handler(BaseHTTPRequestHandler):
             return sse(self, text("The image is red." if has_image else "No image arrived."))
         if not body.get("tools"):
             return sse(self, text("Chat only reply."))
+        if name == "activeexit.gguf":
+            if os.path.exists(os.path.join(HERE, "active-exit-armed")):
+                if not tool_results:
+                    return sse(self, tool_call("write_file", {"path": "retained.txt", "content": "retained before runtime exit\n", "expected_hash": "missing"}))
+                if not any(m.get("name") == "write_file" and json.loads(m.get("content", "{} ")).get("success") is True for m in tool_results):
+                    return self.reply(500, {"error": "fixture needs successful real write result"})
+                barrier = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                barrier_path = os.path.join(HERE, "active-stream-exit-%s.sock" % os.getpid())
+                barrier.bind(barrier_path)
+                barrier.listen(1)
+                # Flush enough distinct visible text to cross the engine's
+                # stream batching threshold without a sleep as ordering proof.
+                partial = "The earlier fixture edit is retained; this response is still incomplete. " + " ".join("observation_%03d=value_%03d" % (i, i) for i in range(220))
+                chunk = tool_call("write_file", {"path": "unexecuted.txt", "content": "must never execute", "expected_hash": "missing"})[0]
+                chunk["choices"][0]["delta"]["content"] = partial
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
+                self.wfile.flush()
+                with open(os.path.join(HERE, "active-stream-held.json"), "w") as f:
+                    json.dump({"pid": os.getpid(), "socket": barrier_path}, f)
+                connection, _ = barrier.accept()
+                with connection, connection.makefile("rb") as stream:
+                    if stream.read(4) != b"exit":
+                        os._exit(2)
+                sys.stderr.write("active-generation fixture exit\n")
+                sys.stderr.flush()
+                os._exit(29)
+            if not tool_results:
+                return sse(self, tool_call("read_file", {"path": "retained.txt"}))
+            if not any(m.get("name") == "exec" for m in tool_results):
+                return sse(self, tool_call("exec", {"command": "python3 check_retained.py"}))
+            return sse(self, text("The retained file passed the configured check."))
         if "hermes-partial" in name:
             chunks = tool_call("write_file", {"path": "unexpected.txt", "content": "never"})
             chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] = '{"path":"unexpected.txt","content":'
@@ -3575,4 +3609,212 @@ async fn foreign_health_with_rejected_props_cannot_mark_an_unbound_runtime_loade
         !row["reason"].as_str().unwrap().starts_with("Loaded"),
         "picker claimed foreign runtime ready: {observed}"
     );
+}
+
+/// LOC-04 active generation: a confirmed managed-child exit must fail the
+/// admitted task, preserve completed work, and permit a separate explicit retry.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn active_runtime_exit_preserves_edit_and_failed_task_then_allows_explicit_retry() {
+    use anyhow::{ensure, Context};
+    use futures_util::FutureExt;
+    use tokio::io::AsyncWriteExt;
+
+    fn process(pid: u64) -> Option<(u64, char)> {
+        let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let fields: Vec<_> = text.rsplit_once(") ")?.1.split_whitespace().collect();
+        Some((
+            fields.get(19)?.parse().ok()?,
+            fields.first()?.chars().next()?,
+        ))
+    }
+    async fn exited(pid: u64, start: u64) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while process(pid).is_some_and(|(now, state)| now == start && state != 'Z') {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("owned runtime did not exit after explicit command")
+    }
+    fn git(project: &Path, args: &[&str]) -> anyhow::Result<String> {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(project)
+            .output()?;
+        ensure!(
+            out.status.success(),
+            "fixture git failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(String::from_utf8(out.stdout)?.trim().to_owned())
+    }
+
+    let f = fixture(""); // CPU fixture; no GPU-fallback path or real model.
+    let model = f.models.join("activeexit.gguf");
+    qwen_like(&model, "qwen3", TOOLS_TEMPLATE);
+    let model_bytes = fs::read(&model).unwrap();
+    fs::write(f.bin.join("active-exit-armed"), "").unwrap();
+    fs::write(f.project.join("hello.txt"), "original project bytes\n").unwrap();
+    fs::write(f.project.join("check_retained.py"), "from pathlib import Path\nassert Path('retained.txt').read_text() == 'retained before runtime exit\\n'\nassert not Path('unexecuted.txt').exists()\nprint('retained-check-passed')\n").unwrap();
+    git(&f.project, &["init", "-q"]).unwrap();
+    git(&f.project, &["add", "."]).unwrap();
+    git(&f.project, &["commit", "-qm", "base"]).unwrap();
+    fs::write(f.project.join("hello.txt"), "staged user bytes\n").unwrap();
+    git(&f.project, &["add", "hello.txt"]).unwrap();
+    fs::write(f.project.join("hello.txt"), "unstaged user bytes\n").unwrap();
+    fs::write(f.project.join("unrelated.txt"), "unrelated user bytes\n").unwrap();
+    let original_index = fs::read(f.project.join(".git/index")).unwrap();
+    let original_head = git(&f.project, &["rev-parse", "HEAD"]).unwrap();
+    let check_bytes = fs::read(f.project.join("check_retained.py")).unwrap();
+    Config::patch(
+        &f.paths,
+        json!({
+            "local_engine":{"files":[model]},
+            "network":{"mode":"offline"},"cli_agents":{"enabled":false},
+            "permissions":{"mode":"allow_edits","approve_shell":false},
+            "verification":{"commands":["python3 check_retained.py"]}
+        }),
+    )
+    .unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let id = local_engine::scan(&cfg.local_engine)[0].id.clone();
+    let mut service = Some(Service::open(f.paths.clone(), Some(f.project.clone())).unwrap());
+    let mut sentinel = tokio::process::Command::new(f.bin.join("llama-server"))
+        .arg("--post-ready-sentinel")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    let observed = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !f.bin.join("post-ready-sentinel-ready").is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.context("sentinel ready barrier")?;
+        let started = call(service.as_ref().unwrap(), "POST", "/api/jobs", json!({
+            "workspace":f.project,"task":"Create a retained fixture file and verify it.","model":id,"mode":"code"
+        })).await?;
+        let job_id = started["id"].as_str().context("job ID")?.to_owned();
+        let task_id = started["task_id"].as_str().context("task ID")?.to_owned();
+        let session_id = started["session_id"].as_str().context("session ID")?.to_owned();
+        let held = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(bytes) = fs::read(f.bin.join("active-stream-held.json")) {
+                    if let Ok(value) = serde_json::from_slice::<Value>(&bytes) { break value; }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.context("fake runtime never reached active stream barrier")?;
+        // Require receipt of real visible SSE before triggering the crash.
+        let partial = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(event) = service.as_ref().unwrap().engine.store().last_task_event(&task_id,"model.stream")? {
+                    if event["payload"]["text"].as_str().is_some_and(|text| text.contains("The earlier fixture edit is retained") && text.len() >= 4000) { break Ok::<_,anyhow::Error>(event); }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.context("partial SSE was not durably observed")??;
+        let runtime = service.as_ref().unwrap().engine.local_runtime().loaded().context("active runtime missing")?;
+        let pid = runtime.pid.context("owned PID missing")? as u64;
+        let (start, state) = process(pid).context("owned runtime missing from proc")?;
+        ensure!(state != 'Z' && held["pid"] == pid, "barrier belongs to different/dead runtime");
+        ensure!(fs::read_to_string(f.project.join("retained.txt"))? == "retained before runtime exit\n", "real edit absent before crash");
+        ensure!(!f.project.join("unexecuted.txt").exists(), "partial tool ran before crash");
+        ensure!(service.as_ref().unwrap().engine.job(&job_id)?.context("active job missing")?.status == "running", "task ended before crash");
+        let expected_socket = f.bin.join(format!("active-stream-exit-{pid}.sock"));
+        ensure!(held["socket"] == expected_socket.to_string_lossy().as_ref(), "unexpected private exit socket");
+        let mut exit = tokio::time::timeout(Duration::from_secs(2), tokio::net::UnixStream::connect(&expected_socket)).await.context("active exit connect deadline")??;
+        exit.write_all(b"exit").await?;
+        drop(exit);
+        exited(pid,start).await?;
+        // Keep configured retry defaults. Retries cannot respawn a runtime or
+        // execute incomplete tool calls; their budget must eventually fail.
+        let done = tokio::time::timeout(Duration::from_secs(20), service.as_ref().unwrap().engine.wait(&job_id)).await.context("active crash did not reach bounded terminal")??;
+        let store = service.as_ref().unwrap().engine.store();
+        let saved = store.job(&job_id)?.context("durable failed job missing")?;
+        let events = store.events_after(&session_id,0,Some(done.event_cursor),1000)?;
+        ensure!(done.status == "failed" && !done.summary.is_empty() && saved["result"]["success"] == false, "runtime death was not failed: {saved}");
+        ensure!(saved["result"]["verification"]["verified"] == false && saved["result"]["verification"]["status"] != "passed", "failed task claimed a passed check");
+        ensure!(events.iter().filter(|e| e["task_id"] == task_id && e["type"] == "agent.completed").count() == 1, "terminal event not exactly once");
+        ensure!(events.iter().filter(|e| e["task_id"] == task_id && e["type"] == "tool.started").count() == 1 && events.iter().any(|e| e["task_id"] == task_id && e["type"] == "tool.completed" && e["payload"]["tool"] == "write_file" && e["payload"]["success"] == true), "completed write lost or partial tool executed");
+        ensure!(!events.iter().any(|e| e["task_id"] == task_id && (e["type"] == "verification.receipt" || (e["type"] == "tool.started" && e["payload"]["tool"] == "exec"))), "check was fabricated/executed before retry");
+        let failed_response = events.iter().find(|e| e["type"] == "model.response_metadata" && e["payload"]["message_id"] == partial["payload"]["message_id"]).context("partial response failure metadata missing")?;
+        ensure!(failed_response["payload"]["accepted"] == false && failed_response["payload"]["failure_kind"] == "disconnected" && failed_response["payload"]["finish_marker_seen"] == false && failed_response["payload"]["tool_call_slots"] == 1, "wrong active stream failure metadata: {failed_response}");
+        ensure!(events.iter().any(|e| e["type"] == "model.stream_end" && e["payload"]["message_id"] == partial["payload"]["message_id"] && e["payload"]["complete"] == false), "partial stream not marked incomplete");
+        let retries = events.iter().filter(|e| e["type"] == "model.retry").count();
+        ensure!(retries <= cfg.agent.model_retries, "retry budget exceeded");
+        let catalog = call(service.as_ref().unwrap(),"GET","/api/local-models",Value::Null).await?;
+        ensure!(catalog["loaded"].is_null(), "dead runtime remains Loaded");
+        ensure!(process(pid).is_none_or(|(now,_)| now != start), "owned exited child was not reaped by observation");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !service.as_ref().unwrap().engine.local_runtime().last_error(&id).is_some_and(|e| e.contains("active-generation fixture exit")) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.context("runtime crash tail missing")?;
+        ensure!(lines(&f.bin.join("launches.jsonl")).len() == 1 && lines(&f.bin.join("requests.jsonl")).len() == 2, "failure automatically relaunched/replayed completed work");
+        ensure!(sentinel.try_wait()?.is_none(), "unrelated process stopped on runtime death");
+        service.as_ref().unwrap().engine.shutdown().await?;
+        drop(service.take());
+        service = Some(Service::open(f.paths.clone(),Some(f.project.clone()))?);
+        ensure!(service.as_ref().unwrap().engine.store().job(&job_id)? == Some(saved.clone()) && service.as_ref().unwrap().engine.store().events_after(&session_id,0,Some(done.event_cursor),1000)? == events, "failed task/error/partial stream changed after reopen");
+        let verification = call(service.as_ref().unwrap(),"GET",&format!("/api/jobs/{job_id}/verification"),Value::Null).await?;
+        ensure!(verification["verified"] == false && verification["status"] != "passed", "reopen reassessed failed task as verified");
+        ensure!(fs::read_to_string(f.project.join("retained.txt"))? == "retained before runtime exit\n" && !f.project.join("unexecuted.txt").exists(), "work not preserved after failure/reopen");
+        // Only the fixture failure switch changes; model/config/budgets stay
+        // byte-identical. This is one explicit new task, not an invisible retry.
+        fs::remove_file(f.bin.join("active-exit-armed"))?;
+        let restarted = call(service.as_ref().unwrap(),"POST","/api/jobs",json!({"workspace":f.project,"task":"Check the retained fixture file without editing it.","model":id,"mode":"code"})).await?;
+        let retry_id = restarted["id"].as_str().context("explicit retry ID")?;
+        let retried = tokio::time::timeout(Duration::from_secs(15),service.as_ref().unwrap().engine.wait(retry_id)).await.context("explicit retry task deadline")??;
+        ensure!(retried.status == "completed" && retried.result.as_ref().context("retry result")?["verification"]["verified"] == true, "explicit retry/check failed: {retried:?}");
+        let retry_pid = service.as_ref().unwrap().engine.local_runtime().loaded().context("retry runtime missing")?.pid.context("retry PID missing")? as u64;
+        let retry_start = process(retry_pid).context("retry runtime absent")?.0;
+        ensure!(lines(&f.bin.join("launches.jsonl")).len() == 2, "explicit retry did not launch exactly once");
+        ensure!(service.as_ref().unwrap().engine.store().job(&job_id)? == Some(saved.clone()) && service.as_ref().unwrap().engine.store().events_after(&session_id,0,Some(done.event_cursor),1000)? == events, "new task overwrote failed task evidence");
+        ensure!(fs::read(&model)? == model_bytes && fs::read(f.project.join(".git/index"))? == original_index && git(&f.project,&["rev-parse","HEAD"])? == original_head, "model/HEAD/index changed");
+        ensure!(fs::read_to_string(f.project.join("hello.txt"))? == "unstaged user bytes\n" && fs::read_to_string(f.project.join("unrelated.txt"))? == "unrelated user bytes\n" && fs::read(f.project.join("check_retained.py"))? == check_bytes, "unrelated project/check bytes changed");
+        service.as_ref().unwrap().engine.shutdown().await?;
+        exited(retry_pid,retry_start).await?;
+        ensure!(process(retry_pid).is_none_or(|(now,_)| now != retry_start), "explicit retry child was not reaped after shutdown");
+        ensure!(sentinel.try_wait()?.is_none(), "runtime shutdown killed unrelated process");
+        Ok::<_,anyhow::Error>(json!({"failed_job":saved,"partial_event":partial["id"],"failure_metadata":failed_response,"retries":retries,"old_pid":pid,"retry_pid":retry_pid,"retry_job":retried.id,"retry_verification":retried.result.unwrap()["verification"],"launches":2,"requests":lines(&f.bin.join("requests.jsonl")).len()}))
+    }).catch_unwind().await;
+
+    // Cleanup remains outside the caught observation and before all outcome
+    // assertions. Signals target only retained owned Child handles.
+    let shutdown = if let Some(current) = service.as_ref() {
+        tokio::time::timeout(Duration::from_secs(20), current.engine.shutdown()).await
+    } else {
+        Ok(Ok(()))
+    };
+    let sentinel_survived = sentinel.try_wait().map(|status| status.is_none());
+    let _ = sentinel.start_kill();
+    let sentinel_reaped = tokio::time::timeout(Duration::from_secs(5), sentinel.wait()).await;
+    eprintln!("ACTIVE_RUNTIME_EXIT panic={} result={:?}; shutdown={shutdown:?}; sentinel={sentinel_reaped:?}",observed.is_err(),observed.as_ref().ok());
+    assert!(matches!(shutdown, Ok(Ok(()))), "{shutdown:?}");
+    assert!(matches!(sentinel_reaped, Ok(Ok(_))), "{sentinel_reaped:?}");
+    assert!(
+        matches!(sentinel_survived, Ok(true)),
+        "unrelated process did not survive cleanup: {sentinel_survived:?}"
+    );
+    match observed {
+        Ok(result) => {
+            result.expect("active runtime fixture/acceptance failed");
+        }
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
