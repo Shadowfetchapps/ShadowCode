@@ -1197,6 +1197,37 @@ title> · <project>", message, tags, priority, click?}`; `message` is a
 generic sentence unless `details` is on; `click` is
 `<public or running address>/#session=<id>`, which the web interface opens.
 
+## About and updates
+
+Settings › About and the status-bar update notice (`native/core/src/updates.rs`,
+[DISTRIBUTING.md](DISTRIBUTING.md#updates)). Only `?auto=1` and `POST
+/api/updates/check` reach the network, and only
+`GET https://api.github.com/repos/Shadowfetchapps/ShadowCode/releases/latest`
+with `User-Agent: ShadowCode-update-check` and no identifiers.
+
+- `GET /api/about` → `{name, version, commit: string|null, install: {kind:
+  "appimage"|"deb"|"system"|"source"|"unknown", label}, license: {spdx,
+  name, holder, notice, third_party: string|null}, links: {repository,
+  release_notes, releases, license, notice, issues, user_guide}, updates}`.
+  `commit` is recorded at build time (`SHADOWCODE_COMMIT`); `notice` is the
+  NOTICE text; `third_party` is the installed notices folder; `updates` is the
+  status below. No network access.
+- `GET /api/updates[?auto=1]` → `{current, allowed, automatic, setting:
+  bool|null, default_on, offline, policy_message, policy_source, install,
+  last_checked_at, last_attempt_at, error, latest: {version, tag, url,
+  published_at, signed}|null, available, dismissed, next_step: {text,
+  command, link}|null, releases_url}`. `allowed` is false when the build or a
+  policy file turned checks off; `automatic` adds `updates.check`. With
+  `auto=1` the daily check runs first when it is allowed, online and due (24 h
+  after the last attempt); otherwise the saved answer is returned.
+  `available` means `latest` is newer than `current`; `dismissed` means its
+  notice was hidden; `next_step` depends on `install` and the policy message.
+- `POST /api/updates/check {}` → the status after asking GitHub now (not again
+  within 30 s). Fails with the reason when checks are turned off or the
+  network mode is Offline; a failed request is reported in `error`.
+- `POST /api/updates/dismiss {version}` → the status; hides the notice for
+  that version until a newer one appears.
+
 ## Config
 
 `GET/PUT /api/config`:
@@ -1209,6 +1240,8 @@ generic sentence unless `details` is on; `click` is
   (0–30, default 1.0): model request retries (see above).
   `agent.summary_compaction` (default true) and `agent.summary_timeout_sec`
   (5–600, default 60): model-written compaction summaries.
+- `updates.check: bool` (unset follows the packaged default) — the daily
+  update check; see [About and updates](#about-and-updates).
 - `network.mode: "online" | "web_off" | "offline"` — `web_off` disables web
   tools only; `offline` also suppresses account/usage refresh and any helper
   network activity. Cloud rows are marked unavailable in `offline`.

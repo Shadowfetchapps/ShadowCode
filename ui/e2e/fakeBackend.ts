@@ -28,6 +28,9 @@ export type FakeOptions = {
   worktreeConflict?: boolean;
   /** Seed a finished conversation without selecting or calling a model. */
   completedTask?: boolean;
+  /** Settings › About and the update notice: a newer release (0.34.0) was
+   * found by an earlier daily check, for this kind of installation. */
+  updateAvailable?: "appimage" | "deb";
 };
 
 export function installFakeBackend(options: FakeOptions = {}) {
@@ -264,6 +267,14 @@ export function installFakeBackend(options: FakeOptions = {}) {
   ].join("\n");
   const state: Json = {
     onboarded: !options.onboarding,
+    updates: {
+      install: options.updateAvailable || "appimage",
+      found: Boolean(options.updateAvailable),
+      checks: 0,
+      auto: 0,
+      dismissed: "",
+      checked_at: options.updateAvailable ? now() - 3600 : null,
+    },
     remote: {
       enabled: false,
       address: "127.0.0.1",
@@ -1974,6 +1985,66 @@ export function installFakeBackend(options: FakeOptions = {}) {
     };
   }
 
+  /** GET /api/updates, as the engine answers from its saved state. */
+  function updatesView() {
+    const u = state.updates;
+    const allowed = true;
+    const automatic = state.config.updates?.check !== false;
+    const latest = u.found
+      ? {
+          version: "0.34.0",
+          tag: "v0.34.0",
+          url: "https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.34.0",
+          published_at: "2026-10-02T09:15:00Z",
+          signed: true,
+        }
+      : u.checked_at
+        ? {
+            version: "0.33.0",
+            tag: "v0.33.0",
+            url: "https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.33.0",
+            published_at: "2026-09-28T09:15:00Z",
+            signed: true,
+          }
+        : null;
+    const available = u.found;
+    const appimage = u.install === "appimage";
+    return {
+      current: "0.33.0",
+      allowed,
+      automatic,
+      setting: state.config.updates?.check ?? null,
+      default_on: true,
+      offline: state.config.network?.mode === "offline",
+      policy_message: null,
+      policy_source: null,
+      install: appimage
+        ? { kind: "appimage", label: "AppImage" }
+        : { kind: "deb", label: "Debian package" },
+      last_checked_at: u.checked_at,
+      last_attempt_at: u.checked_at,
+      error: null,
+      latest,
+      available,
+      dismissed: available && u.dismissed === "0.34.0",
+      next_step: available
+        ? appimage
+          ? {
+              text: "Download ShadowCode_0.34.0_amd64.AppImage and its four signature files (SHA256SUMS, RELEASE-MANIFEST.json, RELEASE-AUTH, RELEASE-AUTH.sig) from the release page into one folder. Then run the installer from a trusted copy of ShadowCode's installer bundle. It checks the publisher signature before it runs anything and keeps your settings.",
+              command:
+                "bash /path/to/trusted-bundle/scripts/install-appimage.sh ~/Downloads/ShadowCode_0.34.0_amd64.AppImage",
+              link: "https://github.com/Shadowfetchapps/ShadowCode/blob/v0.34.0/README.md#appimage-recommended",
+            }
+          : {
+              text: "Update through your package manager or your distribution's software updates. If you installed the .deb from GitHub yourself, download the new .deb and its four signature files, verify them, then install it with apt.",
+              command: null,
+              link: "https://github.com/Shadowfetchapps/ShadowCode/blob/v0.34.0/README.md#debian-package",
+            }
+        : null,
+      releases_url: "https://github.com/Shadowfetchapps/ShadowCode/releases",
+    };
+  }
+
   function route(method: string, fullPath: string, body: any): unknown {
     const [path, query = ""] = fullPath.split("?");
     const q = new URLSearchParams(query);
@@ -3188,6 +3259,56 @@ export function installFakeBackend(options: FakeOptions = {}) {
       return remoteView();
     }
     if (path === "/api/remote/ntfy/test") return { ok: true };
+    if (path === "/api/about" && method === "GET") {
+      const tag = "v0.33.0";
+      const repo = "https://github.com/Shadowfetchapps/ShadowCode";
+      return {
+        name: "ShadowCode",
+        version: "0.33.0",
+        commit: "e15c4480e65db5650af012bb2a9773dbe89acf84",
+        install: updatesView().install,
+        license: {
+          spdx: "Apache-2.0",
+          name: "Apache License 2.0",
+          holder: "Shadowfetch",
+          notice:
+            "ShadowCode\nCopyright 2026 Shadowfetch\n\nShadowCode was originally created by Shadowfetch.\n",
+          third_party: "/usr/share/doc/shadowcode/notices",
+        },
+        links: {
+          repository: repo,
+          release_notes: `${repo}/releases/tag/${tag}`,
+          releases: `${repo}/releases`,
+          license: `${repo}/blob/${tag}/LICENSE`,
+          notice: `${repo}/blob/${tag}/NOTICE`,
+          issues: `${repo}/issues`,
+          user_guide: `${repo}/blob/${tag}/docs/USER_GUIDE.md`,
+        },
+        updates: updatesView(),
+      };
+    }
+    if (path === "/api/updates" && method === "GET") {
+      if (
+        q.get("auto") === "1" &&
+        state.config.updates?.check !== false &&
+        state.config.network?.mode !== "offline"
+      )
+        state.updates.auto += 1;
+      return updatesView();
+    }
+    if (path === "/api/updates/check" && method === "POST") {
+      if (state.config.network?.mode === "offline")
+        throw new Error(
+          "ShadowCode is in Offline mode. Choose Online or Web tools off in Settings › Permissions & network to check for updates.",
+        );
+      state.updates.checks += 1;
+      state.updates.checked_at = now();
+      return updatesView();
+    }
+    if (path === "/api/updates/dismiss" && method === "POST") {
+      state.updates.dismissed = String(body?.version || "");
+      return updatesView();
+    }
     throw new Error(`Fake backend has no route for ${method} ${path}`);
   }
 

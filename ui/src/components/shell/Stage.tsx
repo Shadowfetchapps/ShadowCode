@@ -27,7 +27,8 @@ const CompareView = lazy(() =>
   import("../CompareView").then((module) => ({ default: module.CompareView })),
 );
 import { writeStore } from "../../lib/storage";
-import { invoke } from "../../lib/transport";
+import { invoke, isNative, isRemote } from "../../lib/transport";
+import { noticeVersion, useUpdateNotice } from "../../hooks/useUpdates";
 import { trustRequestFor } from "../../lib/trust";
 import { chipInput } from "../../lib/usageChip";
 import { ContextChip } from "../ContextChip";
@@ -149,6 +150,8 @@ export function Stage({
 }) {
   const { transcript, job, busy, connection, history } = conversation;
   const { switching, sessionId, modelChoice, runningChoice } = nav;
+  // Updates are this computer's business: a paired phone never asks.
+  const updates = useUpdateNotice(isNative() && !isRemote());
   const view = compare.view;
   const locked = busy || submitting || switching || Boolean(shutdown);
   const composerLocked = submitting || switching || Boolean(shutdown);
@@ -415,6 +418,8 @@ export function Stage({
         context={
           <ContextChip input={chip} compaction={transcript.compaction} />
         }
+        update={noticeVersion(updates)}
+        onUpdate={() => openSettings("about")}
         version={health?.version || ""}
       />
     </main>

@@ -566,7 +566,35 @@ In **Settings › Permissions & network**:
   "Offline mode: choose a model that runs on this computer". Shell commands
   that reach the network (for example `curl`, `npm` or `pip`) are denied.
   Voice input keeps working with a local model; OpenRouter transcription and
-  model downloads are refused.
+  model downloads are refused. The daily update check pauses too.
+
+## About and updates
+
+**Settings › About** shows the version, the commit it was built from, how it
+was installed (AppImage, Debian package, another system package, or built from
+source), the license (Apache 2.0, with the NOTICE that credits Shadowfetch as
+the original creator) and links to the release notes, source, license, this
+guide and the issue tracker.
+
+Once a day while the window is open, ShadowCode asks GitHub which release is
+the newest. The request sends no version, account or other identifier, and
+ShadowCode never downloads or installs anything by itself. When a newer
+version exists:
+
+- **Update available: VERSION** appears at the right of the status bar. Click
+  it to open Settings › About.
+- About shows the new version, its release notes and the steps for your
+  installation: for the AppImage, download it with its four signature files
+  and run the authenticated installer (copy the command with the copy
+  button); for the deb, update through your package manager.
+- **Hide the notice until the next version** removes the status-bar button
+  until a newer release appears.
+
+**Check now** asks right away. **Check for updates once a day** turns the
+daily check off. In Offline mode nothing is checked. If your distribution
+manages ShadowCode's updates, About says so instead and the switch is not
+shown. A check that fails (for example with no network) stays quiet; About
+shows why the last one didn't work.
 
 ## The shell sandbox
 
