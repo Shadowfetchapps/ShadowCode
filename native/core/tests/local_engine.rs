@@ -894,6 +894,171 @@ async fn catalog_routes_add_list_remove_picker_and_weights_stay() {
 }
 
 #[tokio::test]
+async fn catalog_downloads_recommend_refuse_offline_list_and_delete() {
+    use shadowcode_core::local_downloads;
+    let f = fixture(GPU);
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let listing = call(&service, "GET", "/api/local-models/downloads", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(
+        listing["models"].as_array().unwrap().len(),
+        local_downloads::CATALOG.len()
+    );
+    assert_eq!(listing["offline"], false);
+    assert_eq!(listing["hardware"]["gpu"], "Fake GPU 16");
+    // 16 GiB of VRAM: the strongest model that fits it, among the
+    // architectures this runtime lists (qwen3, llama, gemma4, gpt-oss).
+    assert_eq!(listing["recommended"], "gpt-oss-20b", "{listing}");
+    assert_eq!(listing["recommended_fit"], "gpu");
+    let row = |value: &Value, id: &str| {
+        value["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(&listing, "granite-4.2-3b")["supported"], false);
+    assert_eq!(row(&listing, "gemma-4-e4b")["supported"], true);
+    assert_eq!(row(&listing, "gpt-oss-20b")["state"], "available");
+    let dir = local_downloads::dir(&f.paths);
+    assert_eq!(
+        listing["directory"].as_str().unwrap(),
+        dir.display().to_string()
+    );
+
+    // Refusals happen before anything is fetched.
+    let unknown = call(
+        &service,
+        "POST",
+        "/api/local-models/downloads/start",
+        json!({"id": "not-a-model"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(unknown.to_string().contains("download list"), "{unknown}");
+    let unsupported = call(
+        &service,
+        "POST",
+        "/api/local-models/downloads/start",
+        json!({"id": "granite-4.2-3b"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        unsupported.to_string().contains("can't run"),
+        "{unsupported}"
+    );
+    Config::patch(&f.paths, json!({"network": {"mode": "offline"}})).unwrap();
+    let offline = call(
+        &service,
+        "POST",
+        "/api/local-models/downloads/start",
+        json!({"id": "gemma-4-e4b"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(offline.to_string().contains("offline mode"), "{offline}");
+    let listing = call(&service, "GET", "/api/local-models/downloads", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(listing["offline"], true);
+    assert!(!dir.join("gemma-4-E4B_q4_0-it.gguf.part").exists());
+    // Pause and cancel with nothing running are harmless.
+    for action in ["pause", "cancel"] {
+        call(
+            &service,
+            "POST",
+            &format!("/api/local-models/downloads/{action}"),
+            json!({"id": "gemma-4-e4b"}),
+        )
+        .await
+        .unwrap();
+    }
+
+    // A finished download joins the local catalog under the catalog name,
+    // even though the file's own general.name is a placeholder.
+    let oss = local_downloads::entry("gpt-oss-20b").unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(oss.file);
+    write_gguf(
+        &file,
+        &[
+            ("general.architecture", V::Str("gpt-oss")),
+            ("general.name", V::Str("Hf")),
+            ("gpt-oss.context_length", V::U32(131072)),
+            ("gpt-oss.embedding_length", V::U32(1024)),
+            ("gpt-oss.block_count", V::U32(8)),
+            ("gpt-oss.attention.head_count", V::U32(16)),
+            ("gpt-oss.attention.head_count_kv", V::U32(4)),
+            ("tokenizer.chat_template", V::Str(TOOLS_TEMPLATE)),
+        ],
+        &["token_embd.weight", "output.weight"],
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_len(oss.bytes)
+        .unwrap();
+    let catalog = call(&service, "GET", "/api/local-models", Value::Null)
+        .await
+        .unwrap();
+    let models = catalog["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1, "{catalog}");
+    assert_eq!(models[0]["name"], "gpt-oss 20B");
+    assert_eq!(models[0]["source"], "download");
+    assert_eq!(models[0]["availability"], "ready");
+    assert_eq!(models[0]["tools"], true);
+    let id = models[0]["id"].clone();
+    let listing = call(&service, "GET", "/api/local-models/downloads", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(row(&listing, "gpt-oss-20b")["state"], "installed");
+    assert_eq!(row(&listing, "gpt-oss-20b")["model_id"], id);
+    let picker = call(&service, "GET", "/api/picker", Value::Null)
+        .await
+        .unwrap();
+    assert!(picker["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["id"] == id && t["name"] == "gpt-oss 20B · This computer"));
+    // Nothing is written to config.yaml for it.
+    let cfg = Config::load(&f.paths, None).unwrap();
+    assert!(cfg.local_engine.files.is_empty() && cfg.local_engine.imports.is_empty());
+    assert_eq!(cfg.local_engine.downloads.as_deref(), Some(dir.as_path()));
+
+    // Remove (which never deletes) points to Delete; Delete frees the disk.
+    let refused = call(
+        &service,
+        "POST",
+        "/api/local-models/remove",
+        json!({"id": id}),
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.to_string().contains("Choose Delete"), "{refused}");
+    assert!(file.exists());
+    let deleted = call(
+        &service,
+        "POST",
+        "/api/local-models/downloads/delete",
+        json!({"id": "gpt-oss-20b"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(row(&deleted, "gpt-oss-20b")["state"], "available");
+    assert!(!file.exists());
+    let catalog = call(&service, "GET", "/api/local-models", Value::Null)
+        .await
+        .unwrap();
+    assert!(catalog["models"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn memory_too_large_is_marked_unavailable_and_refused() {
     let f = fixture("");
     let huge = f.models.join("huge.gguf");

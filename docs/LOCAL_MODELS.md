@@ -2,9 +2,11 @@
 
 ShadowCode runs GGUF models on this computer with a pinned build of
 [llama.cpp](https://github.com/ggml-org/llama.cpp) that ships with the app. It
-needs no Ollama, LM Studio or other daemon. It never downloads weights and never
-deletes them. Local rows appear under **On this computer** in the picker and
-use ShadowCode's own agent loop, tools and permissions.
+needs no Ollama, LM Studio or other daemon, and no account. It downloads a
+model only when you choose one from its [list of free
+models](#download-a-free-model), and deletes only files it downloaded, when you
+choose **Delete**. Local rows appear under **On this computer** in the picker
+and use ShadowCode's own agent loop, tools and permissions.
 
 ## The runtime
 
@@ -30,6 +32,100 @@ use ShadowCode's own agent loop, tools and permissions.
   are present (`libvulkan1` plus your GPU driver). Otherwise the runtime stays
   on the CPU.
 
+## Download a free model
+
+**Settings › Local models › Download a free model** lists a few GGUF models
+chosen for coding with tools, all under the Apache-2.0 license. The first run
+offers the recommended one when no other model is ready (see the [user
+guide](USER_GUIDE.md#open-a-project)).
+
+| Model | Download | Memory (16K / 4K context) | Good for | Source, pinned commit |
+| --- | --- | --- | --- | --- |
+| Granite 4.2 3B, Q4_K_M (IBM) | 2.1 GB | 4.1 / 3.2 GB | Any computer; fine on a processor | [`ibm-granite/granite-4.2-3b-GGUF`](https://huggingface.co/ibm-granite/granite-4.2-3b-GGUF/tree/c40945d71cd90f249a56985e8155551a9188dc30) `c40945d` |
+| Gemma 4 E4B, Q4_0 QAT (Google) | 4.8 GB | 6.1 / 5.7 GB | Laptops with 16 GB; fine on a processor | [`google/gemma-4-E4B-it-qat-q4_0-gguf`](https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/tree/4b4a2c1d584be7264f87aac328a1bc739ce81b6c) `4b4a2c1` |
+| Gemma 4 12B, Q4_0 QAT (Google) | 6.5 GB | 8.0 / 7.8 GB | A graphics card with 10 GB or more | [`google/gemma-4-12B-it-qat-q4_0-gguf`](https://huggingface.co/google/gemma-4-12B-it-qat-q4_0-gguf/tree/29d097773436b69ff9feafd636ab4cf873786537) `29d0977` |
+| gpt-oss 20B, MXFP4 (OpenAI) | 11.3 GB | 12.8 / 12.2 GB | A 16 GB graphics card, or 24 GB of memory | [`ggml-org/gpt-oss-20b-GGUF`](https://huggingface.co/ggml-org/gpt-oss-20b-GGUF/tree/ef9b12f2ff56c69cf32153a02784e7a3c88bf524) `ef9b12f` |
+| Qwen3.6 35B-A3B, Q4_K_M (Qwen) | 19 GB | 21 / 20.1 GB | A 24 GB graphics card, or 32 GB of memory | [`ggml-org/Qwen3.6-35B-A3B-GGUF`](https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF/tree/baec3ebee244827cda0f4557eafa8b28f7545fa6) `baec3eb` |
+
+Sizes use the same binary units as the rest of the window. The memory figures
+are ShadowCode's own estimate (see [below](#memory-estimate-and-context)) from
+each file's header. Each entry records the exact file, its size and SHA-256
+(`native/core/src/local_downloads.rs`). The licenses were checked in the
+original model repositories: Qwen3.6, gpt-oss (plus OpenAI's one-line usage
+policy to comply with applicable law) and Granite 4.2 are Apache-2.0, and
+Gemma 4, unlike earlier Gemma releases, is Apache-2.0 too. Llama models are
+not listed because their license is not permissive.
+
+### The recommendation
+
+The runtime's device list and `/proc/meminfo` decide it. ShadowCode
+recommends:
+
+1. the strongest model whose estimate fits the graphics card with 1 GB to
+   spare, otherwise
+2. the strongest model that runs well on a processor (Granite 3B, Gemma 4
+   E4B, gpt-oss and Qwen3.6, which are small or mixture-of-experts) and leaves
+   3 GB of memory for other apps, otherwise
+3. the smallest model that fits with a shorter context (*Just fits. Close
+   other apps while you use it*).
+
+With less memory than that, nothing is recommended, and the first run
+suggests an OpenRouter key or a subscription. A model whose architecture is
+missing from the runtime's `architectures.txt` is neither recommended nor
+downloadable. Each row also says how the model would run here: on the
+graphics card, on the processor (slower), just fits, or needs more memory.
+
+### How downloads work
+
+- **Only on request.** Nothing downloads until you choose **Download** (or
+  **Download** on the first run). Offline mode refuses downloads, and turning
+  it on stops a running one within a few seconds (Resume continues it once
+  you are back online).
+- **Checked before it starts.** One model downloads at a time. The free space
+  must cover what is left to download plus 512 MB; otherwise the download is
+  refused with the folder and the amounts.
+- **Pause, Resume, Cancel.** Pause keeps the partial file
+  (`<file>.part`); Resume continues with an HTTP range request, also after
+  ShadowCode restarts, and re-reads the part already on disk first. A dropped
+  or stalled connection (60 seconds without data) keeps the partial file for
+  Resume. Cancel deletes it. If the server ignores the range, the download
+  starts over.
+- **Verified.** The file gets its final name only after its size and SHA-256
+  match the pinned values. A file that doesn't match is deleted, with a
+  message saying so.
+- **Where.** `~/.local/share/shadow-agent/local-models` (private to your
+  user). Finished files join **Your models** and the picker by themselves,
+  under the model's name; `config.yaml` doesn't change. **Delete** removes the
+  file (unloading it first; refused while a task uses it). **Remove**, which
+  never deletes, is not offered for downloaded models.
+- **Network.** Hugging Face's `resolve` URL at the pinned commit, which
+  redirects to its CDN. The system proxy settings (`https_proxy`) apply.
+
+### Checking the list
+
+```sh
+# Commit, size and SHA-256 as Hugging Face reports them, plus the
+# architecture and memory estimate from each file's header (range request).
+cargo test -p shadowcode-core --lib catalog_matches_hugging_face -- --ignored
+
+# Download one model with pause and resume into a scratch folder.
+SHADOWCODE_LIVE_DOWNLOAD_DIR=/tmp/models SHADOWCODE_LIVE_DOWNLOAD_ID=granite-4.2-3b \
+  cargo test -p shadowcode-core --lib live_download_pause_resume_verify -- --ignored
+```
+
+The list was checked against the architectures of the llama.cpp commit in
+[`tools/llama.cpp.pin`](../tools/llama.cpp.pin) (`granite`, `gemma4`,
+`gpt-oss`, `qwen35moe`). A unit test fails when the pin moves, so the list is
+checked again before a release with a new runtime.
+
+Checked on 2026-09-28 with that runtime on an RTX 5060 Ti (16 GB, Vulkan):
+Granite 4.2 3B, Gemma 4 E4B and gpt-oss 20B were downloaded through
+ShadowCode (each paused and resumed once, SHA-256 verified), loaded fully on
+the GPU, and each fixed a small Python module with its tools and ran the
+module's tests at the default settings (16K context). The two larger models
+were checked from their headers (architecture, tool template, memory) but not
+downloaded.
+
 ## Add models
 
 In **Settings › Local models › Add a model**, choose a GGUF file or a folder.
@@ -49,7 +145,10 @@ manifests wins.
   and any projector blob. It never copies them and never writes to the store,
   and the Ollama daemon doesn't need to run.
 - **Incompatible tags** are shown with the reason, for example
-  `unsupported architecture gptoss`, and can't be imported.
+  `unsupported architecture gptoss`, and can't be imported. That one is
+  Ollama's own gpt-oss format: its blob declares the architecture `gptoss`,
+  while upstream GGUF files use `gpt-oss`, which the bundled runtime runs.
+  Download gpt-oss 20B from the [list](#download-a-free-model) instead.
 - **Other stores.** A store in another location (such as a system-wide
   `/usr/share/ollama` install) is found only if `OLLAMA_MODELS` points to it.
 
@@ -170,6 +269,7 @@ See [voice input](VOICE.md).
 
 These settings are the `local_engine` section of `config.yaml`. **Settings ›
 Local models** writes the lists for you when you add, remove or import models.
+Downloaded models are not listed here; they are found in the downloads folder.
 `llama_binary` and `context_size` can only be set in the file or with
 `shadowcode config`.
 

@@ -100,7 +100,8 @@ export type GgufEntry = {
   name: string;
   path: string;
   bytes: number;
-  source: "file" | "directory" | "ollama" | string;
+  /** `download`: fetched from the built-in catalog (Delete frees the disk). */
+  source: "file" | "directory" | "ollama" | "download" | string;
   architecture: string | null;
   context_train: number | null;
   context_tokens: number;
@@ -121,6 +122,59 @@ export type GgufEntry = {
   fits?: "gpu" | "cpu" | "no" | string;
   availability?: string;
   last_error?: string | null;
+};
+
+/** How a catalog model runs on this computer (GET /api/local-models/downloads). */
+export type DownloadFit = "gpu" | "cpu" | "tight" | "no";
+export type DownloadState =
+  "available" | "downloading" | "checking" | "paused" | "failed" | "installed";
+
+/** A free model ShadowCode can download, pinned to one Hugging Face commit. */
+export type DownloadModel = {
+  id: string;
+  name: string;
+  publisher: string;
+  summary: string;
+  file: string;
+  bytes: number;
+  sha256: string;
+  license: string;
+  license_url: string;
+  source_url: string;
+  quantization: string;
+  architecture: string;
+  /** Memory needed at the default context, and at the smallest one. */
+  memory_bytes: number;
+  min_memory_bytes: number;
+  fit: DownloadFit;
+  recommended: boolean;
+  /** The bundled llama.cpp can load this architecture. */
+  supported: boolean;
+  unsupported_reason?: string | null;
+  state: DownloadState;
+  done: number;
+  total: number;
+  bytes_per_second: number;
+  error?: string | null;
+  /** The local picker id once downloaded. */
+  model_id?: string | null;
+  path?: string | null;
+};
+
+export type DownloadCatalog = {
+  directory: string;
+  free_bytes: number | null;
+  offline: boolean;
+  hardware: {
+    ram_bytes: number;
+    vram_bytes: number | null;
+    gpu: string | null;
+  };
+  recommended: string | null;
+  recommended_fit: DownloadFit | null;
+  /** A download or resume check is running. */
+  busy: boolean;
+  models: DownloadModel[];
 };
 
 export type OllamaModel = {
@@ -989,6 +1043,83 @@ export type SandboxStatus = {
   never_mounted: string[];
 };
 
+/** How this copy was installed (`/api/about`, `/api/updates`). */
+export type InstallInfo = {
+  kind: "appimage" | "deb" | "system" | "source" | "unknown";
+  label: string;
+};
+
+/** The newest stable release GitHub reported. */
+export type UpdateRelease = {
+  version: string;
+  tag: string;
+  /** The release page with its notes and downloads. */
+  url: string;
+  published_at?: string | null;
+  /** It carries the signature files the AppImage installer needs. */
+  signed: boolean;
+};
+
+/** What to do to update this kind of installation. */
+export type UpdateStep = {
+  text: string;
+  command: string | null;
+  link: string | null;
+};
+
+/** `GET /api/updates`: the update notice and its settings. Only
+ * `?auto=1` (at most once a day) and `POST /api/updates/check` reach
+ * GitHub. */
+export type UpdateStatus = {
+  current: string;
+  /** False when the build or a system policy turned checks off. */
+  allowed: boolean;
+  /** The daily check runs (policy and `updates.check`). */
+  automatic: boolean;
+  /** `updates.check` in config.yaml; null follows the packaged default. */
+  setting: boolean | null;
+  default_on: boolean;
+  offline: boolean;
+  policy_message: string | null;
+  policy_source: string | null;
+  install: InstallInfo;
+  last_checked_at: number | null;
+  last_attempt_at: number | null;
+  error: string | null;
+  latest: UpdateRelease | null;
+  available: boolean;
+  dismissed: boolean;
+  next_step: UpdateStep | null;
+  releases_url: string;
+};
+
+/** `GET /api/about`: Settings › About. */
+export type AboutInfo = {
+  name: string;
+  version: string;
+  commit: string | null;
+  install: InstallInfo;
+  license: {
+    spdx: string;
+    name: string;
+    holder: string;
+    /** ShadowCode's NOTICE file. */
+    notice: string;
+    /** Folder with third-party license texts, when installed. */
+    third_party: string | null;
+  };
+  links: {
+    repository: string;
+    release_notes: string;
+    releases: string;
+    license: string;
+    notice: string;
+    issues: string;
+    user_guide: string;
+  };
+  updates: UpdateStatus;
+};
+
 /** Settings › Remote access (`/api/remote`, desktop only). */
 export type RemoteStatus = {
   enabled: boolean;
@@ -1295,6 +1426,26 @@ export const api = {
     ),
   unloadLocalModel: () =>
     send<{ ok: boolean }>("/api/local-models/unload", "POST", {}),
+  about: () => get<AboutInfo>("/api/about"),
+  /** `auto`: run the daily check first when it is due and allowed. */
+  updates: (auto = false) =>
+    get<UpdateStatus>(`/api/updates${auto ? "?auto=1" : ""}`),
+  checkUpdates: () => send<UpdateStatus>("/api/updates/check", "POST", {}),
+  dismissUpdate: (version: string) =>
+    send<UpdateStatus>("/api/updates/dismiss", "POST", { version }),
+  /** The built-in download catalog with this computer's recommendation. */
+  modelDownloads: () => get<DownloadCatalog>("/api/local-models/downloads"),
+  /** Starts, or resumes, one download (refused offline or without space). */
+  startModelDownload: (id: string) =>
+    send<DownloadCatalog>("/api/local-models/downloads/start", "POST", { id }),
+  pauseModelDownload: (id: string) =>
+    send<DownloadCatalog>("/api/local-models/downloads/pause", "POST", { id }),
+  /** Stops and deletes the partial file. */
+  cancelModelDownload: (id: string) =>
+    send<DownloadCatalog>("/api/local-models/downloads/cancel", "POST", { id }),
+  /** Deletes a downloaded model (unloading it first). */
+  deleteModelDownload: (id: string) =>
+    send<DownloadCatalog>("/api/local-models/downloads/delete", "POST", { id }),
   remoteStatus: () => get<RemoteStatus>("/api/remote"),
   saveRemote: (
     values: Partial<

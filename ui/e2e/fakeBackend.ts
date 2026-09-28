@@ -28,6 +28,16 @@ export type FakeOptions = {
   worktreeConflict?: boolean;
   /** Seed a finished conversation without selecting or calling a model. */
   completedTask?: boolean;
+  /** Settings › About and the update notice: a newer release (0.34.0) was
+   * found by an earlier daily check, for this kind of installation. */
+  updateAvailable?: "appimage" | "deb";
+  /** A new user: onboarding, no subscription signed in, no OpenRouter key
+   * and no local model. */
+  firstRun?: boolean;
+  /** Progress reads a download takes to finish (default 3). */
+  downloadSteps?: number;
+  /** The first download attempt stops a third of the way with an error. */
+  downloadDrops?: boolean;
 };
 
 export function installFakeBackend(options: FakeOptions = {}) {
@@ -264,6 +274,14 @@ export function installFakeBackend(options: FakeOptions = {}) {
   ].join("\n");
   const state: Json = {
     onboarded: !options.onboarding,
+    updates: {
+      install: options.updateAvailable || "appimage",
+      found: Boolean(options.updateAvailable),
+      checks: 0,
+      auto: 0,
+      dismissed: "",
+      checked_at: options.updateAvailable ? now() - 3600 : null,
+    },
     remote: {
       enabled: false,
       address: "127.0.0.1",
@@ -598,6 +616,165 @@ export function installFakeBackend(options: FakeOptions = {}) {
     /** "Run in new worktree" records (native/core/src/worktree_tasks.rs). */
     worktreeTasks: [] as Json[],
     worktreeConflict: Boolean(options.worktreeConflict),
+    /** GET /api/local-models/downloads (native/core/src/local_downloads.rs). */
+    downloads: {
+      hardware: {
+        ram_bytes: 16 * 1024 ** 3,
+        vram_bytes: 8 * 1024 ** 3,
+        gpu: "Intel Arc A750",
+      },
+      drops: Boolean(options.downloadDrops),
+      models: [
+        {
+          id: "granite-4.2-3b",
+          name: "Granite 4.2 3B",
+          publisher: "IBM",
+          summary:
+            "Small and quick. Runs on most computers, even without a graphics card.",
+          file: "granite-4.2-3b-Q4_K_M.gguf",
+          bytes: 2_244_011_552,
+          memory_bytes: 4_391_495_200,
+          min_memory_bytes: 3_384_862_240,
+          architecture: "granite",
+          fit: "gpu",
+          recommended: false,
+        },
+        {
+          id: "gemma-4-e4b",
+          name: "Gemma 4 E4B",
+          publisher: "Google",
+          summary: "Balanced. Good answers on a laptop with 16 GB of memory.",
+          file: "gemma-4-E4B_q4_0-it.gguf",
+          bytes: 5_154_941_280,
+          memory_bytes: 6_503_410_016,
+          min_memory_bytes: 6_151_088_480,
+          architecture: "gemma4",
+          fit: "gpu",
+          recommended: true,
+        },
+        {
+          id: "qwen3.6-35b-a3b",
+          name: "Qwen3.6 35B-A3B",
+          publisher: "Qwen",
+          summary:
+            "The strongest coder here. Needs 32 GB of memory or a 24 GB graphics card.",
+          file: "Qwen3.6-35B-A3B-Q4_K_M.gguf",
+          bytes: 20_419_565_568,
+          memory_bytes: 22_567_049_216,
+          min_memory_bytes: 21_560_416_256,
+          architecture: "qwen35moe",
+          fit: "no",
+          recommended: false,
+        },
+      ].map((m) => ({
+        ...m,
+        sha256: "0".repeat(64),
+        license: "Apache-2.0",
+        license_url: "https://www.apache.org/licenses/LICENSE-2.0",
+        source_url: `https://huggingface.co/example/${m.id}`,
+        quantization: "Q4",
+        supported: true,
+        unsupported_reason: null,
+        state: "available",
+        done: 0,
+        total: m.bytes,
+        bytes_per_second: 0,
+        error: null as null | string,
+        model_id: null as null | string,
+        path: null as null | string,
+      })),
+    },
+  };
+  if (options.firstRun) {
+    state.onboarded = false;
+    state.local.models = [];
+    for (const v of Object.values(state.vendors) as Json[]) {
+      v.state = "sign_in";
+      v.status = "fail";
+      v.availability = "sign_in";
+      v.availability_label = "Sign in";
+      v.detail = "Not signed in";
+      v.account = null;
+      v.models = [];
+    }
+  }
+
+  /** The download catalog; each read moves a running download on. */
+  function downloadCatalog(advance = false) {
+    const d = state.downloads;
+    const steps = options.downloadSteps ?? 3;
+    for (const m of d.models as Json[]) {
+      if (!advance || m.state !== "downloading") continue;
+      m.bytes_per_second = 25_000_000;
+      m.done = Math.min(m.total, m.done + Math.ceil(m.total / steps));
+      if (d.drops && m.done < m.total) {
+        d.drops = false;
+        m.state = "failed";
+        m.bytes_per_second = 0;
+        const gb = (n: number) => `${(n / 1024 ** 3).toFixed(1)} GB`;
+        m.error = `The connection dropped at ${gb(m.done)} of ${gb(m.total)}. Choose Resume to continue.`;
+      } else if (m.done >= m.total) {
+        m.state = "installed";
+        m.bytes_per_second = 0;
+        m.model_id = `local:gguf:dl-${m.id}`;
+        m.path = `/home/user/.local/share/shadow-agent/local-models/${m.file}`;
+        state.local.models.push({
+          ...fakeLocalModel(),
+          id: m.model_id,
+          name: m.name,
+          path: m.path,
+          bytes: m.bytes,
+          source: "download",
+          architecture: m.architecture,
+        });
+      }
+    }
+    const offline = state.config.network?.mode === "offline";
+    return {
+      directory: "/home/user/.local/share/shadow-agent/local-models",
+      free_bytes: 120_000_000_000,
+      offline,
+      hardware: d.hardware,
+      recommended: "gemma-4-e4b",
+      recommended_fit: "gpu",
+      busy: (d.models as Json[]).some((m) => m.state === "downloading"),
+      models: d.models,
+    };
+  }
+  function fakeLocalModel(): Json {
+    return {
+      id: "",
+      name: "",
+      path: "",
+      bytes: 0,
+      source: "file",
+      architecture: "",
+      context_train: 131072,
+      context_tokens: 16384,
+      compatible: true,
+      reason: "gguf · 16384-token context · ≈6.5 GB in GPU memory",
+      vision: false,
+      mmproj: null,
+      tools: true,
+      tools_reason: "Template mentions tools · file hint only",
+      tools_basis: "template_hint",
+      thinking_switch: true,
+      memory: {
+        weights_bytes: 5_154_941_280,
+        kv_cache_bytes: 700_000_000,
+        compute_bytes: 300_000_000,
+        projector_bytes: 0,
+        overhead_bytes: 500_000_000,
+        total_bytes: 6_503_410_016,
+        context_tokens: 16384,
+      },
+      fits: "gpu",
+      availability: "ready",
+      last_error: null,
+    };
+  }
+  const refuse = (error: string): never => {
+    throw new Error(JSON.stringify({ error }));
   };
 
   /** Hunks between two versions with the same line count (the fake's
@@ -1974,6 +2151,66 @@ export function installFakeBackend(options: FakeOptions = {}) {
     };
   }
 
+  /** GET /api/updates, as the engine answers from its saved state. */
+  function updatesView() {
+    const u = state.updates;
+    const allowed = true;
+    const automatic = state.config.updates?.check !== false;
+    const latest = u.found
+      ? {
+          version: "0.34.0",
+          tag: "v0.34.0",
+          url: "https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.34.0",
+          published_at: "2026-10-02T09:15:00Z",
+          signed: true,
+        }
+      : u.checked_at
+        ? {
+            version: "0.33.0",
+            tag: "v0.33.0",
+            url: "https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.33.0",
+            published_at: "2026-09-28T09:15:00Z",
+            signed: true,
+          }
+        : null;
+    const available = u.found;
+    const appimage = u.install === "appimage";
+    return {
+      current: "0.33.0",
+      allowed,
+      automatic,
+      setting: state.config.updates?.check ?? null,
+      default_on: true,
+      offline: state.config.network?.mode === "offline",
+      policy_message: null,
+      policy_source: null,
+      install: appimage
+        ? { kind: "appimage", label: "AppImage" }
+        : { kind: "deb", label: "Debian package" },
+      last_checked_at: u.checked_at,
+      last_attempt_at: u.checked_at,
+      error: null,
+      latest,
+      available,
+      dismissed: available && u.dismissed === "0.34.0",
+      next_step: available
+        ? appimage
+          ? {
+              text: "Download ShadowCode_0.34.0_amd64.AppImage and its four signature files (SHA256SUMS, RELEASE-MANIFEST.json, RELEASE-AUTH, RELEASE-AUTH.sig) from the release page into one folder. Then run the installer from a trusted copy of ShadowCode's installer bundle. It checks the publisher signature before it runs anything and keeps your settings.",
+              command:
+                "bash /path/to/trusted-bundle/scripts/install-appimage.sh ~/Downloads/ShadowCode_0.34.0_amd64.AppImage",
+              link: "https://github.com/Shadowfetchapps/ShadowCode/blob/v0.34.0/README.md#appimage-recommended",
+            }
+          : {
+              text: "Update through your package manager or your distribution's software updates. If you installed the .deb from GitHub yourself, download the new .deb and its four signature files, verify them, then install it with apt.",
+              command: null,
+              link: "https://github.com/Shadowfetchapps/ShadowCode/blob/v0.34.0/README.md#debian-package",
+            }
+        : null,
+      releases_url: "https://github.com/Shadowfetchapps/ShadowCode/releases",
+    };
+  }
+
   function route(method: string, fullPath: string, body: any): unknown {
     const [path, query = ""] = fullPath.split("?");
     const q = new URLSearchParams(query);
@@ -2268,6 +2505,55 @@ export function installFakeBackend(options: FakeOptions = {}) {
     if (path === "/api/openrouter/refresh" && method === "POST") {
       state.openrouter.fetched_at = now();
       return openrouterStatus();
+    }
+    if (path === "/api/local-models/downloads")
+      return downloadCatalog(method === "GET");
+    if (path.startsWith("/api/local-models/downloads/")) {
+      const found = (state.downloads.models as Json[]).find(
+        (x) => x.id === body?.id,
+      );
+      if (!found)
+        return refuse("That model is not in ShadowCode's download list");
+      const m: Json = found;
+      const action = path.split("/").pop();
+      if (action === "start") {
+        if (state.config.network?.mode === "offline")
+          refuse(
+            "ShadowCode is in offline mode. Switch the network mode to Online in Settings › Permissions & network to download a model.",
+          );
+        if (m.state === "installed") refuse("This model is already downloaded");
+        if (
+          (state.downloads.models as Json[]).some(
+            (x) => x !== m && x.state === "downloading",
+          )
+        )
+          refuse(
+            "Another model is downloading. Pause it or wait until it finishes.",
+          );
+        m.state = "downloading";
+        m.error = null;
+      } else if (action === "pause") {
+        if (m.state === "downloading") m.state = "paused";
+        m.bytes_per_second = 0;
+      } else if (action === "cancel") {
+        Object.assign(m, {
+          state: "available",
+          done: 0,
+          error: null,
+          bytes_per_second: 0,
+        });
+      } else if (action === "delete") {
+        state.local.models = state.local.models.filter(
+          (x: Json) => x.id !== m.model_id,
+        );
+        Object.assign(m, {
+          state: "available",
+          done: 0,
+          model_id: null,
+          path: null,
+        });
+      }
+      return downloadCatalog();
     }
     if (path === "/api/local-models") return state.local;
     if (path === "/api/local-models/load") {
@@ -3188,6 +3474,56 @@ export function installFakeBackend(options: FakeOptions = {}) {
       return remoteView();
     }
     if (path === "/api/remote/ntfy/test") return { ok: true };
+    if (path === "/api/about" && method === "GET") {
+      const tag = "v0.33.0";
+      const repo = "https://github.com/Shadowfetchapps/ShadowCode";
+      return {
+        name: "ShadowCode",
+        version: "0.33.0",
+        commit: "e15c4480e65db5650af012bb2a9773dbe89acf84",
+        install: updatesView().install,
+        license: {
+          spdx: "Apache-2.0",
+          name: "Apache License 2.0",
+          holder: "Shadowfetch",
+          notice:
+            "ShadowCode\nCopyright 2026 Shadowfetch\n\nShadowCode was originally created by Shadowfetch.\n",
+          third_party: "/usr/share/doc/shadowcode/notices",
+        },
+        links: {
+          repository: repo,
+          release_notes: `${repo}/releases/tag/${tag}`,
+          releases: `${repo}/releases`,
+          license: `${repo}/blob/${tag}/LICENSE`,
+          notice: `${repo}/blob/${tag}/NOTICE`,
+          issues: `${repo}/issues`,
+          user_guide: `${repo}/blob/${tag}/docs/USER_GUIDE.md`,
+        },
+        updates: updatesView(),
+      };
+    }
+    if (path === "/api/updates" && method === "GET") {
+      if (
+        q.get("auto") === "1" &&
+        state.config.updates?.check !== false &&
+        state.config.network?.mode !== "offline"
+      )
+        state.updates.auto += 1;
+      return updatesView();
+    }
+    if (path === "/api/updates/check" && method === "POST") {
+      if (state.config.network?.mode === "offline")
+        throw new Error(
+          "ShadowCode is in Offline mode. Choose Online or Web tools off in Settings › Permissions & network to check for updates.",
+        );
+      state.updates.checks += 1;
+      state.updates.checked_at = now();
+      return updatesView();
+    }
+    if (path === "/api/updates/dismiss" && method === "POST") {
+      state.updates.dismissed = String(body?.version || "");
+      return updatesView();
+    }
     throw new Error(`Fake backend has no route for ${method} ${path}`);
   }
 

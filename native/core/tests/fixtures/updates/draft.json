@@ -1,0 +1,103 @@
+{
+  "url": "https://api.github.com/repos/Shadowfetchapps/ShadowCode/releases/300000001",
+  "html_url": "https://evil.example/should-not-be-used",
+  "id": 300000001,
+  "author": {
+    "login": "Shadowfetchapps",
+    "id": 209457103,
+    "type": "User",
+    "site_admin": false
+  },
+  "node_id": "RE_kwDOxxxx",
+  "tag_name": "v0.35.0",
+  "target_commitish": "main",
+  "name": "ShadowCode 0.34.0",
+  "draft": true,
+  "immutable": false,
+  "prerelease": false,
+  "created_at": "2026-10-02T08:40:11Z",
+  "updated_at": "2026-10-02T09:15:00Z",
+  "published_at": "2026-10-02T09:15:00Z",
+  "assets": [
+    {
+      "url": "https://api.github.com/repos/Shadowfetchapps/ShadowCode/releases/assets/11024",
+      "id": 100024,
+      "name": "RELEASE-AUTH",
+      "label": "",
+      "content_type": "text/plain",
+      "state": "uploaded",
+      "size": 1024,
+      "download_count": 12,
+      "browser_download_url": "https://github.com/Shadowfetchapps/ShadowCode/releases/download/v0.34.0/RELEASE-AUTH"
+    },
+    {
+      "url": "https://api.github.com/repos/Shadowfetchapps/ShadowCode/releases/assets/164",
+      "id": 100064,
+      "name": "RELEASE-AUTH.sig",
+      "label": "",
+      "content_type": "application/octet-stream",
+      "state": "uploaded",
+      "size": 64,
+      "download_count": 12,
+      "browser_download_url": "https://github.com/Shadowfetchapps/ShadowCode/releases/download/v0.34.0/RELEASE-AUTH.sig"
+    },
+    {
+      "url": "https://api.github.com/repos/Shadowfetchapps/ShadowCode/releases/assets/14096",
+      "id": 100096,
+      "name": "RELEASE-MANIFEST.json",
+      "label": "",
+      "content_type": "application/json",
+      "state": "uploaded",
+      "size": 4096,
+      "download_count": 12,
+      "browser_download_url": "https://github.com/Shadowfetchapps/ShadowCode/releases/download/v0.34.0/RELEASE-MANIFEST.json"
+    },
+    {
+      "url": "https://api.github.com/repos/Shadowfetchapps/ShadowCode/releases/assets/1300",
+      "id": 100300,
+      "name": "SHA256SUMS",
+      "label": "",
+      "content_type": "text/plain",
+      "state": "uploaded",
+      "size": 300,
+      "download_count": 12,
+      "browser_download_url": "https://github.com/Shadowfetchapps/ShadowCode/releases/download/v0.34.0/SHA256SUMS"
+    },
+    {
+      "url": "https://api.github.com/repos/Shadowfetchapps/ShadowCode/releases/assets/10",
+      "id": 100000,
+      "name": "ShadowCode_0.34.0_amd64.AppImage",
+      "label": "",
+      "content_type": "application/octet-stream",
+      "state": "uploaded",
+      "size": 190000000,
+      "download_count": 12,
+      "browser_download_url": "https://github.com/Shadowfetchapps/ShadowCode/releases/download/v0.34.0/ShadowCode_0.34.0_amd64.AppImage"
+    },
+    {
+      "url": "https://api.github.com/repos/Shadowfetchapps/ShadowCode/releases/assets/10",
+      "id": 100000,
+      "name": "ShadowCode_0.34.0_amd64.deb",
+      "label": "",
+      "content_type": "application/octet-stream",
+      "state": "uploaded",
+      "size": 60000000,
+      "download_count": 12,
+      "browser_download_url": "https://github.com/Shadowfetchapps/ShadowCode/releases/download/v0.34.0/ShadowCode_0.34.0_amd64.deb"
+    },
+    {
+      "url": "https://api.github.com/repos/Shadowfetchapps/ShadowCode/releases/assets/10",
+      "id": 100000,
+      "name": "ShadowCode_0.34.0_appimage-runtime-sources.tar.gz",
+      "label": "",
+      "content_type": "application/octet-stream",
+      "state": "uploaded",
+      "size": 90000000,
+      "download_count": 12,
+      "browser_download_url": "https://github.com/Shadowfetchapps/ShadowCode/releases/download/v0.34.0/ShadowCode_0.34.0_appimage-runtime-sources.tar.gz"
+    }
+  ],
+  "tarball_url": "https://api.github.com/repos/Shadowfetchapps/ShadowCode/tarball/v0.34.0",
+  "zipball_url": "https://api.github.com/repos/Shadowfetchapps/ShadowCode/zipball/v0.34.0",
+  "body": "# ShadowCode 0.34.0\n\nRelease notes text.\n"
+}

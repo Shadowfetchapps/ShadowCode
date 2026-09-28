@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-authors = ["ShadowfetchLinux <209457103+ShadowfetchLinux@users.noreply.github.com>"]
+authors = ["Shadowfetch <209457103+Shadowfetchapps@users.noreply.github.com>"]
 description = "A native workspace for local coding models"
 
 [[bin]]

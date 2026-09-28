@@ -61,6 +61,11 @@ chrono = { version = "=0.4.45", default-features = false, features = ["clock", "
 # whisper-rs-sys; the Rust bindings are Unlicense) for local dictation, CPU
 # only. Pinned so the vendored whisper.cpp revision only changes on purpose.
 whisper-rs = { version = "=0.16.0", default-features = false }
+# `shadowcode completions <shell>` and the packaged man page
+# (`shadowcode manpage`), generated from the same clap definitions as --help.
+# MIT OR Apache-2.0; roff is their only new dependency.
+clap_complete = "=4.6.11"
+clap_mangen = "=0.2.33"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Landlock file/TCP restrictions for shell commands that run without

@@ -235,6 +235,21 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<Remote>,
     },
+    /// Print a shell completion script (for example
+    /// `shadowcode completions bash > ~/.local/share/bash-completion/completions/shadowcode`).
+    Completions {
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+    /// Print the manual page in roff format (packaging uses this).
+    #[command(hide = true)]
+    Manpage,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AcpClient {

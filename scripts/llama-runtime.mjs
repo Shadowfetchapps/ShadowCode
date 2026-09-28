@@ -368,19 +368,21 @@ export async function verifyRuntimeDirectory(directory, pin, { run }) {
 /**
  * Add the runtime to a built .deb as /usr/lib/shadowcode with its relative
  * symlinks (the Tauri bundler's custom-files copy would dereference them),
- * regenerating md5sums and Installed-Size. Replaces `deb` atomically.
+ * regenerating md5sums and Installed-Size. `finish(work)` may complete the
+ * extracted tree first (see native-deb.mjs). Replaces `deb` atomically.
  */
 export async function addRuntimeToDeb(
   deb,
   runtime,
   scratch,
-  { run, normalizeDesktop = false },
+  { run, normalizeDesktop = false, finish },
 ) {
   const work = path.join(scratch, "deb-root");
   await rm(work, { recursive: true, force: true });
   await run("dpkg-deb", ["--raw-extract", deb, work]);
   if (normalizeDesktop) await normalizeDesktopEntry(work);
   await copyManagedRuntime(runtime, path.join(work, RUNTIME_LOCATION));
+  if (finish) await finish(work);
   const sums = [];
   let kibibytes = 0;
   const { entries } = await inspectRuntimeTree(work);
@@ -410,6 +412,9 @@ export async function addRuntimeToDeb(
     controlPath,
     control.replace(/^Installed-Size: \d+$/m, `Installed-Size: ${kibibytes}`),
   );
+  // Control members as dpkg expects them, whatever the build's umask.
+  for (const file of ["control", "md5sums"])
+    await chmod(path.join(work, "DEBIAN", file), 0o644);
   const pending = path.join(scratch, path.basename(deb));
   await run("dpkg-deb", [
     "--root-owner-group",

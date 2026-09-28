@@ -319,6 +319,11 @@ files; they are not signatures. The installer refuses an AppImage without a
 matching entry unless you pass `--unverified`. Package notices and the bundled
 llama.cpp licence texts are checked during packaging
 ([licenses/native](licenses/native/README.md)). ShadowCode sends no telemetry.
+Its only automatic request is the daily update check: an HTTPS `GET` of
+GitHub's latest-release API for this repository with a fixed User-Agent and no
+version or identifier. It never downloads or installs anything, pauses in
+Offline mode, and can be turned off per user or for a whole system
+([DISTRIBUTING.md](docs/DISTRIBUTING.md#updates)).
 
 The CI "Checks" workflow runs `scripts/check-secrets.mjs`. It fails when a
 tracked file looks like it holds a real API key (OpenRouter, Anthropic,

@@ -432,6 +432,16 @@ try {
   await screenshot("onboarding");
   await accessibility("onboarding");
   await clickButton("Trust and open");
+  // Without any ready model (no signed-in subscription on this machine), the
+  // first run asks how to get one; this run skips it (test-native-first-run.mjs
+  // covers that step).
+  const modelStep = await until("Onboarding closes or asks for a model", () => execute("if(!document.querySelector('.wizard'))return 'closed';return /Choose how ShadowCode thinks/.test(document.body.innerText)?'model':false"), 20000);
+  if (modelStep === "model") {
+    const choices = await text();
+    for (const choice of [/Download a free model to run on this computer/, /Use an OpenRouter key/, /Sign in to a subscription/]) assert.match(choices, choice);
+    await clickButton("Skip for now");
+    note("first run without a ready model offers download, OpenRouter and subscription; skipped here");
+  }
   await until("Workspace ready", () => execute("const t=document.querySelector(arguments[0]);return !!t && !t.disabled && !document.querySelector('.wizard')", [composer]), 20000);
   const status = await api("GET", "/api/workspace/status");
   assert.equal(status.workspace, project);
