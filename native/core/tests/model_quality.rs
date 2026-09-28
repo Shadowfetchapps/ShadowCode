@@ -595,6 +595,39 @@ async fn compaction_uses_a_model_summary_that_later_turns_replay() {
     engine.shutdown().await.unwrap();
 }
 
+/// A summary request whose provider reports no token counts is counted as
+/// an estimate (and says so), never as zero tokens.
+#[tokio::test]
+async fn a_summary_without_reported_usage_is_estimated_not_zero() {
+    let server = support::server(|_, body| {
+        if is_summary_request(body) {
+            return (
+                json!({"choices":[{"message":{"role":"assistant","content":"SUMMARY: old things."},"finish_reason":"stop"}]}),
+                Duration::ZERO,
+            );
+        }
+        (response("Answered.", json!([])), Duration::ZERO)
+    })
+    .await;
+    let (root, engine) = setup(&server.endpoint, 16384, json!({}));
+    let sid = seed(&engine, root.path());
+    let job = engine
+        .start(request(root.path(), "What next?", Some(sid)))
+        .await
+        .unwrap();
+    let done = wait(&engine, &job.id).await;
+    assert_eq!(done.status, "completed", "{}", done.summary);
+    let usage = events(&engine, &done, "usage.updated");
+    assert_eq!(usage[0]["purpose"], "compaction");
+    let turn = &usage[0]["turn"];
+    assert_eq!(turn["estimated"], true, "{turn}");
+    assert!(turn["prompt_tokens"].as_u64().unwrap() > 1000, "{turn}");
+    assert!(turn["total_tokens"].as_u64().unwrap() > 0);
+    assert!(done.usage.estimated);
+    assert!(done.usage_is_estimated);
+    engine.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_failed_summary_falls_back_to_the_digest_note() {
     let server = support::server(|_, body| {

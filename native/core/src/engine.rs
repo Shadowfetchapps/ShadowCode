@@ -1957,6 +1957,7 @@ impl Engine {
                 .lock()
                 .map_err(|_| anyhow!("Job lock poisoned"))?;
             record.usage.add(&turn);
+            record.usage_is_estimated |= turn.estimated;
             self.0.store.save_job(&json!(*record))?;
             record.usage.clone()
         };
