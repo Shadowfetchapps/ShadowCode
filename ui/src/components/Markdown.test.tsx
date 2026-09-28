@@ -6,11 +6,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import {
-  Markdown,
-  MARKDOWN_PREVIEW_LIMIT,
-  safeMarkdownHref,
-} from "./Markdown";
+import { Markdown, MARKDOWN_PREVIEW_LIMIT, safeMarkdownHref } from "./Markdown";
 
 const parses = vi.hoisted(() => vi.fn());
 vi.mock("react-markdown", async (original) => {

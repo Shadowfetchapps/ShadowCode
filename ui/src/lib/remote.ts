@@ -355,12 +355,18 @@ export function createRemoteBridge(options: RemoteOptions = {}): Bridge & {
     const id = String(args?.snapshotId ?? "");
     if (!/^[a-fA-F0-9]{32}$/.test(id))
       throw new Error("Invalid diagnostic snapshot ID");
-    const result = (await request(`/api/diagnostic-exports/${id}`, "GET", null)) as {
+    const result = (await request(
+      `/api/diagnostic-exports/${id}`,
+      "GET",
+      null,
+    )) as {
       content?: string;
     };
     const content = result.content;
     if (typeof content !== "string" || content !== args?.expectedContent)
-      throw new Error("Diagnostic preview changed; run Doctor again before saving");
+      throw new Error(
+        "Diagnostic preview changed; run Doctor again before saving",
+      );
     const blob = new Blob([content], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");

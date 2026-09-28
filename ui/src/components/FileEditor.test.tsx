@@ -181,9 +181,7 @@ it("keeps the active editor while a read is pending and ignores a superseded ope
     bytes: 5,
   });
   render(<Harness workspace="/pending" />);
-  fireEvent.click(
-    await screen.findByRole("button", { name: "a.ts" }),
-  );
+  fireEvent.click(await screen.findByRole("button", { name: "a.ts" }));
   const editor = await screen.findByRole("textbox", { name: "Edit a.ts" });
   const originalView = editorView(editor);
   replaceText(editor, "alpha!");

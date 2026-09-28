@@ -9,7 +9,9 @@ import {
 
 it("detects the job-gate trust error so the dialog can open", () => {
   expect(
-    isProjectTrustError("Error: Trust this project before starting an agent task"),
+    isProjectTrustError(
+      "Error: Trust this project before starting an agent task",
+    ),
   ).toBe(true);
   expect(isProjectTrustError("Permission denied")).toBe(false);
 });

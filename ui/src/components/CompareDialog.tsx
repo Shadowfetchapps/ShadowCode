@@ -230,9 +230,9 @@ export function CompareDialog({
         </p>
         {unsavedFiles.length > 0 && (
           <p className="health-bad compare-error" role="alert">
-            Save or discard these open drafts before comparing: {unsavedFiles.join(", ")}.
-            Compare snapshots files from disk, so unsaved editor text would
-            otherwise be missing.
+            Save or discard these open drafts before comparing:{" "}
+            {unsavedFiles.join(", ")}. Compare snapshots files from disk, so
+            unsaved editor text would otherwise be missing.
           </p>
         )}
         {error && (
@@ -253,8 +253,14 @@ export function CompareDialog({
             type="button"
             className="primary"
             disabled={unsavedFiles.length > 0 || starting}
-            aria-disabled={Boolean(check.error) || unsavedFiles.length > 0 || starting}
-            title={unsavedFiles.length ? "Save or discard open drafts first" : check.error || undefined}
+            aria-disabled={
+              Boolean(check.error) || unsavedFiles.length > 0 || starting
+            }
+            title={
+              unsavedFiles.length
+                ? "Save or discard open drafts first"
+                : check.error || undefined
+            }
             onClick={() => void start()}
           >
             {starting && (

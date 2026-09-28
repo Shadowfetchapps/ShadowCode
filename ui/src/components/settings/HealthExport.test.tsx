@@ -1,18 +1,34 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { HealthTab } from "./AdvancedPanels";
 import { api } from "../../api";
 import { exportDiagnostics } from "../../lib/transport";
 
 vi.mock("../../api", () => ({ api: { doctor: vi.fn() } }));
-vi.mock("../../lib/transport", () => ({ isNative: vi.fn(() => true), exportDiagnostics: vi.fn() }));
+vi.mock("../../lib/transport", () => ({
+  isNative: vi.fn(() => true),
+  exportDiagnostics: vi.fn(),
+}));
 
 const content = '{"schema":1,"checks":[{"id":"runtime","status":"pass"}]}\n';
 const report = () => ({
   ok: true,
   version: "fixture",
   suggestions: [],
-  checks: [{ id: "runtime", ok: true, status: "pass" as const, label: "Native runtime" }],
+  checks: [
+    {
+      id: "runtime",
+      ok: true,
+      status: "pass" as const,
+      label: "Native runtime",
+    },
+  ],
   diagnostic_export: {
     id: "a".repeat(32),
     filename: "shadowcode-diagnostics.json",
@@ -35,12 +51,23 @@ afterEach(() => {
 it("shows an exact preview before the only save action", async () => {
   render(<HealthTab health={null} />);
   await screen.findByText("Native runtime");
-  const previewButton = screen.getByRole("button", { name: "Preview diagnostics export" });
-  expect(previewButton.compareDocumentPosition(screen.getByText("Native runtime")) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  const previewButton = screen.getByRole("button", {
+    name: "Preview diagnostics export",
+  });
+  expect(
+    previewButton.compareDocumentPosition(screen.getByText("Native runtime")) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).not.toBe(0);
   expect(exportDiagnostics).not.toHaveBeenCalled();
-  expect(screen.queryByRole("button", { name: "Save diagnostics…" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Preview diagnostics export" }));
-  expect(screen.getByLabelText("Diagnostics export preview").textContent).toBe(content);
+  expect(
+    screen.queryByRole("button", { name: "Save diagnostics…" }),
+  ).toBeNull();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Preview diagnostics export" }),
+  );
+  expect(screen.getByLabelText("Diagnostics export preview").textContent).toBe(
+    content,
+  );
   expect(exportDiagnostics).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "Save diagnostics…" }));
   await waitFor(() =>
@@ -52,9 +79,13 @@ it("shows an exact preview before the only save action", async () => {
 it("hides the old preview while a new Doctor result is pending", async () => {
   render(<HealthTab health={null} />);
   await screen.findByText("Native runtime");
-  fireEvent.click(screen.getByRole("button", { name: "Preview diagnostics export" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Preview diagnostics export" }),
+  );
   vi.mocked(api.doctor).mockImplementationOnce(() => new Promise(() => {}));
   fireEvent.click(screen.getByRole("button", { name: "Run again" }));
-  expect(screen.queryByRole("button", { name: "Save diagnostics…" })).toBeNull();
+  expect(
+    screen.queryByRole("button", { name: "Save diagnostics…" }),
+  ).toBeNull();
   expect(exportDiagnostics).not.toHaveBeenCalled();
 });

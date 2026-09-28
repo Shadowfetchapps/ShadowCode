@@ -123,7 +123,8 @@ it("keeps cancellation terminal when a late successful event arrives", () => {
   const complete = vi.fn();
   const { result } = renderHook(() => useConversation(complete));
   act(() => result.current.load(detail(), job));
-  const oldStream = vi.mocked(jobEvents).mock.results.at(-1)!.value as JobStream;
+  const oldStream = vi.mocked(jobEvents).mock.results.at(-1)!
+    .value as JobStream;
 
   act(() =>
     oldStream.onmessage?.({
@@ -170,9 +171,9 @@ it("keeps cancellation terminal when a late successful event arrives", () => {
   expect(result.current.transcript.items.map((item) => item.text)).toContain(
     "Partial output before stop",
   );
-  expect(result.current.transcript.items.map((item) => item.text)).not.toContain(
-    "Late success must not replace cancellation",
-  );
+  expect(
+    result.current.transcript.items.map((item) => item.text),
+  ).not.toContain("Late success must not replace cancellation");
   expect(complete).not.toHaveBeenCalled();
 });
 

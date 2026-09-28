@@ -130,22 +130,39 @@ describe("remote bridge", () => {
     });
     const create = vi.fn((_blob: Blob) => "blob:diagnostics");
     const revoke = vi.fn();
-    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: create });
-    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revoke });
-    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: create,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: revoke,
+    });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
     expect(calls).toHaveLength(0);
     await expect(
-      bridge.invoke("export_diagnostics", { snapshotId: id, expectedContent: "old" }),
+      bridge.invoke("export_diagnostics", {
+        snapshotId: id,
+        expectedContent: "old",
+      }),
     ).rejects.toThrow("preview changed");
     expect(create).not.toHaveBeenCalled();
     await expect(
-      bridge.invoke("export_diagnostics", { snapshotId: id, expectedContent: content }),
+      bridge.invoke("export_diagnostics", {
+        snapshotId: id,
+        expectedContent: content,
+      }),
     ).resolves.toBe("shadowcode-diagnostics.json");
     expect(calls).toHaveLength(2);
     expect(calls[1].url).toBe(`/api/diagnostic-exports/${id}`);
     expect(click).toHaveBeenCalledTimes(1);
     expect(await (create.mock.calls[0][0] as Blob).text()).toBe(content);
-    await vi.waitFor(() => expect(revoke).toHaveBeenCalledWith("blob:diagnostics"), { timeout: 2500 });
+    await vi.waitFor(
+      () => expect(revoke).toHaveBeenCalledWith("blob:diagnostics"),
+      { timeout: 2500 },
+    );
     click.mockRestore();
     bridge.close();
   });
