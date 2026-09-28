@@ -36,11 +36,34 @@ export async function normalizeDesktopEntry(packageRoot, appimage = false) {
       );
     } else {
       assert.ok(entry.isFile(), "Unexpected Tauri AppDir launcher type");
-      assert.equal(
-        await readFile(oldLink, "utf8"),
-        contents,
-        "Unexpected Tauri AppDir launcher contents",
-      );
+      const rootContents = await readFile(oldLink, "utf8");
+      if (rootContents !== contents) {
+        // linuxdeploy adds this one trailing field when CI exports VERSION.
+        // Bind it to the checked-in package version, never arbitrary ambient
+        // VERSION text. The shipped entry remains the canonical source below.
+        const { version } = JSON.parse(
+          await readFile(
+            new URL("../src-tauri/tauri.conf.json", import.meta.url),
+            "utf8",
+          ),
+        );
+        assert.ok(
+          typeof version === "string" &&
+            /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(
+              version,
+            ),
+          "Unexpected Tauri package version",
+        );
+        assert.ok(
+          contents.endsWith("\n") && !/^X-AppImage-Version=/m.test(contents),
+          "Unexpected Tauri AppDir launcher contents",
+        );
+        assert.equal(
+          rootContents,
+          `${contents}X-AppImage-Version=${version}\n`,
+          "Unexpected Tauri AppDir launcher contents",
+        );
+      }
     }
     await unlink(oldLink);
   }

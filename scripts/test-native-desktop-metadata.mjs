@@ -20,8 +20,20 @@ import {
 
 const desktop =
   "[Desktop Entry]\nType=Application\nName=ShadowCode\nExec=shadowcode\nIcon=shadowcode\n";
+const version = JSON.parse(
+  await readFile(
+    new URL("../src-tauri/tauri.conf.json", import.meta.url),
+    "utf8",
+  ),
+).version;
+const versionLine = `X-AppImage-Version=${version}\n`;
 
-for (const layout of ["Debian", "AppImage symlink", "AppImage regular file"]) {
+for (const layout of [
+  "Debian",
+  "AppImage symlink",
+  "AppImage regular file",
+  "AppImage versioned regular file",
+]) {
   const appimage = layout !== "Debian";
   test(`normalizes the ${layout} desktop ID`, async () => {
     const root = await mkdtemp(path.join(tmpdir(), "shadowcode-desktop-id-"));
@@ -31,6 +43,11 @@ for (const layout of ["Debian", "AppImage symlink", "AppImage regular file"]) {
       await writeFile(path.join(applications, "ShadowCode.desktop"), desktop);
       if (layout === "AppImage regular file")
         await writeFile(path.join(root, "ShadowCode.desktop"), desktop);
+      else if (layout === "AppImage versioned regular file")
+        await writeFile(
+          path.join(root, "ShadowCode.desktop"),
+          desktop + versionLine,
+        );
       else if (appimage)
         await symlink(
           "usr/share/applications/ShadowCode.desktop",
@@ -58,7 +75,15 @@ for (const layout of ["Debian", "AppImage symlink", "AppImage regular file"]) {
   });
 }
 
-for (const layout of ["unexpected symlink", "different file", "directory"]) {
+for (const layout of [
+  "unexpected symlink",
+  "different file",
+  "directory",
+  "wrong version",
+  "duplicate version",
+  "extra version field",
+  "changed versioned launcher",
+]) {
   test(`rejects an AppDir ${layout} before modifying launchers`, async () => {
     const root = await mkdtemp(path.join(tmpdir(), "shadowcode-desktop-id-"));
     try {
@@ -73,7 +98,18 @@ for (const layout of ["unexpected symlink", "different file", "directory"]) {
           rootEntry,
           desktop.replace("Exec=shadowcode", "Exec=other"),
         );
-      else await mkdir(rootEntry);
+      else if (layout === "directory") await mkdir(rootEntry);
+      else {
+        const invalid = {
+          "wrong version": desktop + `X-AppImage-Version=${version}-wrong\n`,
+          "duplicate version": desktop + versionLine + versionLine,
+          "extra version field":
+            desktop + versionLine + "X-AppImage-Name=other\n",
+          "changed versioned launcher":
+            desktop.replace("Exec=shadowcode", "Exec=other") + versionLine,
+        }[layout];
+        await writeFile(rootEntry, invalid);
+      }
       await assert.rejects(
         normalizeDesktopEntry(root, true),
         /Unexpected Tauri/,
