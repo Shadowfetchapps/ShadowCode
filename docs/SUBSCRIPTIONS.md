@@ -27,6 +27,12 @@ server is installed from **Settings › Accounts** (see
   **Settings › Accounts** shows those lines. One sign-in per vendor can run at
   a time. It can be cancelled and stops after 10 minutes. When it finishes,
   ShadowCode checks the account again.
+- **Returning to Accounts.** Active sign-ins are recovered without starting
+  another login. Each provider retains its own instructions and Cancel
+  control. If cancellation is already in progress, the card continues to
+  show **Stopping…** until the provider operation finishes. An unavailable
+  progress read keeps cached account information; use **Refresh** to request
+  another explicit check.
 - **Disconnect** asks for confirmation, then runs `codex logout`,
   `claude auth logout`, `cursor-agent logout` or `grok logout`. Those sign the
   CLI out everywhere on this computer, not only in ShadowCode. ShadowCode then

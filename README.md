@@ -29,9 +29,9 @@ need Ollama, LM Studio or any other model server.
   Approval cards show the actual diff or command. After a task you review
   just what it changed, keep or undo each change, and rewind shell commands
   and subscription edits too.
-- **Shell commands are sandboxed.** They see an empty home folder, so SSH
-  keys, cloud credentials and API keys stay out of reach; only the project is
-  writable.
+- **Explicit execution boundaries.** ShadowCode's native agent uses the
+  configured command sandbox. Vendor agents and your own terminal follow
+  their own execution rules; their tools do not inherit that sandbox.
 - **A capable agent.** Subagents, language-server error checking after each
   edit, a repo map and code search, and support for `CLAUDE.md`, Cursor rules
   and Claude Code skills.
@@ -154,6 +154,12 @@ confirmation, because that signs the CLI out everywhere on this computer. It
 then forgets ShadowCode's cached status, stored usage and resumable session IDs
 for that vendor.
 
+Active sign-ins remain available when you leave Accounts and return. Each
+provider keeps its own progress and Cancel control, so connecting another
+provider does not hide the first. A connected account alone does not establish
+subscription billing; the app shows unknown billing when the vendor supplies
+no evidence.
+
 | Vendor | Runtime ShadowCode starts | Connect runs | Models come from | Image input | Approvals reach ShadowCode | Usage shown |
 | --- | --- | --- | --- | --- | --- | --- |
 | Codex | `codex app-server` (JSON-RPC) | `codex login` | app-server `model/list` | Yes (`localImage`), per model | Yes: command and file-change requests. Codex runs in its own sandbox (`workspace-write`, or `read-only` for Plan/Review) | Rate-limit windows per quota pool (for example 5-hour and weekly), reset times, plan, and credits only when reported |
@@ -199,15 +205,16 @@ plan runs out** to **Ask me** to choose each time. Details:
 
 ## Compare
 
-**Compare** (next to **Send**) runs one task on 2 or 3 models at once, each
+**Compare** (next to **Send**) runs one task on 2 or 3 models, each
 in its own Git worktree that starts from your latest commit plus your
 uncommitted work. Your checkout is not touched while they work. The
 **Comparisons** view shows the lanes side by side: files changed, checks run,
 time and usage, and a link to each lane's conversation. **Keep** one result to
-apply its changes to your working tree (nothing is committed); every lane and
-its branch is then removed, and **Wins in this project** counts which model
-you kept. At most one local model per comparison, since only one fits in GPU
-memory. Details: [compare](docs/COMPARE.md).
+apply its changes to your working tree (nothing is committed), and **Wins in
+this project** counts which model you kept. Managed local models run one after
+another; cloud lanes can run concurrently. If cleanup cannot finish, retained
+copies remain visible for retry. Save unsaved app editor drafts before starting
+a comparison. Details: [compare](docs/COMPARE.md).
 
 ## Working in the window
 
@@ -215,6 +222,13 @@ memory. Details: [compare](docs/COMPARE.md).
   subagent), ↑ for earlier prompts, and switch between **Code**, **Plan**
   and **Ask**. An effort control appears for models that support one. Your
   messages can be edited and resent, retried or copied.
+- **Editor.** Open project files with syntax highlighting, find/replace,
+  undo/redo and recovery drafts. Saving checks whether the file changed on
+  disk before replacing it.
+- **Run a check.** A completed task offers **Run a check…** for a command you
+  choose. It uses the usual approvals, keeps your composer draft and records
+  fresh output without another model turn. A passing check confirms that
+  command only.
 - **Drawer.** Your own terminals (a real shell, never shown to the model), a
   **Git** tab (branches, a suggested commit message, push, pull requests
   through `gh` or `glab` with CI checks), a **Preview** of your dev server

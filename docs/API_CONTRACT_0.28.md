@@ -21,6 +21,37 @@ The desktop keeps acknowledged unsaved file drafts in its private profile databa
 - `DELETE /api/workspace/editor-draft?path=<encoded relative path>` with `{workspace, expected_revision}` → `{removed:true}`. A changed revision refuses deletion.
 
 Paths use the workspace's confined writable-path validation. Only dirty UTF-8 text is stored: the original and draft each have the file editor's 4 MB limit, with at most 32 drafts and 32 MB of text per project. The app shows whether its latest recovery copy has finished saving; input still in flight at a crash is not claimed as durable. Actual file saves continue to use `PUT /api/workspace/file` with the disk content hash and existing trust, permission and reservation checks.
+App-owned workspace mutations that can change a Compare snapshot serialize with Compare's project admission: file saves, project instructions/skills and attachments, editor recovery drafts, project-map saves, and Git hunk/stage/commit actions. Git workspaces use both the in-process project mutex and the repository advisory lock, so another ShadowCode process cannot change these bytes while Compare takes or applies a snapshot; standalone folders, where Compare cannot run, use the in-process mutex only. Compare also checks the profile's persisted recovery-draft paths and refuses to snapshot when any draft differs from its saved base, including a draft saved from another window. The refusal names paths only; draft text is not returned by the check.
+Workspace and Git mutations bind to the selected project before waiting for admission. A project switch during that wait rejects the stale request instead of redirecting it to the newly selected folder.
+
+On Unix, native workspace mutations resolve each destination parent through pinned
+directory handles and reject symlink traversal when opening those handles. Atomic
+write conflict hashes and replacements use the same parent capability; move,
+delete, directory creation, mode changes, and empty-directory removal use
+handle-relative operations as well. Existing-leaf directory opens also refuse
+symlinks, and invalid move sources or stale writes are rejected before creating
+missing destination parents. These checks do not provide atomic compare-and-swap
+against a noncooperating external writer: a leaf can still change between a
+content/type check and rename or unlink. Concurrent replacement of a real
+directory, non-Unix behavior and approval-to-native-window qualification remain
+outside this contract's verified scope.
+
+## Explicit checks from task history
+
+The desktop's completed-task summary offers **Run a check…**. The user enters a
+fresh command; historical receipt text is never replayed as executable input.
+`POST /api/jobs/test` receives `{workspace, session_id, command, timeout:300,
+queue:false}` and creates a native command task against current files. No model
+selection or generation request is required. Trust, command permissions and
+approval policy still apply; a shorter configured tool timeout takes precedence.
+A successful exit verifies this user-selected check only, not arbitrary claims
+about the project.
+
+The action preserves the composer draft and earlier task receipts. Workspace,
+conversation and navigation-generation guards prevent a delayed start response
+from attaching to a different conversation. A refresh failure after acceptance
+does not make the accepted command retryable. Check output and the new receipt
+appear in the ordinary task transcript.
 
 ## Picker
 
@@ -152,7 +183,12 @@ A model row whose usage pool reports the plan limit is `availability:
   `authenticate {methodId: "oauth-personal"}`, lets the server open the
   browser and relays the sign-in link it prints. It fails with the install
   hint when the server isn't installed.
-- `GET /api/accounts/{vendor}/login` → `{ vendor, running, started_at, lines: [{vendor, line, url}], done: {ok, detail, availability}|null }`.
+- `GET /api/accounts/{vendor}/login` → `{ vendor, running, cancellation_requested, started_at, lines: [{vendor, line, url}], done: {ok, detail, availability}|null }`.
+  This read-only progress snapshot retains buffered instructions independently
+  for each provider. `cancellation_requested` is true only while a running
+  operation's cancellation token is set; it becomes false after terminal
+  publication and for absent or newly retried operations. It allows a reopened
+  Accounts page to distinguish a sign-in awaiting the user from one stopping.
 - `POST /api/accounts/{vendor}/disconnect {confirm: true}` → `{ ok, ran: string[], output, note, availability, availability_label }`; runs the
   official logout command (never touches credential files), then forgets the
   vendor's cached status, persisted usage and every conversation's
@@ -499,6 +535,16 @@ imports: [{path, mmproj, name, source}], excluded, llama_binary, context_size }`
   in order; file names, word starts and runs rank higher), skipping
   `.gitignore`d and hidden entries; an empty `q` lists the shallowest
   entries. The listing is cached for 5 s per project.
+- `POST /api/workspace/context-preview {mentions: [{path, kind}]}` →
+  `{items: [{path, kind, included, reason, bytes, total_bytes, from_line,
+  to_line, entries, truncated}], included_bytes, estimated_tokens, truncated}`. The
+  token count is a rough byte-based estimate over the exact bounded attachment
+  prompt text, not a model-tokenizer measurement. This returns no
+  file contents; it resolves the same per-file 64 KiB and total 256 KiB
+  explicit @-attachment bounds as a native task. Folder mentions attach a
+  bounded list of names, not source contents. The preview is a snapshot; the
+  task re-reads selections when execution starts. It does not enumerate
+  provider-owned CLI context or the optional local repository map.
 - `POST /api/sessions/{id}/fork {event_id, title?, before: true}` keeps only
   the events before the task `event_id` belongs to (its prompt included):
   Edit & resend forks there and sends the edited text. Before the first

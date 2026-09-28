@@ -1,6 +1,6 @@
 # ShadowCode user guide
 
-This guide covers ShadowCode 0.30 and follows the usual workflow: open a
+This guide follows the current source's usual workflow: open a
 project, pick a model, describe the task, watch the agent work, then review
 what changed. Installation and a feature overview are in the
 [README](../README.md).
@@ -171,13 +171,22 @@ Cursor rules and Claude Code skills. See [Subagents](SUBAGENTS.md).
 ## Review the result
 
 When the task ends, a summary lists the changed files with line counts and any
-test or build commands with their results. A task counts as verified only from
-recorded command results. An answer that claims success without a recorded
-check is marked as unverified. A task that finished or was stopped without
+test or build commands with their results. Ordinary successful commands are
+separate from configured or explicitly chosen checks. Use **Refresh check
+evidence** to reassess whether passing evidence still matches the current
+files. An answer that claims success without a recorded check is marked as
+unverified. A task that finished or was stopped without
 changing files or running checks shows one quiet line instead, for example
 *Finished · 7s · No files were changed.* A stopped task keeps its partial
 reply.
 
+- **Run a check…** opens a blank command field, such as `npm test`. It runs
+  against the conversation's current project files with your normal command
+  approvals, without selecting a model or sending another model request.
+  Your unsent message stays in the composer. Output and a new check result
+  appear in the conversation; earlier results remain in history. Commands
+  have a five-minute maximum, or your shorter configured tool timeout. A
+  passing exit code confirms that check, not every requirement of the task.
 - **Review changes** appears only when files changed. It opens the task's
   review across the whole window: only the files this task changed, each
   compared with how it was before the task. Switch between a **Unified** and
