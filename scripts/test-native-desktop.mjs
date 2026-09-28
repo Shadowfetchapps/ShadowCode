@@ -415,7 +415,7 @@ try {
   await click(".welcome-model-setup button");
   await until("Welcome action opens picker", () => visible(".unified-picker-menu"));
   note("first-run Choose a model opens the unified picker after model discovery");
-  const picker = await until("Vendor rows probed", async () => {
+  await until("Vendor rows probed", async () => {
     const data = await api("GET", "/api/picker");
     const vendorsChecked = installed.every((vendor) => data.targets.some((t) => t.provider === `cli:${vendor}` && t.reason !== "Not checked yet"));
     return vendorsChecked && data;
@@ -426,9 +426,13 @@ try {
   await click(".unified-picker-actions button");
   await until("Manual model refresh completed", () => execute("return [...document.querySelectorAll('.unified-picker-actions button')].some(b=>b.textContent.includes('Refresh models') && !b.disabled)"), 90000);
   note("open picker manually refreshes provider rows and remains open");
+  // Read the settled manual refresh without starting another provider probe.
+  const picker = await api("GET", "/api/picker?cached=1");
+  const vendorTargets = picker.targets.filter((target) => target.inference !== "local" && target.group !== "local" && target.group !== "api" && target.provider !== "openrouter");
+  const vendorHeading = vendorTargets.some((target) => target.billing === "unknown" || target.billing === "api_key") ? "Vendor CLIs" : "Subscriptions";
   const rows = await pickerRows();
   const groups = await execute("return [...document.querySelectorAll('.unified-picker-heading')].map(h=>h.textContent)");
-  assert.deepEqual(groups, ["Subscriptions", "On this computer", "API keys"]);
+  assert.deepEqual(groups, [vendorHeading, "On this computer", "API keys"], "Vendor heading reflects observed billing, not CLI installation or availability");
   assert.match(await execute("return [...document.querySelectorAll('.unified-picker-group')].find(g=>g.querySelector('.unified-picker-heading').textContent==='On this computer').textContent"), /No local models added yet/);
   // No OpenRouter key in this profile: API-key rows (if the list loaded) ask for one; none is Ready.
   const apiText = await execute("return [...document.querySelectorAll('.unified-picker-group')].find(g=>g.querySelector('.unified-picker-heading').textContent==='API keys').textContent");
@@ -445,7 +449,7 @@ try {
       const target = backend.find((t) => t.name === row.name);
       assert.ok(row.meta.includes(target.availability_label), `${row.name}: shows ${target.availability_label} (${row.meta})`);
       assert.equal(row.blocked, target.availability !== "ready");
-      assert.equal(row.group, "Subscriptions");
+      assert.equal(row.group, vendorHeading);
     }
     vendorSummary[vendor] = [...new Set(backend.map((t) => t.availability_label))].join("/");
     if (expectedVendors[vendor]) assert.ok(backend.some((t) => t.availability_label === expectedVendors[vendor]), `${vendor}: expected ${expectedVendors[vendor]}, backend says ${vendorSummary[vendor]} (${[...new Set(backend.map((t) => t.reason))].join("; ")})`);
@@ -457,7 +461,7 @@ try {
   await accessibility("picker-vendors");
   await execute("document.querySelector('.unified-picker-search input').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
   await until("Picker closed", async () => !(await visible(".unified-picker-menu")));
-  note(`picker: Subscriptions (${Object.entries(vendorSummary).map(([v, s]) => `${v} ${s}`).join(", ") || "no vendor CLIs installed"}), On this computer and API keys (no key)`);
+  note(`picker: ${vendorHeading} (${Object.entries(vendorSummary).map(([v, s]) => `${v} ${s}`).join(", ") || "no vendor CLIs installed"}), On this computer and API keys (no key)`);
 
   // ------------------------------------------------------------ local model
   await openPicker();

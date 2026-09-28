@@ -173,6 +173,47 @@ it.each([
   },
 );
 
+it.each([
+  ["subscription", "Subscriptions"],
+  ["unknown", "Vendor CLIs"],
+  ["api_key", "Vendor CLIs"],
+] as const)(
+  "derives the mixed vendor heading from %s billing, excluding local and API rows",
+  (billing, heading) => {
+    const api: PickerTarget = {
+      ...codex,
+      id: "openrouter:test",
+      provider: "openrouter",
+      group: "api",
+      name: "API test",
+      billing: "api_key",
+    };
+    render(
+      <Harness
+        targets={[
+          { ...codex, billing },
+          { ...cursor, billing: "subscription" },
+          { ...qwen, billing: "unknown" },
+          api,
+        ]}
+      />,
+    );
+    fireEvent.click(trigger());
+    expect(
+      [...document.querySelectorAll(".unified-picker-heading")].map(
+        (node) => node.textContent,
+      ),
+    ).toEqual([heading, "On this computer", "API keys"]);
+    const vendorGroup = screen.getByRole("group", { name: heading });
+    expect(
+      within(vendorGroup).getByRole("option", { name: /Codex · GPT-6-Astra/ }),
+    ).toBeTruthy();
+    expect(
+      within(vendorGroup).getByRole("option", { name: /Cursor · Auto/ }),
+    ).toBeTruthy();
+  },
+);
+
 it("shows 'Choose a model' until a row is chosen and groups both sources", () => {
   render(<Harness />);
   expect(trigger().textContent).toContain("Choose a model");
