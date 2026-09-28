@@ -1,13 +1,13 @@
 # Release procedure
 
-The version currently being prepared is **0.33.1**. Updating version files or
+The most recent documented release is [**0.33.1**](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.33.1). Updating version files or
 these instructions does not publish or sign a release. Bind final build, test
 and authentication receipts to the exact candidate before publication.
 
 Pushing a `v*` tag starts `.github/workflows/release.yml`. Publication follows
 build/qualification, protected signing review and verification of all seven
-public assets. The existing environment permits only `v0.33.0`; a reviewed deployment-rule
-update is required for `v0.33.1`. The workflow uses
+public assets. The current environment permits only `v0.33.1`; later versions
+require reviewed trust-policy, deployment-rule and tooling-pin updates. The workflow uses
 `docs/RELEASE_NOTES.md` as the release text.
 
 ## 1. Version files
@@ -118,19 +118,24 @@ bash scripts/test-install-appimage.sh
 
 The `v0.33.0` attempt at `9e385cb` failed before signing/publication in
 [run 36414378697](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36414378697).
-Do not move or overwrite that tag. Prepare a new reviewed 0.33.1 commit and
-qualification run. Before tagging, update the trusted key/version policy and
-protected deployment rule to authorize the new version, and pin its reviewed
-tooling commit. These updates are pending; existing 0.33.0 receipts do not
-qualify new package bytes. The first-authenticated install boundary remains
-0.33.0 unless separately reviewed; do not silently move this durable boundary.
+Do not move or overwrite that tag. Version 0.33.1 was published from
+`e15c4480e65db5650af012bb2a9773dbe89acf84`, with all 15 required build gates and
+protected signing passing in [run 36427024374](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36427024374).
+The workflow publication job failed on a transient draft-listing response;
+publication resumed locally with the same frozen publisher and signed artifact, verifying
+all seven remote asset files before publication. This does not make that workflow
+run green. Existing 0.33.0 receipts do not qualify the new package bytes.
+The first-authenticated install boundary remains 0.33.0; do not silently move
+this durable boundary.
 
-Public trust in `release/trust` currently allows epoch 1 and version 0.33.0 only;
+Public trust in `release/trust` currently allows epoch 1 and versions 0.33.0–0.33.1;
 `release/install-policy` fixes the first authenticated version at 0.33.0.
 The `release-signing` environment has the signing secret and requires review by
 `Shadowfetchapps` (User ID `209457103`). Self-review is allowed and GitHub's
 default administrator override remains unchanged. Its sole deployment rule is
-`v0.33.0`; `NATIVE_RELEASE_SIGNING_ENVIRONMENT` points to that environment.
+`v0.33.1`; `NATIVE_RELEASE_SIGNING_ENVIRONMENT` points to that environment.
+The reviewed `NATIVE_RELEASE_TOOLING_COMMIT` used for this release is
+`e15c4480e65db5650af012bb2a9773dbe89acf84`.
 
 Before tagging, finish review and push the tooling commit, then set
 `NATIVE_RELEASE_TOOLING_COMMIT` to that exact 40-character SHA. Read back this pin from GitHub configuration before dispatching the release. Verify the environment protections and source/candidate

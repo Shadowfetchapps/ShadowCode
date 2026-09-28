@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.33.1: Reliability and daily workflow (release preparation)
+## 0.33.1: Reliability and daily workflow
 
 - Runtime builds and notices refreshes preserve tracked source pins and reference metadata; actual build provenance stays in generated runtime output. Regression coverage reproduces the source-integrity failure that stopped the unpublished 0.33.0 attempt.
 - Code highlighting, line numbers, undo/redo and recoverable editor drafts, with revision-checked saves and newline preservation.
@@ -10,13 +10,13 @@
 - Safer Compare snapshots and recovery, unsaved-draft guards, and coordination of short workspace writes across cooperating ShadowCode processes.
 - Shared native event listeners prevent per-task listener growth. A real source-built X11 endurance run passed 100 tasks after bounded warm-up; this is not GPU or physical Wayland endurance evidence.
 - AppImage launch preserves an explicitly selected display backend; package normalization accepts only the exact expected linuxdeploy version field.
-- Authenticated installer recovery and staged release verification are strengthened. Signed publication, remote CI and final 0.33.1 artifact qualification are separate release steps, not implied by this changelog.
+- Authenticated installer recovery and staged release verification are strengthened. [Version 0.33.1](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.33.1) was published on September 28, 2026 from `e15c448`, after all 15 required build gates and protected signing passed. The workflow publication job failed on a transient draft-listing response; publication resumed locally with the same frozen publisher and signed artifact, with all seven remote assets compared before publication. See the release notes for the exact evidence and remaining limits.
 
 See [release notes](docs/RELEASE_NOTES.md) for scope and remaining qualification.
 
 ## 0.33.0: Failed release attempt (unpublished)
 
-[Release run 36414378697](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36414378697) at `9e385cb` failed the managed-runtime source-integrity gate after the runtime built and its six tests passed. The builder rewrote tracked runtime pin/COMMIT timestamps. Signing and publication were skipped. The existing `v0.33.0` tag remains unchanged; the next candidate is 0.33.1. Earlier local 0.33.0 package and latency results remain evidence for those exact bytes only.
+[Release run 36414378697](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36414378697) at `9e385cb` failed the managed-runtime source-integrity gate after the runtime built and its six tests passed. The builder rewrote tracked runtime pin/COMMIT timestamps. Signing and publication were skipped. The existing `v0.33.0` tag remains unchanged; the separately qualified successor is 0.33.1. Earlier local 0.33.0 package and latency results remain evidence for those exact bytes only.
 
 ## 0.32.0: The big upgrade
 

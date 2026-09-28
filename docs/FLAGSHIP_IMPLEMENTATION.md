@@ -4,6 +4,8 @@ Goal: a dependable, easy-to-use native workspace combining supported vendor logi
 
 Baseline: `e371baaa4c690527173a322f7e0e1cfae4db329a`. Implementation branch: `flagship/reliability-foundation`. Preserve the existing architecture and provider integrations. The complete [acceptance specification](FLAGSHIP_ACCEPTANCE_SPEC.md) remains in scope; this ledger is not a narrowed definition of completion.
 
+Current release checkpoint (September 28, 2026): signed **0.33.1 is published and installed**, with retained data and successful installed-window checks. See [the final release and installation evidence](#signed-0331-publication-and-installed-app-verification). Earlier pending statements below describe their historical checkpoints. Broader physical desktop, GPU endurance and live provider lifecycle acceptance remain open.
+
 ## Implemented increments
 
 - REMOTE-01 — remote background commands respect the terminal switch. Commit `d488fd2`. Real HTTP regression trusts the project, proves denied requests register no process and write no marker, then proves enabling the switch permits execution. All nine remote integration tests and seven remote policy unit tests pass. Installed release is unchanged; the new test exercises source-built core services.
@@ -839,3 +841,22 @@ Version 0.33.1 is the next candidate. Authoritative manifests, lockfiles and cur
 The ordinary and notices-only builder paths now leave tracked source pins and reference metadata unchanged. Actual compile time/backend remain in ignored generated `bin/COMMIT`; notices-only retains the existing compile time. Three isolated real-shell regressions reproduce the previous behavior (two failures before the fix) and pass after it. The tests run early in packaging CI, native CI and the release receipt gate. The source-integrity guard is unchanged. Public trust is prepared for the same key through 0.33.1, with repository identity, epoch and installation floor preserved; remote deployment-rule/tooling updates and the new tag still require review.
 
 Focused local validation passed 164 release/runtime/session tests, 107 authentication/installer/metadata/scanner tests and two executable-ownership tests, with no skips. A fresh real Vulkan/CPU runtime build is separate pending evidence; these fixture passes do not claim a completed 0.33.1 package, signed publication or installation.
+
+
+## Signed 0.33.1 publication and installed-app verification
+
+On September 28, 2026, [v0.33.1](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.33.1) was published from frozen commit `e15c4480e65db5650af012bb2a9773dbe89acf84`. Current-source Checks and Native desktop CI passed. [Release run 36427024374](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36427024374), attempt 1, passed all 15 required build gates and protected signing after owner approval. Signed artifact `10987931982` has archive SHA-256 `eedf78bf720daef56e3e1228a5e45f004fed9d38099e58bf0ae05dd8986cf7e1`.
+
+The publication job failed because its newly created draft was absent from the immediate authenticated listing. That failed workflow remains visible. Once the same draft became visible, publication resumed locally using the exact frozen publisher, original run/attempt receipts and signed artifact. It verified repository/tag identity, uploaded missing assets without replacement, downloaded and compared all seven assets, then published. A fresh public download independently matched every signed-artifact file, and offline AppImage verification confirmed publisher signature, version and full source commit. Neither tag nor package bytes changed. A subsequent tooling-only fix bounds retries of successful empty listings after draft creation; it never repeats creation or retries API errors. All 70 focused publisher/signing/verification tests passed, including delayed visibility, retry exhaustion and authorization failure.
+
+Published package SHA-256 values:
+
+- AppImage: `434853525c1df842d5b8a749989dccd32d3b8ff3df34bdee94c857f26646519b`.
+- Debian: `4f93c63092e0a2e832839e5796afc1a208b29ea5dd18adbaae7cc9c6b17d30af`.
+- Runtime sources: `909ee4d387f09e587be3d7a48bfa13ad6e5277b01c2d75d701c22cf1a53a5ec7`.
+
+The reviewed installer from the frozen release commit authenticated the public AppImage and replaced this machine's 0.32.0 installation while holding the native profile lock. The active `~/Applications/ShadowCode.AppImage` link now selects `ShadowCode-0.33.1-x86_64.AppImage` with the exact published hash. The normal launcher reports 0.33.1; desktop version/source metadata and the durable accepted-signature receipt match. The superseded AppImage, prior runtime backup and installation journal are absent after successful activation.
+
+Both user databases pass integrity checks; all protected original identities and immutable history rows remain. Four saved settings files are unchanged. Existing model-directory entries and profile-directory identities are preserved. Private backups remain outside Git. The installed AppImage passes all 20 isolated X11/WebKit interaction groups and owned-process/private-session cleanup. Its normal desktop launcher also opens a visible window with the existing user profile, after which the preservation check still passes. No paid provider task was run by this installation check.
+
+This establishes one authenticated local upgrade and installed-window qualification. It does not establish physical Wayland resizing, broader clipboard/IME/DPI acceptance, GPU inference endurance, complete live provider lifecycle conformance, or universal upgrade/rollback behavior. Evidence is retained locally in `artifacts/release-0.33.1/`; the release workflow, tag and public assets provide the public release identities.

@@ -1,18 +1,21 @@
 # Publisher authentication contract
 
-The helpers in `scripts/native-release-auth.mjs` and `scripts/verify-native-release.sh` verify offline publisher signatures. They do not install, execute, download or publish an application, update trusted keys, or generate production keys. CI tests their behavior with disposable fixture keys. Public trust for 0.33.0 is tracked and the protected signing environment is configured. The exact reviewed tooling-commit pin must be checked in GitHub configuration; this does not establish a built, signed or published candidate. The installer now uses these helpers before executing a candidate and explicitly refuses `--unverified`. The first signed release remains pending.
+The helpers in `scripts/native-release-auth.mjs` and `scripts/verify-native-release.sh` verify offline publisher signatures. They do not install, execute, download or publish an application, update trusted keys, or generate production keys. CI tests their behavior with disposable fixture keys. Public trust for 0.33.0–0.33.1 is tracked and the protected signing environment is configured. The installer uses these helpers before executing a candidate and explicitly refuses `--unverified`. [Version 0.33.1](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.33.1), published on September 28, 2026, is the first signed release.
 
 The Bash verifier loads `scripts/native-release-auth-lib.sh` from its own script directory. Keep both reviewed code files together in the trusted tooling bundle; do not obtain the library from the candidate download or source metadata as shell code. The installer uses the same reviewed routines for current candidates and signed historical receipts; it never sources release metadata as code.
 
-## Next candidate: 0.33.1
+## Published release: 0.33.1
 
 The `v0.33.0` release attempt at `9e385cb` failed its source-integrity gate
 before signing/publication ([run 36414378697](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36414378697)).
-Its tag remains unchanged. Current policy/rules below describe the existing
-0.33.0 setup: reviewed trust-range and deployment-rule updates plus a new exact
-tooling pin are required before 0.33.1 can be signed. The 0.33.1 verification
-example below is conditional on those updates and a successfully signed bundle.
-No new signature, publication or installation is established by this document.
+Its tag remains unchanged. The 0.33.1 release and reviewed tooling are pinned to
+`e15c4480e65db5650af012bb2a9773dbe89acf84`. [Run 36427024374](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36427024374),
+attempt 1, passed all 15 required build gates and protected signing. Its
+publication job failed on a transient draft-listing response; the frozen
+publisher then resumed locally with the same signed artifact `10987931982`, compared
+all seven downloaded remote assets and published the release. The workflow
+failure remains recorded. Publication does not establish a local installation
+or qualification beyond the recorded gates.
 
 ## Trust and security contract
 
@@ -74,7 +77,7 @@ Each key has an inclusive version range and exactly one epoch. Unknown keys, dif
 
 For a reviewed rotation, distribute a new authenticated trust bundle with the new public key and higher minimum epoch/version. Retain the old public key with its historical version range only when needed to verify an existing accepted-state receipt. The internal history check may ignore current minimum floors, but it still verifies the old signature, identity, key epoch and historical key range. This exception is not exposed as an install-verification API. Deleting an old key outright can make old state unverifiable; the installer must then fail pending explicit migration, not erase the state or assume a fresh install.
 
-The tracked `release/trust` bundle contains the public Ed25519 key with ID `f0c60ff8228314616985712f8918c9798c0ecf72b7271e19343a041c25663b7f`. Its epoch is 1, minimum version is 0.33.0, and its inclusive key range is 0.33.0–0.33.0. It authorizes no later version without a reviewed policy update. The private key is not distributed in the repository or installer bundle. Fixture keys remain temporary and separate. Public fingerprint distribution, custody and future rotation/revocation remain owner responsibilities.
+The tracked `release/trust` bundle contains the public Ed25519 key with ID `f0c60ff8228314616985712f8918c9798c0ecf72b7271e19343a041c25663b7f`. Its epoch is 1, minimum version is 0.33.0, and its inclusive key range is 0.33.0–0.33.1. It authorizes no later version without a reviewed policy update. The private key is not distributed in the repository or installer bundle. Fixture keys remain temporary and separate. Public fingerprint distribution, custody and future rotation/revocation remain owner responsibilities.
 
 ## Downgrade, replay and accepted state
 
@@ -118,18 +121,18 @@ The release workflow now separates source build/qualification, signing, and publ
 
 A separate publisher runner receives the signing job's immutable artifact ID and repository write permission, but no signing secret. `publish-native-release.mjs` requires the exact seven public assets (three packages plus the four metadata/signature files), verifies private snapshots before any GitHub call, checks remote repository and tag identity, stages a draft, and compares every remote asset's bytes before publication. Identical published retries are read-only; changed bytes under an existing version are refused. `VERIFICATION.json` is bounded CI transport data, not a release asset. Run IDs qualify each attempt without changing immutable release bytes.
 
-The workflow deliberately refuses missing owner configuration. The following records the 0.33.0 setup; recheck it before dispatching a release:
+The workflow deliberately refuses missing owner configuration. The following records the 0.33.1 setup; recheck it before dispatching a release:
 
 - The tracked `release/trust` public policy and key bundle must be included in the reviewed tooling commit and distributed through an authenticated channel. It contains public material only; no default fixture key is trusted.
-- Repository variable `NATIVE_RELEASE_TOOLING_COMMIT` must pin the exact 40-character reviewed and pushed commit containing the current gate definitions, signing/publisher code, public trust and release-appropriate notes. Never infer this pin from an unreviewed tag.
-- Repository variable `NATIVE_RELEASE_SIGNING_ENVIRONMENT` is set to `release-signing`. Its verified configuration requires the `Shadowfetchapps` User reviewer (ID `209457103`), allows self-review and retains GitHub's default administrator override. Its sole deployment rule allows the tag `v0.33.0`. This is an owner-reviewed gate, not a two-person approval guarantee; a later release needs an explicit rule/policy update.
+- Repository variable `NATIVE_RELEASE_TOOLING_COMMIT` must pin the exact 40-character reviewed and pushed commit containing the current gate definitions, signing/publisher code, public trust and release-appropriate notes. The reviewed pin for 0.33.1 is `e15c4480e65db5650af012bb2a9773dbe89acf84`. Never infer this pin from an unreviewed tag.
+- Repository variable `NATIVE_RELEASE_SIGNING_ENVIRONMENT` is set to `release-signing`. Its verified configuration requires the `Shadowfetchapps` User reviewer (ID `209457103`), allows self-review and retains GitHub's default administrator override. Its sole deployment rule allows the tag `v0.33.1`. This is an owner-reviewed gate, not a two-person approval guarantee; a later release needs an explicit rule/policy update.
 - Environment secret `NATIVE_RELEASE_SIGNING_KEY_PEM` has been uploaded to `release-signing`. It is scoped to the signing environment, not repository-wide secrets or the build job. Its presence does not prove that a candidate has been signed.
 
 Owner review of the release workflow/source and repository protections remains necessary: another authorized workflow could request the same environment secret. Local gate receipts are validated assertions, not independent attestations that an adversarial producer executed the commands. Workflow dependencies and exact artifact IDs bind the proposed job flow; local fixtures do not prove GitHub control-plane behavior. Remote checks are observations, not atomic compare-and-swap against independently authorized concurrent changes.
 
 All existing required gates remain, with a new required `built-project-cleanup` gate running the exact release-profile cleanup test over actual installed UI dependencies and output. The default Rust suite transfers only this test to that gate; missing, failed or ignored qualification rejects signing and publication. This scope does not claim full Cargo-cache cleanup qualification.
 
-The tracked AppImage installer now authenticates candidates and retains durable accepted-state receipts. Bootstrap distribution, authenticated .deb invocation, actual production signing, clean-host installation and full GitHub release qualification remain outstanding. Existing installed applications and public releases are not authenticated retroactively.
+The tracked AppImage installer authenticates candidates and retains durable accepted-state receipts. Production signing and publication of the seven authenticated 0.33.1 assets are complete, with the workflow failure and publication recovery recorded above. Independently authenticated installer bootstrap, authenticated .deb installation and the broader installation/upgrade/rollback lifecycle remain separate qualification requirements. Existing installed applications and older public releases are not authenticated retroactively.
 
 ## Trusted installer and durable accepted state
 

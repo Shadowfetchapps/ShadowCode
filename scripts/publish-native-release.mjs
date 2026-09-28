@@ -5,6 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
+import { setTimeout as delay } from 'node:timers/promises';
 import { digest } from './native-release-verification.mjs';
 import { IDENTITY } from './native-release-auth.mjs';
 import { withReleaseSnapshot, validateContext, validateStagedRelease, readReceipts, requireTransportLayout } from './native-release-assets.mjs';
@@ -12,15 +13,15 @@ import { withReleaseSnapshot, validateContext, validateStagedRelease, readReceip
 export { digest } from './native-release-verification.mjs';
 const command = (args) => execFileSync('gh', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 
-export async function publish({ repo, tag, commit, files, verification, trustDir, runId, runAttempt, gh = command }) {
+export async function publish({ repo, tag, commit, files, verification, trustDir, runId, runAttempt, gh = command, sleep = delay }) {
   const context = { repo, tag, commit, runId, runAttempt };
   const version = validateContext(context);
   return withReleaseSnapshot({ files, version }, async (directory, expected) => {
     await validateStagedRelease({ directory, observed: expected, verification, context, trustDir, signed: true });
-    return publishVerified({ repo, tag, commit, expected, gh });
+    return publishVerified({ repo, tag, commit, expected, gh, sleep });
   });
 }
-async function publishVerified({ repo, tag, commit, expected, gh }) {
+async function publishVerified({ repo, tag, commit, expected, gh, sleep }) {
   const identity = JSON.parse(gh(['api', `repos/${repo}`]));
   assert.equal(String(identity.id), IDENTITY.repositoryId, 'Remote repository identity changed');
   assert.equal(String(identity.owner?.id), IDENTITY.ownerId, 'Remote repository owner changed');
@@ -49,6 +50,14 @@ async function publishVerified({ repo, tag, commit, expected, gh }) {
     gh(['release', 'create', tag, '--repo', repo, '--draft', '--verify-tag', '--target', commit,
       '--title', `ShadowCode ${tag}`, '--notes-file', 'docs/RELEASE_NOTES.md']);
     release = inspect();
+    // GitHub can acknowledge creation before the authenticated listing reflects
+    // the draft. Retry only a successful empty listing, never creation or an API
+    // error, and leave the created draft intact if visibility does not converge.
+    for (const milliseconds of [1000, 2000, 4000, 8000]) {
+      if (release) break;
+      await sleep(milliseconds);
+      release = inspect();
+    }
   }
   assert(release, 'Draft release is missing after creation');
   assert.equal(release.tag_name, tag);

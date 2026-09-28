@@ -1,6 +1,6 @@
-# ShadowCode 0.33.1 — release preparation
+# ShadowCode 0.33.1
 
-This version improves editing, explicit verification, provider sign-in recovery and long-running desktop reliability. It is being prepared for release; this document does not establish signed publication or green remote CI. Historical notes below retain their original versions and scope.
+[ShadowCode 0.33.1](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.33.1) was published on September 28, 2026 from `e15c4480e65db5650af012bb2a9773dbe89acf84`. It improves editing, explicit verification, provider sign-in recovery and long-running desktop reliability. Historical notes below retain their original versions and scope.
 
 ## Everyday workflow
 
@@ -24,13 +24,15 @@ Release jobs separate build, signing and publication, verify private artifact sn
 
 Recorded source evidence includes 507 UI unit tests, 75 browser scenarios and the 100-task native endurance run. These counts describe the tested source snapshots, not automatically the final 0.33.1 package. Small live coding tasks have passed across Codex, Claude, Cursor, Grok and Antigravity; full live login-expiry/cancellation/continuation qualification and ACP billing entitlement remain separate.
 
-Physical COSMIC/Wayland interaction coverage is partial: the overall run failed its requested window-resize assertions. GPU inference endurance and broader keyboard/clipboard/IME/DPI acceptance are not established. The existing trust policy and protected deployment rule cover 0.33.0 only; reviewed updates for 0.33.1 are pending. Final version-bound packages, the reviewed tooling pin, protected release approval and remote CI receipts must be checked before publication. See the [implementation evidence ledger](FLAGSHIP_IMPLEMENTATION.md) for exact snapshots, retained failures and later results.
+[Checks 36418625715](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36418625715) and [Native desktop 36418625663](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36418625663) passed on the release commit. [Release run 36427024374](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36427024374), attempt 1, passed all 15 required build gates and protected signing. Its publication job failed when the new draft was briefly absent from the release listing, so the workflow retains a failure conclusion. Publication resumed locally using the same frozen publisher at `e15c448` and immutable signed artifact `10987931982`; all seven remote asset files were downloaded and compared before the release became public. The tag and package bytes were preserved. A fresh download of all seven public assets matched the signed artifact byte for byte, and offline verification of the public AppImage passed against the independently reviewed trust bundle, expected version and full commit.
 
-Expected Linux package names are `ShadowCode_0.33.1_amd64.AppImage`, `ShadowCode_0.33.1_amd64.deb` and `ShadowCode_0.33.1_appimage-runtime-sources.tar.gz`. Use the [release procedure](RELEASING.md) and [publisher authentication contract](RELEASE_AUTHENTICATION.md); these names are not a download-availability claim.
+Physical COSMIC/Wayland interaction coverage is partial: the overall run failed its requested window-resize assertions. GPU inference endurance and broader keyboard/clipboard/IME/DPI acceptance are not established. See the [implementation evidence ledger](FLAGSHIP_IMPLEMENTATION.md) for exact snapshots, retained failures and later results.
+
+The [published Linux release](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.33.1) includes `ShadowCode_0.33.1_amd64.AppImage`, `ShadowCode_0.33.1_amd64.deb` and `ShadowCode_0.33.1_appimage-runtime-sources.tar.gz`, together with `SHA256SUMS`, `RELEASE-MANIFEST.json`, `RELEASE-AUTH` and `RELEASE-AUTH.sig`. Use the [release procedure](RELEASING.md) and [publisher authentication contract](RELEASE_AUTHENTICATION.md) to verify packages with independently trusted installer tooling.
 
 ## Failed 0.33.0 release attempt (unpublished)
 
-[Release run 36414378697](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36414378697), from `9e385cb` / `v0.33.0`, failed the managed-runtime source-integrity gate: the builder changed tracked `tools/llama.cpp.pin` and `packaging/llama.cpp/COMMIT` timestamps. The runtime build and six runtime tests passed, but signing and publication were skipped. The tag is retained unchanged; 0.33.1 is a new candidate requiring fresh qualification. Local package and latency evidence for 0.33.0 is not relabelled as 0.33.1 evidence.
+[Release run 36414378697](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36414378697), from `9e385cb` / `v0.33.0`, failed the managed-runtime source-integrity gate: the builder changed tracked `tools/llama.cpp.pin` and `packaging/llama.cpp/COMMIT` timestamps. The runtime build and six runtime tests passed, but signing and publication were skipped. The tag is retained unchanged; 0.33.1 was built and qualified separately. Local package and latency evidence for 0.33.0 is not relabelled as 0.33.1 evidence.
 
 ## Published 0.32.0
 

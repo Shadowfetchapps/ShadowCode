@@ -42,15 +42,15 @@ need Ollama, LM Studio or any other model server.
   own terminal, go from commit to pull request, preview the app you're
   building, dictate with your voice, and follow along from your phone.
 
-This branch prepares **0.33.1**. See the [0.33.1 release notes](docs/RELEASE_NOTES.md)
-and [release history](CHANGELOG.md). Publication, signing and final candidate
-qualification must be verified separately; these notes do not announce a release.
+ShadowCode **0.33.1** is available in [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.33.1).
+See the [0.33.1 release notes](docs/RELEASE_NOTES.md) for changes and qualification
+limits, and the [release history](CHANGELOG.md).
 
 ## Install
 
 Releases target x86_64 Linux with glibc 2.39 or newer (Ubuntu 24.04 or later).
 Check [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/releases)
-for published versions. The expected 0.33.1 package names are:
+for published versions. The 0.33.1 packages and checksums are:
 
 - `ShadowCode_0.33.1_amd64.AppImage`
 - `ShadowCode_0.33.1_amd64.deb`
@@ -58,16 +58,16 @@ for published versions. The expected 0.33.1 package names are:
 
 ### AppImage (recommended)
 
-The development branch now requires signed release packages. Published 0.32.0
+The installer requires signed release packages. Published 0.32.0
 assets are checksum-only and cannot be installed by this new entry point; use
 the instructions shipped with that released version for those existing assets.
 The 0.33.0 release attempt failed before signing and publication. Its tag stays
-unchanged. Trust policy, deployment rules and the reviewed tooling pin require
-updates for 0.33.1; the first signed release remains pending.
-For development today, use [Build from source](#build-from-source).
+unchanged. Version 0.33.1 is the first signed release; its public trust policy
+and protected signing configuration authorize that version.
+For development, use [Build from source](#build-from-source).
 
-Once a signed release and independently authenticated installer bundle are
-available, put its AppImage, `SHA256SUMS`, `RELEASE-MANIFEST.json`,
+Obtain an independently authenticated installer bundle as described below,
+then put the signed release AppImage, `SHA256SUMS`, `RELEASE-MANIFEST.json`,
 `RELEASE-AUTH` and `RELEASE-AUTH.sig` in one folder. Run the installer from the
 reviewed bundle, which supplies its own verifier, public keys and installation
 policy. Never obtain those trusted keys from the candidate download itself.
