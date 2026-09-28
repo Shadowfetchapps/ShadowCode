@@ -12,6 +12,7 @@ import {
   vendorLabel,
   vendorSections,
   type PickerTarget,
+  usageAfterAvailability,
 } from "./picker";
 
 const now = 1_800_000_000;
@@ -321,4 +322,22 @@ describe("row actions", () => {
       hint: "Install the Antigravity agent in Settings › Accounts.",
     });
   });
+});
+
+it("a picker row does not repeat its availability in the usage", () => {
+  expect(
+    usageAfterAvailability(
+      "Plan limit reached",
+      "Plan limit reached · resets in 2h",
+    ),
+  ).toBe("resets in 2h");
+  expect(
+    usageAfterAvailability("Plan limit reached", "Plan limit reached"),
+  ).toBe("");
+  expect(
+    usageAfterAvailability(
+      "Ready",
+      "Shared plan usage · 2% left · resets in 3h",
+    ),
+  ).toBe("Shared plan usage · 2% left · resets in 3h");
 });

@@ -185,6 +185,23 @@ export function usageLabel(
   return usage.label || UNKNOWN_USAGE;
 }
 
+/** The usage part of a picker row after its availability, without saying
+ * the same thing twice ("Plan limit reached · Plan limit reached · resets
+ * in 2h" reads "Plan limit reached · resets in 2h"). */
+export function usageAfterAvailability(
+  availability: string,
+  usage: string,
+): string {
+  const same = availability.trim().toLowerCase();
+  const text = usage.trim();
+  if (same && text.toLowerCase().startsWith(same))
+    return text
+      .slice(same.length)
+      .replace(/^\s*·\s*/, "")
+      .trim();
+  return text;
+}
+
 /** Expandable detail lines: backend detail first, then windows with reset
  * times, plan/pool/credits and the refresh age — only fields that were
  * reported. */

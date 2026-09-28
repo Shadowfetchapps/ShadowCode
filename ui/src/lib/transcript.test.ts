@@ -686,6 +686,21 @@ describe("subscription turns", () => {
       ),
     ).toBe(true);
   });
+  it("names the product once when the model name already includes it", () => {
+    const state = replay([
+      event(1, "routing.selected", {
+        inference: "cloud",
+        model_id: "cli:codex:gpt-6-astra",
+        model_name: "Codex · GPT-6-Astra",
+        provider: "cli:codex",
+      }),
+    ]);
+    expect(
+      state.items
+        .filter((i) => i.kind === "note")
+        .map((i) => (i as { text: string }).text),
+    ).toEqual(["Using Codex · GPT-6-Astra · Cloud"]);
+  });
 });
 
 describe("plan limit fallback (limit.fallback)", () => {

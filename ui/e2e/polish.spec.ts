@@ -60,6 +60,8 @@ async function axeClean(page: Page, include?: string) {
 test("every Settings page shows its content from the top, light and dark", async ({
   page,
 }) => {
+  // Two themes × fifteen pages, each with an axe pass.
+  test.setTimeout(150_000);
   for (const theme of ["light", "dark"]) {
     await page.evaluate(
       (t) => (document.documentElement.dataset.theme = t),
@@ -93,9 +95,11 @@ test("every Settings page shows its content from the top, light and dark", async
         // A short tab (an error, a small panel) must not stretch the tab
         // bar: it stays one row tall at the top of the page.
         const bar = await tabs.boundingBox();
-        expect(bar && bar.height).toBeLessThan(60);
         const heading = await body.locator("h3").first().boundingBox();
-        expect(bar && heading && bar.y - heading.y).toBeLessThan(60);
+        expect(bar).not.toBeNull();
+        expect(heading).not.toBeNull();
+        expect(bar!.height).toBeLessThan(60);
+        expect(bar!.y - heading!.y).toBeLessThan(60);
         await axeClean(page, '[role="dialog"]');
         if (theme === "light" && ["Health", "MCP"].includes(name))
           await page.screenshot({

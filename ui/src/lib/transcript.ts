@@ -625,7 +625,12 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     const product = ROUTE_PRODUCTS[String(p.provider || "")];
     const modelLabel =
       raw === "auto" ? "Auto" : raw === "default" ? "Default" : raw;
-    const name = product ? `${product} · ${modelLabel}` : raw;
+    // A name that already starts with the product is not prefixed again
+    // ("Codex · Codex · GPT-6").
+    const name =
+      product && !raw.startsWith(`${product} · `)
+        ? `${product} · ${modelLabel}`
+        : raw;
     // With `inference` the row name says enough; older records also name
     // the provider and purpose.
     const selected = p.inference
