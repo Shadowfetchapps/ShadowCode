@@ -1,6 +1,6 @@
 # ShadowCode user guide
 
-This guide follows the current source's usual workflow: open a
+This guide describes the 0.33.0 source workflow: open a
 project, pick a model, describe the task, watch the agent work, then review
 what changed. Installation and a feature overview are in the
 [README](../README.md).
@@ -19,13 +19,34 @@ On first launch, onboarding asks for the project and a permission mode.
 The sidebar groups conversations by project. **New task** (`Ctrl+N`) starts a
 new conversation in the current project.
 
+## Edit files and inspect context
+
+Open a file from the project Files list to edit it with code highlighting, line
+numbers and undo/redo. Drafts survive switching files and reopening the editor.
+Save checks the disk revision so a stale editor does not silently replace a
+newer file. Compare asks you to save or discard app-owned unsaved drafts before
+it snapshots project files.
+
+Inspect attached context before sending: the inventory shows bounded excerpts,
+excluded content, truncation and an approximate token count. These estimates do
+not establish the provider's final context size or billed usage.
+
+## Run a check without another model turn
+
+On a completed task summary, choose **Run a check…**, enter the command and
+submit it. The command uses the current project and conversation, follows normal
+trust and approval controls, and creates its own output and verification
+receipt. No model selection is required; the existing composer draft stays
+intact. A passing check covers that command and observed snapshot, not every
+requirement in the project. See [verification receipts](VERIFICATION_RECEIPTS.md).
+
 ## Pick a model
 
 Open the picker (`Ctrl+M`, or the model button in the composer). It has three
 groups:
 
-- **Subscriptions**: Codex, Claude Code, Cursor, Antigravity and Grok, run
-  through the vendor's official CLI. See [subscriptions](SUBSCRIPTIONS.md).
+- **Subscriptions / Vendor CLIs**: Codex, Claude Code, Cursor, Antigravity and Grok, run
+  through the vendor's official CLI. Unconfirmed billing is labelled Vendor CLIs. See [subscriptions](SUBSCRIPTIONS.md).
 - **On this computer**: GGUF models run by the bundled llama.cpp. See
   [local models](LOCAL_MODELS.md).
 - **API keys**: OpenRouter models, billed per token to your OpenRouter

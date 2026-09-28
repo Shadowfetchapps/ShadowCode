@@ -2,6 +2,15 @@
 
 Task execution and verification are independent. A finished model turn or successful shell process does not prove task acceptance. The native engine extends the existing `verification.summary` event with versioned receipts; it does not create a second task store.
 
+## Run an explicit check
+
+In 0.33.0, **Run a check…** on a completed task summary starts a fresh
+user-entered command through the existing test-task action. It preserves the
+composer draft, requires no selected model, and follows normal trust and
+command approval controls. The result gets its own task and receipt; historical
+redacted command text is never silently replayed. Navigation away from the
+originating project/conversation prevents stale submission or attachment.
+
 ## What counts
 
 A command is a configured check only when it is launched through the existing explicit test-task action, exactly matches a command discovered from project manifests in the project root, or exactly matches a user-configured `verification.commands` entry in application configuration. Execution still uses the existing trust, shell approval, sandbox, and lifecycle-hook path. Merely containing `test`, `lint`, or a runner name is not sufficient. Options and subdirectory commands that do not exactly match remain ordinary execution evidence; they can be run explicitly as checks through the test-task action.
@@ -36,7 +45,7 @@ Historical results are reassessed through `GET /api/jobs/{id}/verification` with
 
 Compare reassesses completed lanes and repeats validation before Keep. A stale or incomplete configured check requires explicit Keep-without-current-checks review. Keep reserves the selected lane against new application-owned jobs during validation/capture; checks recorded at acceptance remain distinguishable after cleanup. This reservation does not prove cross-process or external-editor exclusion.
 
-Remaining integration work: efficiently share change-index fingerprints, continuous invalidation, project-scoped check configuration UI, immutable preview binding and unsaved-buffer protection, transactional Compare recovery, and broader packaged/live-provider qualification. Existing explicit test tasks already rerun a command without making a paid model request.
+Remaining integration work includes efficiently sharing change-index fingerprints, continuous invalidation, project-scoped check configuration UI and broader packaged/live-provider qualification. Compare now guards app-owned unsaved drafts and has ownership-journal cleanup recovery; these do not establish protection against arbitrary external edits. Explicit test tasks rerun commands without a model request.
 
 ## Compatibility and evidence
 

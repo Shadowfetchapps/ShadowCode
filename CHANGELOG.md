@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.33.0: Reliability and daily workflow (release preparation)
+
+- Code highlighting, line numbers, undo/redo and recoverable editor drafts, with revision-checked saves and newline preservation.
+- Bounded attached-context inventory with exclusions, truncation notices and approximate token counts.
+- **Run a check…** from completed tasks: explicit commands, existing approvals, fresh output and verification receipts, no model selection or extra model turn, and preserved composer drafts.
+- Independent provider sign-in recovery after navigation; cancellation remains **Stopping…** until acknowledged. Cached account state survives uncertain progress reads, and refresh waits for ongoing sign-ins.
+- Safer Compare snapshots and recovery, unsaved-draft guards, and coordination of short workspace writes across cooperating ShadowCode processes.
+- Shared native event listeners prevent per-task listener growth. A real source-built X11 endurance run passed 100 tasks after bounded warm-up; this is not GPU or physical Wayland endurance evidence.
+- AppImage launch preserves an explicitly selected display backend; package normalization accepts only the exact expected linuxdeploy version field.
+- Authenticated installer recovery and staged release verification are strengthened. Signed publication, remote CI and final 0.33.0 artifact qualification are separate release steps, not implied by this changelog.
+
+See [release notes](docs/RELEASE_NOTES.md) for scope and remaining qualification.
+
 ## 0.32.0: The big upgrade
 
 Everyday use:

@@ -7,6 +7,12 @@ working tree, and every lane worktree and its branch is removed.
 
 ## Starting state
 
+In 0.33.0, Compare refuses to start while app-owned editor drafts differ from
+their saved base. Save or discard the listed drafts first. The native snapshot
+also checks persisted recovery drafts and coordinates with short workspace
+writes from cooperating ShadowCode processes. Other editors' unsaved buffers
+and arbitrary terminal commands are not covered by that cooperative lock.
+
 Every lane starts from the same commit: HEAD plus the work you have not
 committed yet. That covers staged and unstaged changes to tracked files, and
 untracked files that `.gitignore` does not exclude. Ignored files, such as

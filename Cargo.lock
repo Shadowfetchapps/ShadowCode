@@ -4452,7 +4452,7 @@ dependencies = [
 
 [[package]]
 name = "shadowcode-core"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4506,7 +4506,7 @@ dependencies = [
 
 [[package]]
 name = "shadowcode-desktop"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "notify-rust",

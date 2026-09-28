@@ -16,7 +16,7 @@ need Ollama, LM Studio or any other model server.
 
 ![ShadowCode workspace](docs/images/workspace-light.png)
 
-- **One picker.** The composer lists **Subscriptions**, **On this computer**
+- **One picker.** The composer lists **Subscriptions** (or **Vendor CLIs** when billing is unconfirmed), **On this computer**
   and **API keys** in one menu. Each row shows whether it is ready, whether it
   runs locally or in the cloud, and the usage figures the vendor reports.
 - **Usage figures come from the vendor.** If a vendor exposes no usage, the row
@@ -35,20 +35,25 @@ need Ollama, LM Studio or any other model server.
 - **A capable agent.** Subagents, language-server error checking after each
   edit, a repo map and code search, and support for `CLAUDE.md`, Cursor rules
   and Claude Code skills.
+- **Edit and verify.** The editor highlights code and preserves drafts; attached
+  context shows bounded content and estimates. **Run a check…** starts an explicit
+  command from a completed task without another model turn, keeping your draft.
 - **Everything in one window.** Run tasks side by side in worktrees, use your
   own terminal, go from commit to pull request, preview the app you're
   building, dictate with your voice, and follow along from your phone.
 
-Release history is in [CHANGELOG.md](CHANGELOG.md). What's new in this release:
-[0.32.0 release notes](docs/RELEASE_NOTES.md).
+This branch prepares **0.33.0**. See the [0.33.0 release notes](docs/RELEASE_NOTES.md)
+and [release history](CHANGELOG.md). Publication, signing and final candidate
+qualification must be verified separately; these notes do not announce a release.
 
 ## Install
 
 Releases target x86_64 Linux with glibc 2.39 or newer (Ubuntu 24.04 or later).
-Download from [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/releases/latest):
+Check [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/releases)
+for published versions. The expected 0.33.0 package names are:
 
-- `ShadowCode_0.32.0_amd64.AppImage`
-- `ShadowCode_0.32.0_amd64.deb`
+- `ShadowCode_0.33.0_amd64.AppImage`
+- `ShadowCode_0.33.0_amd64.deb`
 - `SHA256SUMS`
 
 ### AppImage (recommended)
@@ -56,7 +61,9 @@ Download from [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/re
 The development branch now requires signed release packages. Published 0.32.0
 assets are checksum-only and cannot be installed by this new entry point; use
 the instructions shipped with that released version for those existing assets.
-Production public trust and the first signed release are still being provisioned.
+Public trust for 0.33.0 and the signing environment are configured. The exact reviewed
+tooling commit is recorded in GitHub configuration; the first signed release
+remains pending.
 For development today, use [Build from source](#build-from-source).
 
 Once a signed release and independently authenticated installer bundle are
@@ -66,6 +73,16 @@ reviewed bundle, which supplies its own verifier, public keys and installation
 policy. Never obtain those trusted keys from the candidate download itself.
 See [publisher authentication](docs/RELEASE_AUTHENTICATION.md) for the exact
 bundle and bootstrap requirements.
+
+From that independently authenticated installer bundle, run:
+
+```bash
+bash /path/to/trusted-bundle/scripts/install-appimage.sh /path/to/downloads/ShadowCode_0.33.0_amd64.AppImage
+```
+
+The installer takes the AppImage path (or `--recover`), resolves its own trusted
+policy and keys, and verifies the adjacent release metadata. Verifier flags such
+as `--trust-dir` are not installer options.
 
 [`scripts/install-appimage.sh`](scripts/install-appimage.sh):
 
@@ -93,16 +110,27 @@ bundle and bootstrap requirements.
   are preserved for manual recovery; first-window and database rollback are
   not yet qualified.
 
-To run the AppImage without installing it:
-`./ShadowCode_0.32.0_amd64.AppImage --appimage-extract-and-run`. FUSE is not
+After obtaining and verifying the intended package, run the AppImage without installing it:
+`./ShadowCode_0.33.0_amd64.AppImage --appimage-extract-and-run`. FUSE is not
 required.
 
 ### Debian package
 
+Verify the Debian artifact using the independently trusted verifier bundle.
+`verified-deb-0.33.0` must not already exist; install the verified snapshot:
+
 ```bash
-sha256sum --ignore-missing -c SHA256SUMS
-sudo apt install ./ShadowCode_0.32.0_amd64.deb
+bash /path/to/trusted-bundle/scripts/verify-native-release.sh \
+  --bundle-dir /path/to/downloads \
+  --trust-dir /path/to/trusted-bundle/release/trust \
+  --artifact ShadowCode_0.33.0_amd64.deb \
+  --stage-dir ./verified-deb-0.33.0 \
+  --expect-version 0.33.0
+sudo apt install ./verified-deb-0.33.0/ShadowCode_0.33.0_amd64.deb
 ```
+
+This manual Debian verification does not provide the AppImage installer's durable
+accepted-version and rollback state. Checksums alone do not authenticate a publisher.
 
 The deb installs `shadowcode` and the same llama.cpp runtime in
 `/usr/lib/shadowcode`. It depends on `git`, `libgomp1` and `libssl3`, and
@@ -122,7 +150,7 @@ recommends `libvulkan1`, which is needed for GPU inference.
 
 ![Model picker](docs/images/picker.png)
 
-The picker has three groups: **Subscriptions**, **On this computer** and **API
+The picker groups vendor routes under **Subscriptions** or **Vendor CLIs**, alongside **On this computer** and **API
 keys** (OpenRouter, clearly marked as billed per token). Every row is a
 concrete target with a stable ID, for example `cli:cursor:auto`,
 `local:gguf:<hash>` or `api:openrouter:qwen/qwen3-coder`. Selecting it applies to the current

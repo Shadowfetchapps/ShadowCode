@@ -1,8 +1,12 @@
 # Release procedure
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, which publishes the
-release. It builds, tests, packages and uploads the AppImage, the deb, the
-AppImage runtime source archive and `SHA256SUMS`, with
+The version currently being prepared is **0.33.0**. Updating version files or
+these instructions does not publish or sign a release. Bind final build, test
+and authentication receipts to the exact candidate before publication.
+
+Pushing a `v*` tag starts `.github/workflows/release.yml`. Publication follows
+build/qualification, protected signing review and verification of all seven
+public assets. The current environment permits only `v0.33.0`. The workflow uses
 `docs/RELEASE_NOTES.md` as the release text.
 
 ## 1. Version files
@@ -17,7 +21,9 @@ All four must carry the same version, and the tag must be `v<version>`.
 | `ui/package.json` | `version` |
 | `packaging/shadow-agent.desktop` | `X-ShadowCode-Version=` |
 
-Update `CHANGELOG.md` and `docs/RELEASE_NOTES.md`. The notes file becomes the
+Update the workspace package entries in `Cargo.lock` and the root package
+versions in `ui/package-lock.json` alongside those four files; keep locked
+builds reproducible. Update `CHANGELOG.md` and `docs/RELEASE_NOTES.md`. The notes file becomes the
 GitHub release text as it is, so it should start with this release. Notes of
 earlier releases may follow below it, as they do now.
 
@@ -107,7 +113,20 @@ bash scripts/test-install-appimage.sh
   runtime swap and a changed download. If `packaging/llama.cpp/bin` exists, it
   also runs the real `llama-server`.
 
-## 5. Tag
+## 5. Protected signing review and tag
+
+Public trust in `release/trust` currently allows epoch 1 and version 0.33.0 only;
+`release/install-policy` fixes the first authenticated version at 0.33.0.
+The `release-signing` environment has the signing secret and requires review by
+`Shadowfetchapps` (User ID `209457103`). Self-review is allowed and GitHub's
+default administrator override remains unchanged. Its sole deployment rule is
+`v0.33.0`; `NATIVE_RELEASE_SIGNING_ENVIRONMENT` points to that environment.
+
+Before tagging, finish review and push the tooling commit, then set
+`NATIVE_RELEASE_TOOLING_COMMIT` to that exact 40-character SHA. Read back this pin from GitHub configuration before dispatching the release. Verify the environment protections and source/candidate
+receipts before approving signing. Neither the public key nor configured secret
+proves that a package has been built, signed or published. See the
+[authentication contract](RELEASE_AUTHENTICATION.md) for bootstrap and custody.
 
 ```sh
 git tag -a vVERSION -m "ShadowCode VERSION"
@@ -125,21 +144,40 @@ git push origin vVERSION
 6. Rebuilds the AppImage runtime sources without network access.
 7. Runs the packaged CLI, TUI, window and MCP checks.
 8. Writes `SHA256SUMS` and runs the installer test.
-9. Creates the release from `docs/RELEASE_NOTES.md` and uploads:
+9. Prepares an unsigned handoff with required receipts. After protected review,
+   a fresh runner verifies that immutable handoff using pinned tooling and signs
+   private snapshots; the build job never receives the key.
+10. A separate publisher verifies and stages these seven assets in a draft,
+    compares every remote asset's bytes, then publishes:
    - `ShadowCode_VERSION_amd64.AppImage`
    - `ShadowCode_VERSION_amd64.deb`
    - `ShadowCode_VERSION_appimage-runtime-sources.tar.gz`
    - `SHA256SUMS`
+   - `RELEASE-MANIFEST.json`
+   - `RELEASE-AUTH`
+   - `RELEASE-AUTH.sig`
+
+Identical published retries are read-only; changed bytes under an existing
+version are refused. Do not overwrite published versioned assets.
 
 Don't announce a tag until this job succeeds. Afterwards, compare the uploaded
 checksums and the release text with what you expect.
 
 ## 6. Install check
 
+Use the complete independently authenticated installer bundle, including its
+`release/trust`, install policy, verifier helpers, icon and desktop entry. Keep
+the downloaded AppImage beside `SHA256SUMS`, `RELEASE-MANIFEST.json`,
+`RELEASE-AUTH` and `RELEASE-AUTH.sig`.
+
 ```sh
-sha256sum --ignore-missing -c SHA256SUMS
-./scripts/install-appimage.sh /path/to/ShadowCode_VERSION_amd64.AppImage
+bash /path/to/trusted-bundle/scripts/install-appimage.sh /path/to/downloads/ShadowCode_0.33.0_amd64.AppImage
 ```
+
+The installer accepts a single AppImage path or `--recover`; it does not accept
+`--bundle-dir`, `--trust-dir` or `--expect-version`. Those belong to the separate
+read-only verifier. No checksum-only or `--unverified` bypass is supported.
+For manual Debian verification/install, see the [README](../README.md#debian-package).
 
 Then open ShadowCode from the desktop entry and check:
 

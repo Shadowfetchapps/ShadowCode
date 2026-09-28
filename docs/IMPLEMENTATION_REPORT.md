@@ -1,5 +1,9 @@
 # ShadowCode 0.28 implementation report
 
+Historical report with later addenda. For current 0.33.0 preparation, see
+[release notes](RELEASE_NOTES.md) and the [evidence ledger](FLAGSHIP_IMPLEMENTATION.md).
+Versioned counts and provider observations below describe their original snapshots.
+
 Date: 2026-09-23. Base: `main` at 0.27.0 (`d1b685c`). Machine: Linux, RTX 5060 Ti
 16 GB (Vulkan), 62 GB RAM, 16 threads.
 

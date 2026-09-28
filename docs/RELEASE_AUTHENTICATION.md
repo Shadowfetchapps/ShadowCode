@@ -1,6 +1,6 @@
 # Publisher authentication contract
 
-The helpers in `scripts/native-release-auth.mjs` and `scripts/verify-native-release.sh` verify offline publisher signatures. They do not install, execute, download or publish an application, update trusted keys, or generate production keys. CI tests their behavior with disposable fixture keys; production trust is deliberately absent. The installer now uses these helpers before executing a candidate and explicitly refuses `--unverified`. Production public trust and a first signed release remain unprovisioned.
+The helpers in `scripts/native-release-auth.mjs` and `scripts/verify-native-release.sh` verify offline publisher signatures. They do not install, execute, download or publish an application, update trusted keys, or generate production keys. CI tests their behavior with disposable fixture keys. Public trust for 0.33.0 is tracked and the protected signing environment is configured. The exact reviewed tooling-commit pin must be checked in GitHub configuration; this does not establish a built, signed or published candidate. The installer now uses these helpers before executing a candidate and explicitly refuses `--unverified`. The first signed release remains pending.
 
 The Bash verifier loads `scripts/native-release-auth-lib.sh` from its own script directory. Keep both reviewed code files together in the trusted tooling bundle; do not obtain the library from the candidate download or source metadata as shell code. The installer uses the same reviewed routines for current candidates and signed historical receipts; it never sources release metadata as code.
 
@@ -10,9 +10,9 @@ The authorized canonical publisher is `Shadowfetchapps/ShadowCode`, repository I
 
 SHA-256 establishes byte integrity. The detached Ed25519 signature establishes that the holder of an already trusted publisher key signed the release envelope. It does not independently prove which workflow ran, that code is safe, or that the release is the newest available. The workflow identity is currently a publisher assertion; a future GitHub attestation can add an OIDC-backed workflow identity proof.
 
-The trust directory must come from an independently trusted installer/policy bundle, not from the candidate download. There is no adjacent-key discovery or default test key. Explicitly pointing `--trust-dir` at attacker-provided material defeats the premise; the future production installer must choose its own pinned trust path, not accept one from release metadata or an environment override.
+The trust directory must come from an independently trusted installer/policy bundle, not from the candidate download. There is no adjacent-key discovery or default test key. Explicitly pointing `--trust-dir` at attacker-provided material defeats the premise; the production installer must choose its own pinned trust path, not accept one from release metadata or an environment override.
 
-The initial installer/key bootstrap remains an owner decision: use a reviewed canonical repository revision and independently published public-key fingerprint, or another authenticated distribution channel. A verifier/key distributed beside an arbitrary download does not authenticate itself. This prototype is not a new automatic updater.
+The initial installer/key bootstrap requires an authenticated distribution channel: use a reviewed canonical repository revision and independently published public-key fingerprint, or another authenticated distribution channel. A verifier/key distributed beside an arbitrary download does not authenticate itself. This prototype is not a new automatic updater.
 
 ## Exact envelope and bindings
 
@@ -64,7 +64,7 @@ Each key has an inclusive version range and exactly one epoch. Unknown keys, dif
 
 For a reviewed rotation, distribute a new authenticated trust bundle with the new public key and higher minimum epoch/version. Retain the old public key with its historical version range only when needed to verify an existing accepted-state receipt. The internal history check may ignore current minimum floors, but it still verifies the old signature, identity, key epoch and historical key range. This exception is not exposed as an install-verification API. Deleting an old key outright can make old state unverifiable; the installer must then fail pending explicit migration, not erase the state or assume a fresh install.
 
-Production private-key generation/custody, public fingerprint distribution, key ranges, revocation and protected GitHub environment configuration remain owner decisions. Fixture keys are generated only in temporary test directories and deleted afterward. No production trust directory or key is supplied.
+The tracked `release/trust` bundle contains the public Ed25519 key with ID `f0c60ff8228314616985712f8918c9798c0ecf72b7271e19343a041c25663b7f`. Its epoch is 1, minimum version is 0.33.0, and its inclusive key range is 0.33.0–0.33.0. It authorizes no later version without a reviewed policy update. The private key is not distributed in the repository or installer bundle. Fixture keys remain temporary and separate. Public fingerprint distribution, custody and future rotation/revocation remain owner responsibilities.
 
 ## Downgrade, replay and accepted state
 
@@ -90,9 +90,9 @@ The end-user path is Bash plus OpenSSL 3 and ordinary GNU coreutils/diffutils; i
 bash verify-native-release.sh \
   --bundle-dir DOWNLOADED_FILES \
   --trust-dir INDEPENDENTLY_TRUSTED_KEYS \
-  --artifact ShadowCode_0.32.0_amd64.AppImage \
+  --artifact ShadowCode_0.33.0_amd64.AppImage \
   --stage-dir NEW_PRIVATE_STAGE \
-  --expect-version 0.32.0 \
+  --expect-version 0.33.0 \
   --expect-commit EXPECTED_COMMIT
 ```
 
@@ -108,12 +108,12 @@ The release workflow now separates source build/qualification, signing, and publ
 
 A separate publisher runner receives the signing job's immutable artifact ID and repository write permission, but no signing secret. `publish-native-release.mjs` requires the exact seven public assets (three packages plus the four metadata/signature files), verifies private snapshots before any GitHub call, checks remote repository and tag identity, stages a draft, and compares every remote asset's bytes before publication. Identical published retries are read-only; changed bytes under an existing version are refused. `VERIFICATION.json` is bounded CI transport data, not a release asset. Run IDs qualify each attempt without changing immutable release bytes.
 
-The workflow deliberately refuses missing owner configuration. Before enabling a new release, provision and review all of the following:
+The workflow deliberately refuses missing owner configuration. The following records the 0.33.0 setup; recheck it before dispatching a release:
 
-- An independently authenticated `release/trust` public policy and key bundle in the reviewed tooling commit; choose key custody, epoch/ranges/floors, fingerprint distribution and rotation/revocation policy. No production key or default fixture key is supplied.
-- Repository variable `NATIVE_RELEASE_TOOLING_COMMIT`: the exact 40-character reviewed commit containing the current gate definitions, signing/publisher code, public trust and release-appropriate notes. Never infer this pin from an unreviewed tag.
-- Repository variable `NATIVE_RELEASE_SIGNING_ENVIRONMENT`: an existing protected environment with reviewed required reviewers, self-review and allowed deployment-ref settings as supported. A workflow environment name alone does not establish these protections and can create an unprotected environment.
-- Environment secret `NATIVE_RELEASE_SIGNING_KEY_PEM`, scoped only to that protected environment. Do not put the production key in repository-wide secrets or the build job.
+- The tracked `release/trust` public policy and key bundle must be included in the reviewed tooling commit and distributed through an authenticated channel. It contains public material only; no default fixture key is trusted.
+- Repository variable `NATIVE_RELEASE_TOOLING_COMMIT` must pin the exact 40-character reviewed and pushed commit containing the current gate definitions, signing/publisher code, public trust and release-appropriate notes. Never infer this pin from an unreviewed tag.
+- Repository variable `NATIVE_RELEASE_SIGNING_ENVIRONMENT` is set to `release-signing`. Its verified configuration requires the `Shadowfetchapps` User reviewer (ID `209457103`), allows self-review and retains GitHub's default administrator override. Its sole deployment rule allows the tag `v0.33.0`. This is an owner-reviewed gate, not a two-person approval guarantee; a later release needs an explicit rule/policy update.
+- Environment secret `NATIVE_RELEASE_SIGNING_KEY_PEM` has been uploaded to `release-signing`. It is scoped to the signing environment, not repository-wide secrets or the build job. Its presence does not prove that a candidate has been signed.
 
 Owner review of the release workflow/source and repository protections remains necessary: another authorized workflow could request the same environment secret. Local gate receipts are validated assertions, not independent attestations that an adversarial producer executed the commands. Workflow dependencies and exact artifact IDs bind the proposed job flow; local fixtures do not prove GitHub control-plane behavior. Remote checks are observations, not atomic compare-and-swap against independently authorized concurrent changes.
 
@@ -125,14 +125,14 @@ The tracked AppImage installer now authenticates candidates and retains durable 
 
 Distribute a complete, independently authenticated bundle containing `scripts/install-appimage.sh`, `scripts/install-release-state.sh`, both Bash verifier files, `release/install-policy`, the `release/trust` policy/public keys, `assets/icons/shadow-agent.svg` and `packaging/shadow-agent.desktop`. A development checkout is not a runtime dependency when this bundle is complete. The installer resolves its actual script file before choosing sibling code/trust, so a convenience launcher symlink cannot choose an adjacent substitute bundle. The candidate, working directory and environment cannot override this trust root. Path resolution does not authenticate the initial bundle or protect it from its owner modifying it.
 
-The fixed install policy has exactly these two lines, with the actual first signed stable version substituted by the release owner:
+The tracked `release/install-policy` has exactly these two lines:
 
 ```text
 ShadowCode-Install-Policy-v1
-first-authenticated-version=MAJOR.MINOR.PATCH
+first-authenticated-version=0.33.0
 ```
 
-This immutable boundary distinguishes old unsigned installations from an authenticated installation whose state disappeared. It is not the current minimum-version floor and must not be advanced during key rotation. Incoming candidates below it are refused before execution, even if the trust policy's floor is lower. No production boundary is supplied by the repository yet.
+This immutable boundary distinguishes old unsigned installations from an authenticated installation whose state disappeared. It is not the current minimum-version floor and must not be advanced during key rotation. Incoming candidates below it are refused before execution, even if the trust policy's floor is lower. The tracked boundary is 0.33.0; setting it does not establish that this release has been published.
 
 The installer accepts only the authenticated AppImage role. It checks the private snapshot's reported version and bundled runtime before changing installed files. Signed metadata is retained in private, content-addressed receipt generations under `~/.local/lib/.shadowcode-release-state`. A schema3 intent binds the prior/candidate receipt identities, exact app/runtime fingerprints, installation roots and pre-activation launcher/desktop identities. The accepted pointer becomes durable before app/runtime replacement; rollback can restore an earlier working application without lowering the highest accepted release.
 

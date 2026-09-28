@@ -13,4 +13,4 @@ Keywords=agent;llm;coding;shadowfetch;
 StartupNotify=true
 StartupWMClass=shadowcode
 X-GNOME-UsesNotifications=true
-X-ShadowCode-Version=0.32.0
+X-ShadowCode-Version=0.33.0

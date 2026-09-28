@@ -1,11 +1,30 @@
-## Unreleased: reliability and authenticated releases
+# ShadowCode 0.33.0 — release preparation
 
-- Compare cleanup can recover from partial filesystem deletion using a bounded ownership journal and private quarantine, while preserving the applied result and user work.
-- Reopening the selected conversation preserves pending approval cards; changing conversations immediately hides approvals from the previous one.
-- Release jobs separate build, signing and publication, authenticate private snapshots and require complete scoped verification receipts.
-- The AppImage installer now requires publisher signatures and durable accepted-state checks. Checksum-only installation, `SHADOWCODE_SHA256SUMS` overrides and `--unverified` are no longer supported in this entry point. Existing unsigned releases are not retroactively authenticated. Use a separate source-build profile for development.
+This version improves editing, explicit verification, provider sign-in recovery and long-running desktop reliability. It is being prepared for release; this document does not establish signed publication or green remote CI. Historical notes below retain their original versions and scope.
 
-Production public trust, protected signing configuration and the first signed version are not provisioned yet. Full native, clean-install and recovery qualification remain release requirements. This section describes development changes, not a published release.
+## Everyday workflow
+
+- **Editor.** Code highlighting, line numbers, undo/redo and recoverable drafts. Saves check the original disk revision, preserve supported newline formats and retain edits typed while a save is pending.
+- **Context.** Inspect the files and bounded excerpts attached to the next task, including exclusions, truncation and approximate token counts. Estimates are not provider-reported usage.
+- **Run a check…** Completed-task summaries can start a fresh, user-entered command against current project files without selecting a model or spending another model turn. Existing trust and command approvals apply. Output and a new receipt appear in a new task while your composer draft and earlier evidence remain intact. A successful command proves that check's result, not overall application correctness.
+- **Accounts.** Returning to Settings restores each provider's active login independently. Cancellation shows **Stopping…** until acknowledged. Unknown progress preserves cached information instead of silently starting fresh probes. A successful login process alone does not establish Ready or subscription billing.
+
+## Workspace and desktop reliability
+
+- Compare refuses app-owned unsaved editor drafts before taking its snapshot. Short writes coordinate across cooperating ShadowCode processes, and interrupted cleanup retains ownership evidence and recoverable work. Arbitrary terminal commands and external applications remain outside that cooperative lock.
+- Shared native event registrations avoid growth on every task. A source-built X11 run passed 100 qualification tasks after 25 warm-up tasks with stable listener, descriptor and thread counts and intact SQLite integrity.
+- AppImage launch preserves an explicit display-backend choice. The package normalizer accepts linuxdeploy's single exact matching version field while rejecting unrelated launcher changes.
+- Approval restoration, provider event ownership, cancellation, local-model scheduling and installer recovery have additional regression coverage.
+
+## Release and qualification status
+
+Release jobs separate build, signing and publication, verify private artifact snapshots and require complete scoped receipts. The AppImage installer requires publisher signatures and durable accepted-state checks; checksum overrides and `--unverified` do not bypass authentication. Previously published unsigned artifacts are not retroactively authenticated.
+
+Recorded source evidence includes 507 UI unit tests, 75 browser scenarios and the 100-task native endurance run. These counts describe the tested source snapshots, not automatically the final 0.33.0 package. Small live coding tasks have passed across Codex, Claude, Cursor, Grok and Antigravity; full live login-expiry/cancellation/continuation qualification and ACP billing entitlement remain separate.
+
+Physical COSMIC/Wayland interaction coverage is partial: the overall run failed its requested window-resize assertions. GPU inference endurance and broader keyboard/clipboard/IME/DPI acceptance are not established. The protected signing environment and public trust for 0.33.0 are provisioned. Final version-bound packages, the reviewed tooling pin, protected release approval and remote CI receipts must be checked before publication. See the [implementation evidence ledger](FLAGSHIP_IMPLEMENTATION.md) for exact snapshots, retained failures and later results.
+
+Expected Linux package names are `ShadowCode_0.33.0_amd64.AppImage`, `ShadowCode_0.33.0_amd64.deb` and `ShadowCode_0.33.0_appimage-runtime-sources.tar.gz`. Use the [release procedure](RELEASING.md) and [publisher authentication contract](RELEASE_AUTHENTICATION.md); these names are not a download-availability claim.
 
 ## Published 0.32.0
 
