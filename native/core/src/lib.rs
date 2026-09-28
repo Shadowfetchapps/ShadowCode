@@ -74,6 +74,7 @@ pub mod terminal;
 pub mod textdiff;
 pub mod timing;
 pub mod tools;
+pub mod updates;
 pub mod usage;
 pub mod vision;
 pub mod voice;

@@ -164,6 +164,20 @@ shadowcode models --use my-model --provider local --endpoint http://127.0.0.1:12
 reads all settings, `config key` reads a dotted key, and `config key value`
 validates and saves JSON or text. Use the configured environment variable or
 desktop secret editor for credentials; never put secret values in shell history.
+`shadowcode config updates.check false` turns off the daily update check
+(Settings › About).
+
+Shell completions come from the same definitions as `--help`; the Debian
+package installs them, and for the AppImage:
+
+```sh
+shadowcode completions bash > ~/.local/share/bash-completion/completions/shadowcode
+shadowcode completions zsh > ~/.zfunc/_shadowcode    # a folder on your fpath
+shadowcode completions fish > ~/.config/fish/completions/shadowcode.fish
+```
+
+`man shadowcode` (Debian package) lists every command, the files ShadowCode
+uses and the update-check switches.
 
 For [native MCP stdio and HTTP integrations](NATIVE_MCP.md), register a JSON/YAML
 definition, inspect its command or endpoint and hash, and explicitly enable it for the

@@ -119,6 +119,51 @@ statusContainer(
   "Debian package clean-host",
 );
 
+// Removing and purging the package takes only its own files: settings,
+// history and projects stay, and nothing reaches the network.
+const purgeMarker = "__SHADOW_PURGE_KEEPS_USER_DATA__";
+assert.ok(
+  container(
+    [
+      "--tmpfs",
+      "/tmp:rw,nosuid,nodev,size=512m,mode=1777",
+      "--mount",
+      `type=bind,src=${deb},dst=/opt/ShadowCode.deb,readonly`,
+      image,
+      "sh",
+      "-ceu",
+      `
+    dpkg -i /opt/ShadowCode.deb >/dev/null
+    # The slim image excludes /usr/share/man; the package still lists it.
+    dpkg -L shadow-code | grep -qx /usr/share/man/man1/shadowcode.1.gz
+    test -s /usr/share/bash-completion/completions/shadowcode
+    grep -q 'originally created by Shadowfetch' /usr/share/doc/shadow-code/copyright
+    runuser -u nobody -- env HOME=/tmp/home sh -ceu '
+      mkdir -p /tmp/home/project
+      git -C /tmp/home/project init -q
+      /usr/bin/shadowcode --workspace /tmp/home/project --json status >/dev/null
+      /usr/bin/shadowcode --workspace /tmp/home/project config updates.check false >/dev/null
+    '
+    dpkg --purge shadow-code >/dev/null
+    if dpkg -s shadow-code >/dev/null 2>&1; then exit 1; fi
+    test ! -e /usr/bin/shadowcode
+    test ! -e /usr/lib/shadowcode
+    test ! -e /usr/share/doc/shadow-code
+    test ! -e /usr/share/man/man1/shadowcode.1.gz
+    grep -q 'check: false' /tmp/home/.config/shadow-agent/config.yaml
+    test -f /tmp/home/.local/state/shadow-agent/shadow-agent.db
+    test -d /tmp/home/project/.git
+    printf '${purgeMarker}\\n'
+  `,
+    ],
+    "Debian package purge",
+  )
+    .split("\n")
+    .includes(purgeMarker),
+  "Purging the Debian package must leave user data in place",
+);
+console.log("Debian package purge: packaged files removed, user data kept");
+
 const guiMarker = "__SHADOW_CLEAN_WINDOW__";
 function windowContainer(args, label) {
   const output = container(args, label);

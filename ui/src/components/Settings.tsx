@@ -8,6 +8,7 @@ import { LocalModelsPage } from "./settings/LocalModelsPage";
 import { AppearancePage, PermissionsPage } from "./settings/PreferencePages";
 import { AdvancedPage, type AdvancedTab } from "./settings/AdvancedPage";
 import { RemotePage } from "./settings/RemotePage";
+import { AboutPage } from "./settings/AboutPage";
 
 export type SettingsSection =
   | "accounts"
@@ -17,7 +18,8 @@ export type SettingsSection =
   | "permissions"
   | "appearance"
   | "remote"
-  | "advanced";
+  | "advanced"
+  | "about";
 export type { AdvancedTab };
 
 const SECTIONS: { id: SettingsSection; label: string }[] = [
@@ -29,6 +31,7 @@ const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: "appearance", label: "Appearance" },
   { id: "remote", label: "Remote access" },
   { id: "advanced", label: "Advanced" },
+  { id: "about", label: "About" },
 ];
 
 /** Settings. Each page saves only its own configuration group. */
@@ -136,6 +139,7 @@ export function Settings({
             }}
           />
         )}
+        {section === "about" && <AboutPage onSave={onSave} onToast={onToast} />}
         <div className="row end settings-close">
           <button type="button" className="ghost" onClick={onClose}>
             Close
