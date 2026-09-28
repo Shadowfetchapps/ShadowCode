@@ -3,6 +3,7 @@
 //! `/props`, and `/v1/chat/completions` (canned tool calls), requires the
 //! per-launch bearer key, records every launch and request, and exits on
 //! SIGTERM. Nothing here touches a GPU or a real model.
+mod support;
 mod vendor_support;
 use serde_json::{json, Value};
 use shadowcode_core::{
@@ -2335,6 +2336,99 @@ async fn a_plan_limit_continues_the_conversation_on_a_local_model() {
         .count();
     assert_eq!(later, 0, "no follow-up job in ask mode");
     assert!(Config::patch(&f.paths, json!({"limits":{"on_limit":"sometimes"}})).is_err());
+}
+
+/// A local follow-up queued behind other work in one project does not hold
+/// up a local task in another project.
+#[tokio::test]
+async fn a_queued_local_follow_up_does_not_block_another_project() {
+    use shadowcode_core::engine::StartRequest;
+    let slow = support::server(|_, _| {
+        (
+            json!({"choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}),
+            Duration::from_secs(4),
+        )
+    })
+    .await;
+    let f = fixture(GPU);
+    let a = f.models.join("a.gguf");
+    qwen_like(&a, "qwen3", TOOLS_TEMPLATE);
+    let projects: Vec<_> = ["x", "y"]
+        .iter()
+        .map(|name| f._root.path().join(name))
+        .collect();
+    for project in &projects {
+        fs::create_dir(project).unwrap();
+    }
+    Config::patch(
+        &f.paths,
+        json!({"local_engine":{"files":[a]},"trusted_workspaces":projects}),
+    )
+    .unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let id = local_engine::scan(&cfg.local_engine)[0].id.clone();
+    let engine = Engine::open(f.paths.clone()).unwrap();
+    let request = |project: &PathBuf, model: ModelConfig, queue: bool| StartRequest {
+        workspace: project.clone(),
+        task: "Say hello".into(),
+        session_id: None,
+        model: Some(model),
+        mode: "code".into(),
+        queue,
+        images: vec![],
+        web: false,
+    };
+    // Project X: a slow task on another (not managed) model, then a local
+    // follow-up queued behind it in the same conversation.
+    let other = ModelConfig {
+        default: "fixture".into(),
+        name: "fixture".into(),
+        provider: "local".into(),
+        endpoint: slow.endpoint.clone(),
+        api_key_env: "SHADOWCODE_TEST_UNUSED_API_KEY".into(),
+        keep_alive: "5m".into(),
+        context_limit: 16384,
+    };
+    let first = engine
+        .start(request(&projects[0], other, false))
+        .await
+        .unwrap();
+    let mut follow = request(&projects[0], model_for(&id), true);
+    follow.session_id = Some(first.session_id.clone());
+    let follow = engine.start(follow).await.unwrap();
+    // Project Y: a local task starts right away.
+    let second = engine
+        .start(request(&projects[1], model_for(&id), false))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while engine
+            .store()
+            .last_task_event(&second.task_id, "local.runtime_ready")
+            .unwrap()
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the other project's local task started while X was busy");
+    assert_eq!(engine.job(&first.id).unwrap().unwrap().status, "running");
+    assert_eq!(engine.job(&follow.id).unwrap().unwrap().status, "queued");
+    for job in [&first, &follow, &second] {
+        let done = tokio::time::timeout(Duration::from_secs(20), engine.wait(&job.id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(done.status.as_str(), "completed" | "failed"),
+            "{}",
+            done.summary
+        );
+        assert_ne!(done.status, "cancelled");
+    }
+    assert_eq!(slow.requests.lock().unwrap().len(), 1);
+    engine.shutdown().await.unwrap();
 }
 
 #[tokio::test]

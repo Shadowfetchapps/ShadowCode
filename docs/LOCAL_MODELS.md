@@ -123,7 +123,10 @@ llama-server -m <gguf> --host 127.0.0.1 --port <free> --no-webui --jinja \
   until it ends. While any task holds it, **Load**, **Test** or **Unload** of
   another model is refused at once with "A running task is using …" (a task
   started on another model waits its turn instead). While another model is
-  still loading, **Load** and **Test** say so and can be tried again.
+  still loading, **Load** and **Test** say so and can be tried again. Local
+  tasks in different projects take their turns in the order they were sent;
+  a local follow-up still queued behind other work in its own project does
+  not hold up a local task in another project.
 - **Stop.** Unload, a switch or quitting ShadowCode sends SIGTERM to the
   server's process group, then SIGKILL after 5 seconds. The server also dies
   with ShadowCode (`PR_SET_PDEATHSIG`).

@@ -133,6 +133,12 @@ struct Running {
     turn: TurnOptions,
     /// Set for subagent jobs (`engine::child`).
     child: Option<ChildLink>,
+    /// A managed local job reached the front of its project's queue and now
+    /// waits for the local runtime (`await_local_job`).
+    local_waiting: AtomicBool,
+    /// ...and was let through; no other top-level local job starts until it
+    /// has finished.
+    local_admitted: AtomicBool,
 }
 #[derive(Default)]
 struct QueueState {
@@ -790,6 +796,8 @@ impl Engine {
             turn_plan,
             turn: context.turn,
             child: None,
+            local_waiting: AtomicBool::new(false),
+            local_admitted: AtomicBool::new(false),
         });
         if running.command.is_none() && crate::local_engine::is_managed(&running.config.model) {
             self.0
@@ -1157,11 +1165,15 @@ impl Engine {
     }
     /// Top-level managed tasks enter in submission order across workspaces.
     /// Waiting precedes the general worker permit so queued local jobs cannot
-    /// occupy every worker while their predecessor waits to start.
+    /// occupy every worker while their predecessor waits to start. Only jobs
+    /// that reached the front of their own project's queue take part: a
+    /// local follow-up still queued behind other work in one project never
+    /// holds up a local task in another.
     async fn await_local_job(&self, running: &Running) -> Result<()> {
         if running.command.is_some() || !crate::local_engine::is_managed(&running.config.model) {
             return Ok(());
         }
+        running.local_waiting.store(true, Ordering::Release);
         loop {
             let changed = self.0.local_job_changed.notified();
             tokio::pin!(changed);
@@ -1180,10 +1192,20 @@ impl Engine {
                     item.upgrade()
                         .is_some_and(|job| !job.finished.load(Ordering::Acquire))
                 });
-                queue
-                    .front()
-                    .and_then(Weak::upgrade)
-                    .is_some_and(|job| std::ptr::eq(job.as_ref(), running))
+                let jobs: Vec<_> = queue.iter().filter_map(Weak::upgrade).collect();
+                let busy = jobs.iter().any(|job| {
+                    job.local_admitted.load(Ordering::Acquire)
+                        && !std::ptr::eq(job.as_ref(), running)
+                });
+                let first = !busy
+                    && jobs
+                        .iter()
+                        .find(|job| job.local_waiting.load(Ordering::Acquire))
+                        .is_some_and(|job| std::ptr::eq(job.as_ref(), running));
+                if first {
+                    running.local_admitted.store(true, Ordering::Release);
+                }
+                first
             };
             if ready {
                 return Ok(());
