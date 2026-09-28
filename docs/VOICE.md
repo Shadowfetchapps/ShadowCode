@@ -36,7 +36,8 @@ a model, Settings › Voice opens and says what to install.
 
 Models come from the `ggerganov/whisper.cpp` repository on Hugging Face,
 pinned to commit `5359861c739e955e79d9a303bcbc70fb988958b1`; each file must
-match its recorded size and SHA-256 before it is used (the same checked
+match its recorded size and SHA-256 before it is used, and a download that
+receives nothing for 60 seconds stops with an error you can retry (the same checked
 download as the embedding models). They are MIT licensed and are stored in
 `~/.local/share/shadow-agent/voice/models/` (the profile's data directory).
 **Remove** deletes the file. If the chosen model is not installed, any

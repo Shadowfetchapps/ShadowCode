@@ -365,11 +365,13 @@ async fn download_and_unpack(
         .connect_timeout(std::time::Duration::from_secs(15))
         .user_agent(concat!("ShadowCode/", env!("CARGO_PKG_VERSION")))
         .build()?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .context("Could not reach dl.google.com")?;
+    let response = tokio::time::timeout(
+        crate::code_intel::embeddings::DOWNLOAD_STALL,
+        client.get(url).send(),
+    )
+    .await
+    .context("dl.google.com did not answer")?
+    .context("Could not reach dl.google.com")?;
     ensure!(
         response.status().is_success(),
         "The download returned HTTP {}",
@@ -379,8 +381,7 @@ async fn download_and_unpack(
     let mut hasher = Sha256::new();
     let mut done = 0u64;
     let mut stream = futures_util::StreamExt::fuse(response.bytes_stream());
-    while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
-        let chunk = chunk.context("The download was interrupted")?;
+    while let Some(chunk) = crate::code_intel::embeddings::next_piece(&mut stream).await? {
         done += chunk.len() as u64;
         ensure!(done <= bytes, "The download is larger than expected");
         hasher.update(&chunk);
@@ -409,7 +410,10 @@ async fn download_and_unpack(
         return Err(error);
     }
     for name in [SERVER_FILE, HARNESS_FILE] {
-        ensure!(staging.join(name).is_file(), "The archive has no {name}");
+        if !staging.join(name).is_file() {
+            let _ = fs::remove_dir_all(&staging);
+            bail!("The archive has no {name}");
+        }
     }
     if target.exists() {
         fs::remove_dir_all(target)?;
