@@ -148,7 +148,11 @@ A profile has one engine. `shadowcode acp` uses whichever is running:
 Each prompt runs as a job owned by the editor's connection. If the editor
 quits or the agent process is killed, its running prompts are cancelled
 (other work in the engine is not touched). At most eight owner connections
-(editor prompts and MCP gateways together) can run at once. Settings and
+(editor prompts and MCP gateways together) can run at once. A running prompt
+reads its task's progress when the engine announces a change (through the
+same wake-up feed an attached desktop window uses, which counts as one of
+its four views), with a read every two seconds as a backstop; if no view is
+free it reads every 100 ms instead. Settings and
 history are written through the single engine, so the desktop and any number
 of editors never write the profile's database from two processes.
 
