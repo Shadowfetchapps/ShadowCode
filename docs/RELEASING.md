@@ -1,12 +1,13 @@
 # Release procedure
 
-The version currently being prepared is **0.33.0**. Updating version files or
+The version currently being prepared is **0.33.1**. Updating version files or
 these instructions does not publish or sign a release. Bind final build, test
 and authentication receipts to the exact candidate before publication.
 
 Pushing a `v*` tag starts `.github/workflows/release.yml`. Publication follows
 build/qualification, protected signing review and verification of all seven
-public assets. The current environment permits only `v0.33.0`. The workflow uses
+public assets. The existing environment permits only `v0.33.0`; a reviewed deployment-rule
+update is required for `v0.33.1`. The workflow uses
 `docs/RELEASE_NOTES.md` as the release text.
 
 ## 1. Version files
@@ -115,6 +116,15 @@ bash scripts/test-install-appimage.sh
 
 ## 5. Protected signing review and tag
 
+The `v0.33.0` attempt at `9e385cb` failed before signing/publication in
+[run 36414378697](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36414378697).
+Do not move or overwrite that tag. Prepare a new reviewed 0.33.1 commit and
+qualification run. Before tagging, update the trusted key/version policy and
+protected deployment rule to authorize the new version, and pin its reviewed
+tooling commit. These updates are pending; existing 0.33.0 receipts do not
+qualify new package bytes. The first-authenticated install boundary remains
+0.33.0 unless separately reviewed; do not silently move this durable boundary.
+
 Public trust in `release/trust` currently allows epoch 1 and version 0.33.0 only;
 `release/install-policy` fixes the first authenticated version at 0.33.0.
 The `release-signing` environment has the signing secret and requires review by
@@ -171,7 +181,7 @@ the downloaded AppImage beside `SHA256SUMS`, `RELEASE-MANIFEST.json`,
 `RELEASE-AUTH` and `RELEASE-AUTH.sig`.
 
 ```sh
-bash /path/to/trusted-bundle/scripts/install-appimage.sh /path/to/downloads/ShadowCode_0.33.0_amd64.AppImage
+bash /path/to/trusted-bundle/scripts/install-appimage.sh /path/to/downloads/ShadowCode_0.33.1_amd64.AppImage
 ```
 
 The installer accepts a single AppImage path or `--recover`; it does not accept

@@ -11,7 +11,7 @@ import { pathToFileURL } from 'node:url';
 const version = String.raw`VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")`;
 const packaged = `${version}\nBINARY="$GITHUB_WORKSPACE/target/release/bundle/appimage/ShadowCode_${'${VERSION}'}_amd64.AppImage"`;
 export const GATES = {
-  'release-tests': { script: 'node --test --test-reporter=tap scripts/test-native-release.mjs scripts/test-native-release-verification.mjs scripts/test-publisher-auth.mjs scripts/test-native-release-signing.mjs scripts/test-native-test-session.mjs scripts/test-clean-host-mcp-receipt.mjs scripts/test-clean-host-container.mjs scripts/test-native-app-run.mjs\nnode scripts/test-native-process-ownership.mjs' },
+  'release-tests': { script: 'node --test --test-reporter=tap scripts/test-native-release.mjs scripts/test-native-release-verification.mjs scripts/test-publisher-auth.mjs scripts/test-native-release-signing.mjs scripts/test-native-test-session.mjs scripts/test-clean-host-mcp-receipt.mjs scripts/test-clean-host-container.mjs scripts/test-native-app-run.mjs scripts/test-llama-build-inputs.mjs\nnode scripts/test-native-process-ownership.mjs' },
   'release-auth': { script: 'node scripts/check-secrets.mjs\nnode --test --test-reporter=tap scripts/test-native-release-auth.mjs scripts/test-check-secrets.mjs', scope: 'Publisher authentication parser, crypto, replay and private-snapshot fixtures with ephemeral keys; production signing and installer integration are separate.' },
   'release-tag': { script: `${version}\n` + String.raw`test "$GITHUB_REF_NAME" = "v$VERSION"
 test "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)" = "$VERSION"

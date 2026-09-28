@@ -1,4 +1,4 @@
-# ShadowCode 0.33.0 — release preparation
+# ShadowCode 0.33.1 — release preparation
 
 This version improves editing, explicit verification, provider sign-in recovery and long-running desktop reliability. It is being prepared for release; this document does not establish signed publication or green remote CI. Historical notes below retain their original versions and scope.
 
@@ -18,13 +18,19 @@ This version improves editing, explicit verification, provider sign-in recovery 
 
 ## Release and qualification status
 
+The runtime builder now preserves tracked source pins and reference metadata during ordinary builds and notices-only refreshes. Generated runtime metadata retains the actual compilation time. Shell-flow regressions cover the two input mutations that stopped the unpublished 0.33.0 release; the immutable-source guard remains enforced.
+
 Release jobs separate build, signing and publication, verify private artifact snapshots and require complete scoped receipts. The AppImage installer requires publisher signatures and durable accepted-state checks; checksum overrides and `--unverified` do not bypass authentication. Previously published unsigned artifacts are not retroactively authenticated.
 
-Recorded source evidence includes 507 UI unit tests, 75 browser scenarios and the 100-task native endurance run. These counts describe the tested source snapshots, not automatically the final 0.33.0 package. Small live coding tasks have passed across Codex, Claude, Cursor, Grok and Antigravity; full live login-expiry/cancellation/continuation qualification and ACP billing entitlement remain separate.
+Recorded source evidence includes 507 UI unit tests, 75 browser scenarios and the 100-task native endurance run. These counts describe the tested source snapshots, not automatically the final 0.33.1 package. Small live coding tasks have passed across Codex, Claude, Cursor, Grok and Antigravity; full live login-expiry/cancellation/continuation qualification and ACP billing entitlement remain separate.
 
-Physical COSMIC/Wayland interaction coverage is partial: the overall run failed its requested window-resize assertions. GPU inference endurance and broader keyboard/clipboard/IME/DPI acceptance are not established. The protected signing environment and public trust for 0.33.0 are provisioned. Final version-bound packages, the reviewed tooling pin, protected release approval and remote CI receipts must be checked before publication. See the [implementation evidence ledger](FLAGSHIP_IMPLEMENTATION.md) for exact snapshots, retained failures and later results.
+Physical COSMIC/Wayland interaction coverage is partial: the overall run failed its requested window-resize assertions. GPU inference endurance and broader keyboard/clipboard/IME/DPI acceptance are not established. The existing trust policy and protected deployment rule cover 0.33.0 only; reviewed updates for 0.33.1 are pending. Final version-bound packages, the reviewed tooling pin, protected release approval and remote CI receipts must be checked before publication. See the [implementation evidence ledger](FLAGSHIP_IMPLEMENTATION.md) for exact snapshots, retained failures and later results.
 
-Expected Linux package names are `ShadowCode_0.33.0_amd64.AppImage`, `ShadowCode_0.33.0_amd64.deb` and `ShadowCode_0.33.0_appimage-runtime-sources.tar.gz`. Use the [release procedure](RELEASING.md) and [publisher authentication contract](RELEASE_AUTHENTICATION.md); these names are not a download-availability claim.
+Expected Linux package names are `ShadowCode_0.33.1_amd64.AppImage`, `ShadowCode_0.33.1_amd64.deb` and `ShadowCode_0.33.1_appimage-runtime-sources.tar.gz`. Use the [release procedure](RELEASING.md) and [publisher authentication contract](RELEASE_AUTHENTICATION.md); these names are not a download-availability claim.
+
+## Failed 0.33.0 release attempt (unpublished)
+
+[Release run 36414378697](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36414378697), from `9e385cb` / `v0.33.0`, failed the managed-runtime source-integrity gate: the builder changed tracked `tools/llama.cpp.pin` and `packaging/llama.cpp/COMMIT` timestamps. The runtime build and six runtime tests passed, but signing and publication were skipped. The tag is retained unchanged; 0.33.1 is a new candidate requiring fresh qualification. Local package and latency evidence for 0.33.0 is not relabelled as 0.33.1 evidence.
 
 ## Published 0.32.0
 

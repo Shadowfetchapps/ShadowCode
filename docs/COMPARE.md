@@ -7,7 +7,7 @@ working tree, and every lane worktree and its branch is removed.
 
 ## Starting state
 
-In 0.33.0, Compare refuses to start while app-owned editor drafts differ from
+In 0.33.1, Compare refuses to start while app-owned editor drafts differ from
 their saved base. Save or discard the listed drafts first. The native snapshot
 also checks persisted recovery drafts and coordinates with short workspace
 writes from cooperating ShadowCode processes. Other editors' unsaved buffers

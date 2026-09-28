@@ -7,6 +7,11 @@ committed). `scripts/build-native.mjs` copies `bin/` into both packages as
 `scripts/install-appimage.sh` installs the copy from inside the AppImage into
 `~/.local/lib/shadowcode/`.
 
+Builds and `--notices-only` refreshes leave the tracked source pin and the
+reference `packaging/llama.cpp/COMMIT` unchanged. The actual build timestamp
+and backend are recorded in generated `bin/COMMIT`; updating pinned source
+revisions requires an explicit reviewed change to the tracked inputs.
+
 `bin/` contains:
 
 - `llama-server`, `llama-cli` and their shared libraries (`$ORIGIN` rpath);

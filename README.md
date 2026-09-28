@@ -42,7 +42,7 @@ need Ollama, LM Studio or any other model server.
   own terminal, go from commit to pull request, preview the app you're
   building, dictate with your voice, and follow along from your phone.
 
-This branch prepares **0.33.0**. See the [0.33.0 release notes](docs/RELEASE_NOTES.md)
+This branch prepares **0.33.1**. See the [0.33.1 release notes](docs/RELEASE_NOTES.md)
 and [release history](CHANGELOG.md). Publication, signing and final candidate
 qualification must be verified separately; these notes do not announce a release.
 
@@ -50,10 +50,10 @@ qualification must be verified separately; these notes do not announce a release
 
 Releases target x86_64 Linux with glibc 2.39 or newer (Ubuntu 24.04 or later).
 Check [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/releases)
-for published versions. The expected 0.33.0 package names are:
+for published versions. The expected 0.33.1 package names are:
 
-- `ShadowCode_0.33.0_amd64.AppImage`
-- `ShadowCode_0.33.0_amd64.deb`
+- `ShadowCode_0.33.1_amd64.AppImage`
+- `ShadowCode_0.33.1_amd64.deb`
 - `SHA256SUMS`
 
 ### AppImage (recommended)
@@ -61,9 +61,9 @@ for published versions. The expected 0.33.0 package names are:
 The development branch now requires signed release packages. Published 0.32.0
 assets are checksum-only and cannot be installed by this new entry point; use
 the instructions shipped with that released version for those existing assets.
-Public trust for 0.33.0 and the signing environment are configured. The exact reviewed
-tooling commit is recorded in GitHub configuration; the first signed release
-remains pending.
+The 0.33.0 release attempt failed before signing and publication. Its tag stays
+unchanged. Trust policy, deployment rules and the reviewed tooling pin require
+updates for 0.33.1; the first signed release remains pending.
 For development today, use [Build from source](#build-from-source).
 
 Once a signed release and independently authenticated installer bundle are
@@ -77,7 +77,7 @@ bundle and bootstrap requirements.
 From that independently authenticated installer bundle, run:
 
 ```bash
-bash /path/to/trusted-bundle/scripts/install-appimage.sh /path/to/downloads/ShadowCode_0.33.0_amd64.AppImage
+bash /path/to/trusted-bundle/scripts/install-appimage.sh /path/to/downloads/ShadowCode_0.33.1_amd64.AppImage
 ```
 
 The installer takes the AppImage path (or `--recover`), resolves its own trusted
@@ -111,22 +111,22 @@ as `--trust-dir` are not installer options.
   not yet qualified.
 
 After obtaining and verifying the intended package, run the AppImage without installing it:
-`./ShadowCode_0.33.0_amd64.AppImage --appimage-extract-and-run`. FUSE is not
+`./ShadowCode_0.33.1_amd64.AppImage --appimage-extract-and-run`. FUSE is not
 required.
 
 ### Debian package
 
 Verify the Debian artifact using the independently trusted verifier bundle.
-`verified-deb-0.33.0` must not already exist; install the verified snapshot:
+`verified-deb-0.33.1` must not already exist; install the verified snapshot:
 
 ```bash
 bash /path/to/trusted-bundle/scripts/verify-native-release.sh \
   --bundle-dir /path/to/downloads \
   --trust-dir /path/to/trusted-bundle/release/trust \
-  --artifact ShadowCode_0.33.0_amd64.deb \
-  --stage-dir ./verified-deb-0.33.0 \
-  --expect-version 0.33.0
-sudo apt install ./verified-deb-0.33.0/ShadowCode_0.33.0_amd64.deb
+  --artifact ShadowCode_0.33.1_amd64.deb \
+  --stage-dir ./verified-deb-0.33.1 \
+  --expect-version 0.33.1
+sudo apt install ./verified-deb-0.33.1/ShadowCode_0.33.1_amd64.deb
 ```
 
 This manual Debian verification does not provide the AppImage installer's durable

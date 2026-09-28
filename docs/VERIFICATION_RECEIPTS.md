@@ -4,7 +4,7 @@ Task execution and verification are independent. A finished model turn or succes
 
 ## Run an explicit check
 
-In 0.33.0, **Run a check…** on a completed task summary starts a fresh
+In 0.33.1, **Run a check…** on a completed task summary starts a fresh
 user-entered command through the existing test-task action. It preserves the
 composer draft, requires no selected model, and follows normal trust and
 command approval controls. The result gets its own task and receipt; historical

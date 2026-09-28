@@ -4,6 +4,16 @@ The helpers in `scripts/native-release-auth.mjs` and `scripts/verify-native-rele
 
 The Bash verifier loads `scripts/native-release-auth-lib.sh` from its own script directory. Keep both reviewed code files together in the trusted tooling bundle; do not obtain the library from the candidate download or source metadata as shell code. The installer uses the same reviewed routines for current candidates and signed historical receipts; it never sources release metadata as code.
 
+## Next candidate: 0.33.1
+
+The `v0.33.0` release attempt at `9e385cb` failed its source-integrity gate
+before signing/publication ([run 36414378697](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36414378697)).
+Its tag remains unchanged. Current policy/rules below describe the existing
+0.33.0 setup: reviewed trust-range and deployment-rule updates plus a new exact
+tooling pin are required before 0.33.1 can be signed. The 0.33.1 verification
+example below is conditional on those updates and a successfully signed bundle.
+No new signature, publication or installation is established by this document.
+
 ## Trust and security contract
 
 The authorized canonical publisher is `Shadowfetchapps/ShadowCode`, repository ID `1377099349`, owner ID `209457103`. A read-only GitHub API query resolved the historical `ShadowfetchLinux/ShadowCode` origin to that identity. Only stable `MAJOR.MINOR.PATCH`, `x86_64-unknown-linux-gnu` releases are supported by this slice.
@@ -90,9 +100,9 @@ The end-user path is Bash plus OpenSSL 3 and ordinary GNU coreutils/diffutils; i
 bash verify-native-release.sh \
   --bundle-dir DOWNLOADED_FILES \
   --trust-dir INDEPENDENTLY_TRUSTED_KEYS \
-  --artifact ShadowCode_0.33.0_amd64.AppImage \
+  --artifact ShadowCode_0.33.1_amd64.AppImage \
   --stage-dir NEW_PRIVATE_STAGE \
-  --expect-version 0.33.0 \
+  --expect-version 0.33.1 \
   --expect-commit EXPECTED_COMMIT
 ```
 

@@ -1,6 +1,6 @@
 # ShadowCode user guide
 
-This guide describes the 0.33.0 source workflow: open a
+This guide describes the 0.33.1 source workflow: open a
 project, pick a model, describe the task, watch the agent work, then review
 what changed. Installation and a feature overview are in the
 [README](../README.md).

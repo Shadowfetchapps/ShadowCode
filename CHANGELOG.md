@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.33.0: Reliability and daily workflow (release preparation)
+## 0.33.1: Reliability and daily workflow (release preparation)
 
+- Runtime builds and notices refreshes preserve tracked source pins and reference metadata; actual build provenance stays in generated runtime output. Regression coverage reproduces the source-integrity failure that stopped the unpublished 0.33.0 attempt.
 - Code highlighting, line numbers, undo/redo and recoverable editor drafts, with revision-checked saves and newline preservation.
 - Bounded attached-context inventory with exclusions, truncation notices and approximate token counts.
 - **Run a check…** from completed tasks: explicit commands, existing approvals, fresh output and verification receipts, no model selection or extra model turn, and preserved composer drafts.
@@ -9,9 +10,13 @@
 - Safer Compare snapshots and recovery, unsaved-draft guards, and coordination of short workspace writes across cooperating ShadowCode processes.
 - Shared native event listeners prevent per-task listener growth. A real source-built X11 endurance run passed 100 tasks after bounded warm-up; this is not GPU or physical Wayland endurance evidence.
 - AppImage launch preserves an explicitly selected display backend; package normalization accepts only the exact expected linuxdeploy version field.
-- Authenticated installer recovery and staged release verification are strengthened. Signed publication, remote CI and final 0.33.0 artifact qualification are separate release steps, not implied by this changelog.
+- Authenticated installer recovery and staged release verification are strengthened. Signed publication, remote CI and final 0.33.1 artifact qualification are separate release steps, not implied by this changelog.
 
 See [release notes](docs/RELEASE_NOTES.md) for scope and remaining qualification.
+
+## 0.33.0: Failed release attempt (unpublished)
+
+[Release run 36414378697](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36414378697) at `9e385cb` failed the managed-runtime source-integrity gate after the runtime built and its six tests passed. The builder rewrote tracked runtime pin/COMMIT timestamps. Signing and publication were skipped. The existing `v0.33.0` tag remains unchanged; the next candidate is 0.33.1. Earlier local 0.33.0 package and latency results remain evidence for those exact bytes only.
 
 ## 0.32.0: The big upgrade
 

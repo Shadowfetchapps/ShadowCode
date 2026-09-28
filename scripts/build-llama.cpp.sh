@@ -22,6 +22,8 @@
 #
 # Outputs: packaging/llama.cpp/bin (bundled into the AppImage and the deb) and,
 # unless --no-user-install is given, ~/.local/lib/shadowcode.
+# The tracked source pin and reference manifest are inputs, never build outputs.
+# Build timestamps and selected backends belong only in the generated runtime.
 #
 #   --no-user-install  only write packaging/llama.cpp/bin
 #   --cpu-only         do not build the Vulkan module
@@ -90,7 +92,7 @@ fi
 COMMIT="$(git -C "$SRC" rev-parse HEAD)"
 
 # SPIRV-Headers at the pinned commit (the default branch only while no pin
-# exists yet; the commit used is then recorded in the pin).
+# exists yet; the actual commit is recorded in generated runtime metadata).
 fetch_spirv_headers() {
   if [[ ! -d "$SPIRV_SRC/.git" ]]; then
     git init -q "$SPIRV_SRC"
@@ -154,9 +156,6 @@ write_commit() {
     printf 'commit=%s\n' "$COMMIT"
     if [[ -n "$SPIRV_COMMIT" ]]; then
       printf 'spirv_headers_commit=%s\n' "$SPIRV_COMMIT"
-    elif [[ -n "$SPIRV_PINNED" && "$1" == "$PIN" ]]; then
-      # A CPU-only build keeps the SPIRV-Headers pin for the next Vulkan build.
-      printf 'spirv_headers_commit=%s\n' "$SPIRV_PINNED"
     fi
     printf 'backend=%s\n' "$BACKEND"
     printf 'built=%s\n' "$BUILT"
@@ -177,8 +176,6 @@ if [[ "$NOTICES_ONLY" == "1" ]]; then
   fi
   write_notices "$OUT_REPO/bin"
   write_commit "$OUT_REPO/bin/COMMIT"
-  cp "$OUT_REPO/bin/COMMIT" "$OUT_REPO/COMMIT"
-  write_commit "$PIN"
   printf 'Refreshed notices of managed llama.cpp %s (%s) in %s\n' "$COMMIT" "$BACKEND" "$OUT_REPO/bin"
   exit 0
 fi
@@ -272,8 +269,6 @@ install_runtime() {
   rm -rf "$dest.old"
 }
 install_runtime "$OUT_REPO/bin"
-cp "$OUT_REPO/bin/COMMIT" "$OUT_REPO/COMMIT"
-write_commit "$PIN"
 if [[ "$USER_INSTALL" == "1" ]]; then
   install_runtime "$OUT_USER"
 fi

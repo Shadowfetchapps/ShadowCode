@@ -1,6 +1,6 @@
 # ShadowCode 0.28 implementation report
 
-Historical report with later addenda. For current 0.33.0 preparation, see
+Historical report with later addenda. For current 0.33.1 preparation, see
 [release notes](RELEASE_NOTES.md) and the [evidence ledger](FLAGSHIP_IMPLEMENTATION.md).
 Versioned counts and provider observations below describe their original snapshots.
 

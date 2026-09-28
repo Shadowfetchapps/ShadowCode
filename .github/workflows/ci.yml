@@ -43,7 +43,7 @@ jobs:
       - name: Verify publisher authentication and private release snapshots
         run: node --test scripts/test-native-release-auth.mjs
       - name: Managed llama.cpp packaging (pins, notices, relative links, deb repack)
-        run: node --test scripts/test-llama-runtime.mjs
+        run: node --test scripts/test-llama-runtime.mjs scripts/test-llama-build-inputs.mjs
       - name: Packaging PATH ignores host node hijacks
         run: node --test scripts/test-native-packaging-env.mjs
       - name: Pinned-source failures and mirror recovery
