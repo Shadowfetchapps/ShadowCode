@@ -205,6 +205,13 @@ never uses it once a turn has started or when images are attached.
 - **Switching providers.** A move between providers hands over at most 12,000
   characters of earlier turns, after you consent. See the
   [user guide](USER_GUIDE.md#switch-models-mid-conversation).
+- **Rules and skills.** Your profile rules, the project guidance the CLI
+  does not read by itself, and a skill list reach every vendor through its
+  own per-run option: Claude Code `--append-system-prompt-file` and
+  `--plugin-dir`, Codex `developerInstructions`, and a labelled block before
+  the first prompt of each run for Cursor, Grok and Antigravity. Nothing is
+  written to the vendor's folders, and they never grant permissions. See
+  [rules and skills](RULES_AND_SKILLS.md).
 - **MCP servers.** The MCP servers you enabled for the project are passed to
   the vendor for each run, in addition to the vendor's own MCP settings:
   Cursor, Grok and Antigravity receive them in ACP `session/new` and

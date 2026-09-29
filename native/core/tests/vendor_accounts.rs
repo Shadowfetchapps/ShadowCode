@@ -482,6 +482,7 @@ async fn run_fake(
                 effort: None,
                 legacy_effort: false,
                 mcp_servers: Vec::new(),
+                rulebook: None,
             },
             config: &config,
             prompt: "hello".into(),

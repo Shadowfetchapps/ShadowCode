@@ -293,6 +293,8 @@ pub struct AcpAdapter {
     mcp_http: bool,
     /// Negotiated per process, never inferred from a vendor name or cache.
     images_supported: bool,
+    /// The rulebook block went out with this run's first prompt.
+    rules_sent: bool,
 }
 impl AcpAdapter {
     pub fn new(vendor: Vendor) -> Self {
@@ -326,6 +328,7 @@ impl AcpAdapter {
             switching: false,
             mcp_http: false,
             images_supported: false,
+            rules_sent: false,
         }
     }
     fn check_images(&self, images: &[PromptImage]) -> Result<()> {
@@ -369,7 +372,18 @@ impl AcpAdapter {
         self.tool_metadata.clear();
         self.tool_names.clear();
         self.pending_permissions.clear();
-        let mut prompt = vec![json!({"type":"text","text":text})];
+        let mut prompt = Vec::new();
+        // ACP has no system prompt field: the rulebook goes, clearly
+        // labelled, ahead of the first prompt of each run. A run is a new
+        // or a resumed (`session/load`) session, so a resumed conversation
+        // gets the current rules again.
+        if !self.rules_sent {
+            self.rules_sent = true;
+            if let Some(rules) = self.options.as_ref().and_then(|o| o.rules_text()) {
+                prompt.push(json!({"type":"text","text":rules}));
+            }
+        }
+        prompt.push(json!({"type":"text","text":text}));
         for image in images {
             prompt.push(json!({
                 "type":"image",

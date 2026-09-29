@@ -27,6 +27,8 @@ fn manual_page_lists_commands_files_and_the_update_switch() {
     assert!(page.contains(".SH COMMANDS"));
     assert!(page.contains("\\fBshadowcode run\\fR"));
     assert!(page.contains("\\fBshadowcode completions\\fR"));
+    assert!(page.contains("\\fBshadowcode rules\\fR"));
+    assert!(page.contains("~/.config/shadowcode/profile/"));
     // Only this page is installed: no references to per-command pages, and
     // the packaging-only command stays hidden.
     assert!(!page.contains("shadowcode\\-run(1)"));

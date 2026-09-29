@@ -333,6 +333,9 @@ impl CodexAppServerAdapter {
                         if !options.model.is_empty() && options.model != "default" {
                             params["model"] = json!(options.model);
                         }
+                        if let Some(rules) = options.rules_text() {
+                            params["developerInstructions"] = json!(rules);
+                        }
                     }
                     return Ok(Step {
                         send: vec![rpc_request(thread_id, "thread/start", params)],
@@ -372,6 +375,11 @@ impl CodexAppServerAdapter {
                 });
                 if !options.model.is_empty() && options.model != "default" {
                     params["model"] = json!(options.model);
+                }
+                // The user's rulebook, as Codex's own per-thread developer
+                // instructions (never written to ~/.codex).
+                if let Some(rules) = options.rules_text() {
+                    params["developerInstructions"] = json!(rules);
                 }
                 if let Some(thread) = options.resume.as_deref().filter(|t| !t.is_empty()) {
                     // Documented resume: `thread/resume {threadId}` reopens the
@@ -939,6 +947,16 @@ pub struct CodexExecAdapter {
     prompt: Option<String>,
     started: bool,
     completed: bool,
+    /// The rulebook, sent once ahead of the first prompt.
+    rules: Option<String>,
+}
+impl CodexExecAdapter {
+    fn with_rules(&mut self, text: String) -> String {
+        match self.rules.take() {
+            Some(rules) => format!("{rules}\n\n{text}"),
+            None => text,
+        }
+    }
 }
 impl CliAdapter for CodexExecAdapter {
     fn vendor(&self) -> Vendor {
@@ -968,10 +986,11 @@ impl CliAdapter for CodexExecAdapter {
         args.push("-".into());
         (options.binary.clone(), args)
     }
-    fn on_start(&mut self, _options: &LaunchOptions) -> Vec<String> {
+    fn on_start(&mut self, options: &LaunchOptions) -> Vec<String> {
         self.started = true;
+        self.rules = options.rules_text().map(str::to_owned);
         match self.prompt.take() {
-            Some(prompt) => vec![prompt],
+            Some(prompt) => vec![self.with_rules(prompt)],
             None => Vec::new(),
         }
     }
@@ -983,7 +1002,7 @@ impl CliAdapter for CodexExecAdapter {
             bail!("codex exec cannot accept image bytes; use the official app-server image input");
         }
         if self.started {
-            Ok(vec![text.to_owned()])
+            Ok(vec![self.with_rules(text.to_owned())])
         } else {
             self.prompt = Some(text.to_owned());
             Ok(Vec::new())

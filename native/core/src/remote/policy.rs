@@ -7,6 +7,9 @@
 //!   bind address or turn terminals on.
 //! - The app preview (`/api/preview…`) is refused: its proxies listen on this
 //!   computer's loopback only, and server detection lists local processes.
+//! - Rules & skills imports, the export into other CLIs' folders and opening
+//!   the profile folder (`/api/rules/imports…`, `/export…`, `/folder`) are
+//!   refused: they fetch from the network or write outside ShadowCode.
 //! - Interactive terminals (`/api/terminals…`) and the direct command runner
 //!   (`/api/workspace/exec`), including background processes (`/api/background…`),
 //!   are refused unless the user turned on "Allow
@@ -43,6 +46,7 @@ pub const REDACTED_INPUT: &str =
 pub const MICROPHONE: &str =
     "The microphone of the computer running ShadowCode can't be switched on over remote access.";
 pub const INVALID_PATH: &str = "Invalid application command path";
+pub const RULES_LOCAL: &str = "Importing a profile, using your rules in other CLIs and opening the rules folder work only on the computer running ShadowCode.";
 pub const PREVIEW_LOCAL: &str =
     "The app preview works only in the ShadowCode window on the computer running your dev server.";
 
@@ -156,6 +160,9 @@ pub fn check(path: &str, body: &Value, access: &Access, paths: &AppPaths) -> Res
             return Err(Refusal(TERMINALS_OFF))
         }
         "preview" => return Err(Refusal(PREVIEW_LOCAL)),
+        "rules" if matches!(parts.get(1).copied(), Some("imports" | "export" | "folder")) => {
+            return Err(Refusal(RULES_LOCAL));
+        }
         _ => {}
     }
     if parts == ["workspace", "exec"] && !access.allow_terminals {
@@ -373,6 +380,10 @@ mod tests {
         ("mcp", "allowed: activation is hash-pinned"),
         ("hooks", "allowed: activation is hash-pinned"),
         ("sqlite", "allowed: read-only inspection"),
+        (
+            "rules",
+            "allowed; imports, export and open folder refused (network, vendor folders)",
+        ),
         ("memory", "allowed"),
     ];
 
@@ -493,6 +504,42 @@ mod tests {
             "/api/approvals/a1",
         ] {
             assert!(check(path, &Value::Null, &off, &paths).is_ok(), "{path}");
+        }
+    }
+
+    #[test]
+    fn rules_imports_exports_and_the_folder_stay_on_this_computer() {
+        let (_root, paths) = paths();
+        let access = Access {
+            allow_terminals: true,
+        };
+        for path in [
+            "/api/rules/imports",
+            "/api/rules/imports/team/update",
+            "/api/rules/export",
+            "/api/rules/export/claude",
+            "/api/rules/folder",
+        ] {
+            assert_eq!(
+                check(
+                    path,
+                    &json!({"url": "https://example.com/r.git"}),
+                    &access,
+                    &paths
+                ),
+                Err(Refusal(RULES_LOCAL)),
+                "{path}"
+            );
+        }
+        // Reading and switching rules works remotely; rules never grant
+        // permissions.
+        for path in [
+            "/api/rules",
+            "/api/rules/preview",
+            "/api/rules/check",
+            "/api/rules/items",
+        ] {
+            assert!(check(path, &Value::Null, &access, &paths).is_ok(), "{path}");
         }
     }
 

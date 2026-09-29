@@ -792,6 +792,73 @@ See [SUBAGENTS.md](SUBAGENTS.md) for behaviour and definition files.
 - Slash commands (`GET /api/commands`) include `.claude/commands/*.md`;
   `arg_spec` is the command's `argument-hint` when set.
 
+## Rules and skills
+
+The user's profile (`~/.config/shadowcode/profile/`, or
+`<--profile>/shadowcode/profile/`) merged with the selected project's own
+files. Behaviour: [RULES_AND_SKILLS.md](RULES_AND_SKILLS.md). Item ids are
+`profile:<path inside the profile>` or `project:<path in the project>`.
+
+- `GET /api/rules` → `{profile: {path, exists, agents_md: {content, hash, path}},
+  workspace, share_with_cli_agents, items, imports, issues, starters, limits}`.
+  `items[]`: `{id, scope: "profile"|"project", source: "profile"|"import:<name>"|"project",
+  kind: "rules"|"skill"|"command"|"agent", name, path, description, enabled,
+  bytes, hash, overridden_by}`; `overridden_by` names the more specific
+  definition used instead. `imports[]`: `{name, url, path, added_at, commit:
+  {commit, short, subject, date}}` (unknown values `null`). `starters[]`:
+  `{name, title, summary, installed, path}`. `limits`: `{profile_file_bytes:
+  16000, profile_total_bytes: 24000, total_bytes: 48000, skill_index_entries:
+  48, skill_index_bytes: 6000}`. `hash` is `missing` when there is no profile
+  `AGENTS.md`.
+- `PUT /api/rules/profile` `{content, expected_hash}` → `{ok, hash}`. Refused
+  when the file changed since `expected_hash` (`missing` creates it) or
+  `content` exceeds 64,000 bytes. Creates the profile folder (mode 700).
+- `POST /api/rules/items` `{id, enabled, workspace?}` → `{ok, id, enabled}`.
+  A project id needs a selected project; a `workspace` that is not the
+  selected project is refused.
+- `POST /api/rules/sharing` `{enabled}` → `{ok, share_with_cli_agents}`:
+  whether vendor CLIs receive the rulebook.
+- `GET /api/rules/preview` → `{workspace, runners: [{id, label, mechanism,
+  delivered, sharing_off, preview, native_files, native_skill_folders}]}` for
+  `shadowcode`, `codex`, `claude`, `cursor`, `antigravity`, `grok`. `preview`
+  has the attached-context inventory shape (`items[{path, kind, included,
+  reason, bytes, total_bytes, …}]`, `included_bytes`, `estimated_tokens`,
+  `truncated`); `kind` is `profile-rules`, `project-rules` or `skill`. Needs a
+  selected project.
+- `GET /api/rules/check` → `{ok, checked, errors, warnings, infos, findings,
+  profile, workspace, note}`; `findings[]`: `{severity: "error"|"warning"|"info",
+  code, scope, path, name, message, fix}`. `code` is one of `front-matter`,
+  `too-large`, `missing-file`, `unreadable`, `no-description`,
+  `long-description`, `ignored-field`, `unsafe-content`, `duplicate-name`,
+  `index-full`, `limit`, `profile`. Report only; `ok` is false when there are
+  errors.
+- `POST /api/rules/imports` `{url}` → `{name, url, path, commit}`. Only
+  `https://`, `ssh://` and `user@host:path` addresses; a URL with a password,
+  an address already imported, a ninth import or a checkout over 32 MB /
+  5,000 files is refused. `POST /api/rules/imports/{name}/update` →
+  `{name, changed, before, commit}` (refused when the import has hand edits).
+  `DELETE /api/rules/imports/{name}` → `{ok}`.
+- `GET /api/rules/export` → `{targets: [{id: "claude"|"codex", label, home,
+  enabled, links: [{link, target, state: "linked"|"blocked"|"available"}],
+  created}]}`. `POST /api/rules/export/{target}` → `{target, created, skipped}`;
+  `DELETE /api/rules/export/{target}` → `{target, removed, kept}`.
+- `GET /api/rules/starters` → `{starters}`; `POST /api/rules/starters`
+  `{names}` → `{installed, skipped}` (existing folders are skipped).
+- `POST /api/rules/folder` → `{path}` (creates the profile folder). The
+  desktop's `open_rules_folder` command calls it and opens that path; the
+  window never supplies a path.
+- Remote access refuses `/api/rules/imports…`, `/api/rules/export…` and
+  `/api/rules/folder`.
+- Event `rules.delivered {vendor, mechanism, profile_files, project_files,
+  skills, plugin_skills, bytes, estimated_tokens, truncated}` for each vendor
+  run that received the rulebook. A failure to prepare it is an
+  `agent.warning` with `kind: "rules"`; the run continues without it.
+- Doctor adds the check `rules-and-skills` (`pass` or `warn`), which the
+  diagnostics export keeps as *Rules and skills*.
+- `GET /api/workspace/skills`, `GET /api/commands` and `GET /api/agents`
+  include enabled profile definitions (`source: "profile"` or
+  `"import:<name>"`, absolute `path`); switched-off ones are left out.
+
 ## Approvals and jobs feed
 
 The window no longer polls approvals and jobs. It reads one feed when the
