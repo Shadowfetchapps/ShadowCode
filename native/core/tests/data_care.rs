@@ -525,6 +525,7 @@ async fn a_reset_that_cannot_finish_puts_everything_back() {
         config: root.join("xdg-config/shadow-agent"),
         data: root.join("xdg-data/shadow-agent"),
         state: root.join("xdg-state/shadow-agent"),
+        cache: root.join("xdg-cache/shadow-agent"),
     };
     paths.ensure().unwrap();
     Config::patch(&paths, json!({"ui": {"theme": "dark"}})).unwrap();

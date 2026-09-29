@@ -4,10 +4,16 @@
 //! search. Languages: Rust, TypeScript/TSX, JavaScript, Python, Go, C, C++ and
 //! Java; other text files are chunked for search only.
 //!
-//! Files are indexed when touched or during a bounded project scan — never the
-//! whole world at startup. Unchanged files (same mtime and size) are skipped
-//! without being read. The database lives in a private per-process cache, not
-//! in the project.
+//! Files are indexed when touched or during a project scan — never the whole
+//! world at startup. A scan walks every indexable file (up to 250,000) but
+//! parses at most 2,000 changed ones per call, so a large repository fills in
+//! over a few calls while each stays short; unchanged files (same mtime and
+//! size) are skipped without being read. The app and the CLI keep the
+//! database in the profile's cache (`use_cache`), so the index survives
+//! restarts; an index from another version, or a damaged one, is rebuilt.
+//! Without `use_cache` (embedders, tests) it lives in a private per-process
+//! folder. It is never stored in the project. A project may set a focus
+//! folder: only that subtree is scanned.
 use crate::code_intel::{
     chunks,
     langs::{self, Lang},
@@ -27,8 +33,13 @@ use std::{
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
-const MAX_SCAN_FILES: usize = 3_000;
-const MAX_WALK_ENTRIES: usize = 40_000;
+/// Most changed files one call parses (unchanged ones are only checked).
+const PARSE_BUDGET: usize = 2_000;
+/// Most indexable files a project scan follows.
+const MAX_INDEX_FILES: usize = 250_000;
+const MAX_WALK_ENTRIES: usize = 1_000_000;
+/// Bumped when the tables change: an index from another version is rebuilt.
+const INDEX_VERSION: &str = "2";
 const MAX_FILE_BYTES: usize = 512_000;
 const MAX_CALLERS: usize = 24;
 const MAX_REFS_PER_FILE: usize = 4_000;
@@ -96,9 +107,23 @@ fn relative(root: &Path, path: &Path) -> String {
 // Keep derived data out of the project (including read-only reviews). The
 // private process cache cannot be redirected by a project's .shadow symlink.
 static CACHE: Mutex<Option<tempfile::TempDir>> = Mutex::new(None);
+/// The profile's index folder, when the app or CLI set one.
+static CACHE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Keep indexes in `dir` (the profile's cache) from now on.
+pub fn use_cache(dir: PathBuf) {
+    if let Ok(mut current) = CACHE_DIR.lock() {
+        *current = Some(dir);
+    }
+}
+
 fn db_path(root: &Path) -> Result<PathBuf> {
     let root = root.canonicalize()?;
     let key = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
+    if let Some(dir) = CACHE_DIR.lock().ok().and_then(|d| d.clone()) {
+        crate::paths::private_directory(&dir)?;
+        return Ok(dir.join(format!("{key}.sqlite")));
+    }
     let mut cache = CACHE
         .lock()
         .map_err(|_| anyhow::anyhow!("Index cache lock poisoned"))?;
@@ -116,15 +141,105 @@ fn db_path(root: &Path) -> Result<PathBuf> {
         .join(format!("{key}.sqlite")))
 }
 fn open_db(root: &Path) -> Result<Connection> {
-    let path = db_path(root)?;
-    let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    open_or_rebuild(&db_path(root)?)
+}
+
+/// Open an index file; a damaged one, or one from another version, is
+/// deleted and started again (the index is rebuildable).
+fn open_or_rebuild(path: &Path) -> Result<Connection> {
+    match open_db_at(path) {
+        Ok(conn) => Ok(conn),
+        Err(_) => {
+            remove_db(path);
+            open_db_at(path)
+        }
+    }
+}
+
+fn remove_db(path: &Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        let _ = fs::remove_file(PathBuf::from(name));
+    }
+}
+
+fn open_db_at(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch(
         "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
     )?;
     conn.execute_batch(SCHEMA)?;
     conn.execute_batch(chunks::SCHEMA)?;
+    let version: Option<String> = conn
+        .query_row("SELECT value FROM meta WHERE key='version'", [], |r| {
+            r.get(0)
+        })
+        .ok();
+    match version.as_deref() {
+        Some(INDEX_VERSION) => {}
+        None => {
+            let files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
+            anyhow::ensure!(files == 0, "index from another version");
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES('version',?)",
+                [INDEX_VERSION],
+            )?;
+        }
+        Some(_) => anyhow::bail!("index from another version"),
+    }
     Ok(conn)
+}
+
+fn meta(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM meta WHERE key=?", [key], |r| r.get(0))
+        .ok()
+}
+
+fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+        [key, value],
+    )?;
+    Ok(())
+}
+
+/// Scan only `focus` (a folder of the project) from now on; `None` scans
+/// the whole project. Files outside it leave the index at the next full
+/// scan.
+pub fn set_focus(root: &Path, focus: Option<&str>) -> Result<Value> {
+    let conn = open_db(root)?;
+    match focus.map(str::trim).filter(|f| !f.is_empty() && *f != ".") {
+        Some(folder) => {
+            let workspace = Workspace::open(root)?;
+            let rel = workspace.relative(folder)?;
+            ensure!(root.join(&rel).is_dir(), "Choose a folder in the project");
+            set_meta(&conn, "focus", &rel.to_string_lossy())?;
+        }
+        None => {
+            conn.execute("DELETE FROM meta WHERE key='focus'", [])?;
+        }
+    }
+    forget_recent_scan(root);
+    drop(conn);
+    stats(root)
+}
+
+/// Delete this project's index (it is rebuilt when needed).
+pub fn clear(root: &Path) -> Result<()> {
+    let path = db_path(root)?;
+    remove_db(&path);
+    forget_recent_scan(root);
+    Ok(())
+}
+
+fn forget_recent_scan(root: &Path) {
+    if let (Ok(key), Ok(mut scans)) = (root.canonicalize(), LAST_SCAN.lock()) {
+        if let Some(scans) = scans.as_mut() {
+            scans.remove(&key);
+        }
+    }
 }
 
 /// Read-only access for search and the repo map. Call `ensure_index` first.
@@ -263,8 +378,9 @@ fn parse_file(grammar: &mut Grammar, source: &str, lang: Lang) -> Parsed {
 
 /// Walk indexable files. Returns the files and whether the walk saw the whole
 /// project (no entry or file limit reached).
-fn walk_sources(root: &Path, limit: usize) -> (Vec<PathBuf>, bool) {
-    let mut walker = ignore::WalkBuilder::new(root)
+/// Indexable files below `start` (the project or its focus folder).
+fn walk_sources(start: &Path, limit: usize) -> (Vec<PathBuf>, bool) {
+    let mut walker = ignore::WalkBuilder::new(start)
         .follow_links(false)
         .max_depth(Some(32))
         .filter_entry(|entry| {
@@ -433,8 +549,18 @@ fn still_indexable(root: &Path, rel: &str) -> bool {
 
 static LAST_SCAN: Mutex<Option<HashMap<PathBuf, Instant>>> = Mutex::new(None);
 
-/// Index specific relative paths (touched files) and/or a bounded scan.
+/// Index specific relative paths (touched files) and/or a scan (one batch;
+/// a scan repeated within a couple of seconds reuses the last one).
 pub fn ensure_index(root: &Path, touched: &[String], scan: bool) -> Result<Value> {
+    run_index(root, touched, scan, true)
+}
+
+/// One more scan batch now, whatever the last scan (Settings › Reindex).
+pub fn index_more(root: &Path) -> Result<Value> {
+    run_index(root, &[], true, false)
+}
+
+fn run_index(root: &Path, touched: &[String], scan: bool, reuse_recent: bool) -> Result<Value> {
     ensure!(root.is_dir(), "workspace root required");
     let _guard = INDEX_LOCK
         .lock()
@@ -460,13 +586,19 @@ pub fn ensure_index(root: &Path, touched: &[String], scan: bool) -> Result<Value
     }
     let wants_scan = scan || touched.is_empty();
     let key = root.canonicalize()?;
-    let recent_scan = LAST_SCAN
-        .lock()
-        .ok()
-        .and_then(|scans| scans.as_ref()?.get(&key).copied())
-        .is_some_and(|at| at.elapsed() < RESCAN_AFTER);
-    let (walked, complete) = if wants_scan && !recent_scan {
-        walk_sources(root, MAX_SCAN_FILES)
+    let recent_scan = reuse_recent
+        && LAST_SCAN
+            .lock()
+            .ok()
+            .and_then(|scans| scans.as_ref()?.get(&key).copied())
+            .is_some_and(|at| at.elapsed() < RESCAN_AFTER);
+    let focus = meta(&conn, "focus");
+    let scan_root = match &focus {
+        Some(folder) => root.join(folder),
+        None => root.to_path_buf(),
+    };
+    let (walked, walk_complete) = if wants_scan && !recent_scan {
+        walk_sources(&scan_root, MAX_INDEX_FILES)
     } else {
         (Vec::new(), false)
     };
@@ -476,6 +608,8 @@ pub fn ensure_index(root: &Path, touched: &[String], scan: bool) -> Result<Value
     let mut indexed_files = 0usize;
     let mut symbol_count = 0usize;
     let mut walked_rel = HashSet::new();
+    let mut parsed = 0usize;
+    let mut budget_hit = false;
     let forced = touched_paths.iter().map(|p| (p, true));
     let scanned_paths = walked.iter().map(|p| (p, false));
     for (path, force) in forced.chain(scanned_paths) {
@@ -485,15 +619,27 @@ pub fn ensure_index(root: &Path, touched: &[String], scan: bool) -> Result<Value
             if touched_rel.contains(&rel) {
                 continue;
             }
+            if parsed >= PARSE_BUDGET {
+                // The rest waits for the next batch; the walk still counts it.
+                budget_hit = true;
+                continue;
+            }
         }
         match index_file(&conn, root, path, &mut grammars, force)? {
             Indexed::Updated(n) => {
                 indexed_files += 1;
                 symbol_count += n;
+                parsed += 1;
             }
             Indexed::Unchanged => indexed_files += 1,
             Indexed::Skipped => {}
         }
+    }
+    let complete = walk_complete && !budget_hit;
+    if wants_scan && !recent_scan {
+        set_meta(&conn, "scan_total", &walked.len().to_string())?;
+        set_meta(&conn, "scan_complete", if complete { "1" } else { "0" })?;
+        set_meta(&conn, "scanned_at", &now().to_string())?;
     }
     // Remove stale entries for deleted, renamed, oversized, ignored or secret
     // files. A complete scan is authoritative; otherwise check metadata.
@@ -514,7 +660,7 @@ pub fn ensure_index(root: &Path, touched: &[String], scan: bool) -> Result<Value
         }
     }
     transaction.commit()?;
-    if wants_scan && !recent_scan {
+    if wants_scan && !recent_scan && complete {
         if let Ok(mut scans) = LAST_SCAN.lock() {
             scans
                 .get_or_insert_with(HashMap::new)
@@ -528,10 +674,12 @@ pub fn ensure_index(root: &Path, touched: &[String], scan: bool) -> Result<Value
         "symbols_written": symbol_count,
         "symbols_total": total,
         "scanned_files": scanned,
+        "parsed_files": parsed,
         "complete": complete,
         "bounded": true,
-        "storage": "private process cache; workspace is unchanged",
-        "note": "Ordinary SQLite tables (tree-sitter symbols, identifier references, FTS5 chunks); bounded scan, not a world index."
+        "focus": focus,
+        "storage": if CACHE_DIR.lock().ok().is_some_and(|d| d.is_some()) { "the profile's cache; workspace is unchanged" } else { "private process cache; workspace is unchanged" },
+        "note": "Ordinary SQLite tables (tree-sitter symbols, identifier references, FTS5 chunks); at most 2,000 changed files are parsed per call."
     }))
 }
 
@@ -545,13 +693,27 @@ pub fn stats(root: &Path) -> Result<Value> {
         let (lang, n) = row?;
         languages.insert(lang, json!(n));
     }
+    let path = db_path(root)?;
+    let size = ["", "-wal"]
+        .iter()
+        .filter_map(|suffix| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(suffix);
+            fs::metadata(PathBuf::from(name)).ok().map(|m| m.len())
+        })
+        .sum::<u64>();
     Ok(json!({
         "files": count("SELECT COUNT(*) FROM files")?,
         "symbols": count("SELECT COUNT(*) FROM symbols")?,
         "references": count("SELECT COUNT(*) FROM refs")?,
         "chunks": count("SELECT COUNT(*) FROM chunks")?,
         "languages": languages,
-        "max_files": MAX_SCAN_FILES,
+        "max_files": MAX_INDEX_FILES,
+        "total": meta(&conn, "scan_total").and_then(|t| t.parse::<u64>().ok()),
+        "complete": meta(&conn, "scan_complete").as_deref() == Some("1"),
+        "focus": meta(&conn, "focus"),
+        "size_bytes": size,
+        "persistent": CACHE_DIR.lock().ok().is_some_and(|d| d.is_some()),
     }))
 }
 
@@ -985,5 +1147,79 @@ mod tests {
 
     fn stats_of(root: &Path) -> Value {
         stats(root).unwrap()
+    }
+    #[test]
+    fn a_damaged_or_older_index_is_rebuilt_and_a_good_one_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let conn = open_or_rebuild(&path).unwrap();
+        conn.execute(
+            "INSERT INTO files(path,lang,mtime_ns,size,digest,indexed_at) VALUES('a.rs','rust',1,1,'d',0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        // Kept across opens (a restart).
+        let conn = open_or_rebuild(&path).unwrap();
+        let files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(files, 1);
+        // Another version: started again.
+        conn.execute("UPDATE meta SET value='0' WHERE key='version'", [])
+            .unwrap();
+        drop(conn);
+        let conn = open_or_rebuild(&path).unwrap();
+        let files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(files, 0);
+        drop(conn);
+        // Damaged: started again.
+        remove_db(&path);
+        fs::write(&path, b"this is not a database at all, not even close").unwrap();
+        let conn = open_or_rebuild(&path).unwrap();
+        assert_eq!(meta(&conn, "version").as_deref(), Some(INDEX_VERSION));
+    }
+
+    #[test]
+    fn large_projects_fill_in_over_batches_and_a_focus_folder_limits_the_scan() {
+        let root = tempfile::tempdir().unwrap();
+        let count = PARSE_BUDGET + 500;
+        for i in 0..count {
+            let dir = root.path().join(if i % 2 == 0 { "app" } else { "lib" });
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join(format!("m{i}.rs")),
+                format!("pub fn f{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let started = Instant::now();
+        let first = index_more(root.path()).unwrap();
+        assert_eq!(first["parsed_files"], PARSE_BUDGET, "{first}");
+        assert_eq!(first["complete"], false);
+        let status = stats(root.path()).unwrap();
+        assert_eq!(status["total"], count as u64);
+        assert_eq!(status["complete"], false);
+        let second = index_more(root.path()).unwrap();
+        assert_eq!(second["parsed_files"], 500);
+        assert_eq!(second["complete"], true);
+        assert_eq!(stats(root.path()).unwrap()["files"], count as i64);
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "{:?}",
+            started.elapsed()
+        );
+        // A focus folder: the other half leaves the index at the next scan.
+        set_focus(root.path(), Some("app")).unwrap();
+        let focused = index_more(root.path()).unwrap();
+        assert_eq!(focused["complete"], true);
+        let status = stats(root.path()).unwrap();
+        assert_eq!(status["focus"], "app");
+        assert_eq!(status["files"], (count / 2 + count % 2) as i64);
+        set_focus(root.path(), None).unwrap();
+        clear(root.path()).unwrap();
+        assert_eq!(stats(root.path()).unwrap()["files"], 0);
     }
 }

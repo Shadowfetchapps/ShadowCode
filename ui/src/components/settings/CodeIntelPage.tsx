@@ -34,6 +34,8 @@ export function CodeIntelPage({
   const [status, setStatus] = useState<CodeIntelStatus | null>(null);
   const [error, setError] = useState("");
   const [pending, setPending] = useState("");
+  // The focus folder being edited (null: show the saved one).
+  const [focusEdit, setFocusEdit] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -92,6 +94,8 @@ export function CodeIntelPage({
   const config = status.config;
   const managed = new Map(status.managed.map((m) => [m.id, m]));
   const index = status.index;
+  const focusDraft = focusEdit ?? index?.focus ?? "";
+  const setFocusDraft = (value: string) => setFocusEdit(value);
   const coverage = status.embeddings.coverage;
   const backfill = status.embeddings.backfill;
   return (
@@ -285,6 +289,24 @@ export function CodeIntelPage({
               : "Not built yet (it builds on first use)"}
           </code>
         </div>
+        {index && index.total && index.complete === false ? (
+          <div>
+            <span>Progress</span>
+            <code>
+              Indexed {index.files.toLocaleString()} of{" "}
+              {index.total.toLocaleString()} files; Reindex continues
+            </code>
+          </div>
+        ) : null}
+        {index && index.size_bytes ? (
+          <div>
+            <span>Size</span>
+            <code>
+              {formatBytes(index.size_bytes)}
+              {index.persistent ? " · kept between runs" : ""}
+            </code>
+          </div>
+        ) : null}
         {coverage && (
           <div>
             <span>Vectors</span>
@@ -310,7 +332,42 @@ export function CodeIntelPage({
         >
           {pending === "reindex" ? "Indexing…" : "Reindex this project"}
         </button>
+        <button
+          type="button"
+          className="ghost"
+          disabled={Boolean(pending) || !index || index.files === 0}
+          onClick={() =>
+            void run("clear-index", () => api.clearIndex(), "Index cleared")
+          }
+        >
+          Clear index
+        </button>
       </div>
+      <form
+        className="row index-focus"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const value = focusDraft.trim();
+          void run(
+            "focus",
+            () => api.setIndexFocus(value || null),
+            value
+              ? `Only ${value} is indexed now`
+              : "The whole project is indexed now",
+          );
+        }}
+      >
+        <label htmlFor="index-focus">Focus folder (large projects)</label>
+        <input
+          id="index-focus"
+          value={focusDraft}
+          placeholder="the whole project"
+          onChange={(e) => setFocusDraft(e.target.value)}
+        />
+        <button type="submit" className="ghost" disabled={Boolean(pending)}>
+          Save
+        </button>
+      </form>
       <label className="check">
         <input
           type="checkbox"

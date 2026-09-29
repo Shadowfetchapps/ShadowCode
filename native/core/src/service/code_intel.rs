@@ -185,10 +185,39 @@ impl Service {
                     json!({"ok": true, "removed": removed, "models": embeddings::catalog_json(&data_dir, &intel)}),
                 )
             }
+            ("POST", "/api/code-intel/index/focus") => {
+                let focus = call.body["focus"].as_str().map(str::to_owned);
+                let root = workspace.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::symbol_index::set_focus(&root, focus.as_deref())
+                })
+                .await
+                .context("Index worker stopped")?
+            }
+            ("POST", "/api/code-intel/index/clear") => {
+                let root = workspace.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::symbol_index::clear(&root)?;
+                    crate::symbol_index::stats(&root)
+                })
+                .await
+                .context("Index worker stopped")?
+            }
             ("POST", "/api/code-intel/reindex") => {
                 let root = workspace.clone();
                 let stats = tokio::task::spawn_blocking(move || {
-                    crate::symbol_index::ensure_index(&root, &[], true)?;
+                    // Batches of changed files until the index is complete,
+                    // for at most a minute and a half per request; the
+                    // answer says whether more remains.
+                    let started = std::time::Instant::now();
+                    loop {
+                        let batch = crate::symbol_index::index_more(&root)?;
+                        if batch["complete"] == true
+                            || started.elapsed() > std::time::Duration::from_secs(90)
+                        {
+                            break;
+                        }
+                    }
                     crate::symbol_index::stats(&root)
                 })
                 .await

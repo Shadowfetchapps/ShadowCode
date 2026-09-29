@@ -11,6 +11,9 @@ pub struct AppPaths {
     pub config: PathBuf,
     pub data: PathBuf,
     pub state: PathBuf,
+    /// Rebuildable data such as the code index (`$XDG_CACHE_HOME`); never
+    /// backed up.
+    pub cache: PathBuf,
 }
 
 /// A lock is released when its last legitimate owner drops, even if an
@@ -43,6 +46,7 @@ impl AppPaths {
             config: xdg("XDG_CONFIG_HOME", ".config"),
             data: xdg("XDG_DATA_HOME", ".local/share"),
             state: xdg("XDG_STATE_HOME", ".local/state"),
+            cache: xdg("XDG_CACHE_HOME", ".cache"),
         };
         result.ensure()?;
         Ok(result)
@@ -54,6 +58,7 @@ impl AppPaths {
             config: root.join("config"),
             data: root.join("data"),
             state: root.join("state"),
+            cache: root.join("cache"),
         };
         result.ensure()?;
         Ok(result)

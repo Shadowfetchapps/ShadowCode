@@ -254,6 +254,14 @@ export type CodeIntelStatus = {
     symbols: number;
     chunks: number;
     languages: Record<string, number>;
+    /** Indexable files the last scan found. */
+    total?: number | null;
+    complete?: boolean;
+    /** Only this folder is scanned. */
+    focus?: string | null;
+    size_bytes?: number;
+    /** Kept between runs in the profile's cache. */
+    persistent?: boolean;
   } | null;
   embeddings: {
     models: EmbeddingModel[];
@@ -1839,6 +1847,9 @@ export const api = {
       "POST",
       {},
     ),
+  setIndexFocus: (focus: string | null) =>
+    send<unknown>("/api/code-intel/index/focus", "POST", { focus }),
+  clearIndex: () => send<unknown>("/api/code-intel/index/clear", "POST", {}),
   scheduledResume: (sessionId: string) =>
     get<{ resume: ScheduledResume | null; scheduler: boolean }>(
       `/api/sessions/${encodeURIComponent(sessionId)}/scheduled-resume`,

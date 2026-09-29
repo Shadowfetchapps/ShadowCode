@@ -368,6 +368,8 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `POST` | `/api/code-intel/config` | stable | allowed | [Code intelligence](#code-intelligence) |
 | `POST` | `/api/code-intel/embeddings/install` | stable | allowed | [Code intelligence](#code-intelligence) |
 | `POST` | `/api/code-intel/embeddings/remove` | stable | allowed | [Code intelligence](#code-intelligence) |
+| `POST` | `/api/code-intel/index/clear` | stable | allowed | [Code intelligence](#code-intelligence) |
+| `POST` | `/api/code-intel/index/focus` | stable | allowed | [Code intelligence](#code-intelligence) |
 | `POST` | `/api/code-intel/install` | stable | allowed | [Code intelligence](#code-intelligence) |
 | `POST` | `/api/code-intel/reindex` | stable | allowed | [Code intelligence](#code-intelligence) |
 | `GET` | `/api/code-intel/repo-map` | stable | allowed | [Code intelligence](#code-intelligence) |
@@ -2627,7 +2629,20 @@ Downloads are refused offline.
   downloads in the background, verifies size and SHA-256, makes the model
   active if none was chosen and embeds the project.
   `POST /api/code-intel/embeddings/remove {model}` → `{ok, removed, models}`.
-- `POST /api/code-intel/reindex` → `{ok, index, embedding_started}`.
+- `POST /api/code-intel/reindex` → `{ok, index, embedding_started}`: scans
+  in batches (at most 2,000 changed files parsed per batch) until the index
+  is complete or 90 seconds passed; `index.complete` says whether more
+  remains (call again). `index` (also in `GET /api/code-intel/status`) =
+  `{files, symbols, references, chunks, languages, max_files, total,
+  complete, focus, size_bytes, persistent}`: `total` is the number of
+  indexable files the last scan found (up to 250 000), `persistent` whether
+  the index is kept in the profile's cache (`$XDG_CACHE_HOME/shadow-agent/index`,
+  or `<profile>/cache/index`) between runs. An index from another version, or
+  a damaged one, is rebuilt.
+- `POST /api/code-intel/index/focus {focus: string|null}` → `index`: scan
+  only that folder of the project (null: the whole project).
+- `POST /api/code-intel/index/clear` → `index`: delete the project's index;
+  it is rebuilt when needed.
 - `POST /api/code-intel/search {query, path?, max_hits?}` (default 10) → `{ok,
   query, mode: "bm25"|"hybrid", count, hits: [{path, start_line, end_line,
   score, preview, symbols?, bm25?, similarity?}], semantic, note}`.

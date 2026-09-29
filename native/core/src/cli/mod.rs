@@ -78,10 +78,14 @@ impl Options {
         }
     }
     pub fn paths(&self) -> Result<AppPaths> {
-        match &self.profile {
+        let paths = match &self.profile {
             Some(root) => AppPaths::isolated(&expand(root)?),
             None => AppPaths::discover(),
-        }
+        }?;
+        // The app and the CLI keep the code index between runs, in the
+        // profile's cache; embedders and tests keep a private one.
+        crate::symbol_index::use_cache(paths.cache.join("index"));
+        Ok(paths)
     }
 }
 fn expand(path: &Path) -> Result<PathBuf> {
