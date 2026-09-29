@@ -743,7 +743,40 @@ export type Approval = {
   grant?: string;
   /** A note given with Deny reaches the agent. */
   note?: boolean;
+  /** The action in plain words (risk tag, whether Rewind can undo it). */
+  assessment?: ApprovalAssessment | null;
+  /** What "Always allow in this project" would cover, in words; empty when
+   * it is not offered. */
+  always?: string;
 };
+export type ApprovalRisk =
+  | "read_only"
+  | "changes_files"
+  | "network"
+  | "outside"
+  | "destructive"
+  | "remote_code"
+  | "admin";
+/** A section another check adds to an approval card (for example new
+ * dependencies). */
+export type ApprovalCheck = {
+  title: string;
+  level?: "info" | "warn" | "danger";
+  items: string[];
+};
+export type ApprovalAssessment = {
+  risk: ApprovalRisk;
+  risk_label: string;
+  explanation: string;
+  undo: "nothing" | "yes" | "partly" | "no";
+  undo_label: string;
+  notes: string[];
+  /** The command was read completely. */
+  read: boolean;
+  checks: ApprovalCheck[];
+};
+/** One "Always allow in this project" command. */
+export type AlwaysAllowed = { command: string; added_at: number };
 export type ReviewFile = {
   path: string;
   status: "added" | "modified" | "deleted" | "unchanged" | "unavailable";
@@ -763,6 +796,9 @@ export type ReviewHunk = {
 export type ReviewFileDetail = ReviewFile & {
   hunks: ReviewHunk[];
   hash: string;
+  /** A secret file (`.env`, keys): its contents are not shown, but it can
+   * still be undone as a whole. */
+  secret?: boolean;
 };
 export type LifecycleHook = {
   name: string;
@@ -2220,7 +2256,7 @@ export const api = {
     id: string,
     decision: "approve" | "deny",
     sessionId?: string,
-    options: { scope?: "once" | "task"; note?: string } = {},
+    options: { scope?: "once" | "task" | "project"; note?: string } = {},
   ) =>
     send<Approval>(`/api/approvals/${id}`, "POST", {
       decision,
@@ -2228,6 +2264,17 @@ export const api = {
       ...(options.scope ? { scope: options.scope } : {}),
       ...(options.note ? { note: options.note } : {}),
     }),
+  /** The project's "Always allow in this project" commands. */
+  alwaysAllowed: (workspace?: string) =>
+    get<{ workspace: string; commands: AlwaysAllowed[] }>(
+      `/api/approvals/always${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
+    ),
+  removeAlwaysAllowed: (command: string, workspace?: string) =>
+    send<{ workspace: string; commands: AlwaysAllowed[] }>(
+      "/api/approvals/always",
+      "DELETE",
+      { command, ...(workspace ? { workspace } : {}) },
+    ),
   /** Files and folders for the composer's @ menu, best matches first. */
   mentions: (query: string, limit = 12) =>
     get<{

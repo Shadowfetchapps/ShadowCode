@@ -419,3 +419,76 @@
     max-height: 160px;
   }
 }
+
+/* ---------- approval assessment ---------- */
+.approval-assessment {
+  margin: 0 0 8px;
+}
+.approval-explain {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.approval-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.risk-tag,
+.undo-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: var(--pill);
+  font-size: 11px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--surface-2, var(--surface));
+}
+.risk-tag.risk-network,
+.risk-tag.risk-outside,
+.undo-tag.undo-partly {
+  color: var(--warn);
+  border-color: currentColor;
+}
+.risk-tag.risk-destructive,
+.risk-tag.risk-remote_code,
+.risk-tag.risk-admin,
+.undo-tag.undo-no {
+  color: var(--danger);
+  border-color: currentColor;
+}
+.risk-tag.risk-read_only,
+.undo-tag.undo-yes,
+.undo-tag.undo-nothing {
+  color: var(--ok);
+  border-color: currentColor;
+}
+.approval-notes {
+  margin: 0 0 6px;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.approval-check {
+  margin: 6px 0;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+.approval-check h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+}
+.approval-check ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.approval-check.check-warn {
+  border-color: var(--warn);
+}
+.approval-check.check-danger {
+  border-color: var(--danger);
+}

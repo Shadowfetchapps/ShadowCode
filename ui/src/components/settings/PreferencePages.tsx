@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { api, type AlwaysAllowed } from "../../api";
 import { NotificationFields, notifyPrefs } from "./NotificationFields";
 import {
   SandboxSettings,
@@ -35,6 +36,66 @@ export function noteSummary(id: string) {
 function noteOrder(notes: Record<string, string>) {
   const rank = (id: string) => (id === "native" ? 0 : id === "network" ? 2 : 1);
   return Object.entries(notes).sort(([a], [b]) => rank(a) - rank(b));
+}
+
+/** The selected project's "Always allow in this project" commands, each
+ * removable. */
+export function AlwaysAllowedList() {
+  const [commands, setCommands] = useState<AlwaysAllowed[] | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let live = true;
+    Promise.resolve()
+      .then(() => api.alwaysAllowed())
+      .then((answer) => live && setCommands(answer.commands))
+      .catch(() => live && setCommands([]));
+    return () => {
+      live = false;
+    };
+  }, []);
+  async function remove(command: string) {
+    setError("");
+    try {
+      const answer = await api.removeAlwaysAllowed(command);
+      setCommands(answer.commands);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+  return (
+    <section
+      className="always-allowed"
+      aria-label="Always allowed in this project"
+    >
+      <h4>Always allowed in this project</h4>
+      {commands === null ? (
+        <p className="hint">Reading…</p>
+      ) : commands.length === 0 ? (
+        <p className="hint">
+          Nothing yet. When ShadowCode asks to run a test, build or check
+          command, choose “Always allow here” to stop it asking for that exact
+          command in this project.
+        </p>
+      ) : (
+        <ul className="always-list">
+          {commands.map((rule) => (
+            <li key={rule.command}>
+              <code>{rule.command}</code>
+              <button
+                type="button"
+                className="ghost"
+                aria-label={`Stop always allowing ${rule.command}`}
+                onClick={() => void remove(rule.command)}
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <p className="warn-text">{error}</p>}
+    </section>
+  );
 }
 
 /** Settings › Permissions & network. Saves only the permissions, network
@@ -108,6 +169,7 @@ export function PermissionsPage({
           ))}
         </div>
       )}
+      <AlwaysAllowedList />
       <fieldset className="mode-options">
         <legend>Network</legend>
         {[

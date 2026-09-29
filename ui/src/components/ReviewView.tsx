@@ -326,7 +326,12 @@ export function ReviewView({
                     showFile={false}
                   />
                 )}
-                {detail.binary ? null : !detail.hunks.length ? (
+                {detail.binary ? null : detail.secret ? (
+                  <p className="hint">
+                    This looks like a secret file, so its contents aren’t shown.
+                    Undo file still puts it back as it was.
+                  </p>
+                ) : !detail.hunks.length ? (
                   <p className="hint">
                     {detail.status === "unchanged"
                       ? "This file is back to how it was before the task."

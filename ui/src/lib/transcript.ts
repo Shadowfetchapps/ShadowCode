@@ -422,6 +422,39 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
       { kind: "note", taskId, text: `Denied with a note: “${p.note}”` },
     ];
   }
+  if (
+    event.type === "checkpoint.updated" &&
+    Array.isArray(p.ignored_saved) &&
+    p.ignored_saved.length > 0
+  ) {
+    const names = (p.ignored_saved as unknown[]).map(String);
+    const shown =
+      names.length > 3
+        ? `${names.slice(0, 3).join(", ")} and ${names.length - 3} more`
+        : names.join(", ");
+    items = [
+      ...items,
+      {
+        kind: "note",
+        taskId,
+        text: `Saved ${shown} before this step, so Rewind can bring ${names.length === 1 ? "it" : "them"} back`,
+      },
+    ];
+  }
+  if (
+    event.type === "approval.granted" &&
+    p.scope === "project" &&
+    typeof p.command === "string"
+  ) {
+    items = [
+      ...items,
+      {
+        kind: "note",
+        taskId,
+        text: `Ran without asking: \`${p.command}\` is always allowed in this project`,
+      },
+    ];
+  }
   if (event.type === "approval.requested") {
     touch((a) => ({
       ...a,

@@ -654,6 +654,8 @@ export function installFakeBackend(options: FakeOptions = {}) {
       conflict: Boolean(options.compareConflict),
     },
     approvals: [] as Json[],
+    /** "Always allow in this project" commands. */
+    alwaysAllowed: [] as Json[],
     /** Files a kept comparison applied to the project (uncommitted). */
     applied: [] as Json[],
     /** Project files for @-mentions, the per-task review and rewinds. */
@@ -3825,6 +3827,15 @@ export function installFakeBackend(options: FakeOptions = {}) {
       }
       return { stats };
     }
+    if (path === "/api/approvals/always" && method === "GET") {
+      return { workspace: "/work/demo", commands: state.alwaysAllowed };
+    }
+    if (path === "/api/approvals/always" && method === "DELETE") {
+      state.alwaysAllowed = state.alwaysAllowed.filter(
+        (rule: Json) => rule.command !== body.command,
+      );
+      return { workspace: "/work/demo", commands: state.alwaysAllowed };
+    }
     if (path === "/api/approvals" && method === "GET") {
       const sid = q.get("session_id");
       return {
@@ -3839,6 +3850,16 @@ export function installFakeBackend(options: FakeOptions = {}) {
         throw compareError("Approval expired or was already answered");
       if (body?.session_id && body.session_id !== approval.session_id)
         throw compareError("Approval belongs to a different session");
+      if (body?.scope === "project") {
+        if (!approval.always)
+          throw compareError("This action can't be always allowed");
+        const command = String(approval.always).match(/`([^`]+)`/)?.[1];
+        if (
+          command &&
+          !state.alwaysAllowed.some((r: Json) => r.command === command)
+        )
+          state.alwaysAllowed.push({ command, added_at: now() });
+      }
       state.approvals = state.approvals.filter((a: Json) => a !== approval);
       notify("approval.resolved", approval.session_id);
       if (approval.command_job_id) {

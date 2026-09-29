@@ -445,3 +445,31 @@
 .issue-banner {
   gap: 8px;
 }
+
+/* Settings › Permissions: "Always allow in this project" commands */
+.always-allowed {
+  margin: 12px 0 16px;
+}
+.always-allowed h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.always-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.always-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.always-list code {
+  overflow-wrap: anywhere;
+}

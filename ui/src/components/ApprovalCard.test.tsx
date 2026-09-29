@@ -145,4 +145,46 @@ describe("ApprovalCard", () => {
       screen.queryByRole("button", { name: "Deny with note…" }),
     ).toBeNull();
   });
+  it("explains the action with its risk and undo, and offers Always allow only when given", () => {
+    const onDecide = vi.fn();
+    const approval = edit({
+      tool: "exec",
+      command: "cargo test",
+      reason: "Run a shell command as your user",
+      preview: { kind: "command", command: "cargo test", cwd: "/p" },
+      assessment: {
+        risk: "changes_files",
+        risk_label: "Changes files",
+        explanation: "Runs the project's Rust tests.",
+        undo: "yes",
+        undo_label: "Rewind can undo this",
+        notes: ["Some steps repeat"],
+        read: true,
+        checks: [],
+      },
+      always: "Always allow `cargo test` in this project",
+      grant: "",
+    });
+    const { rerender } = render(
+      <ApprovalCard approval={approval} onDecide={onDecide} />,
+    );
+    expect(screen.getByText("Runs the project's Rust tests.")).toBeTruthy();
+    expect(screen.getByText("Changes files")).toBeTruthy();
+    expect(screen.getByText("Rewind can undo this")).toBeTruthy();
+    expect(screen.getByText("Some steps repeat")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Always allow here" }));
+    expect(onDecide).toHaveBeenCalledWith("a1", {
+      decision: "approve",
+      scope: "project",
+    });
+    rerender(
+      <ApprovalCard
+        approval={{ ...approval, id: "a2", always: "" }}
+        onDecide={onDecide}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Always allow here" }),
+    ).toBeNull();
+  });
 });

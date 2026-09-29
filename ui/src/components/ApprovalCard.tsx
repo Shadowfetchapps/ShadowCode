@@ -1,12 +1,13 @@
 import { memo, useId, useState } from "react";
-import type { Approval, PreviewFile } from "../api";
+import type { Approval, ApprovalAssessment, PreviewFile } from "../api";
 import { languageOf, parseUnified } from "../lib/diff";
 import { DiffHunk } from "./DiffView";
 
 export type ApprovalDecision = {
   decision: "approve" | "deny";
-  /** "task": allow the same kind of action for the rest of the task. */
-  scope?: "once" | "task";
+  /** "task": allow the same kind of action for the rest of the task;
+   * "project": allow this exact command from now on in this project. */
+  scope?: "once" | "task" | "project";
   /** Sent back to the agent with a denial. */
   note?: string;
 };
@@ -97,6 +98,45 @@ function FilePreview({ file }: { file: PreviewFile }) {
   );
 }
 
+/** What the action does in plain words, how risky it is, and whether
+ * Rewind can undo it, plus any extra checks (for example new packages). */
+function Assessment({ assessment }: { assessment: ApprovalAssessment }) {
+  return (
+    <div className="approval-assessment">
+      <p className="approval-explain">{assessment.explanation}</p>
+      <div className="approval-tags">
+        <span className={`risk-tag risk-${assessment.risk}`}>
+          {assessment.risk_label}
+        </span>
+        <span className={`undo-tag undo-${assessment.undo}`}>
+          {assessment.undo_label}
+        </span>
+      </div>
+      {assessment.notes.length > 0 && (
+        <ul className="approval-notes">
+          {assessment.notes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      )}
+      {assessment.checks.map((check) => (
+        <section
+          key={check.title}
+          className={`approval-check check-${check.level || "info"}`}
+          aria-label={check.title}
+        >
+          <h4>{check.title}</h4>
+          <ul>
+            {check.items.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 /** A pending approval: what the action would do (a diff, the new file, or
  * the full command and folder), and Allow / Allow for this task / Deny /
  * Deny with a note. */
@@ -151,6 +191,9 @@ export const ApprovalCard = memo(function ApprovalCard({
                 : "Allow ShadowCode to run this?"}
         </span>
       </div>
+      {approval.assessment?.explanation && (
+        <Assessment assessment={approval.assessment} />
+      )}
       {preview?.kind === "command" ? (
         <div className="approval-command">
           <pre className="code">{preview.command}</pre>
@@ -230,6 +273,16 @@ export const ApprovalCard = memo(function ApprovalCard({
               Deny with note…
             </button>
           )}
+          {approval.always && (
+            <button
+              type="button"
+              className="ghost"
+              title={approval.always.replace(/`/g, "")}
+              onClick={() => decide({ decision: "approve", scope: "project" })}
+            >
+              Always allow here
+            </button>
+          )}
           {approval.grant && (
             <button
               type="button"
@@ -253,6 +306,12 @@ export const ApprovalCard = memo(function ApprovalCard({
         <p className="hint approval-grant">
           “Allow for this task” covers {approval.grant.replace(/`/g, "")} until
           this task ends.
+        </p>
+      )}
+      {approval.always && !noting && (
+        <p className="hint approval-grant">
+          “Always allow here” covers exactly this command in this project.
+          Remove it in Settings › Permissions & network.
         </p>
       )}
     </div>
