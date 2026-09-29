@@ -60,6 +60,8 @@ const OPTIONAL_RUST_TESTS = new Set([
   'local_downloads::tests::live_download_pause_resume_verify',
   // A real model: a local OpenAI-compatible server or a signed-in vendor CLI.
   'live_review_of_a_staged_change_by_a_real_model',
+  // A real desktop keyring in a private D-Bus session (docs/OPENROUTER.md).
+  'keyring::tests::live_secret_service_round_trip',
 ]);
 export const scriptDigest = gate => createHash('sha256').update(GATES[gate].script).digest('hex');
 export async function digest(file) {

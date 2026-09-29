@@ -788,18 +788,53 @@ pub fn secrets(paths: &AppPaths) -> Result<BTreeMap<String, String>> {
     Ok(result)
 }
 
+/// A saved key: the environment first, then the keyring for keys moved
+/// there (`crate::keyring`), then `secrets.env`.
 pub fn secret(paths: &AppPaths, name: &str) -> Result<Option<String>> {
-    Ok(std::env::var(name)
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or(secrets(paths)?.remove(name)))
+    if let Some(value) = std::env::var(name).ok().filter(|s| !s.is_empty()) {
+        return Ok(Some(value));
+    }
+    if crate::keyring::listed(paths).contains(name) {
+        match crate::keyring::get(paths, name) {
+            Ok(Some(value)) => return Ok(Some(value)),
+            Ok(None) => {}
+            Err(error) => tracing::warn!("keyring.read name={name} error={error:#}"),
+        }
+    }
+    file_secret(paths, name)
 }
 
+/// A key as saved in `secrets.env` only.
+pub fn file_secret(paths: &AppPaths, name: &str) -> Result<Option<String>> {
+    Ok(secrets(paths)?.remove(name))
+}
+
+/// The names saved in `secrets.env`.
+pub fn file_secret_names(paths: &AppPaths) -> Result<Vec<String>> {
+    Ok(secrets(paths)?.into_keys().collect())
+}
+
+/// Save a key where it lives: the keyring when it was moved there,
+/// otherwise `secrets.env`. An empty value removes it.
 pub fn set_secret(paths: &AppPaths, name: &str, value: &str) -> Result<()> {
     ensure!(valid_secret_name(name), "Invalid secret name");
     if value.contains(['\n', '\r', '\0']) || value.len() > 16_384 {
         bail!("Invalid API key");
     }
+    if crate::keyring::listed(paths).contains(name) {
+        crate::keyring::set(paths, name, value)?;
+        return remove_file_secret(paths, name);
+    }
+    write_file_secret(paths, name, value)
+}
+
+pub fn remove_file_secret(paths: &AppPaths, name: &str) -> Result<()> {
+    write_file_secret(paths, name, "")
+}
+
+/// Write one key into `secrets.env` (empty removes it).
+pub fn write_file_secret(paths: &AppPaths, name: &str, value: &str) -> Result<()> {
+    ensure!(valid_secret_name(name), "Invalid secret name");
     let _guard = SECRET_UPDATES
         .lock()
         .map_err(|_| anyhow::anyhow!("Secret update lock poisoned"))?;

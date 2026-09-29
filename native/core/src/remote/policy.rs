@@ -43,6 +43,8 @@ pub const MANAGED_LOCALLY: &str =
     "Remote access is managed in Settings › Remote access on the computer running ShadowCode.";
 pub const LOGS_LOCAL: &str =
     "The app log stays on the computer running ShadowCode. Open it there from Settings › About.";
+pub const KEYS_LOCAL: &str =
+    "Where API keys are kept is changed on the computer running ShadowCode, in Settings › Accounts.";
 pub const SECRET_FILE: &str = "Secret files such as .env are not shown over remote access.";
 pub const PROFILE_FOLDER: &str =
     "ShadowCode's own settings folder cannot be opened over remote access.";
@@ -156,6 +158,7 @@ pub fn check(path: &str, body: &Value, access: &Access, paths: &AppPaths) -> Res
         "remote" | "views" | "runtime" | "owned-jobs" => return Err(Refusal(MANAGED_LOCALLY)),
         "data" => return Err(Refusal(DATA_LOCAL)),
         "logs" => return Err(Refusal(LOGS_LOCAL)),
+        "secrets" => return Err(Refusal(KEYS_LOCAL)),
         "workspace"
             if matches!(
                 parts.get(1).copied(),
@@ -316,6 +319,10 @@ mod tests {
     const REVIEWED_FAMILIES: &[(&str, &str)] = &[
         ("remote", "refused: managed on this computer"),
         ("logs", "refused: the app log stays on this computer"),
+        (
+            "secrets",
+            "refused: key storage is changed on this computer",
+        ),
         ("preview", "refused: loopback proxies and local processes"),
         ("terminals", "refused unless terminals are allowed"),
         ("background", "refused unless terminals are allowed"),

@@ -28,6 +28,8 @@ struct GitFlowBody {
     title: Text,
     body: Text,
     draft: Flag,
+    /// Push even though the commits look like they contain a secret.
+    allow_secrets: Flag,
 }
 
 /// A remote in words the UI can use: where it lives and its web page.
@@ -295,7 +297,10 @@ impl Service {
                 self.git_suggest(body.kind.as_str(), body.base.as_str(), body.remote.as_str())
                     .await
             }
-            ("POST", "/api/git/push") => self.git_push(body.remote.as_str()).await,
+            ("POST", "/api/git/push") => {
+                self.git_push(body.remote.as_str(), body.allow_secrets.is_true())
+                    .await
+            }
             ("GET", "/api/git/pr") => self.pr_status(call.q("remote"), call.q("base")).await,
             ("POST", "/api/git/pr") => self.pr_create(&body).await,
             ("GET", "/api/git/pr/checks") => {
@@ -582,9 +587,35 @@ impl Service {
         Ok(json!({"ok": true, "branch": name, "created": create}))
     }
 
-    /// POST /api/git/push: push the current branch and set its upstream.
-    async fn git_push(&self, requested_remote: &str) -> Result<Value> {
+    /// The in-band refusal when the commits a push would send look like
+    /// they contain a secret (`secret_scan`), unless the user allowed it.
+    async fn push_secret_check(
+        &self,
+        workspace: &Path,
+        requested_remote: &str,
+        allow: bool,
+    ) -> Result<Option<Value>> {
+        if allow {
+            return Ok(None);
+        }
+        let Some((remote, _)) = self.chosen_remote(workspace, requested_remote).await? else {
+            return Ok(None);
+        };
+        let scan = crate::secret_scan::unpushed(workspace, &remote).await?;
+        Ok((!scan.is_clean()).then(|| scan.refusal("pushed")))
+    }
+
+    /// POST /api/git/push `{remote?, allow_secrets?}`: push the current
+    /// branch and set its upstream. Commits that look like they contain a
+    /// secret are refused in band first.
+    async fn git_push(&self, requested_remote: &str, allow_secrets: bool) -> Result<Value> {
         let workspace = self.workspace()?;
+        if let Some(refusal) = self
+            .push_secret_check(&workspace, requested_remote, allow_secrets)
+            .await?
+        {
+            return Ok(refusal);
+        }
         let (remote, branch, output) = self.push_current(&workspace, requested_remote).await?;
         let info = self
             .remotes(&workspace)
@@ -1172,6 +1203,12 @@ impl Service {
             "Create a branch for this work first: you are on {base}"
         );
         let (remote, info) = self.forge_remote(&workspace, body.remote.as_str()).await?;
+        if let Some(refusal) = self
+            .push_secret_check(&workspace, &remote, body.allow_secrets.is_true())
+            .await?
+        {
+            return Ok(refusal);
+        }
         let cli = self.forge_cli(&workspace, &info).await;
         ensure!(
             cli["installed"] == true && cli["authenticated"] == true,

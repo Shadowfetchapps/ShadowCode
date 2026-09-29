@@ -73,8 +73,18 @@ impl Service {
             }
             ("POST", "/api/workspace/git/commit") => {
                 let (service, _project, _ownership) = self.selected_workspace_mutation().await?;
-                service.git_commit(call.text("message")).await
+                service.git_commit(&call.body).await
             }
+            ("POST", "/api/workspace/git/unstage") => {
+                let (service, _project, _ownership) = self.selected_workspace_mutation().await?;
+                service.git_unstage(&call.body).await
+            }
+            ("POST", "/api/workspace/git/ignore") => {
+                let (service, _project, _ownership) = self.selected_workspace_mutation().await?;
+                service.git_ignore(&call.body).await
+            }
+            ("GET", "/api/workspace/git/hooks") => self.git_hooks(None).await,
+            ("POST", "/api/workspace/git/hooks") => self.git_hooks(Some(&call.body)).await,
             _ => self.blocking(call, Self::workspace_files).await,
         }
     }

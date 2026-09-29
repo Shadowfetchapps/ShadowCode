@@ -461,6 +461,46 @@ impl ToolExecutor {
         });
         Ok(result)
     }
+    /// The "New packages" section for an action that adds dependencies (an
+    /// install command or a manifest edit), after looking them up.
+    async fn package_checks(&self, call: &ToolCall) -> Option<Value> {
+        let packages = match call.name.as_str() {
+            "exec" | "background_start" => {
+                crate::supply_chain::from_command(call.arguments["command"].as_str()?)
+            }
+            "write_file" | "edit_file" | "apply_patch" => {
+                crate::approvals::preview::native_contents(
+                    &self.workspace,
+                    &call.name,
+                    &call.arguments,
+                )
+                .into_iter()
+                .flat_map(|(path, before, after)| {
+                    let before = before.and_then(|b| String::from_utf8(b).ok());
+                    let after = after
+                        .and_then(|a| String::from_utf8(a).ok())
+                        .unwrap_or_default();
+                    crate::supply_chain::from_manifest(&path, before.as_deref(), &after)
+                })
+                .collect()
+            }
+            _ => return None,
+        };
+        if packages.is_empty() {
+            return None;
+        }
+        let verdicts = tokio::time::timeout(
+            Duration::from_secs(8),
+            crate::supply_chain::check(
+                &packages,
+                self.config.permissions.offline,
+                Some(&self.events.store),
+            ),
+        )
+        .await
+        .ok()?;
+        crate::supply_chain::section(&verdicts)
+    }
     /// The "Always allow in this project" rule that covers `command`.
     fn always_rule(&self, command: &str) -> Result<Option<String>> {
         crate::approvals::always::covering(&self.events.store, &self.workspace.path, command)
@@ -522,6 +562,12 @@ impl ToolExecutor {
                     &self.workspace.path,
                 );
                 let always_form = assessment.always.clone().filter(|_| call.name == "exec");
+                let mut assessment_json = assessment.to_json();
+                if let Some(section) = self.package_checks(call).await {
+                    if let Some(checks) = assessment_json["checks"].as_array_mut() {
+                        checks.push(section);
+                    }
+                }
                 let reason = if call.name == "background_start" {
                     format!("{reason}\nThis process runs outside ShadowCode's command sandbox. Its file and network access follow your account's permissions and the host's restrictions; command sandbox settings do not apply.")
                 } else {
@@ -563,7 +609,7 @@ impl ToolExecutor {
                     ),
                     grant: String::new(),
                     note: true,
-                    assessment: assessment.to_json(),
+                    assessment: assessment_json,
                     always: always_form
                         .as_deref()
                         .map(crate::approvals::always::label)
@@ -629,7 +675,15 @@ impl ToolExecutor {
                 }
                 ensure!(answer.allow, "{}", answer.denial());
             }
-            Decision::Allow => {}
+            Decision::Allow => {
+                // No card: new dependencies are still looked up and noted.
+                if let Some(section) = self.package_checks(call).await {
+                    self.events.emit(
+                        "packages.checked",
+                        json!({"tool":call.name,"call_id":call.id,"section":section}),
+                    )?;
+                }
+            }
         }
         ensure!(
             !self.cancel.is_cancelled(),
@@ -902,6 +956,25 @@ impl ToolExecutor {
                         && !message.contains('\0'),
                     "Invalid commit message"
                 );
+                // Staged secrets are never committed by the agent: the user
+                // can remove them, or commit from the Git tab after seeing them.
+                let scan = crate::secret_scan::staged(&self.workspace.path).await?;
+                if !scan.is_clean() {
+                    let list = scan
+                        .findings
+                        .iter()
+                        .take(10)
+                        .map(|f| match f.line {
+                            Some(line) => format!("- {}:{line}: {}", f.path, f.kind),
+                            None => format!("- {}: {}", f.path, f.kind),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    bail!(
+                        "Not committed: the staged changes look like they contain a secret.\n{list}\nUnstage or remove it (for a file that should stay local, add it to .gitignore). If it is a test value, add `{}` on that line. Tell the user what you found.",
+                        crate::secret_scan::ALLOW_MARKER
+                    );
+                }
                 vec![
                     "-c".into(),
                     "commit.gpgSign=false".into(),

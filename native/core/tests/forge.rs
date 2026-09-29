@@ -433,3 +433,170 @@ async fn push_without_a_remote_explains_itself() {
         false
     );
 }
+
+/// A GitHub-token-shaped placeholder, built at runtime so the repository's
+/// own secret scan never sees a token-shaped literal.
+fn fake_token() -> String {
+    format!("ghp_{}", "aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn secrets_are_caught_before_commit_and_push_and_hooks_are_asked_once() {
+    let f = setup("http://127.0.0.1:9/v1");
+    let s = &f.service;
+    let commits = |project: &Path| git(project, &["rev-list", "--count", "HEAD"]);
+    let before = commits(&f.project);
+
+    // A staged token stops the commit; nothing is committed.
+    fs::write(
+        f.project.join("config.py"),
+        format!("TOKEN = \"{}\"\n", fake_token()),
+    )
+    .unwrap();
+    git(&f.project, &["add", "config.py"]);
+    let refused = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"Add config"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(refused["status"], 409);
+    assert_eq!(refused["secrets"][0]["path"], "config.py");
+    assert_eq!(refused["secrets"][0]["line"], 1);
+    assert_eq!(refused["secrets"][0]["kind"], "a GitHub token");
+    assert!(!refused.to_string().contains(&fake_token()));
+    assert_eq!(commits(&f.project), before);
+
+    // "Add to .gitignore" keeps the file local and out of the commit.
+    call(
+        s,
+        "POST",
+        "/api/workspace/git/ignore",
+        json!({"path":"config.py"}),
+    )
+    .await
+    .unwrap();
+    assert!(fs::read_to_string(f.project.join(".gitignore"))
+        .unwrap()
+        .contains("/config.py"));
+    assert_eq!(git(&f.project, &["diff", "--cached", "--name-only"]), "");
+
+    // "Commit anyway" commits an environment file the user chose to keep.
+    fs::write(f.project.join(".env.local"), "PORT=3000\n").unwrap();
+    git(&f.project, &["add", ".env.local", ".gitignore"]);
+    let again = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"Local env"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        again["secrets"][0]["kind"], "an environment file",
+        "{again}"
+    );
+    let done = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"Local env","allow_secrets":true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(done["ok"], true, "{done}");
+
+    // The push sees it too, until the user pushes anyway.
+    let push = call(s, "POST", "/api/git/push", json!({})).await.unwrap();
+    assert_eq!(push["ok"], false, "{push}");
+    assert_eq!(push["secrets"][0]["path"], ".env.local");
+    assert!(push["secrets"][0]["commit"].as_str().is_some());
+    let pushed = call(s, "POST", "/api/git/push", json!({"allow_secrets":true}))
+        .await
+        .unwrap();
+    assert_eq!(pushed["ok"], true, "{pushed}");
+
+    // The project's own hooks: asked once, remembered, changeable.
+    let hook = f.project.join(".git/hooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\ntouch hook-ran\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let stage = |text: &str| {
+        fs::write(f.project.join("README.md"), text).unwrap();
+        git(&f.project, &["add", "README.md"]);
+    };
+    stage("# Demo\n\nOne\n");
+    let ask = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"One"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ask["needs_hooks_choice"], true, "{ask}");
+    assert_eq!(ask["hooks"][0]["name"], "pre-commit");
+    assert_eq!(ask["hooks"][0]["preview"], "touch hook-ran");
+    let skipped = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"One","hooks":"skip"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(skipped["ok"], true, "{skipped}");
+    assert!(!f.project.join("hook-ran").exists());
+    stage("# Demo\n\nTwo\n");
+    let quiet = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"Two"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(quiet["ok"], true, "{quiet}");
+    assert!(!f.project.join("hook-ran").exists());
+    let hooks = call(s, "POST", "/api/workspace/git/hooks", json!({"run":true}))
+        .await
+        .unwrap();
+    assert_eq!(hooks["run"], true);
+    stage("# Demo\n\nThree\n");
+    let ran = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"Three"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ran["ok"], true, "{ran}");
+    assert_eq!(ran["hooks_ran"], true);
+    assert!(f.project.join("hook-ran").exists());
+    // A failing hook stops the commit and says why.
+    fs::write(
+        &hook,
+        "#!/bin/sh\necho 'lint failed: 2 problems' >&2\nexit 1\n",
+    )
+    .unwrap();
+    stage("# Demo\n\nFour\n");
+    let stopped = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"Four"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{stopped:#}").contains("lint failed"),
+        "{stopped:#}"
+    );
+    assert!(format!("{stopped:#}").contains("hooks stopped the commit"));
+}

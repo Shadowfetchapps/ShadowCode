@@ -4530,6 +4530,7 @@ dependencies = [
  "unicode-width",
  "uuid",
  "whisper-rs",
+ "zbus",
 ]
 
 [[package]]

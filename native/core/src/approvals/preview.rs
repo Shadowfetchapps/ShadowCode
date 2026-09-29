@@ -99,6 +99,67 @@ fn command_text(value: &Value) -> Option<String> {
     }
 }
 
+/// A file's path, its content before and after a change (`None`: missing).
+pub type FileContents = (String, Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// The files a native file tool would change: `(path, before, after)`, with
+/// `None` for a missing file. Empty for other tools or when the change
+/// cannot be worked out ahead.
+pub fn native_contents(workspace: &Workspace, tool: &str, args: &Value) -> Vec<FileContents> {
+    let path = || args["path"].as_str();
+    let before = |path: &str| workspace.snapshot(path).ok();
+    let contents = || -> Option<Vec<FileContents>> {
+        Some(match tool {
+            "write_file" => {
+                let path = path()?;
+                vec![(
+                    path.to_owned(),
+                    before(path)?.bytes,
+                    Some(args["content"].as_str()?.as_bytes().to_vec()),
+                )]
+            }
+            "edit_file" => {
+                let path = path()?;
+                let current = before(path)?.bytes?;
+                let text = std::str::from_utf8(&current).ok()?;
+                let updated = if let Some(old) = args["old_string"].as_str() {
+                    let new = args["new_string"].as_str()?;
+                    if old.is_empty() || !text.contains(old) {
+                        return None;
+                    }
+                    if args["replace_all"] == true {
+                        text.replace(old, new)
+                    } else {
+                        text.replacen(old, new, 1)
+                    }
+                } else {
+                    crate::tools::edit_line_hunks(text, args["hunks"].as_array()?).ok()?
+                };
+                vec![(
+                    path.to_owned(),
+                    Some(current.clone()),
+                    Some(updated.into_bytes()),
+                )]
+            }
+            "apply_patch" => {
+                let patch = args["patch"].as_str().or_else(|| args["diff"].as_str())?;
+                let patch = if patch.starts_with("@@") {
+                    format!("--- a/{0}\n+++ b/{0}\n{patch}", path()?)
+                } else {
+                    patch.to_owned()
+                };
+                crate::patch::prepare(workspace, &patch)
+                    .ok()?
+                    .into_iter()
+                    .map(|c| (c.path.clone(), c.before.bytes.clone(), c.after.clone()))
+                    .collect()
+            }
+            _ => return None,
+        })
+    };
+    contents().unwrap_or_default()
+}
+
 /// Preview of a native tool call.
 pub fn native(workspace: &Workspace, tool: &str, args: &Value) -> Value {
     native_changes(workspace, tool, args).unwrap_or(Value::Null)

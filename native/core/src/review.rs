@@ -202,6 +202,13 @@ pub fn file(store: &Store, ws: &Workspace, task: &str, path: &str) -> Result<Val
         out["hash"] = json!(now.hash.as_deref().unwrap_or("missing"));
         return Ok(out);
     }
+    if crate::supply_chain::is_lockfile(&path) {
+        if let (Some(old), Some(new)) = (text(&base.bytes), text(&now.bytes)) {
+            if let Some(summary) = crate::supply_chain::lockfile_summary(&path, old, new) {
+                out["lockfile"] = summary;
+            }
+        }
+    }
     out["hunks"] = match (text(&base.bytes), text(&now.bytes)) {
         (Some(old), Some(new)) => json!(textdiff::hunks(old, new)
             .iter()

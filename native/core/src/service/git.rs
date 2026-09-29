@@ -9,19 +9,32 @@ impl Service {
         args: Vec<String>,
         cancel: CancellationToken,
     ) -> Result<Value> {
-        let mut base = vec![
+        Self::git_with_hooks(workspace, args, cancel, false).await
+    }
+    /// `git_in`, running the repository's own hooks when `hooks` is set
+    /// (a commit the user chose to run them for).
+    async fn git_with_hooks(
+        workspace: &Path,
+        args: Vec<String>,
+        cancel: CancellationToken,
+        hooks: bool,
+    ) -> Result<Value> {
+        let mut base: Vec<String> = vec![
             "--no-pager".into(),
             "--no-optional-locks".into(),
             "--literal-pathspecs".into(),
             "-c".into(),
             "core.fsmonitor=false".into(),
-            "-c".into(),
-            "core.hooksPath=/dev/null".into(),
+        ];
+        if !hooks {
+            base.extend(["-c".into(), "core.hooksPath=/dev/null".into()]);
+        }
+        base.extend([
             "-c".into(),
             "color.ui=false".into(),
             "-c".into(),
             "core.quotepath=false".into(),
-        ];
+        ]);
         // Reading the project (status, diffs, logs) never runs the
         // repository's own filter drivers; staging and committing for you
         // keep them, as Git in a terminal would (`crate::git_guard`).
@@ -259,14 +272,50 @@ impl Service {
         ensure!(result["ok"] == true, "{}", result["stderr"]);
         Ok(json!({"ok":true}))
     }
-    /// POST /api/workspace/git/commit: commit what is staged (never signed).
-    pub(super) async fn git_commit(&self, message: &str) -> Result<Value> {
+    /// POST /api/workspace/git/commit `{message, allow_secrets?, hooks?:
+    /// "run"|"skip"}`: commit what is staged (never signed). The staged
+    /// changes are checked for secrets first, and a project with its own
+    /// Git hooks is asked once whether to run them; both answer in band
+    /// (`ok: false, status: 409`) and nothing is committed.
+    pub(super) async fn git_commit(&self, body: &Value) -> Result<Value> {
         let ws = self.mutable_workspace()?;
+        let message = body["message"].as_str().unwrap_or("");
         ensure!(
             !message.trim().is_empty() && message.len() <= 32000,
             "Commit message required"
         );
-        let result = Self::git_in(
+        let store = self.engine.store();
+        let hooks = crate::git_hooks::found(&ws.path, crate::git_hooks::COMMIT_HOOKS).await;
+        let run_hooks = if hooks.is_empty() {
+            false
+        } else {
+            match body["hooks"].as_str() {
+                Some(choice @ ("run" | "skip")) => {
+                    let run = choice == "run";
+                    crate::git_hooks::set_preference(&store, &ws.path, Some(run))?;
+                    run
+                }
+                _ => match crate::git_hooks::preference(&store, &ws.path)? {
+                    Some(run) => run,
+                    None => {
+                        return Ok(json!({
+                            "ok": false,
+                            "status": 409,
+                            "needs_hooks_choice": true,
+                            "hooks": hooks,
+                            "error": "This project has its own Git hooks. Choose whether commits from ShadowCode run them.",
+                        }))
+                    }
+                },
+            }
+        };
+        if body["allow_secrets"] != true {
+            let scan = crate::secret_scan::staged(&ws.path).await?;
+            if !scan.is_clean() {
+                return Ok(scan.refusal("committed"));
+            }
+        }
+        let result = Self::git_with_hooks(
             &ws.path,
             vec![
                 "-c".into(),
@@ -276,10 +325,104 @@ impl Service {
                 message.into(),
             ],
             ws.reservation.cancellation(),
+            run_hooks,
+        )
+        .await?;
+        if result["ok"] != true && run_hooks {
+            bail!(
+                "The project's Git hooks stopped the commit; nothing was committed.\n{}",
+                crate::tools::truncate(
+                    &format!(
+                        "{}\n{}",
+                        result["stderr"].as_str().unwrap_or(""),
+                        result["stdout"].as_str().unwrap_or("")
+                    ),
+                    4000
+                )
+                .trim()
+            );
+        }
+        ensure!(result["ok"] == true, "{}", result["stderr"]);
+        Ok(json!({"ok":true,"hooks_ran":run_hooks && !hooks.is_empty()}))
+    }
+    /// POST /api/workspace/git/unstage `{paths}`: take files out of the next
+    /// commit (the working tree is unchanged).
+    pub(super) async fn git_unstage(&self, body: &Value) -> Result<Value> {
+        let ws = self.mutable_workspace()?;
+        let paths = body["paths"].as_array().context("paths must be an array")?;
+        ensure!(
+            !paths.is_empty() && paths.len() <= 200,
+            "Choose files to unstage"
+        );
+        let mut args: Vec<String> = vec!["reset".into(), "-q".into(), "--".into()];
+        for path in paths {
+            args.push(
+                ws.relative(path.as_str().context("Invalid path")?)?
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        let result = Self::git_in(&ws.path, args, ws.reservation.cancellation()).await?;
+        ensure!(result["ok"] == true, "{}", result["stderr"]);
+        Ok(json!({"ok":true}))
+    }
+    /// POST /api/workspace/git/ignore `{path}`: add a file to the project's
+    /// `.gitignore` and take it out of the next commit.
+    pub(super) async fn git_ignore(&self, body: &Value) -> Result<Value> {
+        let ws = self.mutable_workspace()?;
+        let path = ws
+            .relative(body["path"].as_str().context("path required")?)?
+            .to_string_lossy()
+            .into_owned();
+        ensure!(
+            !path.is_empty() && !path.contains('\n') && !path.starts_with(".git/"),
+            "Choose a file in the project"
+        );
+        let ignore = ws.path.join(".gitignore");
+        let mut text = std::fs::read_to_string(&ignore).unwrap_or_default();
+        let line = format!("/{}", path.replace('\\', "\\\\"));
+        if !text.lines().any(|l| l.trim() == line || l.trim() == path) {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&line);
+            text.push('\n');
+            crate::paths::atomic_write(&ignore, text.as_bytes(), false)?;
+        }
+        let result = Self::git_in(
+            &ws.path,
+            vec![
+                "rm".into(),
+                "-q".into(),
+                "--cached".into(),
+                "--ignore-unmatch".into(),
+                "--".into(),
+                path.clone(),
+            ],
+            ws.reservation.cancellation(),
         )
         .await?;
         ensure!(result["ok"] == true, "{}", result["stderr"]);
-        Ok(json!({"ok":true}))
+        Ok(json!({"ok":true,"path":path}))
+    }
+    /// GET/POST /api/workspace/git/hooks: the project's commit hooks and
+    /// whether commits from ShadowCode run them (`run: null` asks next time).
+    pub(super) async fn git_hooks(&self, body: Option<&Value>) -> Result<Value> {
+        let workspace = self.workspace()?;
+        let store = self.engine.store();
+        if let Some(body) = body {
+            let run = match &body["run"] {
+                Value::Bool(run) => Some(*run),
+                Value::Null => None,
+                _ => bail!("run must be true, false or null"),
+            };
+            crate::git_hooks::set_preference(&store, &workspace, run)?;
+        }
+        Ok(json!({
+            "workspace": workspace,
+            "hooks": crate::git_hooks::found(&workspace, crate::git_hooks::COMMIT_HOOKS).await,
+            "run": crate::git_hooks::preference(&store, &workspace)?,
+        }))
     }
 }
 pub fn parse_hunks(diff: &str) -> Vec<Value> {

@@ -1333,6 +1333,26 @@ async fn request_approval(
             });
         }
     }
+    let mut assessment_json = assessment.to_json();
+    if prompt.kind == "command" {
+        let packages = crate::supply_chain::from_command(&prompt.command);
+        if !packages.is_empty() {
+            // Vendor CLIs never run offline, so the registries are asked.
+            if let Ok(verdicts) = tokio::time::timeout(
+                Duration::from_secs(8),
+                crate::supply_chain::check(&packages, false, Some(&request.events.store)),
+            )
+            .await
+            {
+                if let (Some(section), Some(checks)) = (
+                    crate::supply_chain::section(&verdicts),
+                    assessment_json["checks"].as_array_mut(),
+                ) {
+                    checks.push(section);
+                }
+            }
+        }
+    }
     let grant = vendor_grant(&prompt);
     let preview = crate::approvals::preview::vendor(
         &request.options.workspace,
@@ -1357,7 +1377,7 @@ async fn request_approval(
         preview,
         grant: String::new(),
         note: deny_note,
-        assessment: assessment.to_json(),
+        assessment: assessment_json,
         always: always_form
             .as_deref()
             .map(crate::approvals::always::label)

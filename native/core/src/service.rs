@@ -81,6 +81,7 @@ mod review;
 mod rules;
 mod sandbox;
 mod second_opinion;
+mod secrets;
 mod sessions;
 mod settings;
 mod spending;
@@ -338,6 +339,7 @@ impl Service {
             "rules" => self.rules_routes(&call).await,
             "spending" => self.spending_routes(&call).await,
             "logs" => self.logs_routes(&call).await,
+            "secrets" => self.secrets_routes(&call).await,
             "commands" | "memory" => match (call.method.as_str(), call.path.as_str()) {
                 ("GET", "/api/commands") => self.command_catalog(),
                 ("POST", "/api/commands/run") => self.run_command(&call.body).await,

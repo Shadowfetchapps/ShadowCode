@@ -52,6 +52,13 @@ tree-sitter-cpp = "0.23"
 tree-sitter-java = "0.23"
 # Shell commands are parsed before approval (approvals::shell). MIT.
 tree-sitter-bash = "0.25"
+# Reading Cargo.toml, pyproject.toml and lockfiles for new dependencies
+# (supply_chain). Already built for the desktop app.
+toml = "=0.9.12"
+# API keys in the desktop keyring: the freedesktop Secret Service over
+# D-Bus (keyring.rs). The same zbus the desktop app already builds.
+# MIT.
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 streaming-iterator = "0.1.9"
 # Pairing QR codes for remote access (Settings › Remote access and
 # `shadowcode serve --remote`). MIT OR Apache-2.0, no dependencies.
@@ -79,6 +86,5 @@ landlock = "=0.4.7"
 cpal = { version = "=0.18.2", default-features = false }
 
 [dev-dependencies]
-toml = "=0.9.12"
 # The same tokio, with its paused test clock (no new crate).
 tokio = { version = "1", features = ["full", "test-util"] }
