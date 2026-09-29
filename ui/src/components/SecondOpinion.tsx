@@ -276,7 +276,10 @@ export function OpinionHead({
       </div>
       <p className="opinion-meta">
         {[
-          opinion.model_name && opinion.model_name !== opinion.reviewer.label
+          // The job's own model name, when it says more than the label
+          // (a vendor job is named after its product).
+          opinion.model_name &&
+          !opinion.reviewer.label.includes(opinion.model_name)
             ? `${opinion.reviewer.label} (${opinion.model_name})`
             : opinion.reviewer.label,
           opinion.reviewer.local ? "on this computer" : "cloud",

@@ -307,19 +307,20 @@ export function ReviewView({
                     Undo file
                   </button>
                 </div>
-                {detail.binary ? (
+                {detail.binary && (
                   <p className="hint">
                     Binary or very large file: no line view. Undo file puts it
                     back as a whole.
                   </p>
-                ) : null}
-                {done && !detail.binary && (
+                )}
+                {/* Findings about this file that no hunk below shows. */}
+                {done && (
                   <FindingItems
                     opinion={done}
                     findings={unplaced(
                       done.findings,
                       detail.path,
-                      detail.hunks.map((h) => h.header),
+                      detail.binary ? [] : detail.hunks.map((h) => h.header),
                     )}
                     actions={second.actions}
                     showFile={false}
