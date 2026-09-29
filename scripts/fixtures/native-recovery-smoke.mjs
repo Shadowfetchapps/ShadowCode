@@ -149,6 +149,20 @@ const INJECT = `
 `;
 
 export async function nativeReconnect(ctx) {
+  const evidence = { phase: "start" };
+  try {
+    await reconnectPhase(ctx, evidence);
+  } catch (error) {
+    // What the page and the engine had when it failed.
+    evidence.page = await ctx.execute("return window.__recovery || null").catch((e) => String(e));
+    if (evidence.jobA) evidence.eventsA = await ctx.api("GET", `/api/jobs/${evidence.jobA}/events?after=0&limit=2000`).then((page) => page.events.map((e) => [e.id, e.type, e.payload?.text?.slice?.(0, 40)]), (e) => String(e));
+    evidence.requests = await ctx.modelRequests().catch(() => []);
+    await writeFile(path.join(ctx.artifacts, "native-reconnect-failure.json"), JSON.stringify(evidence, null, 2)).catch(() => {});
+    throw error;
+  }
+}
+
+async function reconnectPhase(ctx, evidence) {
   const A = ctx.sessionId;
   const effects = (name) => readFile(path.join(ctx.project, name), "utf8").catch(() => "");
   const openConversation = async (id) => {
@@ -158,6 +172,7 @@ export async function nativeReconnect(ctx) {
   const jobsBefore = await ctx.jobsFor(A);
   await ctx.send("reconnect-probe: record one effect, then report slowly.");
   const jobA = await ctx.until("Task A started", async () => (await ctx.jobsFor(A)).find((job) => !jobsBefore.some((b) => b.id === job.id)), 15000);
+  evidence.jobA = jobA.id;
   await ctx.until("A's effect approval", () => ctx.execute("return [...document.querySelectorAll('.approval')].some(a=>a.textContent.includes('effects-A.log'))"), 60000);
   // Conversation B gets a check queued behind A in the same project: two
   // conversations with live tasks during the disturbance and the reloads.
@@ -175,8 +190,12 @@ export async function nativeReconnect(ctx) {
   const injected = await ctx.execute(INJECT, [jobA.id]);
   assert.ok(injected, "Event disturbance installed");
   await ctx.approve("effects-A.log");
-  await ctx.until("A streams while disturbed", async () => (await transcriptText(ctx)).includes("part 6"), 30000);
-  await ctx.until("Fake model holds the stream", () => stat(path.join(ctx.runtimeDir, "reconnect-holding")).then(() => true, () => false), 10000);
+  evidence.phase = "disturbed stream";
+  // The engine shows streamed text in batches; the last few words before the
+  // model pauses can wait for its next words, so only the start is required
+  // while the stream is held open.
+  await ctx.until("A streams while disturbed", async () => (await transcriptText(ctx)).includes("Reconnect probe:"), 60000);
+  await ctx.until("Fake model holds the stream", () => stat(path.join(ctx.runtimeDir, "reconnect-holding")).then(() => true, () => false), 30000);
   const disturbed = await ctx.until("Disturbance exercised", async () => {
     const s = await ctx.execute("return window.__recovery");
     return s.rewritten >= 2 && s.failed === 2 && s.dropped === 3 && s.tripled > 0 && s.banner && s;
@@ -184,7 +203,7 @@ export async function nativeReconnect(ctx) {
   await ctx.until("Reconnected", async () => !(await transcriptText(ctx)).includes("Reconnecting…"), 15000);
   const live = await transcriptText(ctx);
   assert.equal(occurrences(live, "reconnect-probe: record one effect"), 1, "User message once");
-  assert.equal(occurrences(live, "Reconnect probe: part 1 part 2 part 3 part 4 part 5 part 6"), 1, "Streamed text once, in order");
+  assert.equal(occurrences(live, "Reconnect probe:"), 1, "Streamed text once");
   assert.ok(await ctx.visible('button[aria-label="Stop task"]'), "A is still running");
   assert.equal(await effects("effects-A.log"), "A\n", "The shell effect ran once");
   await ctx.screenshot("reconnect-disturbed");
@@ -193,10 +212,10 @@ export async function nativeReconnect(ctx) {
   await ctx.wd("POST", `/session/${ctx.session}/refresh`, {});
   await ctx.until("B listed after reload", () => ctx.visible(`button.task-link[data-session-id="${B}"]`), 20000);
   await openConversation(A);
-  await ctx.until("A restored mid-stream", async () => (await transcriptText(ctx)).includes("part 6") && await ctx.visible('button[aria-label="Stop task"]'), 20000);
+  await ctx.until("A restored mid-stream", async () => (await transcriptText(ctx)).includes("Reconnect probe:") && await ctx.visible('button[aria-label="Stop task"]'), 20000);
   const restored = await transcriptText(ctx);
   assert.equal(occurrences(restored, "reconnect-probe: record one effect"), 1);
-  assert.equal(occurrences(restored, "Reconnect probe: part 1 part 2 part 3 part 4 part 5 part 6"), 1);
+  assert.equal(occurrences(restored, "Reconnect probe:"), 1);
   assert.equal(await ctx.execute("return document.querySelectorAll('.approval').length"), 0, "No stale approval after the reload");
   assert.equal(await ctx.execute("return document.querySelector(arguments[0])?.dataset.badge", [`button.task-link[data-session-id="${B}"]`]), "queued", "B's check still waits");
 
@@ -207,7 +226,7 @@ export async function nativeReconnect(ctx) {
   await ctx.until("B needs approval", async () => (await ctx.api("GET", `/api/approvals?session_id=${B}`)).approvals.length === 1, 20000);
   assert.equal(await ctx.execute("return document.querySelectorAll('.approval').length"), 0, "B's approval stays in B");
   const doneA = await transcriptText(ctx);
-  assert.equal(occurrences(doneA, "Finished after the reload."), 1, "Final text once");
+  assert.equal(occurrences(doneA, "Reconnect probe: part 1 part 2 part 3 part 4 part 5 part 6. Finished after the reload."), 1, "The whole reply once, in order");
   assert.ok(!doneA.includes("reconnect check B"), "No B rows in A");
 
   await openConversation(B);

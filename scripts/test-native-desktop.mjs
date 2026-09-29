@@ -668,7 +668,7 @@ try {
   await nativeRunCheck({ wd, session, execute, until, visible, clickButton, fill, approve, screenshot, note, jobsFor, modelRequests, sessionId, project, artifacts });
   if (process.env.SHADOW_NATIVE_ENDURANCE === "1")
     await nativeEndurance({ wd, session, execute, until, visible, clickButton, fill, screenshot, note, api, jobsFor, modelRequests, sessionId, project, profile, artifacts, appPid, descendants });
-  const recoveryContext = { wd, session, execute, until, visible, click, clickButton, fill, send, approve, screenshot, accessibility, note, api, jobsFor, modelRequests, launches, sessionId, project, runtimeDir };
+  const recoveryContext = { wd, session, execute, until, visible, click, clickButton, fill, send, approve, screenshot, accessibility, note, api, jobsFor, modelRequests, launches, sessionId, project, runtimeDir, artifacts };
   await nativeLocalMemory(recoveryContext);
   await nativeReconnect(recoveryContext);
 
