@@ -1276,10 +1276,6 @@ export const api = {
     ),
   worktreeTask: (id: string) =>
     get<WorktreeTask>(`/api/worktree-tasks/${encodeURIComponent(id)}`),
-  worktreeTasks: (workspace = "") =>
-    get<{ workspace: string; tasks: WorktreeTask[] }>(
-      `/api/worktree-tasks${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
-    ),
   /** apply | keep-branch | discard */
   closeWorktreeTask: (
     id: string,
@@ -1881,8 +1877,6 @@ export const api = {
       instruction,
       ...(path ? { path } : {}),
     }),
-  noteJobEdit: (id: string, path: string, detail = "") =>
-    send<Job>(`/api/jobs/${id}/note_edit`, "POST", { path, detail }),
   rewindJob: (id: string) =>
     send<{
       ok: boolean;

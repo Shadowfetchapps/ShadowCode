@@ -1,125 +1,200 @@
-# Copy to ~/.config/shadow-agent/config.yaml, or let ShadowCode create it on
-# first run. Read or set single keys with `shadowcode config KEY [VALUE]`.
-# Never put API keys in this file. Name the environment variable instead.
-# The desktop picker chooses the model for each conversation. This block is
-# the fallback for the CLI and for HTTP endpoints (native agent loop).
+# ShadowCode settings: every key, with its default.
+#
+# ShadowCode creates ~/.config/shadow-agent/config.yaml on first run and
+# changes it from Settings; you rarely need to edit it. A key you leave out
+# uses the default shown here, so a real config only needs the keys you
+# change. Read or set one key with `shadowcode config KEY [VALUE]`.
+# A value ShadowCode can't read is reported with its key and the fix.
+#
+# Keys this version doesn't know (from a newer version, or retired ones such
+# as the old `git` and `logging` groups) are kept and ignored.
+#
+# Never put API keys in this file. They live in secrets.env next to it
+# (Settings › Accounts, or `api_key_env` below names the variable).
+# The project file .shadow/config/config.yaml may change `agent` settings and
+# set `permissions.level: read_only`, and nothing else.
 
+# The fallback model for the CLI and for tasks started without a choice. The
+# desktop picker chooses the model of each conversation.
 model:
-  default: mock
-  provider: mock
-  # Compatible HTTP endpoints (used through `shadowcode models` / `run --model`):
-  #   grok:     provider openai_compatible, endpoint https://api.x.ai/v1, api_key_env XAI_API_KEY
-  #   openai:   provider openai_compatible, endpoint https://api.openai.com/v1, api_key_env OPENAI_API_KEY
-  #   ollama:   provider ollama, endpoint http://127.0.0.1:11434/v1
-  #   llamacpp: provider llamacpp, endpoint http://127.0.0.1:8080/v1 (an external server;
-  #             GGUF rows under local_engine use the bundled runtime instead)
-  #   vllm:     provider vllm, endpoint http://127.0.0.1:8000/v1
-  # Subscriptions are picker ids such as cli:codex or cli:cursor:auto.
-  endpoint: ""
-  api_key_env: OPENAI_API_KEY
-  name: mock-coder
-  context_limit: 16384
-  keep_alive: "30m"  # Ollama endpoints only: duration, "0" to unload, "-1" indefinite
+  default: mock           # the model id this block is registered as
+  provider: mock          # mock | local | ollama | llamacpp | vllm | openai_compatible | cli:<vendor>
+  endpoint: ""            # OpenAI-compatible base URL, e.g. http://127.0.0.1:11434/v1 (ollama),
+                          # http://127.0.0.1:8080/v1 (an external llama-server), https://api.x.ai/v1
+  api_key_env: OPENAI_API_KEY  # the variable (or secrets.env name) that holds the key
+  name: mock-coder        # the model name the endpoint expects
+  context_limit: 128000   # tokens, 1024-4000000
+  keep_alive: "30m"       # Ollama only: "-1" keeps it loaded, "0" unloads, or 5m, 30m, 1h …
 
 permissions:
-  # mode: ask            # ask ("Ask before actions") | allow_edits ("Allow project edits").
-  #                      # Onboarding writes ask; a config without a mode is migrated from level.
-  level: workspace          # advanced: read_only | workspace | elevated
+  mode: ask               # ask (ask before edits and commands) | allow_edits (project edits are allowed).
+                          # New installs use ask; a config without a mode keeps its older behavior.
+  level: workspace        # read_only | workspace | elevated (destructive Git asks instead of being denied)
   require_approval_for_dangerous: true
-  network: false            # let shell commands that reach the network run (after approval)
-  allow_root: false         # sudo/su/pkexec/doas/run0 still ask when true
+  network: false          # shell commands that reach the network may run (after approval)
+  allow_root: false       # true: sudo/su/pkexec/doas/run0 ask instead of being refused
+  approve_shell: true     # shell commands ask first (always true in ask mode)
 
-# network:
-#   mode: online           # online | web_off (no web tools) | offline (local models only,
-#                          # no vendor status/usage checks, cloud jobs refused)
-#   allow_local_dev: []    # exact host:port entries web tools may reach, e.g. localhost:3000
-#   searxng_url: ""        # your own SearXNG base URL; web_search asks it before DuckDuckGo
-#   shell: on              # shell commands: on | off | allowlist (only when permissions.network is true)
-#   allow: []              # allowlist hosts: example.com, *.example.com, host:port (default ports 80/443)
+network:
+  mode: online            # online | web_off (no web tools) | offline (local models only; no account
+                          # or usage checks, no update check, cloud tasks refused)
+  shell: "on"             # shell command network: "on" | "off" | allowlist (needs permissions.network)
+  allow: []               # allowlist hosts: example.com, *.example.com, host:port (default ports 80, 443)
+  allow_local_dev: []     # exact host:port entries web tools may reach, e.g. localhost:3000
+  searxng_url: ""         # your own SearXNG base URL; web search asks it before DuckDuckGo
 
-# Shell sandbox (bubblewrap). Home is an empty temporary folder in the sandbox.
-# sandbox:
-#   require: false         # true: refuse shell commands when bubblewrap is unavailable
-#   landlock: true         # without bubblewrap, restrict files (and TCP) with Landlock
-#   home_binds: [.cargo, .rustup, .nvm, .npm, .cache/pip, .local/bin, .gitconfig, .pyenv, .bun, .deno]
-#                          # read-only; .ssh, .aws, .gnupg, .config, .local/share, ... are refused
+# Shell sandbox (bubblewrap). Home is an empty temporary folder inside it.
+sandbox:
+  require: false          # true: refuse shell commands when bubblewrap is missing
+  landlock: true          # without bubblewrap, restrict files (and TCP) with Landlock
+  home_binds:             # read-only folders from your home; .ssh, .aws, .gnupg, .config … are refused
+    - .cargo
+    - .rustup
+    - .nvm
+    - .npm
+    - .cache/pip
+    - .local/bin
+    - .gitconfig
+    - .pyenv
+    - .bun
+    - .deno
 
-# Project checkpoints around shell commands and subscription CLI turns (for Rewind).
-# checkpoints:
-#   shell: true
-#   vendor: true
-#   keep: 200              # refs kept under refs/shadowcode/checkpoints in each repository
-#   max_copy_files: 5000   # folders without Git: larger folders are not covered
-#   max_copy_bytes: 67108864
-
-# Subscriptions (vendor CLIs). Settings › Advanced › Vendor tools edits these.
-# cli_agents:
-#   enabled: true
-#   claude_enabled: true
-#   codex_binary: codex
-#   claude_binary: claude
-#   cursor_binary: cursor-agent
-#   antigravity_binary: agy
-#   grok_binary: grok
-#   approval_timeout_sec: 600   # unanswered vendor approvals are denied
-#   stall_timeout_sec: 900      # no output for this long stops the vendor process
-
-# Local GGUF models. Settings › Local models edits the lists; weights are never
-# copied or deleted.
-# local_engine:
-#   directories: []
-#   files: []
-#   imports: []            # Ollama store models registered by reference
-#   excluded: []
-#   llama_binary: ""       # explicit llama-server; default is the bundled/managed runtime
-#   context_size: 0        # upper bound for the server context; 0 = 16384
-
-# Update notice (Settings › About): at most once a day ask GitHub for the
-# newest release; the request carries no version or identifier. Offline mode
-# pauses it. Unset follows the packaged default (on unless the distribution
-# turned it off in /etc/shadowcode/policy.yaml; see docs/DISTRIBUTING.md).
-# updates:
-#   check: true
-
-git:
-  auto_commit: false
-  allow_destructive: false
-
-logging:
-  level: info
-
-ui:
-  host: 127.0.0.1         # unused by the native app (kept for older configs)
-  port: 7430              # unused by the native app (kept for older configs)
-  theme: light            # system | light | dark (desktop appearance)
-  ability: none           # legacy capability preference; does not grant OS permissions
-  notify: true            # desktop notification when a long task finishes
-  notify_after_sec: 4.0   # only notify for jobs longer than this
+# Project checkpoints around shell commands and subscription turns (Rewind).
+checkpoints:
+  shell: true
+  vendor: true
+  keep: 200               # refs kept under refs/shadowcode/checkpoints, 1-10000
+  max_copy_files: 5000    # folders without Git: larger folders are not covered (at most 200000)
+  max_copy_bytes: 67108864  # at most 1 GiB
 
 agent:
-  max_steps: 32
-  tool_timeout_sec: 60
-  parallel_reads: true
-  model_retries: 3          # retry 429/5xx/overloaded and dropped streams (0-10)
-  retry_backoff_sec: 1.0    # exponential backoff base, with jitter; Retry-After wins
+  max_steps: 64           # model turns per task, 1-1000
+  tool_timeout_sec: 60    # 1-3600
+  parallel_reads: true    # read-only tools of one turn run together
+  compact_ratio: 0.7      # compact history at this share of the context, 0.2-0.95
+  model_retries: 3        # retries of 429/5xx/overloaded and dropped streams, 0-10
+  retry_backoff_sec: 1.0  # exponential backoff base with jitter, 0-30; Retry-After wins
+  max_fix_retries: 3      # times a task is sent back when it stopped without doing or checking the work, 0-10
+  max_output_bytes: 256000  # tool output kept per call, 4096-4000000
+  max_task_tokens: 1000000  # token budget of one task
+  autonomy_profile: normal  # unlimited | conservative | normal | extended | custom
   summary_compaction: true  # let the model summarize history dropped to fit the context
-  summary_timeout_sec: 60   # longest wait for that summary before the built-in digest
+  summary_timeout_sec: 60   # longest wait for that summary before the built-in digest, 5-600
 
-onboarding:
-  completed: false
-  workspace: ""
+# Subscriptions (vendor CLIs). Settings › Advanced › Vendor tools edits these.
+cli_agents:
+  enabled: true
+  claude_enabled: true
+  codex_binary: codex
+  claude_binary: claude
+  cursor_binary: cursor-agent
+  antigravity_binary: agy
+  grok_binary: grok
+  approval_timeout_sec: 600   # unanswered vendor approvals are denied, 10-86400
+  stall_timeout_sec: 900      # no output for this long stops the vendor process, 30-86400
+  max_run_time_sec: 7200      # longest vendor turn, 1-86400
 
-# Folders tasks may run in. Managed by the trust dialog.
-trusted_workspaces: []
+# When a subscription reports its plan limit.
+limits:
+  on_limit: local         # local (continue on a model on this computer) | ask
+  fallback_model: ""      # a local:gguf: id from the picker; empty picks the last local model used
+
+# Local GGUF models. Settings › Local models edits the lists; weights are
+# never copied or deleted. Downloads from the built-in catalog are found
+# automatically.
+local_engine:
+  directories: []         # absolute folders to scan
+  files: []               # absolute .gguf files
+  imports: []             # models registered from the Ollama store: {path, mmproj, name, source}
+  excluded: []            # files hidden from a scanned folder
+  llama_binary: ""        # an explicit llama-server; empty uses the bundled or managed runtime
+  context_size: 0         # upper bound for the server context; 0 = 16384, else 2048-262144
 
 # Advanced: per-purpose models for tasks started without an explicit model
-# (CLI, goals). The desktop always sends the picker's choice.
+# (CLI, goals). Empty uses `model` above. The desktop sends the picker's choice.
 routing:
   enabled: false
-  planner: mock
-  coder: mock
-  reviewer: mock
-  tester: mock
+  planner: ""
+  coder: ""
+  reviewer: ""
+  tester: ""
+  architecture: ""
+  small_edits: ""
+  vision: ""
+  local: ""
 
+# MCP servers (Settings › Advanced › MCP). An entry is
+# {name, command: [program, args…] or url, api_key_env, description,
+#  env_refs: {VAR: secret name}, timeout_sec}; each project activates a server
+# by its hash (`approved`).
 mcp:
   servers: []
+  approved: []            # {workspace, server, hash}
+  share_with_cli_agents: true  # offer activated servers to subscription CLIs too
+
+# Project lifecycle hooks activated by hash (Settings › Advanced › Hooks).
+hooks:
+  approved: []            # {workspace, path, hash}
+
+# Exact checks a task may run to verify its work (shell policy still applies).
+verification:
+  commands: []
+
+# Background health check of the project (`shadowcode serve` runs it).
+guardian:
+  enabled: false
+  interval_sec: 3600      # 60-86400
+  allow_prepare_patch: false
+
+ui:
+  theme: light            # system | light | dark
+  notify: true            # desktop notifications at all
+  notify_approval: true   # a task asks for approval
+  notify_failed: true     # a task failed
+  notify_limit: true      # a plan limit was reached
+  notify_finished: true   # a task finished
+  notify_sound: false     # ask the notification server to play its sound
+
+# Subagents: children a task starts with `spawn_agent` (native loop only).
+subagents:
+  enabled: true
+  max_parallel: 4         # children of one task running at once, 1-8
+  max_depth: 1            # 1 = children, no grandchildren (0-3)
+  max_turns: 24           # step limit of a child whose definition sets none, 1-200
+  max_per_task: 16        # children one task may start in total, 1-64
+
+# Voice input (Settings › Voice).
+voice:
+  engine: local           # local (whisper.cpp on this computer) | openrouter
+  model: base.en          # local model from the catalog
+  language: en            # a language code, or auto (multilingual model or OpenRouter)
+  openrouter_model: google/gemini-3.1-flash-lite
+  voice_commands: true    # spoken "new line" / "new paragraph" become line breaks
+  live_preview: true      # show words while recording (local engine)
+  max_seconds: 120
+
+# Code intelligence (Settings › Code intelligence).
+code_intel:
+  lsp: true               # start language servers for edited files, when installed
+  diagnostics_on_edit: true
+  diagnostics_wait_ms: 3000
+  lsp_idle_minutes: 10
+  max_servers: 4
+  servers: {}             # per language (rust, typescript, python, go, c): {command, args}
+  repo_map_tokens: 1024   # ranked repo map in the system prompt; 0 turns it off
+  semantic_search: true
+  embedding_model: ""     # an installed embedding model; empty picks the first one
+
+# The daily update notice (Settings › About). null follows the packaged
+# default: on, unless the distribution turned it off in
+# /etc/shadowcode/policy.yaml (see docs/DISTRIBUTING.md).
+updates:
+  check: null
+
+# First-run setup.
+onboarding:
+  completed: false
+  workspace: ""           # the folder chosen during setup (shown in Health)
+
+# Folders tasks may run in. The trust dialog adds them.
+trusted_workspaces: []

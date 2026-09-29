@@ -124,7 +124,7 @@ pub fn parse_entry(entry: &str) -> Result<AllowEntry> {
 pub fn parse_list(entries: &[String]) -> Result<Vec<AllowEntry>> {
     ensure!(
         entries.len() <= MAX_ENTRIES,
-        "At most {MAX_ENTRIES} allowed hosts"
+        "network.allow holds at most {MAX_ENTRIES} hosts"
     );
     entries
         .iter()

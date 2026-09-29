@@ -941,9 +941,6 @@ button.mini.primary-mini {
   width: 18px;
   color: var(--muted);
 }
-.file-label.l-\?\? {
-  color: var(--ok);
-}
 .crumb {
   display: flex;
   align-items: center;
@@ -1335,11 +1332,6 @@ button.mini.primary-mini {
 }
 .wizard {
   width: min(600px, 100%);
-}
-.advanced {
-  border-top: 1px solid var(--border);
-  margin-top: 10px;
-  padding-top: 4px;
 }
 .help-grid {
   display: flex;

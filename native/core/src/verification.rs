@@ -58,12 +58,12 @@ impl CheckConfig {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.commands.len() <= 64,
-            "At most 64 verification commands"
+            "verification.commands holds at most 64 commands"
         );
         for command in &self.commands {
             ensure!(
                 !command.trim().is_empty() && command.len() <= 64000 && !command.contains('\0'),
-                "Invalid verification command"
+                "verification.commands entries must be non-empty commands of at most 64000 bytes"
             );
         }
         Ok(())

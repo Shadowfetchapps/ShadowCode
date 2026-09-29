@@ -172,14 +172,6 @@ impl SteerControl {
             .map_err(|_| anyhow::anyhow!("Steer lock poisoned"))?;
         Ok(take_resume_messages(&mut state, current_hashes))
     }
-
-    pub fn snapshot_instruction(&self) -> anyhow::Result<Option<String>> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Steer lock poisoned"))?;
-        Ok(state.instruction.clone())
-    }
 }
 
 pub fn take_resume_messages(

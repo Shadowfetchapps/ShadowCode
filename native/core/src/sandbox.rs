@@ -130,21 +130,12 @@ pub enum SandboxMode {
     Off { reason: String },
     Bubblewrap,
 }
-#[derive(Clone, Debug)]
-pub struct BubblewrapProfile {
-    pub program: PathBuf,
-    pub args: Vec<String>,
-    pub network: bool,
-    pub scratch_dir: Option<PathBuf>,
-    pub workspace_cow: bool,
-}
 #[derive(Clone, Debug, Default)]
 pub struct ScratchSession {
     pub path: PathBuf,
 }
 static SCRATCH: LazyLock<Mutex<HashMap<PathBuf, tempfile::TempDir>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static COW_STATUS: Mutex<Option<String>> = Mutex::new(None);
 static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 pub fn which(name: &str) -> Option<PathBuf> {
@@ -205,9 +196,6 @@ pub fn discard_scratch(path: &Path) -> Result<Value> {
         json!({"ok":true,"discarded":path,"note":"Removed this command's managed temporary directory."}),
     )
 }
-pub fn last_scratch() -> Option<PathBuf> {
-    SCRATCH.lock().ok().and_then(|g| g.keys().next().cloned())
-}
 fn scratch_base() -> PathBuf {
     // SAFETY: geteuid cannot fail.
     std::env::temp_dir().join(format!("shadowcode-scratch-{}", unsafe { libc::geteuid() }))
@@ -254,21 +242,10 @@ pub fn probe_workspace_cow() -> Value {
         Ok(()) => "Bubblewrap works: shell commands see an empty home folder with read-only toolchains, and project writes are live. Copy-on-write and approve-before-keep are not implemented; rewind restores project files afterwards.".into(),
         Err(error) => format!("{error}. Workspace copy-on-write is unavailable."),
     };
-    if let Ok(mut state) = COW_STATUS.lock() {
-        *state = Some(detail.clone());
-    }
     json!({"ok":false,"workspace_cow":false,"shell_available":available,
         "mode":if available {"scratch-only"} else {"unavailable"},
         "detail":detail,"kernel_proof":false})
 }
-pub fn cow_status_note() -> String {
-    COW_STATUS
-        .lock()
-        .ok()
-        .and_then(|g| g.clone())
-        .unwrap_or_else(|| "Workspace writes are live; copy-on-write is unavailable".into())
-}
-
 /// Network inside the bubblewrap profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Net {

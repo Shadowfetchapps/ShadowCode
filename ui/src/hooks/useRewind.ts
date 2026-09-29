@@ -103,4 +103,3 @@ export function useRewind({
     undo,
   };
 }
-export type RewindFlow = ReturnType<typeof useRewind>;

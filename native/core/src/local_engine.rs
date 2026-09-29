@@ -78,11 +78,20 @@ impl LocalEngineConfig {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.directories.len() <= 32,
-            "Too many local model directories"
+            "local_engine.directories holds at most 32 folders"
         );
-        ensure!(self.files.len() <= 64, "Too many local model files");
-        ensure!(self.imports.len() <= 64, "Too many imported local models");
-        ensure!(self.excluded.len() <= 1024, "Too many excluded local files");
+        ensure!(
+            self.files.len() <= 64,
+            "local_engine.files holds at most 64 files"
+        );
+        ensure!(
+            self.imports.len() <= 64,
+            "local_engine.imports holds at most 64 models"
+        );
+        ensure!(
+            self.excluded.len() <= 1024,
+            "local_engine.excluded holds at most 1024 files"
+        );
         if self.llama_binary.len() > 1024 || self.llama_binary.contains(['\n', '\0']) {
             bail!("local_engine.llama_binary is not a usable path");
         }
@@ -94,29 +103,29 @@ impl LocalEngineConfig {
         {
             ensure!(
                 usable_config_path(path),
-                "Local model paths must be absolute: {path}"
+                "local_engine paths must be absolute: {path}"
             );
         }
         for import in &self.imports {
             ensure!(
                 usable_config_path(&import.path),
-                "Imported model path must be absolute"
+                "local_engine.imports: path must be absolute"
             );
             if let Some(mmproj) = &import.mmproj {
                 ensure!(
                     usable_config_path(mmproj),
-                    "Imported projector path must be absolute"
+                    "local_engine.imports: mmproj must be absolute"
                 );
             }
             ensure!(
                 !import.name.trim().is_empty()
                     && import.name.len() <= 256
                     && !import.name.contains(['\n', '\0']),
-                "Imported model name must contain 1-256 bytes"
+                "local_engine.imports: name must contain 1-256 bytes"
             );
             ensure!(
                 import.source.len() <= 32,
-                "Imported model source is too long"
+                "local_engine.imports: source must be at most 32 bytes"
             );
         }
         ensure!(

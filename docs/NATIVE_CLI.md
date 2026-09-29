@@ -165,7 +165,27 @@ reads all settings, `config key` reads a dotted key, and `config key value`
 validates and saves JSON or text. Use the configured environment variable or
 desktop secret editor for credentials; never put secret values in shell history.
 `shadowcode config updates.check false` turns off the daily update check
-(Settings › About).
+(Settings › About). Every key, its default and its allowed values are in
+[config.example.yaml](../config.example.yaml); a value that can't be used is
+refused with its key and the fix.
+
+Backups, restore, repair and reset ([Your data](DATA.md)):
+
+```sh
+shadowcode backup                        # into ~/.local/share/shadow-agent/backups
+shadowcode backup --include-secrets -o /media/usb   # API keys too: keep it private
+shadowcode restore /media/usb/shadowcode-backup-20260929-120000          # check only
+shadowcode restore /media/usb/shadowcode-backup-20260929-120000 --yes    # restore
+shadowcode doctor --repair
+shadowcode reset                         # shows what would move
+shadowcode reset --yes
+```
+
+`restore` and `reset` finish right away when no ShadowCode runs on the
+profile; otherwise they are scheduled for the next start (cancel in Settings ›
+Your data). A restore first backs up what it replaces; `--include-secrets`
+also restores the backup's API keys. `reset` moves settings and history
+aside into `<folder>.reset-<time>` folders and deletes nothing.
 
 Shell completions come from the same definitions as `--help`; the Debian
 package installs them, and for the AppImage:

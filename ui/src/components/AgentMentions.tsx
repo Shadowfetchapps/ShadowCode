@@ -28,34 +28,3 @@ export function useAgentOptions(active: boolean): AgentInfo[] {
   }, [active, agents]);
   return agents || [];
 }
-
-export function AgentMentionMenu({
-  hits,
-  index,
-  onPick,
-}: {
-  hits: AgentInfo[];
-  index: number;
-  onPick: (agent: AgentInfo) => void;
-}) {
-  return (
-    <div className="slash-menu" role="listbox" aria-label="Subagents">
-      {hits.map((agent, i) => (
-        <div
-          role="option"
-          aria-selected={i === index}
-          className={`slash-hit ${i === index ? "on" : ""}`}
-          key={agent.name}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => onPick(agent)}
-        >
-          <strong>@{agent.name}</strong>
-          <span>
-            {agent.mode === "write" ? "Worktree · " : "Read-only · "}
-            {agent.description}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}

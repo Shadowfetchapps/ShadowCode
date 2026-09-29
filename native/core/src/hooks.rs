@@ -41,22 +41,22 @@ impl HookConfig {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.approved.len() <= 256,
-            "At most 256 hook approvals may be stored"
+            "hooks.approved holds at most 256 entries"
         );
         let mut seen = HashSet::new();
         for entry in &self.approved {
             ensure!(
                 Path::new(&entry.workspace).is_absolute() && entry.workspace.len() <= 4096,
-                "Hook workspace must be an absolute path"
+                "hooks.approved: workspace must be an absolute path"
             );
             validate_path(&entry.path)?;
             ensure!(
                 entry.hash.len() == 64 && entry.hash.bytes().all(|c| c.is_ascii_hexdigit()),
-                "Invalid hook content hash"
+                "hooks.approved: hash must be the 64-character hash shown by `shadowcode hooks --json`"
             );
             ensure!(
                 seen.insert((&entry.workspace, &entry.path)),
-                "Duplicate hook approval"
+                "hooks.approved lists the same hook twice"
             );
         }
         Ok(())

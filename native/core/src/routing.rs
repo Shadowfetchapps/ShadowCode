@@ -38,20 +38,23 @@ pub fn purpose(value: &str, mode: &str) -> Result<&'static str> {
     })
 }
 pub fn validate(value: &Value) -> Result<()> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("Routing must be an object"))?;
+    let object = value.as_object().ok_or_else(|| {
+        anyhow::anyhow!(
+            "routing must be a group of settings, for example `routing: {{enabled: false}}`"
+        )
+    })?;
     for (key, value) in object {
         if key == "enabled" {
             ensure!(value.is_boolean(), "routing.enabled must be a boolean");
         } else {
             ensure!(
                 PURPOSES.contains(&key.as_str()),
-                "Unknown routing purpose: {key}"
+                "routing.{key} is not a routing purpose; use one of {}",
+                PURPOSES.join(", ")
             );
             ensure!(
                 value.as_str().is_some_and(|value| value.len() <= 1024),
-                "Routing model IDs must be strings of at most 1024 bytes"
+                "routing.{key} must be a model id (text of at most 1024 bytes)"
             );
         }
     }

@@ -1367,10 +1367,21 @@ See [SUBAGENTS.md](SUBAGENTS.md).
   plus derived, read-only fields:
   `permissions.vendor_notes: {native, codex, claude, cursor, grok, antigravity, network}`
   and `network.offline`. Sections: `model`, `permissions`, `agent`, `ui`,
-  `onboarding`, `routing`, `mcp`, `hooks`, `verification`, `git`, `logging`,
+  `onboarding`, `routing`, `mcp`, `hooks`, `verification`,
   `trusted_workspaces`, `guardian`, `cli_agents`, `local_engine`, `network`,
-  `sandbox`, `checkpoints`, `limits`, `updates`, and others such as
-  `code_intel`, `voice`, `subagents`.
+  `sandbox`, `checkpoints`, `limits`, `updates`, and, when saved, `code_intel`
+  and `voice`. Every key and its default is documented in
+  `config.example.yaml`, which `native/core/tests/config_keys.rs` keeps
+  complete. Keys this version does not read are kept and returned as they are
+  (for example the retired `git` and `logging` groups, `ui.host`, `ui.port`,
+  `ui.ability` and `permissions.profile` from older configs, or keys from a
+  newer version); they have no effect.
+- Errors name the key and the fix: a value of the wrong type is
+  "`<path>/config.yaml: `agent.max_steps` has a value ShadowCode can't read
+  (…). Fix the value, or delete that line to use the default.", and a value
+  out of range is "`<path>/config.yaml needs a fix: agent.max_steps must be
+  between 1 and 1000; found 0`". `PUT /api/config` reports the same messages
+  without the file name.
 - `PUT /api/config {values, api_key?, api_key_env?}` → the configuration.
   `values` (an object, required) is merged into the saved file and the
   result validated; derived fields are ignored. `api_key` is never written to
@@ -1417,7 +1428,10 @@ Settings with API-visible meaning:
   (fails closed without it).
 - `checkpoints: {shell: true, vendor: true, keep: 1..10000 = 200,
   max_copy_files: ≤ 200000 = 5000, max_copy_bytes: ≤ 1 GiB = 64 MiB}`.
-- `updates.check: bool` (unset follows the packaged default).
+- `updates.check: bool|null` (`null` follows the packaged default).
+- `ui`: `theme` (`system|light|dark`) and the notification switches `notify`,
+  `notify_approval`, `notify_failed`, `notify_limit`, `notify_finished`
+  (default true) and `notify_sound` (default false).
 - `limits` ([plan limits](#plan-limits)); `local_engine` ([local models](#local-models)).
 
 The native `exec` tool result carries `sandbox: {mode: "bubblewrap"|"landlock"|"none",
