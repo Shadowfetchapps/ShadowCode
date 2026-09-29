@@ -141,6 +141,19 @@ test("a local conversation runs Claude Code, Codex and a local reviewer as roles
   await expect(cards.nth(1)).toContainText("These changes were applied");
   await axeClean(page, ".role-card");
   await page.screenshot({ path: "test-results/roles-cards.png" });
+  // Role cards fit a narrow window without sideways scrolling.
+  await page.setViewportSize({ width: 520, height: 900 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  const head = await cards
+    .nth(1)
+    .locator(".subagent-head")
+    .evaluate((el) => el.scrollWidth <= el.clientWidth + 1);
+  expect(head).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 1000 });
 
   const posts = await jobPosts(page);
   expect(posts).toHaveLength(2);

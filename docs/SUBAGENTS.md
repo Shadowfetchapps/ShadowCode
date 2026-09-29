@@ -273,7 +273,8 @@ the agent; you can still run it with `/skill <name>`.
 
 ```yaml
 subagents:
-  enabled: true      # offer spawn_agent to ShadowCode's own agent
+  enabled: true      # offer spawn_agent to ShadowCode's own agent (Plan →
+                     # Implement → Review runs its roles either way)
   max_parallel: 4    # subagents of one task running at once (1–8)
   max_depth: 1       # 1 = no grandchildren (0–3; 0 turns subagents off)
   max_turns: 24      # step limit when a definition sets none (1–200)

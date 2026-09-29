@@ -2002,6 +2002,15 @@ div.activity-step {
 .role-card .subagent-name {
   color: var(--accent);
 }
+/* A role's model, runner and cost give way before the status on narrow
+ * windows. */
+.role-card .subagent-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .role-verdict {
   flex: none;
   border-radius: var(--pill);

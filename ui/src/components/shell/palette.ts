@@ -64,6 +64,11 @@ export function paletteItems(a: PaletteActions): PaletteItem[] {
     { id: "accounts", label: "Accounts", run: () => a.settings("accounts") },
     { id: "local", label: "Local models", run: () => a.settings("local") },
     {
+      id: "roles",
+      label: "Roles · a model to plan, implement, review and explore",
+      run: () => a.settings("roles"),
+    },
+    {
       id: "code",
       label: "Code intelligence · language servers and search",
       run: () => a.settings("code"),

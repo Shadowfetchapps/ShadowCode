@@ -6,6 +6,7 @@ import { TOOL_VIEWS } from "../ToolsTab";
 const SETTINGS_SECTIONS = [
   "accounts",
   "local",
+  "roles",
   "code",
   "voice",
   "permissions",
