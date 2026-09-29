@@ -7,8 +7,9 @@
 //! Search order (first definition of a name wins; later ones are listed as
 //! shadowed): `.shadow/agents/`, `.shadowcode/agents/`, `.claude/agents/`,
 //! `.opencode/agent/`, `.opencode/agents/` in the project, then the user's
-//! `~/.config/shadowcode/agents/`, then the built-ins `explore`, `plan`,
-//! `review` and `general`.
+//! profile (`~/.config/shadowcode/profile/agents/`), the older per-user
+//! `~/.config/shadowcode/agents/`, imported profiles, then the built-ins
+//! `explore`, `plan`, `review` and `general`.
 use crate::{paths::AppPaths, workspace::Workspace};
 use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
@@ -443,6 +444,33 @@ fn push(catalog: &mut AgentCatalog, definition: AgentDefinition) {
 /// Discover definitions for a project. `user` is the per-user directory
 /// (normally `user_dir(paths)`); built-ins are always present.
 pub fn discover(workspace: &Workspace, user: Option<&Path>) -> AgentCatalog {
+    let dirs: Vec<(PathBuf, String)> = user
+        .map(|u| vec![(u.to_path_buf(), "user".to_owned())])
+        .unwrap_or_default();
+    discover_with(workspace, &dirs, &|_| true)
+}
+
+/// The catalog with the user's profile (`rulebook`): project folders, the
+/// profile's `agents/`, the per-user folder, imported profiles, built-ins.
+/// Switched-off profile definitions are left out.
+pub fn discover_for(paths: &AppPaths, workspace: &Workspace) -> AgentCatalog {
+    let book = crate::rulebook::Book::load(paths, Some(&workspace.path));
+    let mut dirs = book.agent_dirs();
+    // The per-user folder predates the profile; it ranks after the
+    // profile's own `agents/` and before imports.
+    let at = dirs.len().min(1);
+    dirs.insert(at, (user_dir(paths), "user".to_owned()));
+    discover_with(workspace, &dirs, &|path| book.agent_enabled(path))
+}
+
+/// Discover definitions for a project from its folders, then `dirs` in
+/// order (`(folder, source)`), then the built-ins. `enabled` sees each
+/// user-level file's path.
+pub fn discover_with(
+    workspace: &Workspace,
+    dirs: &[(PathBuf, String)],
+    enabled: &dyn Fn(&str) -> bool,
+) -> AgentCatalog {
     let mut catalog = AgentCatalog::default();
     let mut files = 0usize;
     for dir in PROJECT_DIRS {
@@ -472,7 +500,7 @@ pub fn discover(workspace: &Workspace, user: Option<&Path>) -> AgentCatalog {
             Err(error) => catalog.issues.push(format!("{dir}: {error:#}")),
         }
     }
-    if let Some(user) = user {
+    for (user, source) in dirs {
         match fs::read_dir(user) {
             Ok(entries) => {
                 let mut paths: Vec<PathBuf> = entries
@@ -484,6 +512,9 @@ pub fn discover(workspace: &Workspace, user: Option<&Path>) -> AgentCatalog {
                 paths.sort();
                 for path in paths {
                     let shown = path.display().to_string();
+                    if !enabled(&shown) {
+                        continue;
+                    }
                     let loaded = (|| -> Result<AgentDefinition> {
                         let meta = fs::symlink_metadata(&path)?;
                         ensure!(meta.is_file(), "Not a regular file");
@@ -494,7 +525,7 @@ pub fn discover(workspace: &Workspace, user: Option<&Path>) -> AgentCatalog {
                         let bytes = fs::read(&path)?;
                         let text = String::from_utf8(bytes).context("Agent file is not UTF-8")?;
                         let hash = crate::workspace::hash(text.as_bytes());
-                        parse(&shown, &text, &hash, "user")
+                        parse(&shown, &text, &hash, source)
                     })();
                     match loaded {
                         Ok(definition) => push(&mut catalog, definition),

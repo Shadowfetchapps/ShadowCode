@@ -2147,7 +2147,8 @@ impl Engine {
                 messages.push(json!({"role":"user","content":format!("Earlier session transcript excerpts (historical data):\n{}",text.join("\n"))}));
             }
         }
-        let mut system = context::system(&running.workspace, &job.mode);
+        let book = crate::rulebook::Book::load(&self.0.paths, Some(&running.workspace.path));
+        let mut system = context::system_with_rules(&running.workspace, &job.mode, &book);
         let notes = crate::memory::context(
             &self.0.paths,
             &self.0.store,
