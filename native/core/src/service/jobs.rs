@@ -64,11 +64,19 @@ struct JobActionBody {
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
+struct AlwaysBody {
+    workspace: Text,
+    command: Text,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
 struct DecisionBody {
     session_id: Text,
     decision: Text,
-    /// `once` (default) or `task`: allow the same kind of action for the
-    /// rest of the task.
+    /// `once` (default), `task` (the same kind of action for the rest of the
+    /// task) or `project` (this exact command from now on in this project,
+    /// when the approval offers it).
     scope: Text,
     /// With `deny`: a reason the model reads.
     note: Text,
@@ -81,6 +89,14 @@ struct VerificationRefreshBody {
 }
 
 impl Service {
+    /// The project an "Always allow" request names, or the selected one.
+    fn always_workspace(&self, value: &str) -> Result<std::path::PathBuf> {
+        Ok(if value.is_empty() {
+            self.workspace()?
+        } else {
+            Workspace::open(&expand_path(value)?)?.path
+        })
+    }
     pub(super) async fn job_routes(&self, call: &Arc<Call>) -> Result<Value> {
         let parts = call.parts();
         if call.method == "POST" && call.path == "/api/jobs/verification-refresh" {
@@ -150,6 +166,18 @@ impl Service {
                     json!({"approvals":self.engine.approvals().list((!call.q("session_id").is_empty()).then_some(call.q("session_id")))}),
                 )
             }
+            ("GET", "/api/approvals/always") => {
+                let workspace = self.always_workspace(call.q("workspace"))?;
+                let commands = crate::approvals::always::list(&store, &workspace)?;
+                return Ok(json!({"workspace":workspace,"commands":commands}));
+            }
+            ("DELETE", "/api/approvals/always") => {
+                let body: AlwaysBody = call.body()?;
+                let workspace = self.always_workspace(body.workspace.as_str())?;
+                let commands =
+                    crate::approvals::always::remove(&store, &workspace, body.command.as_str())?;
+                return Ok(json!({"workspace":workspace,"commands":commands}));
+            }
             _ => {}
         }
         match call.family() {
@@ -195,8 +223,8 @@ impl Service {
                     "Choose approve or deny"
                 );
                 ensure!(
-                    matches!(body.scope.as_str(), "" | "once" | "task"),
-                    "Choose once or task"
+                    matches!(body.scope.as_str(), "" | "once" | "task" | "project"),
+                    "Choose once, task or project"
                 );
                 let allow = body.decision.as_str() == "approve";
                 Ok(json!(self.engine.approvals().answer(
@@ -207,6 +235,7 @@ impl Service {
                         for_task: allow && body.scope.as_str() == "task",
                         note: body.note.non_empty().map(str::to_owned),
                         automatic: false,
+                        for_project: allow && body.scope.as_str() == "project",
                     }
                 )?))
             }

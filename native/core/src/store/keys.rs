@@ -61,6 +61,11 @@ pub fn second_opinion_index(workspace: &Path) -> String {
 pub fn second_opinion_prefs(workspace: &Path) -> String {
     format!("second_opinion_prefs:{}", workspace.display())
 }
+/// `native_meta`: a project's "Always allow in this project" commands
+/// (JSON `{commands: [{command, added_at}]}`, `approvals::always`).
+pub fn always_allow(workspace: &Path) -> String {
+    format!("always_allow:{}", workspace.display())
+}
 /// `native_meta`: set once `goals.db` from before 0.28 was imported.
 pub const LEGACY_GOALS_IMPORTED: &str = "legacy_goals_imported";
 /// `native_meta`: set once the pre-0.28 background process list was imported.

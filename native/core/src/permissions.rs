@@ -231,7 +231,25 @@ pub fn check(config: &PermissionsConfig, tool: &str, args: &Value) -> Decision {
             if config.require_approval_for_dangerous
                 && words.iter().any(|word| DANGEROUS.contains(word))
             {
-                Ask("Potentially destructive shell command".into())
+                return Ask("Potentially destructive shell command".into());
+            }
+            // The parsed command: a step that deletes, reaches outside the
+            // project, runs downloaded code or needs admin rights still asks,
+            // and so does a command with a syntax ShadowCode cannot read.
+            // Relative paths count as inside the project; this only adds
+            // prompts.
+            let root = std::path::Path::new("/.shadowcode-project");
+            let cwd = args["cwd"].as_str().map(|cwd| root.join(cwd));
+            let assessment = crate::approvals::assess::command(command, root, cwd.as_deref());
+            let risky = assessment.risk >= crate::approvals::assess::Risk::Destructive
+                || assessment.known_outside
+                || !assessment.complete;
+            if config.require_approval_for_dangerous && risky {
+                Ask(format!(
+                    "{} ({})",
+                    assessment.explanation.trim_end_matches('.'),
+                    assessment.risk.label()
+                ))
             } else {
                 Allow
             }

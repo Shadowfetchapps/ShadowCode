@@ -353,6 +353,55 @@ async fn rewind_never_deletes_files_that_were_ignored_before_the_step() {
     assert_eq!(read("fresh.txt"), None);
 }
 
+/// Small ignored files that are costly to lose (`.env`, a local SQLite
+/// database) are saved before a command and brought back by rewind, while
+/// dependency folders are left alone.
+#[tokio::test]
+async fn ignored_env_files_and_local_databases_come_back_after_rewind() {
+    let f = fixture(shell_config(), |project| {
+        repo(project);
+        fs::write(
+            project.join(".gitignore"),
+            "*.log\n.env\ndata/\nnode_modules/\n",
+        )
+        .unwrap();
+        git(project, &["commit", "-qam", "ignore local files"]);
+        fs::write(project.join(".env"), "TOKEN=local-only\n").unwrap();
+        fs::create_dir(project.join("data")).unwrap();
+        fs::write(project.join("data/dev.sqlite3"), b"SQLite format 3\0rows").unwrap();
+        fs::create_dir(project.join("node_modules")).unwrap();
+        fs::write(project.join("node_modules/pkg.db"), "dependency").unwrap();
+    });
+    let result = exec(
+        &f.tools,
+        "rm .env && printf broken > data/dev.sqlite3 && rm node_modules/pkg.db",
+    )
+    .await;
+    assert!(result.success, "{} {}", result.error, result.output);
+    let point = &result.output["checkpoint"];
+    assert_eq!(
+        sorted(&point["ignored_saved"]),
+        [".env", "data/dev.sqlite3"],
+        "{point}"
+    );
+    assert!(
+        sorted(&point["paths"]).contains(&".env".to_owned()),
+        "{point}"
+    );
+    let ws = Workspace::open(&f.project).unwrap();
+    checkpoint::restore(&f.store, &ws, &f.task).unwrap();
+    assert_eq!(
+        fs::read_to_string(f.project.join(".env")).unwrap(),
+        "TOKEN=local-only\n"
+    );
+    assert_eq!(
+        fs::read(f.project.join("data/dev.sqlite3")).unwrap(),
+        b"SQLite format 3\0rows"
+    );
+    // Dependency folders are never read ahead, so they are not restored.
+    assert!(!f.project.join("node_modules/pkg.db").exists());
+}
+
 /// A permission-only change (`chmod`) is put back by rewind.
 #[cfg(unix)]
 #[tokio::test]

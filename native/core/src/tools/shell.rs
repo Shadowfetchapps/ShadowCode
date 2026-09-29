@@ -101,6 +101,7 @@ impl ToolExecutor {
                     )?;
                     summary["source"] = json!("shell");
                     summary["changed"] = json!(outcome.paths);
+                    summary["ignored_saved"] = json!(outcome.ignored);
                     self.events.emit("checkpoint.updated", summary)?;
                 }
                 let mut note = outcome.to_json();

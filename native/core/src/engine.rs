@@ -1969,6 +1969,7 @@ impl Engine {
                     {
                         summary["source"] = json!("vendor");
                         summary["changed"] = json!(outcome.paths);
+                        summary["ignored_saved"] = json!(outcome.ignored);
                         let _ = events.emit("checkpoint.updated", summary);
                     }
                 }

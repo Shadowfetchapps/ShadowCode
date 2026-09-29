@@ -25,6 +25,8 @@ fn approval() -> Approval {
         preview: serde_json::Value::Null,
         grant: String::new(),
         note: true,
+        assessment: serde_json::Value::Null,
+        always: String::new(),
     }
 }
 

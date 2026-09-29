@@ -1302,6 +1302,37 @@ async fn request_approval(
     prompt: ApprovalPrompt,
     deny_note: bool,
 ) -> Result<Answer> {
+    let assessment = crate::approvals::assess::vendor(
+        &prompt.kind,
+        &prompt.tool,
+        &prompt.command,
+        &prompt.arguments,
+        &request.options.workspace,
+    );
+    let always_form = assessment
+        .always
+        .clone()
+        .filter(|_| prompt.kind == "command");
+    if let Some(form) = &always_form {
+        if crate::approvals::always::covering(
+            &request.events.store,
+            &request.options.workspace,
+            form,
+        )?
+        .is_some()
+        {
+            // "Always allow in this project" covers this exact command.
+            request.events.emit(
+                "approval.granted",
+                json!({"tool":prompt.tool,"job_id":request.job_id,"grant":"always allowed in this project","scope":"project","command":form}),
+            )?;
+            return Ok(Answer {
+                allow: true,
+                automatic: true,
+                ..Answer::default()
+            });
+        }
+    }
     let grant = vendor_grant(&prompt);
     let preview = crate::approvals::preview::vendor(
         &request.options.workspace,
@@ -1326,6 +1357,11 @@ async fn request_approval(
         preview,
         grant: String::new(),
         note: deny_note,
+        assessment: assessment.to_json(),
+        always: always_form
+            .as_deref()
+            .map(crate::approvals::always::label)
+            .unwrap_or_default(),
     };
     let tool = record.tool.clone();
     let mut pending_error = None;
@@ -1355,7 +1391,24 @@ async fn request_approval(
             json!({"tool":tool,"job_id":request.job_id,"grant":grant.map(|g|g.label).unwrap_or_default()}),
         )?;
     } else {
-        let mut resolved = json!({"tool":"vendor","approved":answer.allow,"job_id":request.job_id,"scope":if answer.for_task {"task"} else {"once"}});
+        if answer.for_project {
+            if let Some(form) = &always_form {
+                crate::approvals::always::add(
+                    &request.events.store,
+                    &request.options.workspace,
+                    form,
+                )?;
+            }
+        }
+        let scope = if answer.for_project {
+            "project"
+        } else if answer.for_task {
+            "task"
+        } else {
+            "once"
+        };
+        let mut resolved =
+            json!({"tool":"vendor","approved":answer.allow,"job_id":request.job_id,"scope":scope});
         if let Some(note) = &answer.note {
             resolved["note"] = json!(note);
         }

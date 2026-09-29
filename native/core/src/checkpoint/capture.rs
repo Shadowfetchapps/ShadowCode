@@ -12,7 +12,13 @@
 //! Folders without Git are copied, within `checkpoints.max_copy_files` and
 //! `max_copy_bytes`; a larger folder is reported as not covered.
 //!
-//! Not covered: Git-ignored files, files over 4 MB, symlinks, submodules,
+//! Small Git-ignored files that are costly to lose (`.env*`, local SQLite
+//! databases, keys, `*.local` settings; at most 10 MB each and 50 MB in all,
+//! outside dependency and build folders) are read before the step and, if
+//! the step deletes or changes them, recorded too, so Rewind brings them
+//! back. They are kept in ShadowCode's private database, never logged.
+//!
+//! Not covered: other Git-ignored files, files over 4 MB, symlinks, submodules,
 //! files using a Git filter (for example LFS), empty directories, and Git
 //! state itself (HEAD, branches, the index, stashes). A file that was ignored
 //! before the step and is no longer ignored after it (the step changed
@@ -70,6 +76,182 @@ struct GitBase {
     large_before: HashSet<String>,
     /// Ignored files, and ignored folders (ending in `/`), before the step.
     ignored_before: HashSet<String>,
+    /// Small ignored files worth keeping, read before the step.
+    precious: Vec<Precious>,
+}
+
+/// A small ignored file (a secret or a local database) read before the
+/// step, so Rewind can bring it back if the step deletes or changes it.
+struct Precious {
+    path: String,
+    bytes: Vec<u8>,
+    mode: u32,
+}
+
+/// Largest ignored file kept before a step, and the most kept in all.
+const PRECIOUS_FILE_BYTES: u64 = 10 * 1024 * 1024;
+const PRECIOUS_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
+const PRECIOUS_MAX_FILES: usize = 200;
+/// Entries looked at inside ignored folders, in all.
+const PRECIOUS_WALK_ENTRIES: usize = 5_000;
+/// Ignored folders that hold dependencies or build output, never walked.
+const PRECIOUS_SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "target",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    "coverage",
+    ".cache",
+    "out",
+    "vendor",
+    ".gradle",
+    ".terraform",
+    ".direnv",
+];
+
+/// A file name worth keeping when it is ignored: environment files, local
+/// databases, keys and `*.local` settings.
+pub fn precious_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == ".env"
+        || name.starts_with(".env.")
+        || name.ends_with(".env")
+        || [".sqlite", ".sqlite3", ".db", ".pem", ".key", ".local"]
+            .iter()
+            .any(|ext| name.ends_with(ext))
+        || name.contains(".local.")
+}
+
+/// Read the precious files among `ignored` (paths relative to `dir`).
+fn precious_files(dir: &Path, ignored: &HashSet<String>) -> Vec<Precious> {
+    let mut found = Vec::new();
+    let mut total = 0u64;
+    let mut budget = PRECIOUS_WALK_ENTRIES;
+    let mut entries: Vec<&String> = ignored.iter().collect();
+    entries.sort();
+    for entry in entries {
+        if found.len() >= PRECIOUS_MAX_FILES || budget == 0 {
+            break;
+        }
+        if let Some(folder) = entry.strip_suffix('/') {
+            if folder
+                .split('/')
+                .any(|part| PRECIOUS_SKIP_DIRS.contains(&part))
+            {
+                continue;
+            }
+            walk_precious(dir, folder, 0, &mut found, &mut total, &mut budget);
+        } else {
+            keep_precious(dir, entry, &mut found, &mut total);
+        }
+    }
+    found
+}
+
+fn walk_precious(
+    dir: &Path,
+    folder: &str,
+    depth: usize,
+    found: &mut Vec<Precious>,
+    total: &mut u64,
+    budget: &mut usize,
+) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(read) = std::fs::read_dir(dir.join(folder)) else {
+        return;
+    };
+    for item in read.flatten() {
+        if *budget == 0 || found.len() >= PRECIOUS_MAX_FILES {
+            return;
+        }
+        *budget -= 1;
+        let name = item.file_name().to_string_lossy().into_owned();
+        let relative = format!("{folder}/{name}");
+        let Ok(kind) = item.file_type() else { continue };
+        if kind.is_dir() && !PRECIOUS_SKIP_DIRS.contains(&name.as_str()) {
+            walk_precious(dir, &relative, depth + 1, found, total, budget);
+        } else if kind.is_file() {
+            keep_precious(dir, &relative, found, total);
+        }
+    }
+}
+
+fn keep_precious(dir: &Path, relative: &str, found: &mut Vec<Precious>, total: &mut u64) {
+    let name = relative.rsplit('/').next().unwrap_or(relative);
+    if !precious_name(name) || found.len() >= PRECIOUS_MAX_FILES {
+        return;
+    }
+    let path = dir.join(relative);
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return;
+    };
+    if !meta.is_file()
+        || meta.len() > PRECIOUS_FILE_BYTES
+        || *total + meta.len() > PRECIOUS_TOTAL_BYTES
+    {
+        return;
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    *total += bytes.len() as u64;
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o777
+    };
+    #[cfg(not(unix))]
+    let mode = 0o644;
+    found.push(Precious {
+        path: relative.to_owned(),
+        bytes,
+        mode,
+    });
+}
+
+/// Record every precious file the step deleted or changed.
+fn record_precious(
+    store: &Store,
+    workspace: &Workspace,
+    task: &str,
+    dir: &Path,
+    precious: Vec<Precious>,
+) -> Result<Vec<String>> {
+    let mut saved = Vec::new();
+    for file in precious {
+        let path = dir.join(&file.path);
+        let now = match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() => std::fs::read(&path).ok(),
+            Ok(_) => Some(Vec::new()),
+            Err(_) => None,
+        };
+        if now.as_deref() == Some(file.bytes.as_slice()) {
+            continue;
+        }
+        let current = now.as_deref().map(hash);
+        record_external(
+            store,
+            workspace,
+            task,
+            &file.path,
+            Some(&file.bytes),
+            Some(file.mode),
+            current.as_deref(),
+        )?;
+        saved.push(file.path);
+    }
+    Ok(saved)
 }
 impl GitBase {
     fn was_ignored(&self, relative: &str) -> bool {
@@ -97,6 +279,9 @@ pub struct Outcome {
     pub skipped: Vec<Value>,
     pub unavailable: Option<String>,
     pub reference: Option<String>,
+    /// Ignored files (such as `.env`) the step deleted or changed, saved
+    /// before it so Rewind brings them back. Also in `paths`.
+    pub ignored: Vec<String>,
 }
 impl Outcome {
     pub fn to_json(&self) -> Value {
@@ -106,6 +291,7 @@ impl Outcome {
             "skipped": self.skipped,
             "unavailable": self.unavailable,
             "ref": self.reference,
+            "ignored_saved": self.ignored,
         })
     }
     /// A sentence for the transcript when some changes cannot be rewound.
@@ -490,7 +676,7 @@ async fn git_before(
         }
     };
     // Ignored folders are listed once (`--directory`), not file by file.
-    let ignored_before = git(
+    let ignored_before: HashSet<String> = git(
         dir,
         &[
             "ls-files",
@@ -509,6 +695,12 @@ async fn git_before(
     .filter(|s| !s.is_empty())
     .filter_map(|raw| std::str::from_utf8(raw).ok().map(str::to_owned))
     .collect();
+    let precious = {
+        let (dir, ignored) = (dir.to_path_buf(), ignored_before.clone());
+        tokio::task::spawn_blocking(move || precious_files(&dir, &ignored))
+            .await
+            .unwrap_or_default()
+    };
     let tree = line(git(dir, &["write-tree"], Some(&index)).await?);
     let message = format!("ShadowCode checkpoint before {label}");
     let mut args = vec![
@@ -537,6 +729,7 @@ async fn git_before(
         reference,
         large_before,
         ignored_before,
+        precious,
     }))
 }
 
@@ -684,6 +877,9 @@ async fn git_after(
     let (paths, skipped) = record(store, workspace, task, changes)?;
     outcome.paths = paths;
     outcome.skipped = skipped;
+    let saved = record_precious(store, workspace, task, dir, base.precious)?;
+    outcome.paths.extend(saved.iter().cloned());
+    outcome.ignored = saved;
     if outcome.paths.is_empty() && outcome.skipped.is_empty() {
         // Nothing changed: the checkpoint ref is not worth keeping.
         if let Some(name) = &base.reference {

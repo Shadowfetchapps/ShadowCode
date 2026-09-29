@@ -1,0 +1,715 @@
+//! A shell command split into the simple commands it would run, for
+//! approval decisions and their plain-words explanation.
+//!
+//! The command is parsed with tree-sitter-bash: pipelines, `&&`/`||`/`;`
+//! lists, subshells, command and process substitution, heredocs and
+//! redirects. Every simple command becomes one [`Simple`], in source order,
+//! including the ones inside `$(…)` and `<(…)`. Nothing runs and nothing is
+//! expanded: a word that depends on a variable or a substitution is marked
+//! `dynamic`.
+//!
+//! Parsing fails closed. A command with a syntax error, a construct this
+//! module does not follow, or more than [`MAX_COMMANDS`] steps is returned
+//! with `complete: false`, and callers treat it as needing approval and
+//! never offer to allow it permanently.
+use tree_sitter::{Node, Parser};
+
+/// Longest command text that is parsed at all.
+pub const MAX_BYTES: usize = 64 * 1024;
+/// Most simple commands followed in one command line.
+pub const MAX_COMMANDS: usize = 200;
+
+/// One word of a command, with quotes removed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Word {
+    pub text: String,
+    /// Depends on a variable, a substitution or arithmetic: its value is not
+    /// known before the command runs. `text` then holds the source.
+    pub dynamic: bool,
+    /// Contains an unquoted glob (`*`, `?`, `[`).
+    pub glob: bool,
+}
+
+/// A redirect of a simple command's input or output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Redirect {
+    /// `>`, `>>`, `<`, `&>`, `&>>`, `>&`, `<&`, `>|`, `<<`, `<<-` or `<<<`.
+    pub op: String,
+    /// The file descriptor written before the operator (`2` in `2>&1`).
+    pub fd: Option<String>,
+    /// Where it goes or comes from; `None` for a heredoc.
+    pub target: Option<Word>,
+    /// A heredoc's or here-string's text, the command's input.
+    pub input: Option<String>,
+}
+impl Redirect {
+    /// Output into a file (not a descriptor duplicate, not `/dev/null`).
+    pub fn writes_file(&self) -> Option<&Word> {
+        let target = self.target.as_ref()?;
+        let output = matches!(self.op.as_str(), ">" | ">>" | "&>" | "&>>" | ">|")
+            || (self.op == ">&" && !target.text.chars().all(|c| c.is_ascii_digit() || c == '-'));
+        (output && target.text != "/dev/null").then_some(target)
+    }
+    pub fn appends(&self) -> bool {
+        matches!(self.op.as_str(), ">>" | "&>>")
+    }
+}
+
+/// One simple command: a program with its arguments.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Simple {
+    /// `NAME=value` assignments before the program (or alone).
+    pub assignments: Vec<String>,
+    /// The program followed by its arguments; empty for a bare assignment.
+    pub words: Vec<Word>,
+    pub redirects: Vec<Redirect>,
+    /// Which pipeline it belongs to, its place in it and the pipeline's
+    /// length; `None` outside a pipeline.
+    pub pipeline: Option<(usize, usize, usize)>,
+    /// Runs inside `$(…)`, backticks or `<(…)`, to produce another
+    /// command's words or input.
+    pub substituted: bool,
+}
+impl Simple {
+    pub fn program(&self) -> Option<&str> {
+        self.words.first().map(|w| w.text.as_str())
+    }
+    /// The program's file name (`/usr/bin/rm` → `rm`).
+    pub fn base(&self) -> &str {
+        let name = self.program().unwrap_or("");
+        name.rsplit('/').next().unwrap_or(name)
+    }
+    pub fn args(&self) -> &[Word] {
+        self.words.get(1..).unwrap_or(&[])
+    }
+    /// The heredoc or here-string given as input, if any.
+    pub fn input(&self) -> Option<&str> {
+        self.redirects.iter().find_map(|r| r.input.as_deref())
+    }
+}
+
+/// A parsed command line.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Script {
+    pub commands: Vec<Simple>,
+    /// Parsed without errors and within the limits.
+    pub complete: bool,
+    /// Why it is not complete, in words.
+    pub problem: Option<String>,
+    /// Loops, conditions, functions or subshells: the steps may run more
+    /// than once or not at all.
+    pub control_flow: bool,
+}
+
+/// Parse `source` as a Bash command line.
+pub fn parse(source: &str) -> Script {
+    let mut script = Script {
+        complete: true,
+        ..Script::default()
+    };
+    if source.len() > MAX_BYTES {
+        script.complete = false;
+        script.problem = Some("the command is too long to read ahead".into());
+        return script;
+    }
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        script.complete = false;
+        script.problem = Some("the shell grammar is unavailable".into());
+        return script;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        script.complete = false;
+        script.problem = Some("the command could not be read".into());
+        return script;
+    };
+    let root = tree.root_node();
+    if root.has_error() {
+        script.complete = false;
+        script.problem = Some("the command has a syntax error".into());
+    }
+    let mut walker = Walker {
+        source: source.as_bytes(),
+        script: &mut script,
+        pipelines: 0,
+    };
+    walker.statement(root, None, false);
+    if script.commands.len() > MAX_COMMANDS {
+        script.commands.truncate(MAX_COMMANDS);
+        script.complete = false;
+        script.problem = Some("the command has too many steps to read ahead".into());
+    }
+    script
+}
+
+struct Walker<'a> {
+    source: &'a [u8],
+    script: &'a mut Script,
+    pipelines: usize,
+}
+
+impl Walker<'_> {
+    fn text(&self, node: Node) -> String {
+        node.utf8_text(self.source).unwrap_or("").to_owned()
+    }
+    fn unsupported(&mut self, what: &str) {
+        self.script.complete = false;
+        if self.script.problem.is_none() {
+            self.script.problem = Some(format!("the command uses {what}"));
+        }
+    }
+
+    /// Walk a statement; `pipe` is its place in a pipeline.
+    fn statement(&mut self, node: Node, pipe: Option<(usize, usize, usize)>, substituted: bool) {
+        if self.script.commands.len() > MAX_COMMANDS {
+            return;
+        }
+        match node.kind() {
+            "command" => self.command(node, pipe, substituted, Vec::new()),
+            "redirected_statement" => self.redirected(node, pipe, substituted),
+            "pipeline" => {
+                let parts: Vec<Node> = named_children(node)
+                    .into_iter()
+                    .filter(|c| c.kind() != "comment")
+                    .collect();
+                self.pipelines += 1;
+                let id = self.pipelines;
+                let len = parts.len();
+                for (index, part) in parts.into_iter().enumerate() {
+                    self.statement(part, Some((id, index, len)), substituted);
+                }
+            }
+            "variable_assignment" => {
+                let text = self.text(node);
+                self.collect_substitutions(node);
+                self.script.commands.push(Simple {
+                    assignments: vec![text],
+                    pipeline: pipe,
+                    substituted,
+                    ..Simple::default()
+                });
+            }
+            "declaration_command" | "unset_command" => {
+                // `export A=1`, `local x`, `unset y`: the shell's own state.
+                let words = named_children(node)
+                    .into_iter()
+                    .map(|c| self.word(c))
+                    .collect::<Vec<_>>();
+                let keyword = self
+                    .text(node)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("export")
+                    .to_owned();
+                let mut all = vec![Word {
+                    text: keyword,
+                    dynamic: false,
+                    glob: false,
+                }];
+                all.extend(words);
+                self.collect_substitutions(node);
+                self.script.commands.push(Simple {
+                    words: all,
+                    pipeline: pipe,
+                    substituted,
+                    ..Simple::default()
+                });
+            }
+            "comment" | "heredoc_body" | "heredoc_start" | "heredoc_end" => {}
+            "program" | "list" | "compound_statement" | "negated_command" => {
+                for child in named_children(node) {
+                    self.statement(child, pipe, substituted);
+                }
+            }
+            "subshell" => {
+                self.script.control_flow = true;
+                for child in named_children(node) {
+                    self.statement(child, pipe, substituted);
+                }
+            }
+            "if_statement"
+            | "elif_clause"
+            | "else_clause"
+            | "while_statement"
+            | "for_statement"
+            | "c_style_for_statement"
+            | "case_statement"
+            | "case_item"
+            | "do_group"
+            | "function_definition" => {
+                self.script.control_flow = true;
+                for child in named_children(node) {
+                    match child.kind() {
+                        // Loop variables and case patterns are not commands.
+                        "variable_name" | "word" | "string" | "raw_string" | "concatenation"
+                        | "number" | "simple_expansion" | "expansion" | "extglob_pattern" => {
+                            self.collect_substitutions(child)
+                        }
+                        _ => self.statement(child, pipe, substituted),
+                    }
+                }
+            }
+            "test_command" => {
+                // `[[ … ]]` only tests, but may hold substitutions.
+                self.collect_substitutions(node);
+                self.script.commands.push(Simple {
+                    words: vec![Word {
+                        text: "[[".into(),
+                        dynamic: false,
+                        glob: false,
+                    }],
+                    pipeline: pipe,
+                    substituted,
+                    ..Simple::default()
+                });
+            }
+            "command_substitution" | "process_substitution" => {
+                for child in named_children(node) {
+                    self.statement(child, None, true);
+                }
+            }
+            "ERROR" => self.unsupported("a syntax ShadowCode cannot read"),
+            other if other.ends_with("_expression") || other == "arithmetic_expansion" => {
+                self.collect_substitutions(node);
+            }
+            other => {
+                let what = format!("`{other}`");
+                self.unsupported(&what);
+                self.collect_substitutions(node);
+            }
+        }
+    }
+
+    fn redirected(&mut self, node: Node, pipe: Option<(usize, usize, usize)>, substituted: bool) {
+        let mut redirects = Vec::new();
+        let mut after = Vec::new();
+        let mut body = None;
+        let mut cursor = node.walk();
+        for (index, child) in node.named_children(&mut cursor).enumerate() {
+            let field = node.field_name_for_named_child(index as u32);
+            if field == Some("body") {
+                body = Some(child);
+                continue;
+            }
+            match child.kind() {
+                "file_redirect" | "herestring_redirect" => redirects.push(self.redirect(child)),
+                "heredoc_redirect" => {
+                    let (redirect, rest) = self.heredoc(child);
+                    redirects.push(redirect);
+                    after.extend(rest);
+                }
+                _ if body.is_none() => body = Some(child),
+                _ => after.push(child),
+            }
+        }
+        let Some(body) = body else {
+            self.unsupported("a redirect without a command");
+            return;
+        };
+        if body.kind() == "command" {
+            self.command(body, pipe, substituted, redirects);
+            // `cat <<EOF | sh`: the grammar puts `| sh` inside the heredoc
+            // redirect; it continues the command's pipeline.
+            if pipe.is_none() {
+                if let Some(index) = after.iter().position(|n| n.kind() == "pipeline") {
+                    let rest = named_children(after.remove(index));
+                    self.pipelines += 1;
+                    let id = self.pipelines;
+                    let len = rest.len() + 1;
+                    if let Some(first) = self.script.commands.last_mut() {
+                        first.pipeline = Some((id, 0, len));
+                    }
+                    for (position, part) in rest.into_iter().enumerate() {
+                        self.statement(part, Some((id, position + 1, len)), substituted);
+                    }
+                }
+            }
+        } else {
+            // A compound statement with redirects: every step shares them.
+            let start = self.script.commands.len();
+            self.statement(body, pipe, substituted);
+            for command in &mut self.script.commands[start..] {
+                command.redirects.extend(redirects.iter().cloned());
+            }
+        }
+        for node in after {
+            self.statement(node, pipe, substituted);
+        }
+    }
+
+    fn command(
+        &mut self,
+        node: Node,
+        pipe: Option<(usize, usize, usize)>,
+        substituted: bool,
+        mut redirects: Vec<Redirect>,
+    ) {
+        let mut simple = Simple {
+            pipeline: pipe,
+            substituted,
+            ..Simple::default()
+        };
+        let mut cursor = node.walk();
+        for (index, child) in node.named_children(&mut cursor).enumerate() {
+            match (node.field_name_for_named_child(index as u32), child.kind()) {
+                (Some("name"), _) => {
+                    let word = named_children(child)
+                        .first()
+                        .map(|n| self.word(*n))
+                        .unwrap_or_else(|| self.word(child));
+                    simple.words.insert(0, word);
+                }
+                (Some("redirect"), _) | (_, "file_redirect" | "herestring_redirect") => {
+                    redirects.push(self.redirect(child))
+                }
+                (_, "variable_assignment") => {
+                    simple.assignments.push(self.text(child));
+                    self.collect_substitutions(child);
+                }
+                (_, "subshell") => self.statement(child, None, true),
+                (_, "comment") => {}
+                _ => simple.words.push(self.word(child)),
+            }
+        }
+        simple.redirects = redirects;
+        self.script.commands.push(simple);
+    }
+
+    fn redirect(&mut self, node: Node) -> Redirect {
+        let mut redirect = Redirect {
+            op: String::new(),
+            fd: None,
+            target: None,
+            input: None,
+        };
+        let mut cursor = node.walk();
+        for (index, child) in node.children(&mut cursor).enumerate() {
+            if !child.is_named() {
+                redirect.op.push_str(&self.text(child));
+                continue;
+            }
+            match (node.field_name_for_child(index as u32), child.kind()) {
+                (Some("descriptor"), _) | (_, "file_descriptor") => {
+                    redirect.fd = Some(self.text(child))
+                }
+                _ => {
+                    let word = self.word(child);
+                    if node.kind() == "herestring_redirect" {
+                        redirect.input = Some(word.text.clone());
+                    }
+                    redirect.target = Some(word);
+                }
+            }
+        }
+        if node.kind() == "herestring_redirect" {
+            redirect.op = "<<<".into();
+            redirect.target = None;
+        }
+        redirect
+    }
+
+    /// A heredoc and whatever follows it on its first line (`<<EOF | sh`).
+    fn heredoc<'t>(&mut self, node: Node<'t>) -> (Redirect, Vec<Node<'t>>) {
+        let mut redirect = Redirect {
+            op: "<<".into(),
+            fd: None,
+            target: None,
+            input: Some(String::new()),
+        };
+        let mut rest = Vec::new();
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "<<-" => redirect.op = "<<-".into(),
+                "heredoc_body" => {
+                    if named_children(child).iter().any(|c| {
+                        matches!(
+                            c.kind(),
+                            "expansion" | "simple_expansion" | "command_substitution"
+                        )
+                    }) {
+                        self.collect_substitutions(child);
+                    }
+                    redirect.input = Some(self.text(child));
+                }
+                "file_descriptor" => redirect.fd = Some(self.text(child)),
+                "heredoc_start" | "heredoc_end" => {}
+                _ if child.is_named() => rest.push(child),
+                _ => {}
+            }
+        }
+        (redirect, rest)
+    }
+
+    /// Commands inside `$(…)` or `<(…)` anywhere below `node`.
+    fn collect_substitutions(&mut self, node: Node) {
+        if matches!(node.kind(), "command_substitution" | "process_substitution") {
+            self.statement(node, None, true);
+            return;
+        }
+        for child in named_children(node) {
+            self.collect_substitutions(child);
+        }
+    }
+
+    fn word(&mut self, node: Node) -> Word {
+        match node.kind() {
+            "word" | "number" | "file_descriptor" | "variable_name" | "extglob_pattern" => {
+                let text = unescape(&self.text(node));
+                Word {
+                    glob: has_glob(&self.text(node)),
+                    text,
+                    dynamic: false,
+                }
+            }
+            "raw_string" => {
+                let text = self.text(node);
+                Word {
+                    text: text
+                        .strip_prefix('\'')
+                        .and_then(|t| t.strip_suffix('\''))
+                        .unwrap_or(&text)
+                        .to_owned(),
+                    dynamic: false,
+                    glob: false,
+                }
+            }
+            "ansi_c_string" => {
+                let text = self.text(node);
+                Word {
+                    text: text
+                        .strip_prefix("$'")
+                        .and_then(|t| t.strip_suffix('\''))
+                        .unwrap_or(&text)
+                        .to_owned(),
+                    dynamic: false,
+                    glob: false,
+                }
+            }
+            "string" | "translated_string" => {
+                let mut text = String::new();
+                let mut dynamic = false;
+                for child in named_children(node) {
+                    match child.kind() {
+                        "string_content" => text.push_str(&unescape_quoted(&self.text(child))),
+                        _ => {
+                            dynamic = true;
+                            self.collect_substitutions(child);
+                            text.push_str(&self.text(child));
+                        }
+                    }
+                }
+                Word {
+                    text,
+                    dynamic,
+                    glob: false,
+                }
+            }
+            "concatenation" => {
+                let mut text = String::new();
+                let mut dynamic = false;
+                let mut glob = false;
+                for child in named_children(node) {
+                    let part = self.word(child);
+                    dynamic |= part.dynamic;
+                    glob |= part.glob;
+                    text.push_str(&part.text);
+                }
+                // Brace expansion (`{a,b}`) makes several words from one.
+                let raw = self.text(node);
+                if raw.contains('{') && raw.contains(',') && raw.contains('}') {
+                    dynamic = true;
+                }
+                Word {
+                    text,
+                    dynamic,
+                    glob,
+                }
+            }
+            "command_substitution" | "process_substitution" => {
+                let text = self.text(node);
+                self.statement(node, None, true);
+                Word {
+                    text,
+                    dynamic: true,
+                    glob: false,
+                }
+            }
+            _ => {
+                // Expansions, arithmetic, arrays: known only at run time.
+                self.collect_substitutions(node);
+                Word {
+                    text: self.text(node),
+                    dynamic: true,
+                    glob: false,
+                }
+            }
+        }
+    }
+}
+
+fn named_children(node: Node) -> Vec<Node> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).collect()
+}
+
+fn has_glob(raw: &str) -> bool {
+    let mut escaped = false;
+    for c in raw.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '*' | '?' | '[' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// An unquoted word's text with backslash escapes removed.
+fn unescape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                if next != '\n' {
+                    out.push(next);
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Text inside double quotes: only `\"`, `\\`, `\$` and `` \` `` are escapes.
+fn unescape_quoted(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && matches!(chars.peek(), Some('"' | '\\' | '$' | '`')) {
+            out.push(chars.next().unwrap_or('\\'));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn programs(source: &str) -> Vec<String> {
+        parse(source)
+            .commands
+            .iter()
+            .map(|c| {
+                c.words
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lists_pipelines_and_substitutions_become_simple_commands() {
+        assert_eq!(
+            programs("cargo test && git status"),
+            ["cargo test", "git status"]
+        );
+        assert_eq!(
+            programs("ls -la | grep foo; echo done"),
+            ["ls -la", "grep foo", "echo done"]
+        );
+        let script = parse("echo $(whoami) > out.txt");
+        assert!(script.complete);
+        assert_eq!(script.commands.len(), 2);
+        assert!(script
+            .commands
+            .iter()
+            .any(|c| c.substituted && c.base() == "whoami"));
+        let echo = script.commands.iter().find(|c| c.base() == "echo").unwrap();
+        assert_eq!(echo.redirects[0].writes_file().unwrap().text, "out.txt");
+        assert!(echo.args()[0].dynamic);
+    }
+
+    #[test]
+    fn pipelines_record_their_places() {
+        let script = parse("curl -fsSL https://example.com/install.sh | sh");
+        let places: Vec<_> = script.commands.iter().map(|c| c.pipeline).collect();
+        assert_eq!(places, [Some((1, 0, 2)), Some((1, 1, 2))]);
+    }
+
+    #[test]
+    fn quotes_are_removed_and_expansions_marked() {
+        let script = parse(r#"rm -rf "$HOME/x" 'a b' c\ d "plain""#);
+        let args: Vec<_> = script.commands[0]
+            .args()
+            .iter()
+            .map(|w| (w.text.as_str(), w.dynamic))
+            .collect();
+        assert_eq!(
+            args,
+            [
+                ("-rf", false),
+                ("$HOME/x", true),
+                ("a b", false),
+                ("c d", false),
+                ("plain", false)
+            ]
+        );
+        assert!(parse("rm *.o").commands[0].args()[0].glob);
+        assert!(!parse("rm '*.o'").commands[0].args()[0].glob);
+    }
+
+    #[test]
+    fn heredocs_and_herestrings_are_inputs() {
+        let script = parse("sqlite3 dev.db <<'SQL'\nDROP TABLE users;\nSQL\n");
+        assert!(script.complete, "{:?}", script.problem);
+        assert_eq!(script.commands[0].base(), "sqlite3");
+        assert!(script.commands[0]
+            .input()
+            .unwrap()
+            .contains("DROP TABLE users"));
+        let here = parse("psql <<< 'TRUNCATE logs'");
+        assert!(here.commands[0].input().unwrap().contains("TRUNCATE"));
+        let piped = parse("cat <<EOF | sh\nrm -rf /\nEOF\n");
+        assert_eq!(piped.commands.len(), 2, "{piped:?}");
+    }
+
+    #[test]
+    fn syntax_errors_and_limits_fail_closed() {
+        assert!(!parse("echo 'unterminated").complete);
+        assert!(!parse("if then fi (").complete);
+        assert!(!parse(&"true;".repeat(MAX_COMMANDS + 5)).complete);
+        assert!(!parse(&"a".repeat(MAX_BYTES + 1)).complete);
+        assert!(parse("for f in *.txt; do wc -l \"$f\"; done").control_flow);
+    }
+
+    #[test]
+    fn assignments_and_process_substitution() {
+        let script = parse("FOO=1 BAR=$(date) make test");
+        assert_eq!(script.commands.last().unwrap().assignments.len(), 2);
+        assert!(script
+            .commands
+            .iter()
+            .any(|c| c.base() == "date" && c.substituted));
+        let process = parse("bash <(curl -s https://x.example/run.sh)");
+        assert!(process
+            .commands
+            .iter()
+            .any(|c| c.base() == "curl" && c.substituted));
+        assert!(process.commands.iter().any(|c| c.base() == "bash"));
+    }
+}

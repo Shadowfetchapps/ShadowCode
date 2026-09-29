@@ -194,6 +194,14 @@ pub fn file(store: &Store, ws: &Workspace, task: &str, path: &str) -> Result<Val
     let base = baseline(store, ws, task, &path)?;
     let now = current(ws, &path)?;
     let mut out = summary(&path, &base, &now);
+    if crate::redaction::is_secret_path(&path) {
+        // A secret file (`.env`, keys) can still be undone as a whole, but
+        // its contents are not shown.
+        out["secret"] = json!(true);
+        out["hunks"] = json!([]);
+        out["hash"] = json!(now.hash.as_deref().unwrap_or("missing"));
+        return Ok(out);
+    }
     out["hunks"] = match (text(&base.bytes), text(&now.bytes)) {
         (Some(old), Some(new)) => json!(textdiff::hunks(old, new)
             .iter()

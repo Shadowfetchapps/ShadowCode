@@ -15,7 +15,10 @@ use std::{
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 
+pub mod always;
+pub mod assess;
 pub mod preview;
+pub mod shell;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Approval {
@@ -41,6 +44,14 @@ pub struct Approval {
     /// A note given with Deny reaches the model.
     #[serde(default)]
     pub note: bool,
+    /// The action in plain words: `{risk, risk_label, explanation, undo,
+    /// undo_label, notes, read, checks}` (`approvals::assess`).
+    #[serde(default)]
+    pub assessment: Value,
+    /// What "Always allow in this project" would cover, in words; empty
+    /// when it is not offered (`approvals::always`).
+    #[serde(default)]
+    pub always: String,
 }
 
 /// The scope of an "Allow for this task" grant: a tool kind, and for
@@ -149,6 +160,9 @@ pub struct Answer {
     pub note: Option<String>,
     /// Allowed by an earlier "Allow for this task", without a prompt.
     pub automatic: bool,
+    /// Allowed from now on in this project ("Always allow in this
+    /// project"); the caller stores the rule.
+    pub for_project: bool,
 }
 
 impl Answer {
@@ -280,6 +294,10 @@ impl ApprovalHub {
             !answer.for_task || (answer.allow && pending.grant.is_some()),
             "This action can only be allowed once"
         );
+        ensure!(
+            !answer.for_project || (answer.allow && !pending.record.always.is_empty()),
+            "This action can't be always allowed"
+        );
         answer.automatic = false;
         answer.note = answer
             .note
@@ -351,6 +369,7 @@ impl ApprovalHub {
                     for_task: true,
                     note: None,
                     automatic: true,
+                    for_project: false,
                 });
             }
         }
@@ -427,6 +446,8 @@ mod tests {
             preview: Value::Null,
             grant: String::new(),
             note: true,
+            assessment: Value::Null,
+            always: String::new(),
         }
     }
 
@@ -636,6 +657,8 @@ mod expiry_tests {
             preview: Value::Null,
             grant: String::new(),
             note: false,
+            assessment: Value::Null,
+            always: String::new(),
         });
         let event = receiver.try_recv().unwrap();
         assert_eq!(event["type"], "approval.expiring");
@@ -661,6 +684,8 @@ mod expiry_tests {
             preview: Value::Null,
             grant: String::new(),
             note: false,
+            assessment: Value::Null,
+            always: String::new(),
         });
     }
 }

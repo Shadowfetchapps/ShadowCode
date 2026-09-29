@@ -461,6 +461,10 @@ impl ToolExecutor {
         });
         Ok(result)
     }
+    /// The "Always allow in this project" rule that covers `command`.
+    fn always_rule(&self, command: &str) -> Result<Option<String>> {
+        crate::approvals::always::covering(&self.events.store, &self.workspace.path, command)
+    }
     async fn execute_inner(&self, call: &ToolCall) -> Result<Value> {
         ensure!(
             call.arguments.is_object(),
@@ -495,7 +499,29 @@ impl ToolExecutor {
         };
         match decision {
             Decision::Deny(reason) => bail!(reason),
+            Decision::Ask(_)
+                if call.name == "exec"
+                    && self
+                        .always_rule(call.arguments["command"].as_str().unwrap_or(""))?
+                        .is_some() =>
+            {
+                // "Always allow in this project" covers this exact command:
+                // no prompt, but the transcript still says what ran and why.
+                let rule = self
+                    .always_rule(call.arguments["command"].as_str().unwrap_or(""))?
+                    .unwrap_or_default();
+                self.events.emit(
+                    "approval.granted",
+                    json!({"tool":call.name,"call_id":call.id,"grant":"always allowed in this project","scope":"project","command":rule}),
+                )?;
+            }
             Decision::Ask(reason) => {
+                let assessment = crate::approvals::assess::native_tool(
+                    &call.name,
+                    &call.arguments,
+                    &self.workspace.path,
+                );
+                let always_form = assessment.always.clone().filter(|_| call.name == "exec");
                 let reason = if call.name == "background_start" {
                     format!("{reason}\nThis process runs outside ShadowCode's command sandbox. Its file and network access follow your account's permissions and the host's restrictions; command sandbox settings do not apply.")
                 } else {
@@ -537,6 +563,11 @@ impl ToolExecutor {
                     ),
                     grant: String::new(),
                     note: true,
+                    assessment: assessment.to_json(),
+                    always: always_form
+                        .as_deref()
+                        .map(crate::approvals::always::label)
+                        .unwrap_or_default(),
                 };
                 let grant = native_grant(&call.name, &call.arguments);
                 let mut pending_error = None;
@@ -568,12 +599,32 @@ impl ToolExecutor {
                         json!({"tool":call.name,"call_id":call.id,"grant":grant.map(|g|g.label).unwrap_or_default()}),
                     )?;
                 } else {
-                    let mut resolved = json!({"tool":call.name,"approved":answer.allow,"scope":if answer.for_task {"task"} else {"once"}});
+                    let scope = if answer.for_project {
+                        "project"
+                    } else if answer.for_task {
+                        "task"
+                    } else {
+                        "once"
+                    };
+                    if answer.for_project {
+                        if let Some(form) = &always_form {
+                            crate::approvals::always::add(
+                                &self.events.store,
+                                &self.workspace.path,
+                                form,
+                            )?;
+                        }
+                    }
+                    let mut resolved =
+                        json!({"tool":call.name,"approved":answer.allow,"scope":scope});
                     if let Some(note) = &answer.note {
                         resolved["note"] = json!(note);
                     }
                     crate::redaction::redact_value(&mut resolved);
                     resolved["call_id"] = json!(call.id);
+                    if answer.for_project {
+                        resolved["command"] = json!(always_form);
+                    }
                     self.events.emit("approval.resolved", resolved)?;
                 }
                 ensure!(answer.allow, "{}", answer.denial());
