@@ -225,6 +225,7 @@ async fn install_sign_in_models_run_and_sign_out_through_the_acp_server() {
         steer: &steer,
         approvals_required: true,
         catalog: None,
+        approval_route: None,
     };
     let outcome = tokio::time::timeout(Duration::from_secs(30), runner::run(run("gemini-pro")))
         .await

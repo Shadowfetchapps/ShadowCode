@@ -114,6 +114,7 @@ for raw in sys.stdin:
     elif method in ("thread/start", "thread/resume"):
         active_thread = params.get("threadId") or "thr-1"
         mark("threads.log", method + " " + json.dumps(params.get("model")) + " " + json.dumps(params.get("threadId")))
+        mark("sandbox.log", json.dumps({"sandbox": params.get("sandbox"), "cwd": params.get("cwd"), "pwd": os.getcwd()}))
         if C.get("block_stdin"):
             import fcntl
             fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETPIPE_SZ, 4096)
@@ -137,6 +138,11 @@ for raw in sys.stdin:
         mark("prompts.log", json.dumps(text))
         send({"jsonrpc":"2.0","id":mid,"result":{"turn":{"id":active_turn}}})
         mode = C.get("turn", "ok")
+        # A prompt that contains a key runs that mode instead (roles tests).
+        for key, value in (C.get("mode_when") or {}).items():
+            if key in text:
+                mode = value
+                break
         if mode == "pause_budget" and not os.path.exists(os.path.join(HERE, "interrupted")):
             mark("pause_ready")
             continue
@@ -209,6 +215,10 @@ for raw in sys.stdin:
             for name in C.get("deletes") or []:
                 os.remove(os.path.join(os.getcwd(), name))
         reply = "fake answer"
+        for key, value in (C.get("replies") or {}).items():
+            if key in text:
+                reply = value
+                break
         if mode == "env":
             reply = "API keys visible: " + (",".join(k for k in KEYS if k in os.environ) or "none") + "; marker=" + os.environ.get("SHADOWCODE_FAKE_MARKER", "absent")
         for n in (1, 2):

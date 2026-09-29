@@ -316,6 +316,7 @@ mod tests {
         ("compares", "allowed"),
         ("agents", "allowed"),
         ("subagents", "allowed"),
+        ("roles", "allowed: consent is asked when a task starts"),
         ("worktrees", "allowed"),
         ("parallel", "allowed"),
         ("worktree-tasks", "allowed"),

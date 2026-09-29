@@ -211,7 +211,7 @@ async fn run_permission_fixture(allow: bool, read_only: bool) {
             vendor: Vendor::Claude, options, config: &config, prompt: "edit fixture".into(),
             images: Vec::new(), session_id: session_id.clone(), task_id: task_id.clone(),
             job_id: "fixture-job".into(), events: &events, approvals: &hub,
-            cancel, steer: &steer, approvals_required: true, catalog: None,
+            cancel, steer: &steer, approvals_required: true, catalog: None, approval_route: None,
         });
         tokio::pin!(run);
         loop {

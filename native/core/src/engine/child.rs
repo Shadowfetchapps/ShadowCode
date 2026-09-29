@@ -12,10 +12,25 @@ use crate::subagents::{
 /// optionally limited to some tools.
 pub(crate) struct ChildLink {
     pub name: String,
+    /// Its approval reasons start with this (`Subagent general`,
+    /// `Plan role (Claude Code)`).
+    pub label: String,
     pub run_id: String,
     pub parent_session: String,
     pub depth: usize,
     pub filter: Option<Arc<ToolFilter>>,
+    /// The local model an ancestor holds while this child runs.
+    pub holds_local: Option<String>,
+}
+
+impl ChildLink {
+    /// Where this child's approval prompts are shown.
+    pub fn approval_route(&self) -> ApprovalRoute {
+        ApprovalRoute {
+            session_id: self.parent_session.clone(),
+            label: self.label.clone(),
+        }
+    }
 }
 
 pub(crate) struct ChildSpec {
@@ -60,14 +75,36 @@ impl Engine {
             spec.config.is_trusted(&workspace.path),
             "Trust this project before starting subagents"
         );
+        // A vendor CLI child is a normal vendor job in its own conversation
+        // (`run_cli_agent`); everything else runs on ShadowCode's own loop.
+        let vendor = crate::cli_agent::Vendor::from_provider(&spec.config.model.provider);
+        if let Some(vendor) = vendor {
+            ensure!(
+                spec.config.cli_agents.vendor_enabled(vendor),
+                "{} is disabled in Settings → Advanced",
+                vendor.label()
+            );
+        }
         ensure!(
-            matches!(
-                crate::runtime::Runtime::for_model(&spec.config.model),
-                crate::runtime::Runtime::Local
-            ),
-            "Subagents run on ShadowCode's own loop"
+            !spec.config.offline() || crate::config::runs_on_this_computer(&spec.config.model),
+            "Offline mode: choose a model that runs on this computer"
         );
         spec.config.validate()?;
+        let routing = {
+            let (inference, route) = routing::route_of(&spec.config.model);
+            routing::Decision {
+                purpose: "subagent".into(),
+                source: "subagent".into(),
+                requested: spec.config.model.default.clone(),
+                model_id: spec.config.model.default.clone(),
+                model_name: spec.config.model.name.clone(),
+                provider: spec.config.model.provider.clone(),
+                context_limit: spec.config.model.context_limit,
+                fallback_reason: None,
+                inference: inference.into(),
+                route: route.into(),
+            }
+        };
         let (job, running) = {
             let mut queues = self
                 .0
@@ -100,7 +137,11 @@ impl Engine {
                 // Never queued: it starts inside the parent's tool call.
                 status: "running".into(),
                 mode: spec.mode,
-                model: spec.config.model.name.clone(),
+                model: match vendor {
+                    Some(vendor) => vendor.label().into(),
+                    None => spec.config.model.name.clone(),
+                },
+                routing: Some(routing),
                 started_at: crate::now(),
                 event_cursor: store.event_cursor(&sid)?,
                 ..Default::default()
@@ -120,6 +161,7 @@ impl Engine {
                 turn_plan: Default::default(),
                 turn: Default::default(),
                 child: Some(spec.link),
+                roles: None,
                 local_waiting: AtomicBool::new(false),
                 local_admitted: AtomicBool::new(false),
             });
@@ -194,7 +236,10 @@ impl Engine {
         let native = running.command.is_none();
         let depth = running.child.as_ref().map_or(0, |c| c.depth);
         let settings = SubagentsConfig::from_config(&running.config);
-        let host = (native && settings.enabled && depth < settings.max_depth)
+        // A Plan → Implement → Review task always runs its roles as children;
+        // it orchestrates and holds no local model itself.
+        let pipeline = running.roles.is_some();
+        let host = (native && (pipeline || (settings.enabled && depth < settings.max_depth)))
             .then(|| {
                 SubagentHost::new(
                     self.clone(),
@@ -207,6 +252,13 @@ impl Engine {
                         cancel: running.cancel.clone(),
                         events: events.clone(),
                         depth,
+                        holds_local: if !pipeline
+                            && crate::local_engine::is_managed(&running.config.model)
+                        {
+                            Some(running.config.model.default.clone())
+                        } else {
+                            running.child.as_ref().and_then(|c| c.holds_local.clone())
+                        },
                     },
                     settings,
                 )
@@ -217,10 +269,7 @@ impl Engine {
         ToolExtensions {
             host,
             filter: running.child.as_ref().and_then(|c| c.filter.clone()),
-            approval: running.child.as_ref().map(|c| ApprovalRoute {
-                session_id: c.parent_session.clone(),
-                label: c.name.clone(),
-            }),
+            approval: running.child.as_ref().map(ChildLink::approval_route),
             skills: Arc::new(if native {
                 crate::workflows::model_skills(&running.workspace)
             } else {

@@ -281,7 +281,7 @@ impl Service {
         self.check_worktree_project(&call)?;
         match call.family() {
             "compare" | "compares" => self.compare(&call).await,
-            "agents" | "subagents" => self.blocking(&call, Self::agent_routes).await,
+            "agents" | "subagents" | "roles" => self.blocking(&call, Self::agent_routes).await,
             "worktrees" | "parallel" => self.worktree_routes(&call).await,
             "worktree-tasks" => self.worktree_task_routes(&call).await,
             "sandbox" => self.sandbox_routes(&call).await,
