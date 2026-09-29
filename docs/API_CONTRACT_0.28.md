@@ -1003,6 +1003,87 @@ redacted.
   "pass"|"fail"|"pending"|"none", url, checked_at}` from `gh pr checks
   --json`. GitLab answers `supported: false` with the pipelines URL.
 
+## Second opinions
+
+A read-only review of the staged changes or of one task's changes by a
+model the user picks, or another model's view of a task's answer. Each runs
+as an ordinary job in `review` mode (read-only: no write, shell or MCP tools
+natively; vendor CLIs in plan/read-only mode with every edit or command
+request denied) in a hidden conversation (`session_meta` `second_opinion`,
+and `second_opinion_of` = the conversation it belongs to), queued behind any
+task in the project. Hidden conversations never appear in `GET
+/api/sessions` and are deleted with the conversation they belong to (unless
+still running). Records are `native_meta` `second_opinion:<id>`, indexed per
+project (`second_opinion_index:<project>`, newest first, at most 40; the
+oldest finished ones and their conversations are removed). Nothing is
+written when a request is refused.
+
+- `POST /api/second-opinions {kind: "review"|"ask", source: "staged"|"task",
+  workspace?, session_id?, task_id?, model, question?, consent?}` → the
+  record, or `{ok: false, status: 409, error, needs_consent: true, handoff:
+  {from, to, excerpt_chars, images: 0, reason, purpose: "second_opinion",
+  files}}`. `model` is a picker id. `staged` reviews `git diff --cached` of
+  the project (an error when nothing is staged); `task` reviews the task's
+  changes as `GET /api/review/tasks/{id}` shows them, and `ask` adds the
+  task's request and answer. The reviewer gets at most 60 000 bytes of diff
+  (whole lines; later files are only named, `truncated: true`), never the
+  contents of secret-looking files (`omitted`), and an optional `question`
+  (at most 2 000 characters). Offline mode refuses models that do not run
+  on this computer. A cloud reviewer needs `consent: true` when the
+  conversation's last turn ran on this computer or the model that wrote the
+  change did. `session_id` (staged reviews) is the conversation the user is
+  in; without it, the conversation of the latest turn in the project that
+  changed files.
+- `GET /api/second-opinions?workspace=&session_id=&task_id=&source=&limit=20`
+  → `{workspace, second_opinions: Record[]}` newest first; running records
+  are brought up to date with their jobs.
+- `GET /api/second-opinions/{id}` → the record. `POST …/{id}/cancel` stops a
+  running one.
+- `POST /api/second-opinions/{id}/findings/{finding} {status:
+  "open"|"dismissed"}` → the record.
+- `POST /api/second-opinions/{id}/findings/{finding}/fix {consent?}` →
+  `{second_opinion, job}`: queues a `code` task in the conversation the
+  record belongs to (a new conversation when it no longer exists) on that
+  conversation's model, with the finding as its request; the finding becomes
+  `fixing` with `fix_job_id` and `fix_session_id`. A second fix of the same
+  finding is refused. The job start follows `POST /api/jobs` (trust, 409
+  consent).
+- `GET /api/second-opinions/options?workspace=&session_id=&task_id=` →
+  `{workspace, prefs: {model: string|null, before_commit: bool}, offline,
+  writer: {model, label, local}|null, local_only}`: what the window needs to
+  suggest a reviewer (not the writer; only local models for `local_only`).
+- `GET /api/second-opinions/current?workspace=&source=staged|task&task_id=`
+  → `{hash, files, omitted, truncated}`: the fingerprint of the changes as
+  they are now; a record whose `diff_hash` differs reviewed other changes.
+- `POST /api/second-opinions/prefs {workspace?, model?, before_commit?}` →
+  prefs (`native_meta` `second_opinion_prefs:<project>`). Starting a second
+  opinion also remembers its model. "Review before every commit" is a window
+  behaviour: the engine never refuses a commit because of it.
+
+Record: `{id, kind, workspace, source, session_id, task_id, question,
+reviewer: {model, label, local}, writer: {model, label, local}|null,
+same_model, consented, job_id, review_session, review_task, status:
+"queued"|"running"|"completed"|"failed"|"cancelled"|"limit_reached"|"interrupted",
+created_at, finished_at, diff_hash, files, omitted, diff: [{path, status,
+diff, binary}], truncated, context_chars, summary, findings: Finding[],
+format_note, error, usage: Usage, model_name, reviewer_changed}`.
+`Finding`: `{id: "f1"…, file, line, end_line, hunk (header of the reviewed
+hunk), severity: "high"|"medium"|"low"|"info", title, explanation,
+suggested_fix, status: "open"|"dismissed"|"fixing", fix_job_id,
+fix_session_id}`. Reviewers are asked for one JSON object; fenced, prose-
+wrapped, reasoning-prefixed, differently keyed, trailing-comma, cut-off and
+Markdown-list replies are read too (at most 50 findings), and a reply that
+cannot be read stays as `summary` with a plain `format_note`. For `ask`,
+`summary` is the whole reply. `reviewer_changed` lists files the reviewer's
+job reported changing (it should be empty).
+
+Job summaries (`GET /api/jobs?view=summary`, the feed) carry
+`second_opinion` (the record id, null for other jobs); the window leaves
+these out of the queued follow-ups. The engine broadcasts
+`second_opinion.updated {id, status, workspace, kind}` (with the record's
+`session_id`) when a second opinion starts, finishes, stops or a finding
+changes; it is a wake-up only, never stored.
+
 ## Issues
 
 "Start from an issue" (see [AUTOMATIONS.md](AUTOMATIONS.md#start-from-an-issue)).

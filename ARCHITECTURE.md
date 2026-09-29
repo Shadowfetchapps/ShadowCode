@@ -41,7 +41,8 @@ runs in-process with the window. There is no HTTP server between them.
   hands it, by the segment after `/api/`, to one route module under
   `service/` (`sessions`, `jobs`, `workspace` + `git`, `worktrees`,
   `settings`, `accounts`, `model_catalog`, `goals`, `background`,
-  `extensions`, `compare`, `commands`, `memory`, `feed`). Bodies are typed structs
+  `extensions`, `compare`, `commands`, `memory`, `feed`, `second_opinion`).
+  Bodies are typed structs
   whose `Text`/`Flag`/`Loose` fields read absent or mistyped values the way
   the untyped API did. Synchronous handlers run on tokio's blocking pool.
   The CLI reaches the same service through
@@ -49,7 +50,9 @@ runs in-process with the window. There is no HTTP server between them.
   peer-credential checks. It opens no TCP listener. At startup it removes
   sockets left behind by dead engines.
 - **Engine** (`engine.rs`): owns jobs. Each workspace runs one active job plus
-  queued follow-ups. `start_with_context` is the single entry point for the
+  queued follow-ups. Second opinions (`second_opinion.rs`: reviews of staged
+  or task changes, another model's view of an answer) are ordinary
+  read-only `review` jobs in hidden conversations, queued like follow-ups. `start_with_context` is the single entry point for the
   desktop, CLI, goals, MCP and workflows. It enforces workspace trust, the
   offline refusal of cloud routes, read-only mode for Plan/Review, and
   handoff consent. All of these checks run before a job row is written.
