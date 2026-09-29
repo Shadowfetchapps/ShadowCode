@@ -248,6 +248,27 @@ service discovery therefore differs from the physical desktop. No GTK portal
 backend is mandated; this qualifies the controlled X11 app and Markdown/CSP
 behavior, not physical Wayland or all portal features.
 
+To run the same window test on a real Wayland connection without touching
+your desktop, use the private Wayland wrapper. It starts its own Weston
+compositor (Pixman software rendering) with a fresh runtime directory and
+private D-Bus session, removes `DISPLAY` and the host bus from the app's
+environment, and stops the compositor and its helpers afterwards:
+
+```sh
+node scripts/run-native-wayland.mjs node scripts/test-native-desktop.mjs
+```
+
+It needs Weston 13 or later (`weston` on `PATH`, or `SHADOW_WESTON`; an
+unpacked, uninstalled Weston also needs `SHADOW_WESTON_LIBRARY_PATH` and
+`SHADOW_WESTON_MODULE_MAP`). By default Weston runs on its X11 backend inside
+a private Xvfb, which gives the compositor a keyboard and pointer seat;
+`SHADOW_WAYLAND_BACKEND=headless` uses Weston's headless backend instead (no
+input seat). Results go to `artifacts/native-wayland/run-*` (override
+`SHADOW_WAYLAND_ARTIFACTS`). This qualifies the app over the Wayland protocol
+(GTK's Wayland backend, window sizing, WebView input through WebDriver,
+approvals, reload and quit), not a physical desktop: no GPU output, real input
+devices, IME, compositor shortcuts, cross-app clipboard or mixed DPI.
+
 For an explicit test on the current physical Wayland desktop, run the desktop
 probe directly under a private bus instead of the X11 wrapper:
 

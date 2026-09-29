@@ -20,6 +20,7 @@
 //   SHADOW_NATIVE_ENDURANCE=1 adds the required dedicated UI-03 100-task phase
 //   SHADOW_NATIVE_DISPLAY=wayland explicitly exercises the current desktop;
 //     run directly under dbus-run-session, never through run-native-x11.mjs.
+//     scripts/run-native-wayland.mjs sets it for a private Weston compositor.
 //   SHADOW_EXPECT_VENDORS   e.g. "codex=Ready,claude=Sign in": exact picker
 //                           availability expected for vendors on this machine
 import assert from "node:assert/strict";
