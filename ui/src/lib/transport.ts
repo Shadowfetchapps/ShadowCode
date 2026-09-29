@@ -174,6 +174,10 @@ export const exportDiagnostics = (
 ) =>
   invoke<string | null>("export_diagnostics", { snapshotId, expectedContent });
 
+/** Opens the rules profile folder in the file manager (desktop only). The
+ * engine names the folder; the window never passes a path. */
+export const openRulesFolder = () => invoke<null>("open_rules_folder");
+
 export async function openExternal(url: string) {
   const parsed = new URL(url);
   if (!["https:", "http:"].includes(parsed.protocol))

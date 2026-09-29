@@ -137,7 +137,15 @@ shadowcode goals --resume GOAL_PREFIX
 shadowcode goals --pause GOAL_PREFIX
 shadowcode config ui.theme dark
 shadowcode health --test-model
+shadowcode rules
+shadowcode rules check
+shadowcode rules preview --agent claude
 ```
+
+`rules` lists your profile's and the project's rules, skills, commands and
+agents, switched on or off; `rules check` runs the skill checker (report
+only, exit status 1 when it finds errors); `rules preview` shows what each
+agent reads. See [rules and skills](RULES_AND_SKILLS.md).
 
 Conversation and job IDs (including unique prefixes) resolve against the complete
 profile history, independently of recent-list limits. Ambiguous prefixes are

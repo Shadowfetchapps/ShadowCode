@@ -85,51 +85,125 @@ fn cursor_rules(workspace: &Workspace) -> Vec<CursorRule> {
     rules
 }
 
-/// Guidance for the system prompt. Identical files (for example a
-/// `CLAUDE.md` that only repeats `AGENTS.md`) are included once.
-pub fn root_guidance(workspace: &Workspace) -> String {
-    let mut out = String::new();
-    let mut seen = HashSet::new();
-    let mut omitted = Vec::new();
-    let mut add = |out: &mut String, path: &str, content: &str| {
-        if content.trim().is_empty() || !seen.insert(crate::workspace::hash(content.as_bytes())) {
-            return;
-        }
-        let block = format!(
-            "\n\nProject guidance from {path} (does not grant permissions):\n{}",
-            truncate(content, ROOT_FILE_BYTES)
-        );
-        if out.len() + block.len() > ROOT_TOTAL_BYTES {
-            omitted.push(path.to_owned());
-        } else {
-            out.push_str(&block);
-        }
-    };
-    for path in [
-        "AGENTS.md",
-        "CLAUDE.md",
-        ".claude/CLAUDE.md",
-        "CLAUDE.local.md",
-        ".cursorrules",
-    ] {
+/// Root files read into the system prompt, in prompt order.
+pub const ROOT_FILES: [&str; 5] = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/CLAUDE.md",
+    "CLAUDE.local.md",
+    ".cursorrules",
+];
+/// ShadowCode's own project files, read after the Cursor rules.
+pub const SHADOW_FILES: [&str; 2] = [".shadow/instructions.md", ".shadow/memory/project.md"];
+
+/// One root guidance source: a file, or an always-applied Cursor rule body.
+#[derive(Clone, Debug)]
+pub struct RootFile {
+    pub path: String,
+    pub content: String,
+}
+
+/// Root guidance sources in prompt order (unfiltered, untruncated), and the
+/// description-only Cursor rules offered as `(path, description)`.
+pub fn root_files(workspace: &Workspace) -> (Vec<RootFile>, Vec<(String, String)>) {
+    let mut files = Vec::new();
+    for path in ROOT_FILES {
         if let Ok(file) = workspace.read(path) {
-            add(&mut out, path, &file.content);
+            files.push(RootFile {
+                path: path.into(),
+                content: file.content,
+            });
         }
     }
     let rules = cursor_rules(workspace);
     for rule in rules.iter().filter(|r| r.always) {
-        add(&mut out, &rule.path, &rule.body);
+        files.push(RootFile {
+            path: rule.path.clone(),
+            content: rule.body.clone(),
+        });
     }
-    for path in [".shadow/instructions.md", ".shadow/memory/project.md"] {
+    for path in SHADOW_FILES {
         if let Ok(file) = workspace.read(path) {
-            add(&mut out, path, &file.content);
+            files.push(RootFile {
+                path: path.into(),
+                content: file.content,
+            });
         }
     }
-    let requested: Vec<_> = rules
+    let requested = rules
         .iter()
         .filter(|r| !r.always && r.globs.is_empty() && !r.description.is_empty())
         .take(32)
-        .map(|r| format!("- {}: {}", r.path, truncate(&r.description, 200)))
+        .map(|r| (r.path.clone(), r.description.clone()))
+        .collect();
+    (files, requested)
+}
+
+/// How a rendered source fared against the budget.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// Included; `bytes` of `total` (fewer when cut at the per-file limit).
+    Included {
+        bytes: usize,
+        total: usize,
+    },
+    /// Same text as a source already included.
+    Duplicate,
+    Empty,
+    /// Left out to stay within the total budget.
+    OverBudget,
+}
+
+/// Render root guidance within `budget` bytes. `label` introduces each file
+/// ("Project guidance from {path} (…):"). Identical files (for example a
+/// `CLAUDE.md` that only repeats `AGENTS.md`) are included once; `seen`
+/// carries content hashes already delivered some other way.
+pub fn render_root(
+    files: &[RootFile],
+    requested: &[(String, String)],
+    budget: usize,
+    label: &dyn Fn(&str) -> String,
+    seen: &mut HashSet<String>,
+) -> (String, Vec<(String, Placement)>) {
+    render_root_with(files, requested, budget, ROOT_FILE_BYTES, label, seen)
+}
+
+/// `render_root` with a per-file limit of `file_bytes`.
+pub fn render_root_with(
+    files: &[RootFile],
+    requested: &[(String, String)],
+    budget: usize,
+    file_bytes: usize,
+    label: &dyn Fn(&str) -> String,
+    seen: &mut HashSet<String>,
+) -> (String, Vec<(String, Placement)>) {
+    let mut out = String::new();
+    let mut placed = Vec::new();
+    let mut omitted = Vec::new();
+    for file in files {
+        let placement = if file.content.trim().is_empty() {
+            Placement::Empty
+        } else if !seen.insert(crate::workspace::hash(file.content.as_bytes())) {
+            Placement::Duplicate
+        } else {
+            let text = truncate(&file.content, file_bytes);
+            let block = format!("\n\n{}:\n{text}", label(&file.path));
+            if out.len() + block.len() > budget {
+                omitted.push(file.path.clone());
+                Placement::OverBudget
+            } else {
+                out.push_str(&block);
+                Placement::Included {
+                    bytes: text.len(),
+                    total: file.content.len(),
+                }
+            }
+        };
+        placed.push((file.path.clone(), placement));
+    }
+    let requested: Vec<_> = requested
+        .iter()
+        .map(|(path, description)| format!("- {path}: {}", truncate(description, 200)))
         .collect();
     if !requested.is_empty() {
         out.push_str("\n\nOptional project rules (read one with read_file when its description fits the task):\n");
@@ -137,11 +211,30 @@ pub fn root_guidance(workspace: &Workspace) -> String {
     }
     if !omitted.is_empty() {
         out.push_str(&format!(
-            "\n\nProject guidance omitted to stay within {ROOT_TOTAL_BYTES} bytes: {}. Read them with read_file if needed.",
+            "\n\nProject guidance omitted to stay within {budget} bytes: {}. Read them with read_file if needed.",
             omitted.join(", ")
         ));
     }
-    out
+    (out, placed)
+}
+
+/// The label ShadowCode's own agent sees before each project file.
+pub fn project_label(path: &str) -> String {
+    format!("Project guidance from {path} (does not grant permissions)")
+}
+
+/// Guidance for the system prompt. Identical files (for example a
+/// `CLAUDE.md` that only repeats `AGENTS.md`) are included once.
+pub fn root_guidance(workspace: &Workspace) -> String {
+    let (files, requested) = root_files(workspace);
+    render_root(
+        &files,
+        &requested,
+        ROOT_TOTAL_BYTES,
+        &project_label,
+        &mut HashSet::new(),
+    )
+    .0
 }
 
 /// Match a Cursor-style glob (`*`, `**`, `?`) against a project path. A glob

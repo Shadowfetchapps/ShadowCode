@@ -29,6 +29,7 @@ const SECTIONS = [
   "Accounts",
   "Local models",
   "Code intelligence",
+  "Rules & skills",
   "Voice",
   "Permissions & network",
   "Appearance",
@@ -62,7 +63,7 @@ async function axeClean(page: Page, include?: string) {
 test("every Settings page shows its content from the top, light and dark", async ({
   page,
 }) => {
-  // Two themes × sixteen pages, each with an axe pass.
+  // Two themes × every page, each with an axe pass.
   test.setTimeout(150_000);
   for (const theme of ["light", "dark"]) {
     await page.evaluate(

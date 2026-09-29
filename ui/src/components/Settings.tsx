@@ -10,11 +10,13 @@ import { AdvancedPage, type AdvancedTab } from "./settings/AdvancedPage";
 import { RemotePage } from "./settings/RemotePage";
 import { AboutPage } from "./settings/AboutPage";
 import { DataPage } from "./settings/DataPage";
+import { RulesPage } from "./settings/RulesPage";
 
 export type SettingsSection =
   | "accounts"
   | "local"
   | "code"
+  | "rules"
   | "voice"
   | "permissions"
   | "appearance"
@@ -28,6 +30,7 @@ const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: "accounts", label: "Accounts" },
   { id: "local", label: "Local models" },
   { id: "code", label: "Code intelligence" },
+  { id: "rules", label: "Rules & skills" },
   { id: "voice", label: "Voice" },
   { id: "permissions", label: "Permissions & network" },
   { id: "appearance", label: "Appearance" },
@@ -119,6 +122,7 @@ export function Settings({
           />
         )}
         {section === "code" && <CodeIntelPage onToast={onToast} />}
+        {section === "rules" && <RulesPage onToast={onToast} />}
         {section === "voice" && <VoicePage onToast={onToast} />}
         {section === "permissions" && (
           <PermissionsPage cfg={cfg} onSave={onSave} />

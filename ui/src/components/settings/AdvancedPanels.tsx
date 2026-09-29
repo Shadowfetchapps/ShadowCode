@@ -11,6 +11,7 @@ import { exportDiagnostics, isNative } from "../../lib/transport";
 import { Empty, LoadError } from "../cards";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { goalStatusLabel, processStatusLabel } from "../../lib/statusLabels";
+import { SkillChecker } from "./SkillChecker";
 
 /* Project tools: skills and health sit under Settings › Advanced; goals and
  * background processes are in the drawer's Tools tab (used while working). */
@@ -590,6 +591,7 @@ function HealthTab({ health }: { health: Health | null }) {
           {loading ? "Checking…" : "Run again"}
         </button>
       </div>
+      <SkillChecker />
     </>
   );
 }

@@ -98,6 +98,33 @@ impl Service {
             json!({"ok":true,"path":path,"count":count,"log":if empty_history{json!("")}else{log["stdout"].clone()},"empty_history":empty_history,"diff":diff,"truncated":log["truncated"],"note":"Commit subjects and current diffs are recorded evidence; they do not establish an author's intent."}),
         )
     }
+    /// The skill checker's summary as one Doctor check.
+    fn rules_check(&self) -> Value {
+        let workspace = self.workspace().ok().and_then(|p| Workspace::open(&p).ok());
+        let book = crate::rulebook::Book::load(
+            self.engine.paths(),
+            workspace.as_ref().map(|w| w.path.as_path()),
+        );
+        let report = crate::rulebook::check::run(&book, workspace.as_ref());
+        let (errors, warnings) = (
+            report["errors"].as_u64().unwrap_or(0),
+            report["warnings"].as_u64().unwrap_or(0),
+        );
+        check(
+            "rules-and-skills",
+            if errors + warnings == 0 { "pass" } else { "warn" },
+            "Rules and skills",
+            format!(
+                "{} files checked: {errors} errors, {warnings} warnings (report only; nothing is changed)",
+                report["checked"]
+            ),
+            if errors + warnings == 0 {
+                ""
+            } else {
+                "Open the skill checker on this page, or run `shadowcode rules check`, for details."
+            },
+        )
+    }
     pub(super) async fn doctor(&self, test_model: bool) -> Result<Value> {
         let paths = self.engine.paths();
         let mut checks = vec![check(
@@ -307,6 +334,7 @@ impl Service {
                 "",
             ));
             checks.extend(crate::sandbox::doctor_checks());
+            checks.push(self.rules_check());
             for mut check in crate::cli_agent::doctor::checks(&cfg.cli_agents).await {
                 let status = check["status"].as_str().unwrap_or("info").to_owned();
                 check["ok"] = json!(status == "pass");

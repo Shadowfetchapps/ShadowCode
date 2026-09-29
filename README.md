@@ -316,6 +316,13 @@ subscription CLIs bring their own agents.
   Cursor rules, and Claude Code commands and skills are read; MCP tools are
   offered directly and your enabled MCP servers reach the subscription CLIs
   too.
+- **One rulebook for every agent.** Your profile's rules, skills, commands
+  and agents (`~/.config/shadowcode/profile/`) reach ShadowCode's own agent
+  and every subscription CLI through each CLI's own per-run option, merged
+  with the project's files. **Settings › Rules & skills** switches items on
+  and off, shows what each agent reads, imports a profile from Git and adds
+  starter skills; a skill checker reports problems
+  ([rules and skills](docs/RULES_AND_SKILLS.md)).
 - **Long conversations** are summarized by the model rather than cut,
   OpenRouter requests use prompt caching, and each task records its tokens
   and cost.
@@ -539,6 +546,8 @@ The editor's project must be trusted in ShadowCode (or start the agent with
 | Antigravity agent server (installed from Accounts) | `~/.local/share/shadowcode/antigravity-acp/1.2.1` |
 | Antigravity sign-in (ShadowCode's private profile) | `~/.local/share/shadowcode/antigravity-acp/profile` |
 | Project notes, skills, attachments | `<project>/.shadow/` |
+| Your rules, skills, commands and agents for every project, Git imports | `~/.config/shadowcode/profile/` |
+| Rules & skills switches, imports and export links | `~/.config/shadow-agent/rulebook.json` (mode 600) |
 
 The directories are named `shadow-agent`, and keep that name in every 1.x
 version so every upgrade finds your data. `--profile DIR` keeps a separate

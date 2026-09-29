@@ -23,7 +23,7 @@ use crate::{
 };
 use anyhow::{bail, ensure, Context, Result};
 pub use args::Options;
-use args::{Background, Command, Mcp, Plugin, Remote, Run, TaskOptions, WorktreeArgs};
+use args::{Background, Command, Mcp, Plugin, Remote, Rules, Run, TaskOptions, WorktreeArgs};
 use backend::Backend;
 use clap::Parser;
 use serde_json::{json, Value};
@@ -279,6 +279,12 @@ Settings. \fBupdates.check: false\fR turns off the daily update check.
 .TP
 \fI~/.config/shadow-agent/secrets.env\fR
 API keys for HTTP providers (mode 600).
+.TP
+\fI~/.config/shadowcode/profile/\fR
+Your rules (\fBAGENTS.md\fR), skills, commands and agents for every project
+and every agent; \fBshadowcode rules\fR lists them and \fBshadowcode rules
+check\fR checks them. Switches are kept in
+\fI~/.config/shadow-agent/rulebook.json\fR.
 .TP
 \fI~/.local/state/shadow-agent/\fR
 Conversations, jobs and history (SQLite), and the update check's last answer.
@@ -758,6 +764,69 @@ fn data_command(paths: &AppPaths, command: &Command, json_output: bool) -> Resul
     Ok(0)
 }
 
+/// `shadowcode rules`: the profile folder and every item, switched on or off.
+fn rules_text(value: &Value, _: Option<&str>) -> String {
+    let mut out = format!(
+        "Profile folder: {}\n",
+        value["profile"]["path"].as_str().unwrap_or("")
+    );
+    for item in value["items"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "{} {:<8} {:<7} {}{}\n",
+            if item["enabled"] == true {
+                "on "
+            } else {
+                "off"
+            },
+            item["scope"].as_str().unwrap_or(""),
+            item["kind"].as_str().unwrap_or(""),
+            item["path"].as_str().unwrap_or(""),
+            item["overridden_by"]
+                .as_str()
+                .map(|p| format!(" (not used: {p} takes its place)"))
+                .unwrap_or_default()
+        ));
+    }
+    for issue in value["issues"].as_array().into_iter().flatten() {
+        out.push_str(&format!("Note: {}\n", issue.as_str().unwrap_or("")));
+    }
+    out
+}
+
+/// `shadowcode rules preview`: per agent, what is sent and what is not.
+fn preview_text(value: &Value, agent: Option<&str>) -> String {
+    let mut out = String::new();
+    for runner in value["runners"].as_array().into_iter().flatten() {
+        if agent.is_some_and(|a| runner["id"] != a) {
+            continue;
+        }
+        let preview = &runner["preview"];
+        out.push_str(&format!(
+            "{}: {}{}\n",
+            runner["label"].as_str().unwrap_or(""),
+            runner["mechanism"].as_str().unwrap_or(""),
+            if runner["sharing_off"] == true {
+                " Sending rules to vendor CLIs is off."
+            } else {
+                ""
+            }
+        ));
+        for item in preview["items"].as_array().into_iter().flatten() {
+            out.push_str(&format!(
+                "  {} {} ({})\n",
+                if item["included"] == true { "+" } else { "-" },
+                item["path"].as_str().unwrap_or(""),
+                item["reason"].as_str().unwrap_or("")
+            ));
+        }
+        out.push_str(&format!(
+            "  About {} tokens ({} bytes)\n",
+            preview["estimated_tokens"], preview["included_bytes"]
+        ));
+    }
+    out
+}
+
 /// Where `shadowcode serve --remote` listens, and what that means.
 fn remote_banner(status: &Value, address: std::net::SocketAddr) -> String {
     let mut text = format!(
@@ -1133,6 +1202,36 @@ async fn execute(backend: &Backend, workspace: &Path, options: &Options) -> Resu
                         value["stderr"].as_str().unwrap_or(""),
                         value["exit_code"]
                     )),
+                    value,
+                });
+            }
+        }
+        Command::Rules { action } => {
+            type Render = fn(&Value, Option<&str>) -> String;
+            let (path, render): (&str, Render) = match action {
+                None => ("/api/rules", rules_text),
+                Some(Rules::Check) => ("/api/rules/check", |report, _| {
+                    crate::rulebook::check::text(report)
+                }),
+                Some(Rules::Preview { .. }) => ("/api/rules/preview", preview_text),
+            };
+            let agent = match action {
+                Some(Rules::Preview { agent }) => agent.as_deref(),
+                _ => None,
+            };
+            if let Some(agent) = agent {
+                ensure!(
+                    crate::rulebook::delivery::Runner::parse(agent).is_some(),
+                    "Unknown agent {agent}; use shadowcode, claude, codex, cursor, grok or antigravity"
+                );
+            }
+            let value = backend.call("GET", path, Value::Null).await?;
+            if options.json {
+                value
+            } else {
+                return Ok(Outcome {
+                    code: if value["ok"] == false { 1 } else { 0 },
+                    raw: Some(render(&value, agent)),
                     value,
                 });
             }
@@ -1682,6 +1781,47 @@ mod tests {
             })
         ));
         assert!(Options::try_parse_from(["shadowcode", "remote", "revoke"]).is_err());
+    }
+
+    #[test]
+    fn rules_commands_parse_and_render_plain_text() {
+        let parsed = Options::try_parse_from(["shadowcode", "rules", "check"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Rules {
+                action: Some(Rules::Check)
+            })
+        ));
+        let parsed =
+            Options::try_parse_from(["shadowcode", "rules", "preview", "--agent", "claude"])
+                .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Rules { action: Some(Rules::Preview { agent: Some(ref a) }) }) if a == "claude"
+        ));
+        let listed = rules_text(
+            &json!({"profile":{"path":"/p"},"items":[
+                {"enabled":true,"scope":"profile","kind":"skill","path":"/p/skills/a/SKILL.md","overridden_by":".shadow/skills/a.md"},
+                {"enabled":false,"scope":"project","kind":"rules","path":"CLAUDE.md","overridden_by":null}
+            ],"issues":["x"]}),
+            None,
+        );
+        assert!(listed.contains("Profile folder: /p"));
+        assert!(listed.contains("on  profile  skill   /p/skills/a/SKILL.md (not used: .shadow/skills/a.md takes its place)"));
+        assert!(listed.contains("off project  rules   CLAUDE.md"));
+        let preview = preview_text(
+            &json!({"runners":[
+                {"id":"shadowcode","label":"ShadowCode's own agent","mechanism":"System prompt.","preview":{"items":[],"estimated_tokens":0,"included_bytes":0}},
+                {"id":"codex","label":"Codex","mechanism":"developerInstructions.","sharing_off":true,"preview":{"items":[{"path":"AGENTS.md","included":false,"reason":"Codex reads this file itself"}],"estimated_tokens":5,"included_bytes":15}}
+            ]}),
+            Some("codex"),
+        );
+        assert!(!preview.contains("ShadowCode's own agent"));
+        assert!(
+            preview.contains("Codex: developerInstructions. Sending rules to vendor CLIs is off.")
+        );
+        assert!(preview.contains("  - AGENTS.md (Codex reads this file itself)"));
+        assert!(preview.contains("About 5 tokens (15 bytes)"));
     }
 
     #[test]

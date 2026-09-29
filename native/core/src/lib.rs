@@ -63,6 +63,7 @@ pub mod remote;
 pub mod retry;
 pub mod review;
 pub mod routing;
+pub mod rulebook;
 pub mod runtime;
 pub mod sandbox;
 pub mod service;

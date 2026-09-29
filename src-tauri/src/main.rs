@@ -241,6 +241,30 @@ fn open_external(app: tauri::AppHandle, url: String) -> std::result::Result<(), 
         .map_err(|e| e.to_string())
 }
 
+/// Settings › Rules & skills › Open folder: the engine names (and creates)
+/// the profile folder; the renderer never supplies a path.
+#[tauri::command]
+async fn open_rules_folder(
+    app: tauri::AppHandle,
+    service: tauri::State<'_, Backend>,
+) -> std::result::Result<(), String> {
+    let folder = service
+        .dispatch(Request {
+            method: "POST".into(),
+            path: "/api/rules/folder".into(),
+            body: Value::Null,
+        })
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let path = folder["path"]
+        .as_str()
+        .ok_or("Rules folder missing")?
+        .to_owned();
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn desktop_quit(app: tauri::AppHandle) {
     request_shutdown(&app);
@@ -385,6 +409,7 @@ fn run() -> Result<()> {
             export_session,
             export_diagnostics,
             open_external,
+            open_rules_folder,
             desktop_quit,
             notices::set_visible_session
         ])

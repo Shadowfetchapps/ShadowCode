@@ -65,6 +65,7 @@ const MODULES: &[(&str, &[&str])] = &[
     ("service/preview.rs", &["preview"]),
     ("service/remote.rs", &["remote"]),
     ("service/review.rs", &["review"]),
+    ("service/rules.rs", &["rules"]),
     ("service/sandbox.rs", &["sandbox"]),
     (
         "service/sessions.rs",

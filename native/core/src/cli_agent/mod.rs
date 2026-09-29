@@ -427,6 +427,20 @@ pub struct LaunchOptions {
     /// Project MCP servers the user enabled, passed to the vendor for this
     /// run (ACP `mcpServers`, Claude `--mcp-config`, Codex `-c mcp_servers`).
     pub mcp_servers: Vec<McpServerSpec>,
+    /// The user's rulebook for this run (`rulebook::delivery`): Claude
+    /// `--append-system-prompt-file` and `--plugin-dir`, Codex
+    /// `developerInstructions`, a labelled block before the first ACP prompt.
+    /// `None` sends nothing.
+    pub rulebook: Option<crate::rulebook::VendorRules>,
+}
+impl LaunchOptions {
+    /// The rulebook text, when there is any.
+    pub fn rules_text(&self) -> Option<&str> {
+        self.rulebook
+            .as_ref()
+            .map(|r| r.text.as_str())
+            .filter(|t| !t.is_empty())
+    }
 }
 
 /// A pure protocol translator. It never touches processes or the network.
