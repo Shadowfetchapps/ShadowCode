@@ -23,7 +23,12 @@ export function ConsentDialog({
   onCancel: () => void;
 }) {
   const handoff = request.handoff || {};
-  const to = destination || providerLabel(handoff.to);
+  // Cloud roles name themselves; `to` is already their product names.
+  const roles = handoff.roles || [];
+  const to =
+    destination ||
+    (roles.length ? String(handoff.to || "") : "") ||
+    providerLabel(handoff.to);
   const from = handoff.from ? providerLabel(handoff.from) : null;
   const chars = Number(handoff.excerpt_chars || 0);
   const images = Number(handoff.images || 0);
@@ -37,16 +42,44 @@ export function ConsentDialog({
       onClose={onCancel}
     >
       <h2>Send to {to}?</h2>
-      <p>
-        {opinion
-          ? "This second opinion goes to a cloud provider."
-          : "This message goes to a cloud provider."}{" "}
-        {from
-          ? opinion
-            ? `The work ran on ${from}, on this computer.`
-            : `The conversation so far ran on ${from}.`
-          : "It includes content that is only on this computer."}
-      </p>
+      {roles.length ? (
+        <>
+          <p>
+            {roles.length === 1 ? "This role runs" : "These roles run"} on a
+            cloud provider.{" "}
+            {from
+              ? `This conversation runs on ${from}, on this computer.`
+              : "This conversation runs on this computer."}
+          </p>
+          <ul className="consent-list consent-roles" aria-label="Cloud roles">
+            {roles.map((role, index) => (
+              <li key={`${role.role || role.agent}-${index}`}>
+                <strong>
+                  {role.agent
+                    ? `@${role.agent}`
+                    : `${role.label || role.role || "Role"} role`}
+                </strong>{" "}
+                {role.name}
+              </li>
+            ))}
+          </ul>
+          <p className="dim">
+            They receive the following and can read the project&apos;s files.
+            Allowed providers are remembered for this conversation.
+          </p>
+        </>
+      ) : (
+        <p>
+          {opinion
+            ? "This second opinion goes to a cloud provider."
+            : "This message goes to a cloud provider."}{" "}
+          {from
+            ? opinion
+              ? `The work ran on ${from}, on this computer.`
+              : `The conversation so far ran on ${from}.`
+            : "It includes content that is only on this computer."}
+        </p>
+      )}
       {billingWarning && <p className="warn-text">{billingWarning}</p>}
       <ul className="consent-list">
         {opinion ? (

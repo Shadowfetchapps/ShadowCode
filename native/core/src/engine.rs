@@ -45,6 +45,8 @@ pub(crate) use child::{ChildLink, ChildSpec};
 mod faults;
 #[cfg(debug_assertions)]
 pub use faults::Fault;
+mod roles;
+use roles::RoleTurn;
 #[derive(Default)]
 struct LaunchContext<'a> {
     system_context: Option<String>,
@@ -56,6 +58,10 @@ struct LaunchContext<'a> {
     /// The user agreed to hand this conversation (or its attachments) to a
     /// cloud route for this turn.
     handoff_consent: bool,
+    /// The caller can ask the user for consent and resend (the window's
+    /// composer): an `@agent` on a cloud role asks first instead of being
+    /// refused when it runs.
+    interactive: bool,
     turn: TurnOptions,
 }
 
@@ -69,6 +75,9 @@ pub struct TurnOptions {
     /// Attached context. Native models read the files' contents with the
     /// prompt; vendor CLIs get `@path` in the prompt text instead.
     pub mentions: Vec<crate::mentions::Mention>,
+    /// Run a Code task as Plan → Implement → Review (a Plan task as its plan
+    /// role) with the project's roles (`crate::roles`).
+    pub roles: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -137,6 +146,8 @@ struct Running {
     turn: TurnOptions,
     /// Set for subagent jobs (`engine::child`).
     child: Option<ChildLink>,
+    /// Set for a Plan → Implement → Review task (`engine::roles`).
+    roles: Option<Arc<crate::roles::Pipeline>>,
     /// A managed local job reached the front of its project's queue and now
     /// waits for the local runtime (`await_local_job`).
     local_waiting: AtomicBool,
@@ -206,6 +217,9 @@ pub struct Engine(Arc<Inner>);
 /// What the conversation shows when a bug in ShadowCode stops a task (a
 /// panic inside the job). The details go to the log.
 const WORKER_PANIC: &str = "ShadowCode hit an internal error and stopped this task. Your files and this conversation were kept; you can send the message again.";
+/// A Plan → Implement → Review task orchestrates its roles; each role's own
+/// conversation can be paused and steered instead.
+const ROLES_NOT_STEERED: &str = "A Plan → Implement → Review task can't be paused or steered. Stop it, or open the running role's transcript to pause or steer that role.";
 
 /// Kept outside the job worker so the follow-up task's future is checked for
 /// `Send` without the worker's own opaque type in scope.
@@ -675,6 +689,7 @@ impl Engine {
                 permission_limit: limit,
                 owner,
                 handoff_consent,
+                interactive: true,
                 turn,
                 ..Default::default()
             },
@@ -742,17 +757,54 @@ impl Engine {
             config.permissions.level = PermissionLevel::ReadOnly;
         }
         config.apply_runtime(request.web);
+        let roles_turn = context.turn.roles && context.command.is_none();
+        // A Plan → Implement → Review task checks each role instead: its
+        // roles may run on this computer while the conversation's model
+        // does not.
         ensure!(
             context.command.is_some()
+                || roles_turn
                 || !config.offline()
                 || crate::config::runs_on_this_computer(&config.model),
             "Offline mode: choose a model that runs on this computer"
         );
         config.validate()?;
         ensure!(context.command.is_some()||config.model.provider!="mock","Choose a local or compatible model before starting a coding task. The offline preview does not execute tasks.");
+        // Roles and their consent, decided before any job or task row exists.
+        let pipeline = if roles_turn {
+            Some(self.prepare_roles(
+                RoleTurn {
+                    mode: &request.mode,
+                    task: &request.task,
+                    images: request.images.len(),
+                    session: request.session_id.as_deref(),
+                },
+                &workspace.path,
+                &config,
+                context.handoff_consent,
+            )?)
+        } else {
+            None
+        };
+        let mention_consent = match (&pipeline, context.command.is_some()) {
+            (None, false) if context.interactive => self.mention_consent(
+                RoleTurn {
+                    mode: &request.mode,
+                    task: &request.task,
+                    images: request.images.len(),
+                    session: request.session_id.as_deref(),
+                },
+                &workspace,
+                &config,
+                context.handoff_consent,
+            )?,
+            _ => None,
+        };
         // Provider change / consent, decided before any job or task row exists.
         let turn_plan = match (&request.session_id, context.command.is_some()) {
             (_, true) => crate::cli_agent::handoff::TurnPlan::default(),
+            // The roles receive the conversation so far from the task itself.
+            _ if pipeline.is_some() => crate::cli_agent::handoff::TurnPlan::default(),
             (session, false) => {
                 let jobs = match session {
                     Some(sid) => self.0.store.session_jobs(sid, 200)?,
@@ -839,6 +891,8 @@ impl Engine {
             mode: request.mode,
             model: if context.command.is_some() {
                 "native command".into()
+            } else if let Some((pipeline, _)) = &pipeline {
+                pipeline.label()
             } else if let Some(vendor) =
                 crate::cli_agent::Vendor::from_provider(&config.model.provider)
             {
@@ -851,7 +905,10 @@ impl Engine {
             } else {
                 config.model.name.clone()
             },
-            routing: decision,
+            routing: match &pipeline {
+                Some((pipeline, _)) => Some(pipeline.decision()),
+                None => decision,
+            },
             workflow: context.workflow,
             started_at: crate::now(),
             finished_at: None,
@@ -881,6 +938,16 @@ impl Engine {
                 &crate::now().to_string(),
             )?;
         }
+        // The cloud providers this turn's roles use have now received the
+        // conversation with the user's consent (or it never ran locally).
+        let consented: Vec<String> = match (&pipeline, &mention_consent) {
+            (Some((_, providers)), _) => providers.clone(),
+            (None, Some(provider)) => vec![provider.clone()],
+            _ => Vec::new(),
+        };
+        if !consented.is_empty() {
+            crate::roles::record_consent(&self.0.store, &job.session_id, &consented)?;
+        }
         let running = Arc::new(Running {
             clock,
             record: Mutex::new(job.clone()),
@@ -895,11 +962,12 @@ impl Engine {
             turn_plan,
             turn: context.turn,
             child: None,
+            roles: pipeline.map(|(pipeline, _)| Arc::new(pipeline)),
             local_waiting: AtomicBool::new(false),
             local_admitted: AtomicBool::new(false),
             edit_window: AtomicBool::new(false),
         });
-        if running.command.is_none() && crate::local_engine::is_managed(&running.config.model) {
+        if running.uses_local_runtime() {
             self.0
                 .local_jobs
                 .lock()
@@ -985,6 +1053,7 @@ impl Engine {
         let job = self
             .running(id)?
             .context("Job not found or already finished")?;
+        ensure!(job.roles.is_none(), "{ROLES_NOT_STEERED}");
         ensure!(!job.cancel.is_cancelled(), "Task is cancelling");
         ensure!(
             !job.finished.load(Ordering::Acquire),
@@ -1015,6 +1084,7 @@ impl Engine {
         let job = self
             .running(id)?
             .context("Job not found or already finished")?;
+        ensure!(job.roles.is_none(), "{ROLES_NOT_STEERED}");
         job.steer.set_instruction(instruction)?;
         if let Some(path) = edited_path.filter(|p| !p.trim().is_empty()) {
             job.steer.note_edit(path, "manual edit noted by user")?;
@@ -1261,7 +1331,7 @@ impl Engine {
     /// local follow-up still queued behind other work in one project never
     /// holds up a local task in another.
     async fn await_local_job(&self, running: &Running) -> Result<()> {
-        if running.command.is_some() || !crate::local_engine::is_managed(&running.config.model) {
+        if !running.uses_local_runtime() {
             return Ok(());
         }
         running.local_waiting.store(true, Ordering::Release);
@@ -1404,12 +1474,19 @@ impl Engine {
         config: &Config,
         workspace: &Path,
     ) -> Result<Option<(String, String)>> {
-        let local_cfg = config.local_engine.clone();
-        let engine = self.clone();
-        let catalog = tokio::task::spawn_blocking(move || {
-            crate::local_engine::catalog_with(&local_cfg, Some(engine.local_runtime()))
-        })
-        .await?;
+        let (engine, config, workspace) = (self.clone(), config.clone(), workspace.to_path_buf());
+        tokio::task::spawn_blocking(move || engine.local_choice(&config, &workspace, None)).await?
+    }
+    /// `local_fallback` for callers already on the blocking pool; `prefer`
+    /// (a `local:gguf:` id) wins when it is ready.
+    pub fn local_choice(
+        &self,
+        config: &Config,
+        workspace: &Path,
+        prefer: Option<&str>,
+    ) -> Result<Option<(String, String)>> {
+        let catalog =
+            crate::local_engine::catalog_with(&config.local_engine, Some(self.local_runtime()));
         let ready: Vec<&Value> = catalog["models"]
             .as_array()
             .into_iter()
@@ -1422,6 +1499,9 @@ impl Engine {
                 .find(|m| m["id"] == id)
                 .map(|m| (id.to_owned(), m["name"].as_str().unwrap_or(id).to_owned()))
         };
+        if let Some(hit) = prefer.and_then(find) {
+            return Ok(Some(hit));
+        }
         let preferred = config.limits["fallback_model"].as_str().unwrap_or("");
         if let Some(hit) = (!preferred.is_empty()).then(|| find(preferred)).flatten() {
             return Ok(Some(hit));
@@ -1711,7 +1791,11 @@ impl Engine {
         if let crate::runtime::Runtime::Vendor(_) =
             crate::runtime::Runtime::for_model(&running.config.model)
         {
-            return self.run_cli_agent(running, job, events).await;
+            // A Plan → Implement → Review task runs its roles, whatever the
+            // conversation's own model is.
+            if running.roles.is_none() {
+                return self.run_cli_agent(running, job, events).await;
+            }
         }
         if let Some((from, to)) = &running.turn_plan.model_switch {
             events.emit(
@@ -1731,6 +1815,9 @@ impl Engine {
         .with_extensions(self.tool_extensions(running, &job, &events));
         let result = if let Some(command) = &running.command {
             self.run_command_job(running, &job, &events, &tools, command)
+                .await
+        } else if let Some(pipeline) = running.roles.clone() {
+            self.run_roles(running, job, events, &tools, &pipeline)
                 .await
         } else {
             self.run_with_tools(running, job, events, &tools).await
@@ -1836,11 +1923,21 @@ impl Engine {
                 "images":job.images
             }),
         )?;
-        let checkpoints = running.config.checkpoints.vendor
-            && running.config.permissions.level != crate::config::PermissionLevel::ReadOnly;
+        let read_only =
+            running.config.permissions.level == crate::config::PermissionLevel::ReadOnly;
+        // A write subagent edits its own throwaway worktree; its diff is
+        // checkpointed when the parent applies it.
+        let checkpoints =
+            running.config.checkpoints.vendor && !read_only && running.child.is_none();
         events.emit(
             "agent.warning",
-            json!({"text":if checkpoints {
+            json!({"text":if running.child.is_some() {
+                if read_only {
+                    "Vendor agent: the official CLI owns its tools and sandbox. It runs read-only here: ShadowCode declines its requests to change files or run commands."
+                } else {
+                    "Vendor agent: the official CLI owns its tools and sandbox. It works in an isolated worktree; its changes go back to the parent conversation as a diff, which is applied with your usual edit approval."
+                }
+            } else if checkpoints {
                 "Vendor agent: the official CLI owns its tools and sandbox. ShadowCode checkpoints the project around the turn, so Rewind can restore files it changed (not Git-ignored files or Git history)."
             } else {
                 "Vendor agent: the official CLI owns tools and sandbox. Project checkpoints are off, so Rewind does not apply to this task."
@@ -1936,7 +2033,7 @@ impl Engine {
             binary,
             workspace: running.workspace.path.clone(),
             model: running.config.model.name.clone(),
-            read_only: running.config.permissions.level == crate::config::PermissionLevel::ReadOnly,
+            read_only,
             resume,
             effort: crate::effort::vendor(vendor, running.turn.effort.as_deref()),
             legacy_effort,
@@ -1980,6 +2077,8 @@ impl Engine {
                 steer: &running.steer,
                 approvals_required: running.config.permissions.shell_asks(),
                 catalog: Some(self.0.vendors.clone()),
+                // A subagent asks in its parent's conversation, with its name.
+                approval_route: running.child.as_ref().map(ChildLink::approval_route),
             })
             .await;
         self.close_edit_window(running).await;
@@ -2166,7 +2265,12 @@ impl Engine {
     ) -> Result<(String, Value)> {
         // A parent may be awaiting this child while holding the local lease.
         // Waiting for a different model here would deadlock that task tree.
-        if running.child.is_some()
+        // A child whose ancestors hold no local model (a cloud parent, or a
+        // Plan → Implement → Review stage) waits for the runtime as usual.
+        if running
+            .child
+            .as_ref()
+            .is_some_and(|link| link.holds_local.is_some())
             && crate::local_engine::is_managed(&running.config.model)
             && self.0.local_llama.in_use() > 0
         {
@@ -3073,6 +3177,18 @@ impl Running {
             self.record.clear_poison();
             poisoned.into_inner()
         })
+    }
+    /// A top-level task that loads a model on this computer: its own model,
+    /// or any role of a Plan → Implement → Review task. Such tasks start one
+    /// at a time (`await_local_job`).
+    fn uses_local_runtime(&self) -> bool {
+        if self.command.is_some() || self.child.is_some() {
+            return false;
+        }
+        match &self.roles {
+            Some(pipeline) => pipeline.uses_managed_local(),
+            None => crate::local_engine::is_managed(&self.config.model),
+        }
     }
     fn snapshot(&self) -> Result<Job> {
         let mut job = self.record().clone();

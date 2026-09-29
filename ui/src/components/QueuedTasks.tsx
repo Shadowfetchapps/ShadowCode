@@ -16,6 +16,7 @@ const modeName = (job: Job) => {
         tester: "Test",
         test: "Test",
         command: "Command",
+        roles: "Roles",
       } as Record<string, string>
     )[mode] || mode
   );

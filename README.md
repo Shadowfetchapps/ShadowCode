@@ -657,6 +657,17 @@ runs another copy of the vendor CLI (a newer release in a scratch folder).
 sign-in; OpenRouter rows read the key from `OPENROUTER_API_KEY`, because the
 throwaway profile has no `secrets.env`.
 
+`live_roles_turn` runs one small Plan → Implement → Review task (fix a
+one-line bug) with a model per role, answering approvals yes and printing
+each role's model, cost, verdict and the approvals' labels. `--ollama <model>`
+makes the conversation's model an Ollama model on this computer, so consent
+is asked before a cloud role runs; a role left out uses the conversation's
+model and `skip` skips plan or review:
+
+```bash
+cargo run -p shadowcode-core --example live_roles_turn -- --plan cli:grok --implement "" --review "" --ollama qwen3:8b-q8_0 [--conversation <picker id>]
+```
+
 The free-model list has two network checks and one window check, all opt-in
 (they download from Hugging Face). The first re-checks every pin; the second
 downloads one model with a pause and a resume; the third drives the real

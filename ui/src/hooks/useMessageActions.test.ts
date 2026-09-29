@@ -17,7 +17,7 @@ const items: ChatItem[] = [
   { kind: "agent", text: "Done", taskId: "t2", key: "d" },
 ];
 
-function setup(busy = false) {
+function setup(busy = false, roles = false) {
   const deps = {
     openSession: vi.fn(async () => {}),
     startTask: vi.fn(async () => {}),
@@ -30,6 +30,7 @@ function setup(busy = false) {
       sessionId: "s1",
       workspace: "/w",
       model: "local:gguf:qwen",
+      roles,
       busy,
       queueing: false,
       ...deps,
@@ -53,6 +54,21 @@ beforeEach(() => {
 });
 
 describe("useMessageActions", () => {
+  it("resends as Plan → Implement → Review while roles are on", async () => {
+    const plain = setup();
+    await act(() => plain.actions.retry("Second"));
+    expect(plain.startTask).toHaveBeenCalledWith(
+      expect.not.objectContaining({ roles: true }),
+      null,
+    );
+    const roles = setup(false, true);
+    await act(() => roles.actions.retry("Second"));
+    expect(roles.startTask).toHaveBeenCalledWith(
+      expect.objectContaining({ task: "Second", roles: true }),
+      null,
+    );
+  });
+
   it("edits and resends in a fork made just before the message", async () => {
     const { actions, openSession, startTask, rewindNow } = setup();
     await act(() =>

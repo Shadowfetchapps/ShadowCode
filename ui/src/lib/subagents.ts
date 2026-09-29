@@ -1,5 +1,6 @@
-import type { EventRow } from "../api";
+import type { EventRow, RoleId, Usage } from "../api";
 import type { ChatItem } from "../components/cards";
+import { isRoleId } from "./roles";
 
 /** One changed file of a write subagent (its diffstat). */
 export type SubagentFile = {
@@ -33,6 +34,17 @@ export type SubagentRun = {
   steps: number;
   tokens: number;
   durationS?: number;
+  /** The role this run played, when the project's roles chose its model. */
+  role?: RoleId;
+  /** `vendor` (a vendor CLI) or `shadowcode` (ShadowCode's own loop). */
+  runner?: string;
+  /** `local` or `cloud`. */
+  route?: string;
+  /** `local`, `subscription` or `api`. */
+  cost?: string;
+  usage?: Usage | null;
+  /** A review role's verdict: `ready` or `needs_changes`. */
+  verdict?: string;
 };
 
 const str = (value: unknown) =>
@@ -94,6 +106,10 @@ export function applySubagentEvent(
     notes: [],
     steps: 0,
     tokens: 0,
+    role: isRoleId(p.role) ? p.role : undefined,
+    runner: str(p.runner) || undefined,
+    route: str(p.route) || undefined,
+    cost: str(p.cost) || undefined,
   };
   let run = base;
   if (event.type === "subagent.finished") {
@@ -117,6 +133,12 @@ export function applySubagentEvent(
       steps: Number(p.steps) || 0,
       tokens: Number(usage.total_tokens) || 0,
       durationS: p.duration_s == null ? undefined : Number(p.duration_s),
+      role: isRoleId(p.role) ? p.role : base.role,
+      runner: str(p.runner) || base.runner,
+      route: str(p.route) || base.route,
+      cost: str(p.cost) || base.cost,
+      usage: p.usage && typeof p.usage === "object" ? (p.usage as Usage) : null,
+      verdict: p.verdict ? str(p.verdict) : undefined,
     };
   } else if (event.type === "subagent.applied") {
     run = { ...base, applied: true };
@@ -128,7 +150,7 @@ export function applySubagentEvent(
     ...(index >= 0 && items[index].key ? { key: items[index].key } : {}),
     kind: "subagent",
     taskId: event.task_id || undefined,
-    text: `@${run.agent}: ${run.summary || run.description || run.prompt}`,
+    text: `${run.role ? `${run.role} role` : `@${run.agent}`}: ${run.summary || run.description || run.prompt}`,
     run,
   };
   const next = [...items];

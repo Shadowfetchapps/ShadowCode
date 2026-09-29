@@ -159,7 +159,7 @@ async fn fixture(mode: &str, answer: bool, cancel_run: bool) {
         let run = runner::run(runner::Request {
             vendor: Vendor::Cursor, options, config: &config, prompt: "fixture".into(), images: vec![],
             session_id: session_id.clone(), task_id, job_id: "fixture-job".into(), events: &events,
-            approvals: &approvals, cancel: cancel.clone(), steer: &steer, approvals_required: true, catalog: None,
+            approvals: &approvals, cancel: cancel.clone(), steer: &steer, approvals_required: true, catalog: None, approval_route: None,
         });
         tokio::pin!(run);
         loop {

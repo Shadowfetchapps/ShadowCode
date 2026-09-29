@@ -414,7 +414,77 @@ export type ConsentRequest = {
     purpose?: string;
     /** Changed files the review includes. */
     files?: number;
+    /** Cloud roles that would receive this conversation's work
+     * (Plan → Implement → Review, or an @agent on a role's model). */
+    roles?: ConsentRole[];
   };
+};
+
+/** One cloud role named in a consent request. */
+export type ConsentRole = {
+  role?: RoleId | null;
+  label?: string | null;
+  name: string;
+  provider?: string;
+  /** Set when an @agent request asked. */
+  agent?: string;
+};
+
+/** The roles a project assigns (GET/POST /api/roles, docs/SUBAGENTS.md). */
+export type RoleId = "plan" | "implement" | "review" | "explore";
+/** Each role is "" (the conversation's model), "skip" (plan and review) or
+ * a picker id. */
+export type RoleSetup = {
+  /** Code tasks run as Plan → Implement → Review. */
+  pipeline: boolean;
+  plan: string;
+  implement: string;
+  review: string;
+  explore: string;
+  /** The preset last applied; "" once a role was changed by hand. */
+  preset: string;
+  updated_at?: number;
+};
+/** One role resolved for the open conversation. */
+export type RoleTarget = {
+  role: RoleId;
+  label: string;
+  setting: string;
+  id?: string;
+  name?: string;
+  provider?: string;
+  local?: boolean;
+  runner?: "vendor" | "shadowcode";
+  vendor?: string | null;
+  /** How it is paid for. */
+  cost?: "local" | "subscription" | "api";
+  skipped?: boolean;
+  /** Why it cannot run (offline, turned off, missing model). */
+  blocked?: string;
+  /** Cloud role in a conversation on this computer: asked before it runs. */
+  needs_consent?: boolean;
+};
+export type RolePreset = {
+  id: string;
+  label: string;
+  description: string;
+  roles: Record<RoleId, string>;
+};
+export type RolesView = {
+  workspace: string;
+  setup: RoleSetup;
+  roles: Record<RoleId, RoleTarget>;
+  presets: RolePreset[];
+  conversation: { id: string; name: string; local: boolean };
+  offline: boolean;
+  /** Cloud providers this conversation already allowed as roles. */
+  consented: string[];
+};
+export type RolesChange = Partial<Omit<RoleSetup, "updated_at">> & {
+  workspace?: string;
+  session_id?: string;
+  /** The composer's model, which roles set to "" use. */
+  model?: string;
 };
 
 /** An explicit user-selected check, executed locally without a model turn. */
@@ -447,6 +517,9 @@ export type StartJobRequest = {
   /** Start a new conversation in a fresh worktree of the project; it runs
    * beside a task in the main checkout. */
   worktree?: boolean;
+  /** Run a Code task as Plan → Implement → Review (a Plan task as its plan
+   * role) with the project's roles. */
+  roles?: boolean;
 };
 
 /** A conversation run in its own managed worktree ("Run in new worktree"),
@@ -2165,6 +2238,17 @@ export const api = {
       { workspace: "", title },
     ),
   agents: () => get<{ agents: AgentInfo[]; issues: string[] }>("/api/agents"),
+  /** The project's roles, resolved for a conversation. */
+  roles: (workspace = "", sessionId = "", model = "") => {
+    const query = new URLSearchParams();
+    if (workspace) query.set("workspace", workspace);
+    if (sessionId) query.set("session_id", sessionId);
+    if (model) query.set("model", model);
+    const text = query.toString();
+    return get<RolesView>(`/api/roles${text ? `?${text}` : ""}`);
+  },
+  saveRoles: (change: RolesChange) =>
+    send<RolesView>("/api/roles", "POST", change),
   commands: () =>
     get<{
       commands: {

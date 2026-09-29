@@ -12,13 +12,24 @@
 //! their own children unless `subagents.max_depth` allows it, stop when the
 //! parent is cancelled, and ask their approvals in the parent conversation
 //! with the child's name.
+//!
+//! A child may run on a vendor CLI (a project role, an agent definition's
+//! `model: cli:claude:…`, or the call's `model`). It is then a normal vendor
+//! job in its own conversation (`Engine::run_cli_agent`): the vendor's
+//! approvals are asked in the parent conversation, stopping the parent stops
+//! it, its usage counts toward the parent, and a write child still edits its
+//! own worktree and returns a diff. Project roles (`crate::roles`) choose the
+//! model of `explore`, `plan`, `review` and write children, and run the
+//! stages of a Plan → Implement → Review task (`Self::run_role`).
 use crate::{
     agents::{self, AgentCatalog, AgentDefinition},
+    cli_agent::{handoff, Vendor},
     compare,
-    config::{Config, PermissionLevel},
+    config::{Config, ModelConfig, PermissionLevel},
     engine::{ChildLink, ChildSpec, Engine, Job},
     events::TaskEvents,
     instructions::NestedGuidance,
+    roles::{self, Role},
     store::Store,
     tools::truncate,
     workspace::Workspace,
@@ -117,11 +128,17 @@ impl ToolFilter {
     }
 }
 
-/// Where a child's approval prompts are shown.
+/// Where a child's approval prompts are shown, and the label its reasons
+/// start with (`Subagent general`, `Implement role (Codex)`).
 #[derive(Clone, Debug)]
 pub struct ApprovalRoute {
     pub session_id: String,
     pub label: String,
+}
+impl ApprovalRoute {
+    pub fn reason(&self, reason: &str) -> String {
+        format!("{}: {reason}", self.label)
+    }
 }
 
 /// Per-task additions to the native tool executor: subagents, skills,
@@ -194,8 +211,15 @@ impl ToolExtensions {
         if let Some(host) = self.host.as_ref().filter(|_| offered("spawn_agent")) {
             note.push_str("\n\nSubagents (spawn_agent): delegate focused, self-contained work so your own context stays small; independent tasks can run in parallel via tasks. A subagent sees only the prompt you give it. Read-only agents cannot change files; write agents edit an isolated worktree and return a diff that you review and apply with apply_agent_changes. Available agents:");
             for agent in host.catalog().agents.iter().take(32) {
+                // The project's roles say which model runs an agent.
+                let runs_on = match host.role_model(agent) {
+                    Some((role, id)) if agent.model.is_none() => {
+                        format!("; {} role on {id}", role.id())
+                    }
+                    _ => String::new(),
+                };
                 note.push_str(&format!(
-                    "\n- {} ({}): {}",
+                    "\n- {} ({}{runs_on}): {}",
                     agent.name,
                     if agent.read_only() {
                         "read-only"
@@ -214,10 +238,7 @@ impl ToolExtensions {
     /// The session and reason an approval prompt is shown with.
     pub fn approval_target(&self, own_session: &str, reason: String) -> (String, String) {
         match &self.approval {
-            Some(route) => (
-                route.session_id.clone(),
-                format!("Subagent {}: {reason}", route.label),
-            ),
+            Some(route) => (route.session_id.clone(), route.reason(&reason)),
             None => (own_session.to_owned(), reason),
         }
     }
@@ -245,6 +266,10 @@ pub struct ParentContext {
     pub events: TaskEvents,
     /// 0 for a top-level task.
     pub depth: usize,
+    /// The local model this task or one of its ancestors holds while its
+    /// children run. Only one local model runs at a time, so a child on
+    /// another local model would wait for its parent: it is refused instead.
+    pub holds_local: Option<String>,
 }
 
 pub struct SubagentHost {
@@ -254,6 +279,10 @@ pub struct SubagentHost {
     catalog: AgentCatalog,
     slots: Arc<Semaphore>,
     spawned: AtomicUsize,
+    /// The project's roles (`crate::roles`).
+    roles: roles::Setup,
+    /// Cloud providers this conversation allowed as roles.
+    consented: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -287,6 +316,43 @@ pub struct RunRecord {
     pub notes: Vec<String>,
     pub created_at: f64,
     pub finished_at: Option<f64>,
+    /// The role this run played (`plan`, `implement`, `review`, `explore`),
+    /// empty when its model did not come from the project's roles.
+    pub role: String,
+    /// The picker id the run used.
+    pub model_id: String,
+    /// `shadowcode` (ShadowCode's own loop) or `vendor` (a vendor CLI).
+    pub runner: String,
+    /// The vendor CLI (`codex`, `claude`, …) when `runner` is `vendor`.
+    pub vendor: Option<String>,
+    /// `local` (this computer) or `cloud`.
+    pub route: String,
+    /// How the run is paid for: `local`, `subscription` or `api`.
+    pub cost: String,
+    /// A review role's `Verdict:` line: `ready` or `needs_changes`.
+    pub verdict: Option<String>,
+}
+
+impl RunRecord {
+    /// The fields `subagent.started` and `subagent.finished` share.
+    fn event(&self) -> Value {
+        json!({
+            "run_id": self.id,
+            "agent": self.agent,
+            "description": self.description,
+            "mode": self.mode,
+            "model": self.model,
+            "model_id": self.model_id,
+            "role": self.role,
+            "runner": self.runner,
+            "vendor": self.vendor,
+            "route": self.route,
+            "cost": self.cost,
+            "job_id": self.job_id,
+            "session_id": self.session_id,
+            "depth": self.depth,
+        })
+    }
 }
 
 use crate::store::keys::{subagent_index as index_key, subagent_run as record_key};
@@ -355,19 +421,13 @@ pub fn recover(store: &Store) -> Result<usize> {
         }
         store.set_native_meta(&record_key(&record.id), &serde_json::to_string(&record)?)?;
         if store.session(&record.parent_session)?.is_some() {
-            store.add_event(
-                "subagent.finished",
-                &json!({
-                    "run_id": record.id,
-                    "agent": record.agent,
-                    "description": record.description,
-                    "mode": record.mode,
-                    "model": record.model,
+            let mut payload = record.event();
+            crate::config::merge(
+                &mut payload,
+                json!({
                     "status": record.status,
                     "summary": "",
                     "error": record.error,
-                    "job_id": record.job_id,
-                    "session_id": record.session_id,
                     "files": [],
                     "files_truncated": false,
                     "binary_files": [],
@@ -377,6 +437,10 @@ pub fn recover(store: &Store) -> Result<usize> {
                     "notes": record.notes,
                     "interrupted": true,
                 }),
+            );
+            store.add_event(
+                "subagent.finished",
+                &payload,
                 Some(&record.parent_session),
                 (!record.parent_task.is_empty()).then_some(record.parent_task.as_str()),
             )?;
@@ -458,10 +522,39 @@ fn task_args(value: &Value) -> Result<TaskArgs> {
     })
 }
 
+/// One child run, fully decided: what it runs, where and on which model.
+pub(crate) struct ChildRun {
+    pub definition: AgentDefinition,
+    pub description: String,
+    /// The task as the child receives it.
+    pub prompt: String,
+    pub model: ModelConfig,
+    pub write: bool,
+    pub notes: Vec<String>,
+    /// Set when the project's roles chose the model.
+    pub role: Option<Role>,
+    /// Step limit for ShadowCode's own loop.
+    pub max_turns: usize,
+    /// Replaces the standard subagent introduction in the system prompt.
+    pub system_context: Option<String>,
+    /// Approval reasons start with this (default `Subagent <name>`).
+    pub approval_label: Option<String>,
+}
+
+/// A finished child: its record and the text diff of a write child.
+pub(crate) struct ChildOutcome {
+    pub record: RunRecord,
+    pub diff: String,
+}
+
 impl SubagentHost {
     pub fn new(engine: Engine, parent: ParentContext, settings: SubagentsConfig) -> Result<Self> {
         let workspace = Workspace::open(&parent.workspace)?;
         let catalog = agents::discover_for(engine.paths(), &workspace);
+        let store = engine.store();
+        let project = roles::project_of(&store, &workspace.path, Some(&parent.session_id));
+        let roles = roles::load(&store, &project).unwrap_or_default();
+        let consented = roles::consented(&store, &parent.session_id);
         Ok(Self {
             slots: Arc::new(Semaphore::new(settings.max_parallel)),
             engine,
@@ -469,10 +562,19 @@ impl SubagentHost {
             settings,
             catalog,
             spawned: AtomicUsize::new(0),
+            roles,
+            consented,
         })
     }
     pub fn catalog(&self) -> &AgentCatalog {
         &self.catalog
+    }
+    /// The model a definition runs on by default: its role's, when the
+    /// project names one.
+    pub fn role_model(&self, definition: &AgentDefinition) -> Option<(Role, String)> {
+        let role = Role::for_agent(definition)?;
+        let setting = self.roles.get(role).trim();
+        (!matches!(setting, "" | roles::SKIP)).then(|| (role, setting.to_owned()))
     }
     /// The `spawn_agent` tool. One task returns its result object; `tasks`
     /// returns `{results:[…]}`. Failures of a child are reported in its
@@ -518,9 +620,10 @@ impl SubagentHost {
         requested: Option<&str>,
         definition: &AgentDefinition,
         notes: &mut Vec<String>,
-    ) -> Result<crate::config::ModelConfig> {
+    ) -> Result<(ModelConfig, Option<Role>)> {
         let store = self.engine.store();
         let parent = &self.parent.config.model;
+        let mut role = None;
         let model = if let Some(id) = requested {
             crate::model_registry::resolve(&store, id, parent)
                 .with_context(|| format!("Could not use model {id}"))?
@@ -535,6 +638,14 @@ impl SubagentHost {
                     parent.clone()
                 }
             }
+        } else if let Some((for_role, id)) = self.role_model(definition) {
+            role = Some(for_role);
+            crate::model_registry::resolve(&store, &id, parent).with_context(|| {
+                format!(
+                    "The {} role's model ({id}) is not available. Choose another one in Settings › Roles.",
+                    for_role.id()
+                )
+            })?
         } else {
             parent.clone()
         };
@@ -542,26 +653,39 @@ impl SubagentHost {
             model.provider != "mock",
             "Choose a local or compatible model for subagents"
         );
-        ensure!(
-            crate::cli_agent::Vendor::from_provider(&model.provider).is_none(),
-            "Subagents run on ShadowCode's own loop; subscription CLIs ({}) cannot be subagent models",
-            model.provider
-        );
+        let what = match role {
+            Some(role) => format!("the {} role", role.id()),
+            None => "a subagent".into(),
+        };
+        let name = roles::model_label(&model);
         ensure!(
             !self.parent.config.offline() || crate::config::runs_on_this_computer(&model),
-            "Offline mode: choose a model that runs on this computer"
+            "Offline mode: {what} cannot use {name}, which runs in the cloud. Choose a model that runs on this computer."
         );
+        if let Some(vendor) = Vendor::from_provider(&model.provider) {
+            ensure!(
+                self.parent.config.cli_agents.vendor_enabled(vendor),
+                "{} is disabled in Settings → Advanced, so {what} cannot use it",
+                vendor.product_label()
+            );
+        }
         // Consent before cloud: a subagent has no interactive consent channel,
         // so when this conversation runs on this computer a subagent may not
-        // move it to a cloud route. This blocks a repository agent file or an
-        // injected spawn_agent argument from silently sending project files to
-        // a cloud provider (and billing the user's key).
+        // move it to a cloud route unless the user allowed that provider for
+        // this conversation (a Plan → Implement → Review turn or an @agent
+        // request asked first). This blocks a repository agent file or an
+        // injected spawn_agent argument from silently sending project files
+        // to a cloud provider (and billing the user's key or plan).
         ensure!(
-            subagent_cloud_allowed(parent, &model),
-            "This conversation runs on this computer; a subagent cannot use the cloud model '{}'. Switch this conversation to that model first, or choose a local subagent model.",
-            model.provider
+            subagent_cloud_allowed(parent, &model, &self.consented),
+            "This conversation runs on this computer; {what} cannot use the cloud model '{}' ({name}) without your consent. Start the request with @{} so ShadowCode can ask you first, switch this conversation to that model, or choose a model on this computer.",
+            model.provider,
+            definition.name
         );
-        Ok(model)
+        if let Some(conflict) = local_conflict(self.parent.holds_local.as_deref(), &model, &what) {
+            bail!(conflict);
+        }
+        Ok((model, role))
     }
 
     async fn run_one(&self, task: TaskArgs) -> Value {
@@ -604,14 +728,163 @@ impl SubagentHost {
             "This task is read-only, so subagents cannot edit files; use a read-only agent"
         );
         let mut notes = Vec::new();
-        let model = self.resolve_model(task.model.as_deref(), &definition, &mut notes)?;
+        let (model, role) = self.resolve_model(task.model.as_deref(), &definition, &mut notes)?;
+        let max_turns = definition.max_turns.unwrap_or(self.settings.max_turns);
+        let outcome = self
+            .execute(ChildRun {
+                description: task.description.clone(),
+                prompt: task.prompt.clone(),
+                model,
+                write,
+                notes,
+                role,
+                max_turns,
+                system_context: None,
+                approval_label: None,
+                definition,
+            })
+            .await?;
+        let ChildOutcome { record, diff } = outcome;
+        let mut result = json!({
+            "ok": record.status == "completed",
+            "run_id": record.id,
+            "agent": record.agent,
+            "mode": record.mode,
+            "model": record.model,
+            "status": record.status,
+            "summary": truncate(&record.summary, SUMMARY_FOR_MODEL),
+            "session_id": record.session_id,
+        });
+        if !record.role.is_empty() {
+            result["role"] = json!(record.role);
+        }
+        if let Some(error) = &record.error {
+            result["error"] = json!(truncate(error, 2000));
+        }
+        if !record.notes.is_empty() {
+            result["notes"] = json!(record.notes);
+        }
+        if write {
+            result["files"] = json!(record
+                .files
+                .iter()
+                .map(|f| format!(
+                    "{} {} (+{} -{})",
+                    f.status, f.path, f.additions, f.deletions
+                ))
+                .collect::<Vec<_>>());
+            if record.patch {
+                let shown = truncate(&diff, DIFF_FOR_MODEL);
+                result["diff"] = json!(shown);
+                result["diff_truncated"] = json!(shown.len() < diff.len());
+                result["apply"] = json!(format!(
+                    "Review the diff, then call apply_agent_changes with run_id {} to apply it to this project.",
+                    record.id
+                ));
+            } else {
+                result["diff"] = json!("");
+                result["apply"] = json!("The subagent made no text changes.");
+            }
+            if !record.binary_files.is_empty() {
+                result["binary_files_not_included"] = json!(record.binary_files);
+            }
+        }
+        Ok(result)
+    }
+
+    /// One stage of a Plan → Implement → Review task (`engine::roles`): the
+    /// role's target was resolved and allowed when the task started; it is
+    /// checked again here. `prompt` already carries the role's instructions,
+    /// the request and the previous roles' results.
+    pub(crate) async fn run_role(
+        &self,
+        target: &roles::Target,
+        prompt: String,
+        write: bool,
+        description: &str,
+    ) -> Result<ChildOutcome> {
+        ensure!(!self.parent.cancel.is_cancelled(), "The task was cancelled");
+        let guard = roles::Guard {
+            config: &self.parent.config,
+            conversation_local: handoff::is_local(&self.parent.config.model),
+            consented: &self.consented,
+        };
+        match guard.check(target) {
+            Ok(()) => {}
+            Err(roles::Refusal::Blocked(reason)) => bail!(reason),
+            Err(roles::Refusal::NeedsConsent) => bail!(
+                "The {} role runs on {} in the cloud, and this conversation has not allowed that.",
+                target.role.id(),
+                target.name()
+            ),
+        }
+        ensure!(
+            !write || self.parent.config.permissions.level != PermissionLevel::ReadOnly,
+            "This project is read-only, so the implement role cannot change files"
+        );
+        self.spawned.fetch_add(1, Ordering::AcqRel);
+        let builtin = match target.role {
+            Role::Plan => "plan",
+            Role::Implement => "general",
+            Role::Review => "review",
+            Role::Explore => "explore",
+        };
+        let mut definition = agents::builtins()
+            .into_iter()
+            .find(|a| a.name == builtin)
+            .context("Built-in agent missing")?;
+        definition.instructions = roles::instructions(target.role).into();
+        let max_turns = if target.role == Role::Implement {
+            self.parent.config.agent.max_steps
+        } else {
+            definition
+                .max_turns
+                .unwrap_or(self.settings.max_turns)
+                .max(32)
+        };
+        let system_context = format!(
+            "You run as the {} role of a Plan → Implement → Review task, started by ShadowCode for one step. You cannot see the conversation; everything you need is in the task. Your final message is handed to the next role, so end with a concise, self-contained result. {}",
+            target.role.id(),
+            if write {
+                "You work in an isolated copy of the project; your file changes come back as a diff for review."
+            } else {
+                "You are read-only: do not attempt to change files."
+            }
+        );
+        self.execute(ChildRun {
+            definition,
+            description: description.into(),
+            prompt,
+            model: target.model.clone(),
+            write,
+            notes: Vec::new(),
+            role: Some(target.role),
+            max_turns,
+            system_context: Some(system_context),
+            approval_label: Some(format!("{} role ({})", target.role.label(), target.name())),
+        })
+        .await
+    }
+
+    /// Start one child, wait for it, collect a write child's diff, and
+    /// report it in the parent conversation.
+    pub(crate) async fn execute(&self, run: ChildRun) -> Result<ChildOutcome> {
+        let ChildRun {
+            definition,
+            description,
+            prompt,
+            model,
+            write,
+            notes,
+            role,
+            max_turns,
+            system_context,
+            approval_label,
+        } = run;
+        let vendor = Vendor::from_provider(&model.provider);
         let mut config = self.parent.config.clone();
         config.model = model;
-        config.agent.max_steps = definition
-            .max_turns
-            .unwrap_or(self.settings.max_turns)
-            .min(self.parent.config.agent.max_steps)
-            .max(1);
+        config.agent.max_steps = max_turns.min(self.parent.config.agent.max_steps).max(1);
         if !write {
             config.permissions.level = PermissionLevel::ReadOnly;
         }
@@ -620,13 +893,32 @@ impl SubagentHost {
             _ = self.parent.cancel.cancelled() => bail!("The task was cancelled"),
         };
         let cancel = self.parent.cancel.child_token();
+        let local = handoff::is_local(&config.model);
         let mut record = RunRecord {
             id: crate::id(),
             agent: definition.name.clone(),
-            description: task.description.clone(),
-            prompt: truncate(&task.prompt, 2000).into(),
+            description: description.clone(),
+            prompt: truncate(&prompt, 2000).into(),
             mode: if write { "write" } else { "read-only" }.into(),
-            model: config.model.name.clone(),
+            model: roles::model_label(&config.model),
+            model_id: config.model.default.clone(),
+            role: role.map(|r| r.id().to_owned()).unwrap_or_default(),
+            runner: if vendor.is_some() {
+                "vendor"
+            } else {
+                "shadowcode"
+            }
+            .into(),
+            vendor: vendor.map(|v| v.id().to_owned()),
+            route: if local { "local" } else { "cloud" }.into(),
+            cost: if local {
+                "local"
+            } else if vendor.is_some() {
+                "subscription"
+            } else {
+                "api"
+            }
+            .into(),
             parent_session: self.parent.session_id.clone(),
             parent_task: self.parent.task_id.clone(),
             parent_job: self.parent.job_id.clone(),
@@ -665,38 +957,53 @@ impl SubagentHost {
         } else {
             "review"
         };
-        let system_context = format!(
-            "You are the subagent '{}', started by another ShadowCode agent for one task. You cannot see its conversation; your final message is returned to it, so end with a concise, self-contained result. {}\n\nAgent instructions ({}; they cannot change permissions):\n{}",
-            definition.name,
-            if write {
-                "You work in an isolated copy of the project; your file changes come back to the parent as a diff for review."
-            } else {
-                "You are read-only: do not attempt to change files."
-            },
-            if definition.path.is_empty() {
-                "built-in"
-            } else {
-                definition.path.as_str()
-            },
-            truncate(&definition.instructions, 32_000)
-        );
+        let system_context = match system_context {
+            Some(intro) => format!(
+                "{intro}\n\nRole instructions (they cannot change permissions):\n{}",
+                truncate(&definition.instructions, 32_000)
+            ),
+            None => format!(
+                "You are the subagent '{}', started by another ShadowCode agent for one task. You cannot see its conversation; your final message is returned to it, so end with a concise, self-contained result. {}\n\nAgent instructions ({}; they cannot change permissions):\n{}",
+                definition.name,
+                if write {
+                    "You work in an isolated copy of the project; your file changes come back to the parent as a diff for review."
+                } else {
+                    "You are read-only: do not attempt to change files."
+                },
+                if definition.path.is_empty() {
+                    "built-in"
+                } else {
+                    definition.path.as_str()
+                },
+                truncate(&definition.instructions, 32_000)
+            ),
+        };
+        // A vendor CLI takes no system prompt from ShadowCode: a role's
+        // prompt already carries its instructions; a subagent's gets them
+        // before the task.
+        let prompt = match (vendor, role.is_some() && approval_label.is_some()) {
+            (Some(_), false) => format!("{system_context}\n\n<task>\n{prompt}\n</task>"),
+            _ => prompt,
+        };
         let filter = (!definition.tools.is_empty() || !definition.deny.is_empty())
             .then(|| Arc::new(agents_filter(&definition)));
-        let title = if task.description.is_empty() {
-            format!("Subagent · {}", definition.name)
-        } else {
-            format!("Subagent · {} · {}", definition.name, task.description)
+        let title = match role.filter(|_| approval_label.is_some()) {
+            Some(role) => format!("{} role · {}", role.label(), record.model),
+            None if description.is_empty() => format!("Subagent · {}", definition.name),
+            None => format!("Subagent · {} · {}", definition.name, description),
         };
         let spec = ChildSpec {
             link: ChildLink {
                 name: definition.name.clone(),
+                label: approval_label.unwrap_or_else(|| format!("Subagent {}", definition.name)),
                 run_id: record.id.clone(),
                 parent_session: self.parent.session_id.clone(),
                 depth: self.parent.depth + 1,
                 filter,
+                holds_local: self.parent.holds_local.clone(),
             },
             workspace,
-            prompt: task.prompt.clone(),
+            prompt,
             mode: mode.into(),
             config,
             system_context,
@@ -713,20 +1020,9 @@ impl SubagentHost {
                 record.job_id = job.id.clone();
                 record.session_id = job.session_id.clone();
                 let _ = save(&hook_store, &record);
-                let _ = events.emit(
-                    "subagent.started",
-                    json!({
-                        "run_id": record.id,
-                        "agent": record.agent,
-                        "description": record.description,
-                        "prompt": truncate(&record.prompt, 400),
-                        "mode": record.mode,
-                        "model": record.model,
-                        "job_id": job.id,
-                        "session_id": job.session_id,
-                        "depth": record.depth,
-                    }),
-                );
+                let mut payload = record.event();
+                payload["prompt"] = json!(truncate(&record.prompt, 400));
+                let _ = events.emit("subagent.started", payload);
             }
         };
         let outcome = self.engine.run_child(spec, started).await;
@@ -741,7 +1037,9 @@ impl SubagentHost {
                     "completion_tokens": job.usage.completion_tokens,
                     "total_tokens": job.usage.total_tokens,
                     "cost_usd": job.usage.cost_usd,
+                    "cost_estimated": job.usage.cost_estimated,
                     "estimated": job.usage_is_estimated,
+                    "source": job.usage.source,
                 });
                 if job.status != "completed" {
                     record.error = Some(job.summary.clone());
@@ -768,6 +1066,9 @@ impl SubagentHost {
                 .into();
                 record.error = Some(format!("{error:#}"));
             }
+        }
+        if record.role == Role::Review.id() && record.status == "completed" {
+            record.verdict = roles::verdict(&record.summary).map(str::to_owned);
         }
         let mut diff = String::new();
         if let Some((id, path, base)) = checkout {
@@ -806,70 +1107,24 @@ impl SubagentHost {
         }
         record.finished_at = Some(crate::now());
         save(&store, &record)?;
-        self.parent.events.emit(
-            "subagent.finished",
-            json!({
-                "run_id": record.id,
-                "agent": record.agent,
-                "description": record.description,
-                "mode": record.mode,
-                "model": record.model,
-                "status": record.status,
-                "summary": truncate(&record.summary, 4000),
-                "error": record.error.as_deref().map(|e| truncate(e, 2000)),
-                "job_id": record.job_id,
-                "session_id": record.session_id,
-                "files": record.files,
-                "files_truncated": record.files_truncated,
-                "binary_files": record.binary_files,
-                "patch": record.patch,
-                "usage": record.usage,
-                "steps": record.steps,
-                "notes": record.notes,
-                "duration_s": ((record.finished_at.unwrap_or(record.created_at) - record.created_at) * 10.0).round() / 10.0,
-            }),
-        )?;
-        let mut result = json!({
-            "ok": record.status == "completed",
-            "run_id": record.id,
-            "agent": record.agent,
-            "mode": record.mode,
+        let mut payload = record.event();
+        let finished = json!({
             "status": record.status,
-            "summary": truncate(&record.summary, SUMMARY_FOR_MODEL),
-            "session_id": record.session_id,
+            "summary": truncate(&record.summary, 4000),
+            "error": record.error.as_deref().map(|e| truncate(e, 2000)),
+            "files": record.files,
+            "files_truncated": record.files_truncated,
+            "binary_files": record.binary_files,
+            "patch": record.patch,
+            "usage": record.usage,
+            "steps": record.steps,
+            "notes": record.notes,
+            "verdict": record.verdict,
+            "duration_s": ((record.finished_at.unwrap_or(record.created_at) - record.created_at) * 10.0).round() / 10.0,
         });
-        if let Some(error) = &record.error {
-            result["error"] = json!(truncate(error, 2000));
-        }
-        if !record.notes.is_empty() {
-            result["notes"] = json!(record.notes);
-        }
-        if write {
-            result["files"] = json!(record
-                .files
-                .iter()
-                .map(|f| format!(
-                    "{} {} (+{} -{})",
-                    f.status, f.path, f.additions, f.deletions
-                ))
-                .collect::<Vec<_>>());
-            if record.patch {
-                let shown = truncate(&diff, DIFF_FOR_MODEL);
-                result["diff"] = json!(shown);
-                result["diff_truncated"] = json!(shown.len() < diff.len());
-                result["apply"] = json!(format!(
-                    "Review the diff, then call apply_agent_changes with run_id {} to apply it to this project.",
-                    record.id
-                ));
-            } else {
-                result["diff"] = json!("");
-                result["apply"] = json!("The subagent made no text changes.");
-            }
-            if !record.binary_files.is_empty() {
-                result["binary_files_not_included"] = json!(record.binary_files);
-            }
-        }
-        Ok(result)
+        crate::config::merge(&mut payload, finished);
+        self.parent.events.emit("subagent.finished", payload)?;
+        Ok(ChildOutcome { record, diff })
     }
 
     /// Diffstat and a text patch of the worktree against its base; the
@@ -953,7 +1208,7 @@ impl SubagentHost {
             let _ = save(&store, &record);
             let _ = self.parent.events.emit(
                 "subagent.applied",
-                json!({"run_id": run_id, "agent": record.agent, "paths": output["paths"]}),
+                json!({"run_id": run_id, "agent": record.agent, "role": record.role, "paths": output["paths"]}),
             );
         }
     }
@@ -968,21 +1223,41 @@ fn agents_filter(definition: &AgentDefinition) -> ToolFilter {
     ToolFilter::new(&allow, &definition.deny)
 }
 
+/// One local model at a time: a child on another local model than the one
+/// its parent (or an ancestor) holds would wait for that parent to finish,
+/// which waits for the child. Refused with a clear message instead.
+fn local_conflict(held: Option<&str>, child: &ModelConfig, what: &str) -> Option<String> {
+    let held = held?;
+    if !crate::local_engine::is_managed(child) || child.default == held {
+        return None;
+    }
+    let held_name = crate::local_engine::known(held)
+        .map(|e| e.name)
+        .unwrap_or_else(|| held.to_owned());
+    Some(format!(
+        "Only one model on this computer runs at a time. This conversation is using {held_name}, so {what} cannot run {} now. Choose {held_name} or a cloud model for it, or turn on Plan → Implement → Review, where roles run one after another.",
+        roles::model_label(child)
+    ))
+}
+
 /// Consent before cloud: a subagent may move to a cloud route only when the
-/// conversation is already on one. It has no interactive consent channel, so a
-/// local conversation never silently spawns a cloud child (from a repository
-/// agent file or an injected `spawn_agent` model argument).
+/// conversation is already on one, or the user allowed that provider for this
+/// conversation. It has no interactive consent channel, so a local
+/// conversation never silently spawns a cloud child (from a repository agent
+/// file, a project role, or an injected `spawn_agent` model argument).
 fn subagent_cloud_allowed(
-    parent: &crate::config::ModelConfig,
-    child: &crate::config::ModelConfig,
+    parent: &ModelConfig,
+    child: &ModelConfig,
+    consented: &std::collections::BTreeSet<String>,
 ) -> bool {
-    crate::cli_agent::handoff::is_local(child) || !crate::cli_agent::handoff::is_local(parent)
+    handoff::is_local(child) || !handoff::is_local(parent) || consented.contains(&child.provider)
 }
 
 #[cfg(test)]
 mod cloud_consent_tests {
-    use super::subagent_cloud_allowed;
+    use super::{local_conflict, subagent_cloud_allowed};
     use crate::config::ModelConfig;
+    use std::collections::BTreeSet;
 
     fn model(provider: &str, default: &str, endpoint: &str) -> ModelConfig {
         ModelConfig {
@@ -1001,11 +1276,37 @@ mod cloud_consent_tests {
             "api:openrouter:a/b",
             "https://openrouter.ai/api/v1",
         );
+        let none = BTreeSet::new();
         // Local parent: a cloud child is refused, a local child is fine.
-        assert!(!subagent_cloud_allowed(&local, &cloud));
-        assert!(subagent_cloud_allowed(&local, &local));
+        assert!(!subagent_cloud_allowed(&local, &cloud, &none));
+        assert!(subagent_cloud_allowed(&local, &local, &none));
         // Cloud parent (the conversation already consented): either is fine.
-        assert!(subagent_cloud_allowed(&cloud, &cloud));
-        assert!(subagent_cloud_allowed(&cloud, &local));
+        assert!(subagent_cloud_allowed(&cloud, &cloud, &none));
+        assert!(subagent_cloud_allowed(&cloud, &local, &none));
+        // The user allowed this provider for this conversation.
+        let allowed: BTreeSet<String> = ["openrouter".to_owned()].into();
+        assert!(subagent_cloud_allowed(&local, &cloud, &allowed));
+        let claude = crate::cli_agent::resolve_vendor("cli:claude").unwrap();
+        assert!(!subagent_cloud_allowed(&local, &claude, &allowed));
+    }
+
+    #[test]
+    fn a_child_never_waits_for_the_local_model_its_parent_holds() {
+        let a = model("llamacpp", "local:gguf:aaa", "");
+        let b = model("llamacpp", "local:gguf:bbb", "");
+        let cloud = crate::cli_agent::resolve_vendor("cli:codex").unwrap();
+        // Nothing held (a cloud parent or a Plan → Implement → Review task):
+        // any local model waits for the runtime as usual.
+        assert!(local_conflict(None, &b, "the review role").is_none());
+        // The parent holds A: A is shared, a cloud child is fine, B is refused.
+        assert!(local_conflict(Some("local:gguf:aaa"), &a, "x").is_none());
+        assert!(local_conflict(Some("local:gguf:aaa"), &cloud, "x").is_none());
+        let refused = local_conflict(Some("local:gguf:aaa"), &b, "the review role").unwrap();
+        assert!(
+            refused.contains("Only one model on this computer runs at a time"),
+            "{refused}"
+        );
+        assert!(refused.contains("the review role cannot run"), "{refused}");
+        assert!(refused.contains("Plan → Implement → Review"), "{refused}");
     }
 }

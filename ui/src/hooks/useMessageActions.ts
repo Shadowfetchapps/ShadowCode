@@ -14,6 +14,7 @@ export function useMessageActions({
   sessionId,
   workspace,
   model,
+  roles,
   busy,
   queueing,
   openSession,
@@ -26,6 +27,8 @@ export function useMessageActions({
   workspace: string;
   /** The composer's model (picker id). */
   model: string;
+  /** Plan → Implement → Review is on: resent messages run as roles too. */
+  roles?: boolean;
   busy: boolean;
   queueing: boolean;
   openSession: (id: string) => Promise<void>;
@@ -49,8 +52,9 @@ export function useMessageActions({
       queue,
       images: [],
       web: false,
+      ...(roles ? { roles: true } : {}),
     }),
-    [workspace, model],
+    [workspace, model, roles],
   );
 
   const editResend = useCallback(

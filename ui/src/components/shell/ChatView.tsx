@@ -10,6 +10,7 @@ import { WelcomeBanner } from "../WelcomeBanner";
 import type { TaskActivity } from "../../lib/activity";
 import { isProjectTrustError, trustErrorHint } from "../../lib/trust";
 import { readableError } from "../../lib/transport";
+import { ROLES_PROVIDER } from "../../lib/transcript";
 import type { ToastKind } from "../../hooks/useToasts";
 
 export type HistoryState = {
@@ -234,12 +235,16 @@ export function ChatView({
               pendingApprovals={approvals.length}
               elapsed={busy && since ? <Elapsed since={since} /> : undefined}
             />
-            {job && (job.status === "running" || job.status === "paused") && (
-              <TaskSteerBar
-                job={job}
-                onToast={(text, kind) => onToast(text, kind || "info")}
-              />
-            )}
+            {job &&
+              (job.status === "running" || job.status === "paused") &&
+              // A Plan → Implement → Review task is steered through its
+              // roles' own conversations.
+              job.routing?.provider !== ROLES_PROVIDER && (
+                <TaskSteerBar
+                  job={job}
+                  onToast={(text, kind) => onToast(text, kind || "info")}
+                />
+              )}
           </div>
         )}
       </div>

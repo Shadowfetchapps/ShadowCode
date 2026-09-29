@@ -19,6 +19,7 @@ export function useConversationEdits({
   sessionId,
   workspace,
   target,
+  roles,
   busy,
   queueing,
   openSession,
@@ -33,6 +34,8 @@ export function useConversationEdits({
   sessionId: string;
   workspace: string;
   target: PickerTarget | undefined;
+  /** Resent messages run as Plan → Implement → Review. */
+  roles?: boolean;
   /** A task runs or is being sent. */
   busy: boolean;
   queueing: boolean;
@@ -58,6 +61,7 @@ export function useConversationEdits({
     sessionId,
     workspace,
     model: target?.id || "",
+    roles,
     busy,
     queueing,
     openSession,

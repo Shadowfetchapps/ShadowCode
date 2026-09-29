@@ -33,7 +33,7 @@ const MODULES: &[(&str, &[&str])] = &[
         "service/accounts.rs",
         &["accounts", "cli-agents", "openrouter", "allowance"],
     ),
-    ("service/agents.rs", &["agents", "subagents"]),
+    ("service/agents.rs", &["agents", "subagents", "roles"]),
     ("service/automations.rs", &["automations"]),
     ("service/background.rs", &["background"]),
     ("service/code_intel.rs", &["code-intel"]),

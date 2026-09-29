@@ -651,6 +651,7 @@ async fn fake_binary_spawn_approval_and_cancel() {
             steer: &steer,
             approvals_required: true,
             catalog: None,
+            approval_route: None,
         }),
     )
     .await
@@ -703,6 +704,7 @@ async fn fake_binary_spawn_approval_and_cancel() {
             steer: &steer,
             approvals_required: true,
             catalog: None,
+            approval_route: None,
         }),
     )
     .await

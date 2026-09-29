@@ -30,6 +30,9 @@ struct StartBody {
     /// Start a new conversation in a fresh managed worktree of the project
     /// (`crate::worktree_tasks`); `session_id` and `queue` are ignored.
     worktree: Flag,
+    /// Run a Code task as Plan → Implement → Review (a Plan task as its plan
+    /// role) with the project's roles (`crate::roles`).
+    roles: Flag,
 }
 
 /// POST /api/jobs/test.
@@ -360,6 +363,7 @@ impl Service {
         let turn = crate::engine::TurnOptions {
             effort: crate::effort::parse(body.effort.as_str())?,
             mentions: crate::mentions::validate(&Workspace::open(&workspace)?, mentions)?,
+            roles: body.roles.is_true(),
         };
         let mut limit: Option<crate::config::PermissionLevel> = body
             .permission_limit

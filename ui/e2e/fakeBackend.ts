@@ -38,6 +38,10 @@ export type FakeOptions = {
   downloadSteps?: number;
   /** The first download attempt stops a third of the way with an error. */
   downloadDrops?: boolean;
+  /** The project's saved roles (GET /api/roles `setup`). */
+  roles?: Record<string, unknown>;
+  /** `network.mode`, e.g. "offline". */
+  network?: string;
 };
 
 export function installFakeBackend(options: FakeOptions = {}) {
@@ -345,7 +349,7 @@ export function installFakeBackend(options: FakeOptions = {}) {
           cursor: "Cursor asks through ACP permission requests.",
         },
       },
-      network: { mode: "online" },
+      network: { mode: options.network || "online" },
       ui: { theme: "light", notify: true },
       cli_agents: { enabled: true },
       guardian: { enabled: false, interval_sec: 3600 },
@@ -613,6 +617,18 @@ export function installFakeBackend(options: FakeOptions = {}) {
     events: [] as Json[],
     cursor: 0,
     lastRoute: {} as Record<string, string>,
+    /** The project's roles (GET/POST /api/roles) and the cloud providers
+     * each conversation allowed as roles. */
+    roles: {
+      pipeline: false,
+      plan: "",
+      implement: "",
+      review: "",
+      explore: "",
+      preset: "",
+      ...options.roles,
+    } as Json,
+    rolesConsented: {} as Record<string, string[]>,
     /** The engine's selected project (a lane's copy once its conversation
      * is activated). */
     selected: workspace,
@@ -1527,6 +1543,387 @@ export function installFakeBackend(options: FakeOptions = {}) {
   }
 
   /** Queue a job and its user.message; `handoff` marks a provider change. */
+  // --- Roles (docs/SUBAGENTS.md) ------------------------------------------
+  const ROLE_IDS = ["plan", "implement", "review", "explore"];
+  const ROLE_LABEL: Json = {
+    plan: "Plan",
+    implement: "Implement",
+    review: "Review",
+    explore: "Explore",
+  };
+  const ROLE_PRESETS: Json[] = [
+    {
+      id: "claude-codex-local",
+      label: "Claude Code plans, Codex implements, local reviews",
+      description:
+        "Claude Code writes the plan, Codex makes the changes and a model on this computer reviews them.",
+      roles: {
+        plan: "cli:claude",
+        implement: "cli:codex",
+        review: "local",
+        explore: "",
+      },
+    },
+    {
+      id: "claude-plans",
+      label: "Claude Code plans",
+      description:
+        "Claude Code writes the plan; the conversation's model makes the changes. No review step.",
+      roles: { plan: "cli:claude", implement: "", review: "skip", explore: "" },
+    },
+    {
+      id: "local-review",
+      label: "Local model reviews",
+      description:
+        "The conversation's model makes the changes and a model on this computer reviews them. No plan step.",
+      roles: { plan: "skip", implement: "", review: "local", explore: "" },
+    },
+    {
+      id: "all-local",
+      label: "Everything on this computer",
+      description:
+        "One model on this computer plans, implements, reviews and explores.",
+      roles: {
+        plan: "local",
+        implement: "local",
+        review: "local",
+        explore: "local",
+      },
+    },
+  ];
+  /** One role resolved like the engine: "" is the conversation's model. */
+  function roleTarget(role: string, model: string) {
+    const setting = String(state.roles[role] || "");
+    const rows = pickerTargets();
+    const row =
+      setting === "" || setting === "skip"
+        ? rows.find((t) => t.id === model)
+        : rows.find((t) => t.id === setting) ||
+          rows.find((t) => t.provider === setting && t.is_default);
+    const local = row ? row.inference === "local" : true;
+    const vendor = row && String(row.provider).startsWith("cli:");
+    const name = row
+      ? local
+        ? String(row.name).replace(/ · This computer$/, "")
+        : vendor && setting && !setting.split(":")[2]
+          ? String(row.name).split(" · ")[0]
+          : String(row.name)
+      : "mock-coder";
+    return {
+      role,
+      label: ROLE_LABEL[role],
+      setting: setting === "skip" ? "" : setting,
+      skipped: setting === "skip",
+      id: row?.id || setting,
+      name,
+      provider: row?.provider || "local",
+      local,
+      runner: vendor ? "vendor" : "shadowcode",
+      vendor: vendor ? String(row!.provider).slice(4) : null,
+      cost: local ? "local" : vendor ? "subscription" : "api",
+    };
+  }
+  function rolesView(sid: string, model: string) {
+    const conversation = pickerTargets().find((t) => t.id === model);
+    const conversationLocal =
+      !conversation || conversation.inference === "local";
+    const consented = state.rolesConsented[sid] || [];
+    const offline = state.config.network?.mode === "offline";
+    const roles: Json = {};
+    for (const role of ROLE_IDS) {
+      const target: Json = roleTarget(role, model);
+      if (!target.local && offline)
+        target.blocked = `Offline mode: the ${role} role uses ${target.name}, which runs in the cloud. Choose a model on this computer for it in Settings › Roles, or go online.`;
+      else if (
+        !target.local &&
+        conversationLocal &&
+        !consented.includes(target.provider)
+      )
+        target.needs_consent = true;
+      roles[role] = target;
+    }
+    return {
+      workspace,
+      setup: { ...state.roles },
+      roles,
+      presets: ROLE_PRESETS,
+      conversation: {
+        id: model,
+        name: conversation ? conversation.name : "mock-coder",
+        local: conversationLocal,
+      },
+      offline,
+      consented,
+    };
+  }
+  /** A Plan → Implement → Review task: role cards, the apply step and the
+   * roles summary, as the engine records them. */
+  function rolesScript(job: Json, stages: Json[]) {
+    const sid = job.session_id;
+    const tid = job.task_id;
+    const label = `Roles: ${stages.map((s) => s.name).join(" → ")}`;
+    const events: [string, Json][] = [
+      [
+        "agent.started",
+        { task: job.task, job_id: job.id, native: true, roles: stages },
+      ],
+      [
+        "routing.selected",
+        {
+          purpose: "roles",
+          source: "roles",
+          requested: "roles",
+          model_id: `roles:${stages.map((s) => `${s.role}=${s.id}`).join(",")}`,
+          model_name: label,
+          provider: "shadowcode:roles",
+          context_limit: 0,
+          inference: stages.every((s) => s.local) ? "local" : "cloud",
+        },
+      ],
+    ];
+    const results: Json[] = [];
+    stages.forEach((stage, index) => {
+      const run = `${job.id}-role-${index}`;
+      const common = {
+        run_id: run,
+        agent: stage.role === "implement" ? "general" : stage.role,
+        role: stage.role,
+        model: stage.name,
+        model_id: stage.id,
+        runner: stage.runner,
+        vendor: stage.vendor,
+        route: stage.local ? "local" : "cloud",
+        cost: stage.cost,
+        mode: stage.role === "implement" ? "write" : "read-only",
+        job_id: `${run}-job`,
+        session_id: `${run}-session`,
+        depth: 1,
+      };
+      const usage = {
+        prompt_tokens: 900,
+        completion_tokens: 120,
+        total_tokens: 1020,
+        cost_usd: stage.local ? 0 : null,
+        source: stage.local ? "local" : "vendor",
+      };
+      const summary =
+        stage.role === "plan"
+          ? "1. Fix `add` in src/app.ts.\n2. Run the tests."
+          : stage.role === "implement"
+            ? "Fixed `add` in src/app.ts."
+            : "The change is correct.\n\nVerdict: ready";
+      const files =
+        stage.role === "implement"
+          ? [
+              {
+                path: "src/app.ts",
+                status: "modified",
+                additions: 1,
+                deletions: 1,
+                binary: false,
+              },
+            ]
+          : [];
+      events.push(["subagent.started", { ...common, prompt: job.task }]);
+      events.push([
+        "subagent.finished",
+        {
+          ...common,
+          status: "completed",
+          summary,
+          error: null,
+          files,
+          files_truncated: false,
+          binary_files: [],
+          patch: files.length > 0,
+          usage,
+          steps: 1,
+          notes: [],
+          verdict: stage.role === "review" ? "ready" : null,
+          duration_s: 2.5,
+        },
+      ]);
+      results.push({
+        role: stage.role,
+        label: stage.label,
+        name: stage.name,
+        runner: stage.runner,
+        route: common.route,
+        cost: stage.cost,
+        status: "completed",
+        usage,
+        files: files.length,
+        additions: files.length,
+        deletions: files.length,
+        verdict: stage.role === "review" ? "ready" : null,
+        run_id: run,
+        session_id: common.session_id,
+        duration_s: 2.5,
+      });
+    });
+    const implement = stages.findIndex((s) => s.role === "implement");
+    if (implement >= 0) {
+      events.push([
+        "tool.started",
+        {
+          tool: "apply_agent_changes",
+          call_id: "apply",
+          arguments: { run_id: `${job.id}-role-${implement}` },
+        },
+      ]);
+      events.push([
+        "tool.completed",
+        {
+          tool: "apply_agent_changes",
+          call_id: "apply",
+          success: true,
+          output: { paths: ["src/app.ts"] },
+          output_preview: "Applied the implement role's changes",
+        },
+      ]);
+      events.push([
+        "checkpoint.updated",
+        {
+          task_id: tid,
+          workspace,
+          changes: 1,
+          paths: ["src/app.ts"],
+          restored: false,
+        },
+      ]);
+      events.push([
+        "subagent.applied",
+        {
+          run_id: `${job.id}-role-${implement}`,
+          role: "implement",
+          paths: ["src/app.ts"],
+        },
+      ]);
+    }
+    events.push([
+      "roles.finished",
+      {
+        label,
+        stages: results,
+        applied: implement >= 0 ? true : null,
+        apply_note:
+          implement >= 0 ? "The changes were applied to the project." : "",
+        files: implement >= 0 ? ["src/app.ts"] : [],
+        completed: true,
+      },
+    ]);
+    const summary = [
+      "**Plan → Implement → Review**",
+      "",
+      ...results.map((r) => `- **${ROLE_LABEL[r.role]}** · ${r.name} — done`),
+      "",
+      implement >= 0 ? "The changes were applied to the project." : "",
+    ].join("\n");
+    let index = 0;
+    const tick = () => {
+      if (job.status === "cancelling") {
+        job.status = "cancelled";
+        emit(sid, tid, "agent.completed", {
+          summary: "Task cancelled",
+          success: false,
+          cancelled: true,
+        });
+        job.event_cursor = state.cursor;
+        return;
+      }
+      if (index < events.length) {
+        if (index === 0) job.status = "running";
+        const [type, payload] = events[index++];
+        if (type === "checkpoint.updated") applyEdit(tid);
+        emit(sid, tid, type, payload);
+        job.event_cursor = state.cursor;
+        setTimeout(tick, step);
+        return;
+      }
+      job.status = "completed";
+      job.finished_at = now();
+      job.summary = summary;
+      job.result = { success: true, summary };
+      emit(sid, tid, "agent.completed", {
+        summary,
+        success: true,
+        cancelled: false,
+        usage: {},
+      });
+      job.event_cursor = state.cursor;
+    };
+    setTimeout(tick, step);
+  }
+  function startRoles(body: Json) {
+    const target = pickerTargets().find((t) => t.id === body.model);
+    if (!target) throw new Error("Choose a model in the composer");
+    const sid = body.session_id || "s1";
+    const mode = body.purpose === "planner" ? "plan" : "code";
+    const stages = (
+      mode === "plan" ? ["plan"] : ["plan", "implement", "review"]
+    )
+      .map((role) => roleTarget(role, body.model))
+      .filter((stage) => !stage.skipped);
+    if (state.config.network?.mode === "offline") {
+      const cloud = stages.find((s) => !s.local);
+      if (cloud)
+        throw new Error(
+          `Offline mode: the ${cloud.role} role uses ${cloud.name}, which runs in the cloud. Choose a model on this computer for it in Settings › Roles, or go online.`,
+        );
+    }
+    const consented = state.rolesConsented[sid] || [];
+    const asking = stages.filter(
+      (s) => !s.local && !consented.includes(s.provider),
+    );
+    if (target.inference === "local" && asking.length && !body.handoff_consent)
+      throw new Error(
+        JSON.stringify({
+          error: "Confirm before continuing",
+          needs_consent: true,
+          handoff: {
+            from: String(target.name).replace(/ · This computer$/, ""),
+            to: [...new Set(asking.map((s) => s.name))].join(" and "),
+            excerpt_chars: 0,
+            images: 0,
+            reason: "cloud roles",
+            roles: asking.map((s) => ({
+              role: s.role,
+              label: s.label,
+              name: s.name,
+              provider: s.provider,
+            })),
+          },
+        }),
+      );
+    state.rolesConsented[sid] = [
+      ...new Set([
+        ...consented,
+        ...stages.filter((s) => !s.local).map((s) => s.provider),
+      ]),
+    ];
+    const id = `j${state.jobs.length + 1}`;
+    const job: Json = {
+      id,
+      task_id: `t${state.jobs.length + 1}`,
+      workspace: body.workspace || workspace,
+      session_id: sid,
+      status: "queued",
+      task: body.task,
+      model: `Roles: ${stages.map((s) => s.name).join(" → ")}`,
+      model_name: `Roles: ${stages.map((s) => s.name).join(" → ")}`,
+      provider: "shadowcode:roles",
+      started_at: now(),
+      event_cursor: state.cursor,
+      web: false,
+    };
+    state.jobs.push(job);
+    notify("job.changed", sid);
+    emit(sid, job.task_id, "user.message", { text: body.task });
+    job.event_cursor = state.cursor - 1;
+    rolesScript(job, stages);
+    return job;
+  }
+
   function createJob(body: Json) {
     const target = pickerTargets().find((t) => t.id === body.model);
     if (!target) throw new Error("Choose a model in the composer");
@@ -2727,6 +3124,37 @@ export function installFakeBackend(options: FakeOptions = {}) {
         forked_from_event: body.event_id,
       };
     }
+    if (path === "/api/roles" && method === "GET")
+      return rolesView(
+        q.get("session_id") || "s1",
+        q.get("model") || "local:gguf:qwen",
+      );
+    if (path === "/api/roles" && method === "POST") {
+      const next = { ...state.roles };
+      if (body.preset) {
+        const preset = ROLE_PRESETS.find((p) => p.id === body.preset);
+        if (!preset) throw new Error(`Unknown roles preset '${body.preset}'`);
+        for (const role of ROLE_IDS)
+          next[role] =
+            preset.roles[role] === "local"
+              ? "local:gguf:qwen"
+              : preset.roles[role];
+        next.preset = preset.id;
+      }
+      for (const role of ROLE_IDS)
+        if (typeof body[role] === "string" && body[role] !== next[role]) {
+          if (body[role] === "skip" && !["plan", "review"].includes(role))
+            throw new Error(`The ${role} role cannot be skipped`);
+          next[role] = body[role];
+          next.preset = "";
+        }
+      if (typeof body.pipeline === "boolean") next.pipeline = body.pipeline;
+      state.roles = next;
+      return rolesView(
+        body.session_id || "s1",
+        body.model || "local:gguf:qwen",
+      );
+    }
     if (path === "/api/agents")
       return {
         agents: [
@@ -3057,6 +3485,8 @@ export function installFakeBackend(options: FakeOptions = {}) {
       }, step);
       return { ...job };
     }
+    if (path === "/api/jobs" && method === "POST" && body.roles)
+      return { ...startRoles(body) };
     if (path === "/api/jobs" && method === "POST") {
       const target = pickerTargets().find((t) => t.id === body.model);
       if (!target) throw new Error("Choose a model in the composer");

@@ -62,6 +62,7 @@ pub mod redaction;
 pub mod remote;
 pub mod retry;
 pub mod review;
+pub mod roles;
 pub mod routing;
 pub mod rulebook;
 pub mod runtime;

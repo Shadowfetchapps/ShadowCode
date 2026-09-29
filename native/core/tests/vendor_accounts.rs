@@ -496,6 +496,7 @@ async fn run_fake(
             steer: &steer,
             approvals_required,
             catalog,
+            approval_route: None,
         }),
     )
     .await

@@ -252,6 +252,9 @@ pub struct Request<'a> {
     pub approvals_required: bool,
     /// Receives plan usage pushed during the turn (Codex rate-limit updates).
     pub catalog: Option<std::sync::Arc<super::catalog::VendorCatalog>>,
+    /// A subagent's approvals are asked in its parent's conversation, with
+    /// its name in the reason.
+    pub approval_route: Option<crate::subagents::ApprovalRoute>,
 }
 
 /// What a finished vendor run produced.
@@ -1302,14 +1305,18 @@ async fn request_approval(
         &prompt.kind,
         &prompt.arguments,
     );
+    let (session_id, reason) = match &request.approval_route {
+        Some(route) => (route.session_id.clone(), route.reason(&prompt.reason)),
+        None => (request.session_id.clone(), prompt.reason),
+    };
     let record = Approval {
         id: String::new(),
-        session_id: request.session_id.clone(),
+        session_id,
         task_id: request.task_id.clone(),
         tool: prompt.tool,
         arguments: prompt.arguments,
         command: prompt.command,
-        reason: prompt.reason,
+        reason,
         pending: true,
         created_at: 0.0,
         expires_at: 0.0,

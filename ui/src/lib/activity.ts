@@ -1,3 +1,4 @@
+import type { RolesSummary } from "./roles";
 /** Activity derived only from recorded events: tool calls (native and vendor),
  * approvals, web sources, changed files, verification and completion. */
 import { localProgressLabel, type LocalPhase } from "./localProgress";
@@ -74,6 +75,8 @@ export type TaskActivity = {
   approvalsPending: number;
   approvalsSeen: number;
   verification?: Verification;
+  /** A Plan → Implement → Review task: who did what (`roles.finished`). */
+  roles?: RolesSummary;
   finished?: {
     success: boolean;
     cancelled: boolean;

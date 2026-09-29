@@ -243,10 +243,15 @@ Types, grouped, with the payload fields clients rely on:
   `checkpoint.rewind_undone` `{task_id, paths, undo_id}`;
   `review.undone` `{task_id, path, hunk, whole}`.
 - **Subagents** (on the parent conversation): `subagent.started` `{run_id,
-  agent, description, prompt, mode, model, job_id, session_id, depth}`,
-  `subagent.finished` `{run_id, agent, description, mode, model, status,
-  summary, error, job_id, session_id, files, files_truncated, binary_files,
-  patch, usage, steps, notes, duration_s}`, `subagent.applied` `{run_id, agent, paths}`.
+  agent, description, prompt, mode, model, model_id, role, runner, vendor,
+  route, cost, job_id, session_id, depth}`, `subagent.finished` `{run_id,
+  agent, description, mode, model, model_id, role, runner, vendor, route,
+  cost, status, summary, error, job_id, session_id, files, files_truncated,
+  binary_files, patch, usage, steps, notes, verdict, duration_s}`,
+  `subagent.applied` `{run_id, agent, role, paths}`.
+- **Roles** (on a Plan → Implement → Review task): `roles.started` `{label,
+  stages}` and `roles.finished` `{label, stages, applied, apply_note, files,
+  completed}` ([Roles](#roles)).
 - **Goals**: `goal.updated`, `goal.milestone.started` `{goal_id, milestone_id, job_id}`.
 - **Automations** (on the run's conversation): `automation.started`
   `{automation_id, run_id, name, job_id}`, `automation.waiting`
@@ -482,6 +487,8 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `POST` | `/api/review/tasks/{task_id}/undo` | stable | allowed | [Review and rewind](#review-and-rewind) |
 | `GET` | `/api/routing` | stable | allowed | [Settings and health](#settings-and-health) |
 | `PUT` | `/api/routing` | stable | allowed | [Settings and health](#settings-and-health) |
+| `GET` | `/api/roles` | stable | allowed | [Roles](#roles) |
+| `POST` | `/api/roles` | stable | allowed | [Roles](#roles) |
 | `GET` | `/api/rules` | stable | allowed | [Rules and skills](#rules-and-skills) |
 | `GET` | `/api/rules/check` | stable | allowed | [Rules and skills](#rules-and-skills) |
 | `GET` | `/api/rules/export` | stable | refused | [Rules and skills](#rules-and-skills) |
@@ -745,6 +752,7 @@ in-band consent refusal ([Errors](#errors)). Body:
 | `context` | `[{kind: "element"\|"console", label, text}]`? | from the Preview tab; at most 12 items of 16 000 characters (strict; other fields ignored) |
 | `permission_limit` | `"read_only"\|"workspace"\|"elevated"`? | narrows the project's permission level for this job (strict) |
 | `worktree` | bool? | start a new conversation in a fresh worktree ([Worktree tasks](#worktree-tasks)); `session_id` and `queue` are ignored |
+| `roles` | bool? | run a Code task as Plan → Implement → Review, a Plan task as its plan role ([Roles](#roles)); other modes are refused |
 
 - Job records keep the exact picker id in `routing.model_id`. A `local:gguf:`
   target also becomes the project's "last local model" (plan-limit fallback).
@@ -1480,12 +1488,56 @@ See [SUBAGENTS.md](SUBAGENTS.md).
   parent_session, parent_task, parent_job, job_id, session_id, status,
   summary, error, files: [{path, status, additions, deletions, binary}],
   files_truncated, binary_files, patch, applied, usage, steps, depth, notes,
-  created_at, finished_at}`.
+  created_at, finished_at, role, model_id, runner, vendor, route, cost,
+  verdict}`. Since 1.0: `role` is `""` or `plan|implement|review|explore`,
+  `runner` is `shadowcode|vendor`, `route` is `local|cloud`, `cost` is
+  `local|subscription|api`, `verdict` is `ready|needs_changes|null`; `usage`
+  gains `cost_estimated` and `source`.
 - Native tools: `spawn_agent {agent?, prompt, description?, model?, write?}`
   or `{tasks: [...]}` (at most 8); `apply_agent_changes {run_id}` (runs as
   `apply_patch`); `load_skill {name}`; approved MCP tools as
   `mcp__<server>__<tool>`. A subagent's approvals carry the parent's
-  `session_id` and a reason starting `Subagent <name>:`.
+  `session_id` and a reason starting `Subagent <name>:` (a role's:
+  `<Role> role (<model>):`), including a vendor CLI subagent's permission
+  requests. `spawn_agent` results add `model` and, for a role, `role`.
+
+### Roles
+
+- `GET /api/roles?workspace=&session_id=&model=` → `{workspace, setup,
+  roles, presets, conversation: {id, name, local}, offline, consented}`.
+  `setup` = `{pipeline, plan, implement, review, explore, preset,
+  updated_at}`; each value is `""` (the conversation's model), `"skip"` (plan
+  and review) or a picker id. `roles.<plan|implement|review|explore>` =
+  `{role, label, setting, id, name, provider, local, runner, vendor, cost,
+  skipped, blocked?, needs_consent?}`; `blocked` explains why the role cannot
+  run (offline, vendor turned off, model unavailable) and `needs_consent`
+  marks a cloud role a conversation on this computer has not allowed.
+  `presets[]` = `{id, label, description, roles}`; `consented` lists the
+  providers the conversation allowed.
+- `POST /api/roles {workspace?, session_id?, model?, preset?, pipeline?,
+  plan?, implement?, review?, explore?}` → the same view. Absent fields keep
+  their value; `preset` is applied first; changing a role by hand clears
+  `preset`. Refused: unknown presets or models, skipping implement or
+  explore, a preset needing a local model when none is ready, untrusted
+  projects. Stored per project in ShadowCode's database (`roles:<project>`),
+  never in the repository.
+- `POST /api/jobs` with `roles: true`: the job's `model` names the roles and
+  `routing` is `{purpose: "roles", provider: "shadowcode:roles", model_id:
+  "roles:<role>=<id>,…", model_name, inference: local|cloud, route:
+  "roles"}`. When a cloud role would receive a local conversation's work,
+  the answer is `needs_consent` with `handoff: {from, to, excerpt_chars,
+  images: 0, reason, roles: [{role, label, name, provider, agent?}]}`;
+  resending with `handoff_consent: true` records the providers in the
+  conversation (`session_meta` `consent:cloud_roles`). A plain turn that
+  starts with an `@agent` whose role or definition model is a cloud one asks
+  the same way. Offline, a cloud role is refused with the reason.
+- Task events: `roles.started {label, stages}`, `plan.updated` (one step per
+  role plus "Apply the changes"), the roles' `subagent.*` events,
+  `tool.started/completed` for `apply_agent_changes`, and `roles.finished
+  {label, stages[{role, label, name, model_id, runner, vendor, route, cost,
+  status, skipped, error, run_id, session_id, usage, files, additions,
+  deletions, verdict, duration_s}], applied: bool|null, apply_note, files,
+  completed}`.
 
 ## Settings and health
 
