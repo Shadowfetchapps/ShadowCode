@@ -44,8 +44,10 @@ use std::path::{Path, PathBuf};
 mod findings;
 pub use findings::{clip, parse as parse_findings, strip_reasoning, Finding, Parsed, MAX_FINDINGS};
 
-/// Diff text sent to a reviewer, in characters.
-pub const MAX_DIFF_CHARS: usize = 60_000;
+/// Diff text sent to a reviewer, in bytes.
+pub const MAX_DIFF_BYTES: usize = 60_000;
+/// A job's task text is at most 128000 bytes; the prompt stays below this.
+const MAX_PROMPT_BYTES: usize = 120_000;
 /// Records kept per project.
 pub const INDEX_LIMIT: usize = 40;
 const MAX_QUESTION_CHARS: usize = 4_000;
@@ -112,7 +114,7 @@ pub struct DiffFile {
 /// What a reviewer is shown, gathered before the request is made.
 #[derive(Clone, Debug, Default)]
 pub struct Context {
-    /// Files with their diffs, within [`MAX_DIFF_CHARS`].
+    /// Files with their diffs, within [`MAX_DIFF_BYTES`].
     pub diff: Vec<DiffFile>,
     /// Every changed file named to the reviewer.
     pub files: Vec<String>,
@@ -127,8 +129,28 @@ pub struct Context {
 }
 
 impl Context {
-    fn diff_chars(&self) -> usize {
-        self.diff.iter().map(|f| f.diff.chars().count()).sum()
+    fn diff_bytes(&self) -> usize {
+        self.diff.iter().map(|f| f.diff.len()).sum()
+    }
+    /// Cut the diff to `budget` bytes: later files lose their diff first
+    /// (they stay named), the last one kept may be cut at a line.
+    fn fit(&mut self, budget: usize) {
+        let mut used = 0;
+        let mut kept = Vec::new();
+        for mut file in std::mem::take(&mut self.diff) {
+            if used + file.diff.len() <= budget {
+                used += file.diff.len();
+                kept.push(file);
+            } else {
+                self.truncated = true;
+                if used < budget && !file.binary && kept.is_empty() {
+                    file.diff = clip_diff(&file.diff, budget - used);
+                    used += file.diff.len();
+                    kept.push(file);
+                }
+            }
+        }
+        self.diff = kept;
     }
     /// Changes when the reviewed changes change.
     pub fn fingerprint(&self) -> String {
@@ -157,14 +179,14 @@ impl Context {
         } else {
             self.truncated = true;
         }
-        let used = self.diff_chars();
-        let size = file.diff.chars().count();
-        if used + size <= MAX_DIFF_CHARS {
+        let used = self.diff_bytes();
+        let size = file.diff.len();
+        if used + size <= MAX_DIFF_BYTES {
             self.diff.push(file);
-        } else if used < MAX_DIFF_CHARS / 2 && !file.binary {
+        } else if used < MAX_DIFF_BYTES / 2 && !file.binary {
             // The first large file is cut rather than left out entirely.
             let mut cut = file;
-            cut.diff = clip_diff(&cut.diff, MAX_DIFF_CHARS - used);
+            cut.diff = clip_diff(&cut.diff, MAX_DIFF_BYTES - used);
             self.diff.push(cut);
             self.truncated = true;
         } else {
@@ -173,12 +195,12 @@ impl Context {
     }
 }
 
-/// Whole lines of `diff` within `limit` characters.
+/// Whole lines of `diff` within `limit` bytes.
 fn clip_diff(diff: &str, limit: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     for line in diff.split_inclusive('\n') {
-        let size = line.chars().count();
+        let size = line.len();
         if used + size > limit {
             break;
         }
@@ -276,11 +298,13 @@ pub fn task_context(store: &Store, ws: &Workspace, task: &str) -> Result<Context
             continue;
         }
         let binary = row["binary"] == true;
+        // A file whose diff cannot be read is still named to the reviewer.
         let diff = if binary || redaction::is_secret_path(&path) {
             String::new()
         } else {
-            let detail = review::file(store, ws, task, &path)?;
-            unified(&detail["hunks"])
+            review::file(store, ws, task, &path)
+                .map(|detail| unified(&detail["hunks"]))
+                .unwrap_or_default()
         };
         context.add(DiffFile {
             path,
@@ -615,7 +639,7 @@ pub(crate) async fn start(engine: &Engine, request: Start<'_>) -> Result<Record>
         cfg.is_trusted(&ws.path),
         "Trust this project before asking for a second opinion"
     );
-    let context = request.context;
+    let mut context = request.context;
     match request.kind {
         Kind::Review => ensure!(
             !context.diff.is_empty() || !context.files.is_empty(),
@@ -661,9 +685,31 @@ pub(crate) async fn start(engine: &Engine, request: Start<'_>) -> Result<Record>
         (Kind::Review, _) => "the changes one task made",
         (Kind::Ask, _) => "a request",
     };
+    // The request, answer and file names come first; the diff gets the room
+    // that is left.
+    let fixed = prompt(
+        request.kind,
+        &Context {
+            diff: Vec::new(),
+            ..context.clone()
+        },
+        writer.as_ref(),
+        &question,
+        about,
+    )
+    .len()
+        + context
+            .diff
+            .iter()
+            .map(|f| 2 * f.path.len() + 64)
+            .sum::<usize>()
+        + 64;
+    if fixed + context.diff_bytes() > MAX_PROMPT_BYTES {
+        context.fit(MAX_PROMPT_BYTES.saturating_sub(fixed));
+    }
     let text = prompt(request.kind, &context, writer.as_ref(), &question, about);
     ensure!(
-        text.len() <= 120_000,
+        text.len() <= MAX_PROMPT_BYTES,
         "The changes are too large to send for a second opinion"
     );
     // Local content never reaches a cloud reviewer without consent.
@@ -1213,13 +1259,38 @@ mod tests {
             });
         }
         assert!(context.truncated);
-        assert!(context.diff_chars() <= MAX_DIFF_CHARS);
+        assert!(context.diff_bytes() <= MAX_DIFF_BYTES);
         assert_eq!(context.files, ["a.rs", "b.rs", "c.rs"]);
         assert!(context.diff[0].diff.ends_with('\n'));
         // The fingerprint follows the content.
         let mut other = context.clone();
         other.diff[0].diff.push_str("+more\n");
         assert_ne!(context.fingerprint(), other.fingerprint());
+    }
+
+    #[test]
+    fn prompts_stay_within_a_task_even_with_wide_characters() {
+        // 60 kB of diff in three-byte characters plus a long answer.
+        let wide = format!(
+            "@@ -1,1 +1,20000 @@\n{}",
+            "+漢字漢字漢字漢字\n".repeat(20_000)
+        );
+        let mut context = Context::default();
+        context.add(DiffFile {
+            path: "wide.txt".into(),
+            status: "modified".into(),
+            diff: wide,
+            binary: false,
+        });
+        context.question = "問".repeat(4_000);
+        context.answer = "答".repeat(12_000);
+        let budget = 20_000;
+        context.fit(budget);
+        assert!(context.diff_bytes() <= budget);
+        assert!(context.truncated);
+        assert!(context.diff[0].diff.ends_with('\n'));
+        let text = prompt(Kind::Ask, &context, None, "", "a request");
+        assert!(text.len() < MAX_PROMPT_BYTES);
     }
 
     #[test]
