@@ -136,6 +136,11 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<Mcp>,
     },
+    /// Your rulebook: profile and project rules, skills and commands.
+    Rules {
+        #[command(subcommand)]
+        action: Option<Rules>,
+    },
     /// Review, install or remove declarative plugins in the selected project.
     Plugin {
         #[command(subcommand)]
@@ -277,6 +282,19 @@ pub enum Remote {
         id: Option<String>,
         #[arg(long)]
         all: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Rules {
+    /// Check rules, skills, commands and agent files for problems. Reports
+    /// only; nothing is changed. Exits 1 when there are errors.
+    Check,
+    /// Show what each agent reads from your rulebook for this project.
+    Preview {
+        /// Only this agent: shadowcode, claude, codex, cursor, grok, antigravity.
+        #[arg(long)]
+        agent: Option<String>,
     },
 }
 
