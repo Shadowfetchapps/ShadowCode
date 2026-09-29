@@ -91,7 +91,13 @@ export function ReviewerSelect({
           : offline
             ? "Offline: only models on this computer can review."
             : writer
-              ? `Written by ${writer.label}.${chosen && !isLocal(chosen) && writer.local ? " Reviewing on a cloud model asks first." : ""}`
+              ? `Written by ${writer.label}.${
+                  writer.local && (!chosen || !isLocal(chosen))
+                    ? chosen
+                      ? " Reviewing on a cloud model asks first."
+                      : " A cloud reviewer asks before anything is sent."
+                    : ""
+                }`
               : "The reviewer only reads; it cannot edit files or run commands."}
       </span>
     </div>

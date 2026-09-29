@@ -54,6 +54,33 @@ fn needs_consent(error: &anyhow::Error) -> Option<Value> {
 impl Service {
     pub(super) async fn second_opinion_routes(&self, call: &Arc<Call>) -> Result<Value> {
         let parts = call.parts();
+        match (call.method.as_str(), &parts[2..]) {
+            ("POST", []) => self.start_second_opinion(call).await,
+            ("GET", ["current"]) => {
+                let workspace = self.opinion_workspace(call.q("workspace"))?;
+                let context = match call.q("source") {
+                    "task" => self.task_opinion_context(call.q("task_id")).await?.1,
+                    _ => self.staged_opinion_context(&workspace).await?,
+                };
+                Ok(json!({
+                    "hash": context.fingerprint(),
+                    "files": context.files,
+                    "omitted": context.omitted,
+                    "truncated": context.truncated,
+                }))
+            }
+            ("POST", [id, "cancel"]) => Ok(opinion::cancel(&self.engine, id).await?.to_json()),
+            ("POST", [id, "findings", finding, "fix"]) => {
+                let body: FindingBody = call.body()?;
+                self.fix_finding(id, finding, body.consent.is_true()).await
+            }
+            // The rest reads and writes the database only.
+            _ => self.blocking(call, Self::second_opinion_sync).await,
+        }
+    }
+
+    fn second_opinion_sync(&self, call: &Call) -> Result<Value> {
+        let parts = call.parts();
         let engine = &self.engine;
         match (call.method.as_str(), &parts[2..]) {
             ("GET", []) => {
@@ -69,20 +96,6 @@ impl Service {
                 Ok(json!({
                     "workspace": workspace,
                     "second_opinions": records.iter().map(opinion::Record::to_json).collect::<Vec<_>>(),
-                }))
-            }
-            ("POST", []) => self.start_second_opinion(call).await,
-            ("GET", ["current"]) => {
-                let workspace = self.opinion_workspace(call.q("workspace"))?;
-                let context = match call.q("source") {
-                    "task" => self.task_opinion_context(call.q("task_id")).await?.1,
-                    _ => self.staged_opinion_context(&workspace).await?,
-                };
-                Ok(json!({
-                    "hash": context.fingerprint(),
-                    "files": context.files,
-                    "omitted": context.omitted,
-                    "truncated": context.truncated,
                 }))
             }
             ("GET", ["options"]) => {
@@ -105,14 +118,9 @@ impl Service {
                 Ok(json!(prefs))
             }
             ("GET", [id]) => Ok(opinion::get(engine, id)?.to_json()),
-            ("POST", [id, "cancel"]) => Ok(opinion::cancel(engine, id).await?.to_json()),
             ("POST", [id, "findings", finding]) => {
                 let body: FindingBody = call.body()?;
                 Ok(opinion::set_finding(engine, id, finding, body.status.as_str())?.to_json())
-            }
-            ("POST", [id, "findings", finding, "fix"]) => {
-                let body: FindingBody = call.body()?;
-                self.fix_finding(id, finding, body.consent.is_true()).await
             }
             _ => Err(call.unavailable()),
         }
