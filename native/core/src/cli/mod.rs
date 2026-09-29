@@ -1395,6 +1395,34 @@ async fn execute(backend: &Backend, workspace: &Path, options: &Options) -> Resu
                     .await?
             }
         }
+        Command::Spending { job, decision } => {
+            let status = backend.call("GET", "/api/spending", Value::Null).await?;
+            match (job, decision) {
+                (Some(job), Some(decision)) => {
+                    ensure!(
+                        job.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                        "Invalid job ID"
+                    );
+                    let card = status["waiting"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|card| card["job_id"] == job.as_str())
+                        .with_context(|| {
+                            format!("Job {job} is not waiting at a spending limit")
+                        })?;
+                    backend
+                        .call(
+                            "POST",
+                            format!("/api/jobs/{job}/spending"),
+                            json!({"prompt_id":card["id"],"action":decision}),
+                        )
+                        .await?
+                }
+                (Some(_), None) => bail!("Supply --decision continue or stop with --job"),
+                _ => status,
+            }
+        }
         Command::Goal {
             instruction,
             run,

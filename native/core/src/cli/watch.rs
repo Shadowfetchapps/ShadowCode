@@ -339,8 +339,9 @@ pub async fn job(
                     });
                 } else if announced.insert(prompt.clone()) && !json_output && !options.events {
                     errln!(
-                        "Waiting at the spending limit: {} Answer in the desktop (Continue or Stop).",
-                        plain(card["text"].as_str().unwrap_or(""))
+                        "Waiting at the spending limit: {} Answer in the desktop, or run `shadowcode spending --job {} --decision continue` (or stop).",
+                        plain(card["text"].as_str().unwrap_or("")),
+                        plain(card["job_id"].as_str().unwrap_or(id.as_str()))
                     );
                 }
             }
@@ -520,4 +521,62 @@ pub async fn goal(
         };
     }
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_and_spending_lines_read_plainly() {
+        assert_eq!(
+            retry_line(
+                &json!({"attempt":2,"max_attempts":5,"reason":"rate_limited","delay_ms":4000})
+            ),
+            "Provider busy, retrying (2 of 5) in 4 s…"
+        );
+        assert_eq!(
+            retry_line(
+                &json!({"attempt":1,"max_attempts":3,"reason":"disconnected","delay_ms":300})
+            ),
+            "Connection to the provider dropped, retrying (1 of 3) in a moment…"
+        );
+        let task =
+            json!({"kind":"task","raise_to":2.0,"text":"It has spent $1.04 on paid models."});
+        let message = spend_stop_message(&task);
+        assert!(message.starts_with("Stopped at the spending limit for one task."));
+        assert!(message.contains("--max-cost 2.00"));
+        let daily =
+            json!({"kind":"daily","raise_to":20.0,"text":"Paid models have cost $10.20 today."});
+        assert!(spend_stop_message(&daily).contains("spending.daily_usd 20.00"));
+    }
+
+    #[test]
+    fn max_cost_is_a_dollar_amount() {
+        use clap::Parser;
+        let parsed = super::super::args::Options::try_parse_from([
+            "shadowcode",
+            "run",
+            "--max-cost",
+            "$0.50",
+            "Fix it",
+        ])
+        .unwrap();
+        match parsed.command {
+            Some(super::super::args::Command::Run(run)) => {
+                assert_eq!(run.options.max_cost, Some(0.5))
+            }
+            other => panic!("{other:?}"),
+        }
+        for bad in ["0", "-1", "lots", "1e9"] {
+            assert!(super::super::args::Options::try_parse_from([
+                "shadowcode",
+                "run",
+                "--max-cost",
+                bad,
+                "Fix it"
+            ])
+            .is_err());
+        }
+    }
 }

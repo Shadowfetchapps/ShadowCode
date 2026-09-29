@@ -367,6 +367,18 @@ impl Translator {
                 }
             }
             "model.retry" => vec![thought_chunk("Retrying the model request…\n")],
+            // A spending limit is answered in ShadowCode (desktop, remote or
+            // `shadowcode spending`); the editor sees why the task waits.
+            "spend.notice" | "spend.unknown" | "spend.limit_resolved" if !text.is_empty() => {
+                vec![thought_chunk(&format!("{text}\n"))]
+            }
+            "spend.limit_reached" => vec![thought_chunk(&format!(
+                "{} {} Continue or stop it in ShadowCode.\n",
+                payload["title"]
+                    .as_str()
+                    .unwrap_or("Spending limit reached."),
+                text
+            ))],
             "context.compacted" => vec![thought_chunk(
                 "Compacted earlier conversation to fit the context window.\n",
             )],

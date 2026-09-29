@@ -488,7 +488,7 @@ async fn handle(
             return owned::serve(&mut stream, scoped, &profile, permit).await;
         }
         if mode == "command" && envelope.request.method != "GET" {
-            ensure!(envelope.request.path.starts_with("/api/approvals/") || (envelope.request.path.starts_with("/api/jobs/") && envelope.request.path.ends_with("/cancel")), "A foreground CLI task owns this profile. Other clients can inspect it, approve tools, or cancel it; use the desktop or shadowcode serve for concurrent work.");
+            ensure!(envelope.request.path.starts_with("/api/approvals/") || (envelope.request.path.starts_with("/api/jobs/") && (envelope.request.path.ends_with("/cancel") || envelope.request.path.ends_with("/spending"))), "A foreground CLI task owns this profile. Other clients can inspect it, approve tools, answer a spending limit, or cancel it; use the desktop or shadowcode serve for concurrent work.");
         }
         let scoped = if let Some(id) = envelope.view {
             views.get(&id)?

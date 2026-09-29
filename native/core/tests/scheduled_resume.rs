@@ -12,7 +12,11 @@ use shadowcode_core::{
     paths::AppPaths,
     routing::Decision,
 };
-use std::{fs, path::PathBuf, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 fn setup(endpoint: &str) -> (tempfile::TempDir, AppPaths, PathBuf) {
     let root = tempfile::tempdir().unwrap();
@@ -35,12 +39,12 @@ fn setup(endpoint: &str) -> (tempfile::TempDir, AppPaths, PathBuf) {
 }
 
 /// A task that stopped at its plan limit, which resets at `resets_at`.
-fn limited(engine: &Engine, project: &PathBuf, resets_at: f64) -> Job {
+fn limited(engine: &Engine, project: &Path, resets_at: f64) -> Job {
     let store = engine.store();
     let session = store.create_session(project, "fixture-model", "").unwrap();
     let mut job = Job {
         id: shadowcode_core::id(),
-        workspace: project.clone(),
+        workspace: project.to_path_buf(),
         session_id: session["id"].as_str().unwrap().to_owned(),
         task_id: shadowcode_core::id(),
         task: "Fix the failing test".into(),

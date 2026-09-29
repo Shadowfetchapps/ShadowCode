@@ -150,7 +150,7 @@ fn the_task_limit_notices_at_75_percent_then_asks_and_continues() {
     assert_eq!(notices[0]["kind"], "task");
     assert_eq!(
         notices[0]["text"],
-        "This task has spent about $0.80 of its $1.00 limit on paid models."
+        "This task has spent about $0.80 (estimated) of its $1.00 limit on paid models."
     );
     f.meter
         .record(&f.store, &paid(), &turn(Some(0.3), false))
@@ -179,7 +179,7 @@ fn the_task_limit_notices_at_75_percent_then_asks_and_continues() {
     assert!(cards[0]["text"]
         .as_str()
         .unwrap()
-        .starts_with("It has spent about $1.10 on paid models"));
+        .starts_with("It has spent about $1.10 (estimated) on paid models"));
     assert!(f.meter.decide(&f.store, "other", "continue").is_err());
     assert!(f.meter.decide(&f.store, &prompt.id, "maybe").is_err());
     let answer = f.meter.decide(&f.store, &prompt.id, "continue").unwrap();

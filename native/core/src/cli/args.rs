@@ -182,6 +182,15 @@ pub enum Command {
         #[arg(long, requires="id", value_parser=["approve","deny"])]
         decision: Option<String>,
     },
+    /// Show spending limits for paid API models, today's total and tasks
+    /// waiting at a limit; answer one with --job and --decision.
+    Spending {
+        /// The waiting task's job ID.
+        #[arg(long)]
+        job: Option<String>,
+        #[arg(long, requires = "job", value_parser = ["continue", "stop"])]
+        decision: Option<String>,
+    },
     /// Create a durable goal and optionally run its milestones.
     Goal {
         instruction: String,

@@ -91,9 +91,10 @@ pub fn money(usd: f64) -> String {
     }
 }
 
+/// An amount, labelled when some of it was worked out from the price list.
 fn amount(usd: f64, estimated: bool) -> String {
     if estimated {
-        format!("about {}", money(usd))
+        format!("about {} (estimated)", money(usd))
     } else {
         money(usd)
     }
