@@ -83,7 +83,10 @@ The same as the desktop window, with these exceptions:
   proxies on this computer's loopback, which a remote device cannot reach;
   `/api/preview…` is refused and the tab says so.
 - **Remote access settings stay on this computer.** A remote device cannot
-  see or change pairing, devices, the address or phone notifications.
+  see or change pairing, devices, the address or phone notifications. The app
+  log (Settings › About › Open logs folder) stays on this computer too.
+- **Spending limits work the same.** A task paused at a spending limit shows
+  its Continue and Stop card on the device too.
 - **No secrets.** Secret files (`.env`, `secrets.env`, private keys,
   credential JSON), also when reached through a symlink or a spelling such as
   `.env/`, are not shown or diffed, ShadowCode's own settings folder

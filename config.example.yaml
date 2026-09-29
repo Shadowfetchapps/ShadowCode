@@ -85,6 +85,18 @@ git:
   auto_commit: false
   allow_destructive: false
 
+# Spending limits for paid API models (OpenRouter and other per-token
+# endpoints; never subscriptions or models on this computer). At a limit the
+# task pauses between steps and asks to continue (limit raised one step) or
+# stop. null turns a limit off. `shadowcode run --max-cost USD` sets one
+# task's limit.
+spending:
+  task_usd: 1.0     # one task, subagents included
+  daily_usd: 10.0   # all tasks and projects together; resets at local midnight
+
+# The app log for bug reports: ~/.local/state/shadow-agent/logs/shadowcode.log,
+# 5 MB x 3 files, secrets redacted; events, errors and timings, never prompts
+# or file contents. error | warn | info | debug
 logging:
   level: info
 

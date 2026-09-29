@@ -8,7 +8,9 @@ values are `null`, never invented.
 
 ## Previewable diagnostics export
 
-`GET /api/doctor` retains the full local Health display and includes `diagnostic_export: {id, filename, content, mime, captured_at, byte_length}`. `content` is the exact UTF-8 JSON preview. It contains only reviewed check IDs, fixed labels and their original status (`pass`, `warn`, `fail`, `info`, `not_checked`), plus app/runtime metadata, scope, exclusions and an omitted-check count. Project maps, full paths, configured model names, detail/fix text, prompts and raw logs are excluded. Unknown check IDs do not enter the export. The projection accepts at most 96 checks, reports the rest as omitted, and is capped at 256 KiB.
+`GET /api/doctor` retains the full local Health display and includes `diagnostic_export: {id, filename, content, mime, captured_at, byte_length}`. `content` is the exact UTF-8 JSON preview. It contains only reviewed check IDs, fixed labels and their original status (`pass`, `warn`, `fail`, `info`, `not_checked`), plus app/runtime metadata, scope, exclusions and an omitted-check count. Project maps, full paths, custom and local model names, detail/fix text, prompts and answers are excluded. Unknown check IDs do not enter the export. The projection accepts at most 96 checks, reports the rest as omitted, and is capped at 256 KiB.
+
+The export also carries `runs` (the run records of up to 12 recent jobs, `{status, run}`; see [Run record](#run-record); model ids other than `api:openrouter:…` and `cli:…` are hidden because they can name local files or private hosts) and `log: {note, lines}`, the app log's last lines (at most 96 KiB; see [App log](#app-log)) with secrets redacted again and every file path replaced by `<path>`.
 
 `GET /api/diagnostic-exports/{id}` retrieves the same immutable snapshot for ten minutes, with at most four retained per engine. Expired or unknown IDs fail; Doctor is not rerun. The native `export_diagnostics` command receives only the snapshot ID, then opens a JSON save dialog and writes the retained bytes as a private file. The remote browser retrieves the same snapshot and refuses download if its content differs from the preview. Previewing or closing the preview does not write or upload anything. This is a Doctor status export, not a crash report or a guarantee that all secret patterns are detectable.
 
@@ -311,6 +313,50 @@ Config `limits`: `{on_limit: "local" | "ask", fallback_model: "" | "local:gguf:�
 
 The fallback model is `fallback_model` when ready, else the last local model
 used in the project, else the first ready local model with tool support.
+
+Event `limit.reached {vendor, usage, detail, job_id, resets_at}` is recorded
+on the limited task when the vendor stops the turn; the job's
+`result.limit_reached` carries the same `resets_at`. `resets_at` (Unix
+seconds or null) is when the plan resets: the latest reset among the vendor's
+exhausted usage windows, else a time in the vendor's error text ("try again
+at 3:40 PM", "resets in 2h 5m", "try again at Oct 1st, 2026 3:40 PM", an RFC
+3339 time, Claude's `…|<unix seconds>`; read in this computer's time zone
+unless it says UTC), else the earliest reported window reset. Times in the
+past or more than 8 days away are not believed.
+
+### Resume after a plan limit
+
+A one-shot continuation on the same model when the plan resets. It is saved
+in `native_meta` `scheduled_resumes` (one per conversation), survives a
+restart, and is started by the automation scheduler (desktop and `shadowcode
+serve`; one-shot CLI commands never run it).
+
+- `GET /api/sessions/{id}/scheduled-resume` → `{resume: Resume|null,
+  scheduler: bool}`; `scheduler` is false when this engine does not run
+  schedules.
+- `POST /api/sessions/{id}/scheduled-resume {job_id?, handoff_consent?}` →
+  `{resume, scheduler}`. `job_id` (default: the conversation's latest job)
+  must be a job of this conversation with status `limit_reached` and a
+  future `resets_at`; otherwise 400. Replaces the conversation's earlier
+  schedule.
+- `DELETE /api/sessions/{id}/scheduled-resume` → `{resume: Resume|null}` (the
+  removed one).
+- `Resume = {id, session_id, workspace, job_id, task_id, target, label, task,
+  mode, web, at, created_at, handoff_consent}`: `target` is the limited job's
+  exact picker id (`routing.model_id`), `label` its product ("Codex").
+- At `at` the scheduler starts a queued job in the same conversation on
+  `target` with the task "Continue where <label> stopped when its plan limit
+  was reached. The request was: …", and sets the conversation's
+  `execution_target` to `target`. It never switches to another model: when
+  `target` cannot be resolved or started, nothing runs and the conversation
+  says why.
+- Events on the limited task (`resume_id, at, target, label, job_id` in each):
+  `resume.scheduled {scheduler}`, `resume.cancelled`, `resume.started`
+  (`job_id` is the new job), `resume.missed` (ShadowCode was not running and
+  the time is more than 12 hours past), `resume.failed {reason, task}`, and
+  `resume.needs_consent {reason, task}` (continuing would hand newer turns to
+  a cloud route; the window starts `task` on `target` through the usual
+  consent dialog).
 
 ## Compare
 
@@ -756,6 +802,109 @@ Usage = {
   get the complete native tool descriptions; smaller ones get descriptions cut
   to 64 bytes.
 
+## Spending limits (paid API models)
+
+Limits on what paid per-token models cost: OpenRouter, or any
+compatible endpoint that is not on this computer. Subscriptions (vendor CLIs),
+models on this computer and the offline preview are never limited.
+
+- Config `spending: {task_usd: number|null, daily_usd: number|null}`
+  (defaults `1.0` and `10.0`; `null` turns a limit off; each between 0.01 and
+  100000). The engine reads it again before every model turn, so a change in
+  Settings applies to running tasks. A project's own config cannot change it.
+- A task's paid requests are counted as they are priced (see `Usage` above),
+  including failed attempts, compaction summaries and every subagent's
+  requests, which count toward the task the user started. Costs worked out
+  from the price list count and are marked `estimated`. The day's total spans
+  all tasks and projects of the profile and starts again at local midnight
+  (`native_meta` `spending_day`).
+- Before each model turn (never inside a tool call) the task checks its
+  limits:
+  - Event `spend.notice {job_id, kind, spent, limit, estimated, text}` once
+    per task (`kind: "task"`) or once per day (`kind: "daily"`) at 75%.
+  - Event `spend.limit_reached {id, job_id, kind, limit, spent, estimated,
+    raise_to, resets_at, title, text, continue_label}` at 100%: the task waits
+    (status stays `running`) until the card is answered, the limit no longer
+    applies, or the task is cancelled. A subagent at the limit shows the card
+    in the task that started it (`job_id` is that task's job).
+  - Event `spend.limit_resolved {prompt_id, job_id, kind, action, limit?,
+    reason?, text?}`: `action` `continue` (the per-task limit, or today's
+    limit, is raised to `raise_to`: the limit plus one more step of the
+    setting, past what is already spent) or `stop`. `reason` is set when
+    no one answered but the limit stopped applying (a setting changed, or
+    the day's total reset).
+  - Event `spend.unknown {job_id, model, text}` once per task when a paid
+    request has no known price; it is not counted as $0.
+- `POST /api/jobs/{id}/spending {prompt_id, action: "continue"|"stop"}`
+  answers the waiting card of job `{id}` (the task's own job) → the
+  `spend.limit_resolved` payload. `stop` cancels the task (and its
+  subagents); its summary is "Stopped at your per-task spending limit…" (or
+  daily). A wrong or answered `prompt_id` is 400.
+- `POST /api/jobs` and `POST /api/commands/run` accept `max_cost_usd`
+  (0.01–100000): this task's limit instead of `spending.task_usd` (the CLI's
+  `--max-cost`).
+- `GET /api/spending` → `{limits: {task_usd, daily_usd}, today: {day, usd,
+  estimated, unknown_turns, limit, resets_at}, waiting: [card + {session_id,
+  task_id}]}`; `today.limit` includes a raise for today.
+- `GET /api/spending/estimate?session_id=&model=&draft_chars=` → `{show:
+  false, reason: "not_paid"|"no_prices"}` or `{show: true, low_usd, high_usd,
+  label, context_tokens, model, detail}`: the next message on a paid model
+  with cached OpenRouter prices, from the conversation's saved message tape,
+  the tool list, the draft length (`draft_chars / 3` tokens) and a typical
+  answer: low = context × input price + 200 output tokens; high = three
+  reads of the context (a few tool steps) + 4,000 output tokens. `model` is
+  a picker id (default: the conversation's target). `label` is "about
+  $0.01–$0.05" (or "less than $0.01").
+- Automations: a run that reaches a limit stops with status
+  `spending_limit` (or waits, when its approvals wait).
+
+## Run record
+
+`Job.run` (also `result.run` and the `agent.completed` payload's `run`) says
+exactly what ran a job, recorded when it first calls its model:
+
+```ts
+RunRecord = {
+  model_id: string,          // exact picker/registry id
+  model: string,             // model name sent to the provider
+  provider: string,
+  route: "vendor_cli" | "local_llamacpp" | "native_http",
+  vendor: string|null,       // "Codex", … when a vendor CLI ran it
+  vendor_version: string|null, // the CLI's `--version` line
+  effort: "low"|"medium"|"high"|null,  // null = the model's default
+  app_version: string,
+  app_commit: string|null,   // when the build recorded it
+  settings_hash: string,     // first 12 hex of SHA-256 of the effective settings
+  rules_hash: string|null,   // same, of the rules and skills text delivered
+  recorded_at: number,
+}
+```
+
+Command jobs have no run record. `rules_hash` hashes exactly what the agent
+received (the vendor's `rules.delivered` text, or the rules part of the
+native system prompt).
+
+## App log
+
+A log for bug reports: `<state>/logs/shadowcode.log`
+(`~/.local/state/shadow-agent/logs/` by default), rotated at 5 MB into
+`.1` and `.2`. Every line is `<local time> <LEVEL> <target>: <message>`,
+passed through the secret redaction, with the home folder written as `~`.
+It holds events, errors and timings only: engine warnings, finished jobs
+(`job.finished job=… status=… model=… steps=… seconds=… tokens=…
+cost_usd=…`, and the error for a failed one), and an allow-list of fields
+per task event (for example `tool.completed tool success`, `model.retry
+attempt max_attempts reason delay_ms`); never prompts, answers, tool
+arguments or output, or file contents. `logging.level` (`error`, `warn`,
+`info`, `debug`) sets how much the engine writes.
+
+- `GET /api/logs` → `{folder, files: [{name, bytes}], max_file_bytes,
+  max_files}` (newest first).
+- `POST /api/logs/folder` → `{path}`: creates the folder. The desktop's
+  `open_logs_folder` command calls it and opens that path; the window never
+  supplies a path.
+- Remote access refuses `/api/logs…`.
+
 
 ## Subagents and agent definitions
 
@@ -850,8 +999,9 @@ files. Behaviour: [RULES_AND_SKILLS.md](RULES_AND_SKILLS.md). Item ids are
 - Remote access refuses `/api/rules/imports…`, `/api/rules/export…` and
   `/api/rules/folder`.
 - Event `rules.delivered {vendor, mechanism, profile_files, project_files,
-  skills, plugin_skills, bytes, estimated_tokens, truncated}` for each vendor
-  run that received the rulebook. A failure to prepare it is an
+  skills, plugin_skills, bytes, estimated_tokens, truncated, hash}` for each
+  vendor run that received the rulebook; `hash` is the run record's
+  `rules_hash`. A failure to prepare it is an
   `agent.warning` with `kind: "rules"`; the run continues without it.
 - Doctor adds the check `rules-and-skills` (`pass` or `warn`), which the
   diagnostics export keeps as *Rules and skills*.
@@ -1365,6 +1515,10 @@ with `User-Agent: ShadowCode-update-check` and no identifiers.
   (5–600, default 60): model-written compaction summaries.
 - `updates.check: bool` (unset follows the packaged default) — the daily
   update check; see [About and updates](#about-and-updates).
+- `spending.task_usd`, `spending.daily_usd` (number or null; defaults 1.0 and
+  10.0) — see [Spending limits](#spending-limits-paid-api-models).
+- `logging.level` (`error`, `warn`, `info`, `debug`; default `info`) — how
+  much the engine writes to the [app log](#app-log).
 - `network.mode: "online" | "web_off" | "offline"` — `web_off` disables web
   tools only; `offline` also suppresses account/usage refresh and any helper
   network activity. Cloud rows are marked unavailable in `offline`.

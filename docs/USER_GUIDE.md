@@ -232,6 +232,16 @@ changing files or running checks shows one quiet line instead, for example
 *Finished · 7s · No files were changed.* A stopped task keeps its partial
 reply.
 
+- **Run details** (under the summary) says exactly what ran the task: the
+  model and provider, the subscription tool and its version when one ran it,
+  the effort, ShadowCode's version and commit, and short fingerprints of the
+  settings and of the rules and skills it received. Two runs with the same
+  fingerprint used the same settings or the same rules. It helps when you
+  compare runs or report a problem.
+- **Try on…** appears when a task did not finish (it failed, you stopped it,
+  or it stopped at a spending limit). Pick any model and the same
+  conversation continues the task there, starting with "Continue where …
+  stopped". ShadowCode never switches models on its own.
 - **Run a check…** opens a blank command field, such as `npm test`. It runs
   against the conversation's current project files with your normal command
   approvals, without selecting a model or sending another model request.
@@ -417,10 +427,23 @@ panel and at the top of **Settings › Accounts**:
   with tool support. A Compare lane never continues on another model: it
   stops at *Plan limit reached*, so its result stays that model's own.
 - **Ask me.** The conversation shows a card with **Continue on <local model>**
-  and **Choose another model**.
+  and **Try on…**, which opens the model picker so you can continue on any
+  model you choose.
 
 If no local model is ready, the conversation says so and offers **Open Local
-models**.
+models** and **Try on…**.
+
+When the vendor says when your plan resets (from its usage windows or its
+message, such as "try again at 3:40 PM"), the card also offers **Resume on
+Codex at 3:40 PM**. At that time ShadowCode continues the same conversation
+on the same model, with "Continue where Codex stopped…". It is saved, so it
+still happens after ShadowCode restarts, and **Cancel resume** in the
+conversation stops it. It needs ShadowCode open at that time (the window or
+`shadowcode serve`); if it was closed for more than 12 hours past the time,
+the conversation says the resume was missed instead. It never moves to
+another model: if that model can't run then, the conversation says why. If
+continuing would send newer turns from this computer to the cloud, it waits
+for you to choose **Review and resume**, which shows what is sent first.
 
 ## Allowance
 
@@ -438,6 +461,39 @@ can run and how much of it is left, as each source reports it:
 
 The dot on the button turns amber when a source you can run is low or has
 reached its limit. **Refresh** checks the vendor accounts again.
+
+## Spending limits for paid models
+
+Models you pay for per use, such as those on OpenRouter, have two spending
+limits. They never apply to subscriptions (Codex, Claude Code, Cursor, Grok,
+Antigravity) or to models on this computer.
+
+- **Per task** (default $1): what one task may spend, including any
+  subagents it starts.
+- **Per day** (default $10): what all your tasks and projects together may
+  spend in a day. It starts again at midnight.
+
+When a task has spent three quarters of a limit, a short note says so and the
+task keeps going. When it reaches a limit, it pauses between steps (never in
+the middle of a command or an edit) and shows a card: **Continue (limit raised
+to $2.00)** raises the limit by one more step and carries on; **Stop** ends
+the task, keeping the changes made so far. A raised daily limit lasts until
+midnight.
+
+Costs that ShadowCode works out from the model's listed prices count too and
+are labelled, for example *about $0.80 (estimated)*. If a model's price isn't
+known at all, the conversation says so once instead of pretending it cost
+nothing.
+
+Before you send, the composer shows a rough price for the next message on a
+paid model, for example *Next message: about $0.01–$0.05*. It comes from the
+conversation so far and the model's listed prices; a task that uses many
+tools can cost more. It is hidden for subscriptions, models on this computer,
+and models without listed prices.
+
+Change or turn off the limits in **Settings › Accounts › Spending limits**,
+which also shows what paid models have cost today. From the command line,
+`shadowcode run --max-cost 0.50 "…"` sets one task's limit.
 
 ## Compare models
 
@@ -720,9 +776,13 @@ Subscription CLIs use their own sandboxes, not this one.
 - **Busy or dropped providers.** A request that fails with a rate limit, an
   overloaded or failing provider, or a connection that drops mid-answer is
   sent again, up to three times (`agent.model_retries`), waiting longer each
-  time or as long as the provider asks. A reply that was cut off is thrown
+  time or as long as the provider asks. The conversation shows it, for
+  example *Provider busy, retrying (2 of 5) in 4 s…*, and then *The provider
+  was busy; it answered after 2 retries.* A reply that was cut off is thrown
   away and replaced; tools only run after a complete reply, so nothing runs
-  twice. Errors such as a wrong key or an unknown model are shown at once.
+  twice. Errors such as a wrong key or an unknown model are shown at once. If
+  the retries run out, **Try on…** continues the task on another model you
+  pick.
 - **Tokens and cost.** Every job and conversation records input, output and
   cached tokens and a cost in US dollars: what OpenRouter charged, zero for a
   model on this computer, and what a subscription CLI reports (Claude Code
@@ -766,6 +826,14 @@ Subscription CLIs use their own sandboxes, not this one.
 - **You need stronger isolation.** Use a container or a separate Linux account.
   Shell commands run with your user's privileges, and the sandbox limits what
   they can see, not what that user may do.
+
+- **Reporting a problem.** **Settings › About › Open logs folder** opens
+  ShadowCode's log (`~/.local/state/shadow-agent/logs/`). It records which
+  tasks ran, errors and timings, never your prompts, answers or files, and
+  removes secrets; it keeps at most about 15 MB. Attach `shadowcode.log` to
+  your report. **Save diagnostics…** in Settings › Advanced › Health also
+  includes the log's last lines (without file paths) and the run details of
+  recent tasks.
 
 Settings and history live in `~/.config/shadow-agent` and
 `~/.local/state/shadow-agent`. Back up both before moving to another machine.
