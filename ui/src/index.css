@@ -1691,3 +1691,19 @@ button.fork-action {
   color: var(--text);
   overflow-wrap: anywhere;
 }
+
+/* A render error shows this instead of an empty window (CrashScreen). */
+.crash-screen {
+  max-width: 34rem;
+  margin: 18vh auto 0;
+  padding: 0 16px;
+  color: var(--text);
+}
+.crash-screen h1 {
+  font-size: 18px;
+  margin: 0 0 8px;
+}
+.crash-screen p {
+  color: var(--text-2);
+  margin: 0 0 16px;
+}

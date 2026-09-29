@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { CrashScreen } from "./components/CrashScreen";
 import { RemoteGate } from "./components/RemoteGate";
 import { applyInitialTheme } from "./hooks/useTheme";
 import { isRemote } from "./lib/transport";
@@ -17,12 +18,14 @@ applyInitialTheme();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    {isRemote() ? (
-      <RemoteGate>
+    <CrashScreen>
+      {isRemote() ? (
+        <RemoteGate>
+          <App />
+        </RemoteGate>
+      ) : (
         <App />
-      </RemoteGate>
-    ) : (
-      <App />
-    )}
+      )}
+    </CrashScreen>
   </StrictMode>,
 );
