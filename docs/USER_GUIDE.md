@@ -373,6 +373,40 @@ staged changes to a pull request:
 Switching branches and committing wait while the agent works; push and pull
 requests do not.
 
+### Secrets, hooks and new packages
+
+- **A secret check before every commit and push.** When you commit, push or
+  open a pull request from ShadowCode, it looks for secrets in what would
+  leave your computer: provider keys (OpenAI, Anthropic, OpenRouter, GitHub,
+  AWS, Google, Stripe …), private keys, `.env` files and long random values
+  assigned to names like `API_KEY` or `PASSWORD`. If it finds one, nothing is
+  committed or pushed; a dialog names the file, the line and what it looks
+  like (never the value), with **Remove from commit**, **Add to .gitignore**
+  and **Commit anyway** (for a push, **Push anyway**). A harmless example
+  value can be marked with `shadowcode:allow-secret` on its line, or its file
+  listed in `.shadowcode/secret-scan-ignore` (one glob per line). The agent's
+  own commits are never made with a secret staged: it is told to remove it
+  and to tell you. Subscriptions that commit by themselves can't be stopped,
+  but their commits are checked when you push from ShadowCode.
+- **The project's own Git hooks.** ShadowCode's Git commands don't run a
+  repository's hooks (`pre-commit`, `commit-msg` …), because a hook is a
+  program from the repository. When a project has hooks, the first commit
+  from the Git tab asks whether to run them; the answer is kept for the
+  project and can be changed in **Settings › Permissions & network**. A hook
+  that fails stops the commit and shows its output.
+- **New packages are looked up first.** When the agent wants to install a
+  package (`npm install`, `pip install`, `cargo add`, `go get` …) or adds one
+  to `package.json`, `requirements.txt`, `pyproject.toml`, `Cargo.toml` or
+  `go.mod`, the approval card says whether it exists on npm, PyPI or
+  crates.io, when it was first published (a package younger than 30 days is
+  pointed out), and whether its name is one or two typos away from a popular
+  package. Nothing is blocked: offline, a package just reads *not checked*.
+  Without a card (edits allowed), the same finding appears as a note.
+- **Lockfiles in plain words.** In the Review view a lockfile
+  (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`,
+  `poetry.lock`, `uv.lock`, `go.sum`) shows *3 added, 1 updated, 0 removed*
+  with the package names; **Show the full diff** opens the raw change.
+
 ## Get a second opinion
 
 Another model can check a change or an answer without touching your files.

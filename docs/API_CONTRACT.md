@@ -525,6 +525,8 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `POST` | `/api/second-opinions/{id}/cancel` | stable | allowed | [Second opinions](#second-opinions) |
 | `POST` | `/api/second-opinions/{id}/findings/{finding}` | stable | allowed | [Second opinions](#second-opinions) |
 | `POST` | `/api/second-opinions/{id}/findings/{finding}/fix` | stable | allowed | [Second opinions](#second-opinions) |
+| `GET` | `/api/secrets` | stable | refused | [Accounts and models](#accounts-and-models) |
+| `POST` | `/api/secrets/move` | stable | refused | [Accounts and models](#accounts-and-models) |
 | `GET` | `/api/sessions` | stable | allowed | [Conversations](#conversations) |
 | `POST` | `/api/sessions` | stable | allowed | [Conversations](#conversations) |
 | `DELETE` | `/api/sessions/{id}` | stable | allowed | [Conversations](#conversations) |
@@ -584,6 +586,10 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `GET` | `/api/workspace/git` | stable | allowed | [Git and forge](#git-and-forge) |
 | `POST` | `/api/workspace/git/add` | stable | allowed | [Git and forge](#git-and-forge) |
 | `POST` | `/api/workspace/git/commit` | stable | allowed | [Git and forge](#git-and-forge) |
+| `GET` | `/api/workspace/git/hooks` | stable | allowed | [Git and forge](#git-and-forge) |
+| `POST` | `/api/workspace/git/hooks` | stable | allowed | [Git and forge](#git-and-forge) |
+| `POST` | `/api/workspace/git/ignore` | stable | allowed | [Git and forge](#git-and-forge) |
+| `POST` | `/api/workspace/git/unstage` | stable | allowed | [Git and forge](#git-and-forge) |
 | `GET` | `/api/workspace/instructions` | stable | allowed | [Workspace and files](#workspace-and-files) |
 | `PUT` | `/api/workspace/instructions` | stable | allowed | [Workspace and files](#workspace-and-files) |
 | `GET` | `/api/workspace/mentions` | stable | allowed | [Workspace and files](#workspace-and-files) |
@@ -2035,6 +2041,23 @@ in · $0.60/M out` or `API key · free`. Jobs run on the native loop
 (`route: "native_http"`); the context limit comes from the list, capped at
 200 000 tokens.
 
+### Where keys are kept
+
+API keys ShadowCode saves (`OPENROUTER_API_KEY`, remote notification tokens,
+MCP server secrets) live in `secrets.env` (mode 600) unless the user moves
+one to the desktop keyring (the freedesktop Secret Service: GNOME Keyring,
+KWallet, KeePassXC). `config/keyring.json` lists the moved names; reads try
+the environment, then the keyring for those names, then the file. ShadowCode
+never unlocks the keyring itself: a locked keyring makes the key unavailable
+until it is unlocked.
+
+- `GET /api/secrets` → `{keyring: {available, detail: string|null}, file,
+  keys: [{name, place: "file"|"keyring"}]}`. No values.
+- `POST /api/secrets/move {name, to: "keyring"|"file"}` → the same. The key
+  is written to the new place and read back before it is removed from the
+  old one; on any failure it stays where it was.
+- Remote access refuses `/api/secrets…`.
+
 ### Allowance
 
 `GET /api/allowance?refresh=1` → `{generated_at, rows}`, one row per source,
@@ -2350,8 +2373,30 @@ user-info; tool errors are redacted.
   working tree. `hunk` must equal a hunk of the current diff ("This diff has
   changed…"); new, binary or truncated files are staged as a whole.
 - `POST /api/workspace/git/add {paths}` (1–200) → `{ok: true}`.
-- `POST /api/workspace/git/commit {message}` (1–32 000 bytes) → `{ok: true}`;
-  never signed.
+- `POST /api/workspace/git/commit {message, allow_secrets?, hooks?:
+  "run"|"skip"}` (1–32 000 bytes) → `{ok: true, hooks_ran}`; never signed.
+  Before committing, and without `allow_secrets: true`, the staged changes
+  are checked for secrets (provider keys, private key blocks, `.env` and
+  other secret files, long random values assigned to names like `API_KEY` or
+  `PASSWORD`); findings answer in band with `{ok: false, status: 409,
+  secrets: [{path, line|null, kind, preview}], secrets_truncated, error}`
+  and nothing is committed. `preview` is the first characters and the
+  length, never the value. A line containing `shadowcode:allow-secret`, and
+  paths matching a glob in `.shadowcode/secret-scan-ignore`, are skipped.
+  When the project has its own commit hooks (`pre-commit`,
+  `prepare-commit-msg`, `commit-msg`, `post-commit`, including a
+  `core.hooksPath` such as `.husky`) and no choice was saved, the answer is
+  `{ok: false, status: 409, needs_hooks_choice: true, hooks: [{name, path,
+  preview}], error}`; `hooks` saves the choice for the project (`native_meta`
+  `git_hooks:<project>`). Hooks never run otherwise; a hook that fails stops
+  the commit with its output.
+- `POST /api/workspace/git/unstage {paths}` (1–200) → `{ok: true}`: out of the
+  next commit, working tree unchanged.
+- `POST /api/workspace/git/ignore {path}` → `{ok: true, path}`: adds `/<path>`
+  to the project's `.gitignore` and takes the file out of the index.
+- `GET /api/workspace/git/hooks` → `{workspace, hooks, run: bool|null}`;
+  `POST /api/workspace/git/hooks {run: bool|null}` saves (`null` asks again
+  at the next commit).
 
 ### Git panel
 
@@ -2377,7 +2422,11 @@ user-info; tool errors are redacted.
   offline), `local` the loaded local model, `summary` a deterministic text.
   Secret-looking paths are listed without contents; text is redacted before
   it leaves; 60 s limit; failures fall back to `summary` with a `note`.
-- `POST /api/git/push {remote?}` → `{ok, remote, branch, output, remote_info}`:
+- `POST /api/git/push` and `POST /api/git/pr` accept `allow_secrets`: without
+  it, the commits the push would send (after the upstream, or on no branch
+  of the remote) are checked for secrets first and findings answer in band as
+  for commits (each with its `commit`); nothing is pushed.
+- `POST /api/git/push {remote?, allow_secrets?}` → `{ok, remote, branch, output, remote_info}`:
   pushes `refs/heads/<branch>` to the same name with `--set-upstream`, never
   forced; 180 s limit. Sign-in and rejection failures explain the next step.
 - `GET /api/git/pr?remote=&base=` → `{remote, provider, remote_info, cli:

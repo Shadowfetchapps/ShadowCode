@@ -20,6 +20,24 @@ shown again, logged, or passed to other tools. **Remove key** deletes it. An
 the stored key. Either way the key is removed from the environment of every
 subscription CLI ShadowCode starts.
 
+**Keep it in the keyring.** On a desktop with a keyring (GNOME Keyring,
+KWallet, KeePassXC), **Settings › Accounts › Where your keys are kept** can
+move the key out of `secrets.env` into the keyring, and back. The key is
+written to the new place and read back before it is removed from the old
+one. A locked keyring makes the key unavailable until you unlock it;
+ShadowCode never unlocks it for you. Headless machines and SSH sessions keep
+using `secrets.env`.
+
+To test the keyring code against a real Secret Service without touching your
+own keyring, run the ignored test in a private session:
+
+```sh
+t=$(mktemp -d); mkdir -p "$t/home" "$t/data" "$t/run"; chmod 700 "$t/run"
+env -i PATH=/usr/bin:/bin HOME="$t/home" XDG_DATA_HOME="$t/data" XDG_RUNTIME_DIR="$t/run" \
+  dbus-run-session -- sh -c 'echo -n test | gnome-keyring-daemon --unlock --components=secrets >/dev/null;
+  exec target/debug/deps/shadowcode_core-* keyring::tests::live --ignored'
+```
+
 The card shows the key's label, credits used, its limit and what is left, the
 account balance (`GET /api/v1/credits`), and how many models are available. A
 key's limit is not the balance: a key can have most of its limit left while
