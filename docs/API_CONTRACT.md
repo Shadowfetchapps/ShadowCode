@@ -488,8 +488,8 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `GET` | `/api/review/tasks/{task_id}` | stable | allowed | [Review and rewind](#review-and-rewind) |
 | `GET` | `/api/review/tasks/{task_id}/file` | stable | allowed | [Review and rewind](#review-and-rewind) |
 | `POST` | `/api/review/tasks/{task_id}/undo` | stable | allowed | [Review and rewind](#review-and-rewind) |
-| `GET` | `/api/roles` | stable | allowed | [Roles](#roles) |
-| `POST` | `/api/roles` | stable | allowed | [Roles](#roles) |
+| `GET` | `/api/roles` | stable | allowed | [Subagents](#subagents) |
+| `POST` | `/api/roles` | stable | allowed | [Subagents](#subagents) |
 | `GET` | `/api/routing` | stable | allowed | [Settings and health](#settings-and-health) |
 | `PUT` | `/api/routing` | stable | allowed | [Settings and health](#settings-and-health) |
 | `GET` | `/api/rules` | stable | allowed | [Rules and skills](#rules-and-skills) |

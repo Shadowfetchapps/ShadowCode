@@ -93,7 +93,9 @@ async fn a_scheduled_resume_survives_a_restart_and_runs_on_the_same_model() {
     .await;
     let (_root, paths, project) = setup(&server.endpoint);
     let engine = Engine::open(paths.clone()).unwrap();
-    let at = shadowcode_core::now() + 3600.0;
+    // Whole seconds: a reset time is read back from JSON, which need not
+    // round-trip every fractional digit.
+    let at = (shadowcode_core::now() + 3600.0).floor();
     let job = limited(&engine, &project, at);
     let resume = engine.schedule_resume(&job.id, false).unwrap();
     assert_eq!(resume.at, at);

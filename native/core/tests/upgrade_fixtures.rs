@@ -66,6 +66,23 @@ fn copy_tree(from: &Path, to: &Path, root: &Path) {
     }
 }
 
+/// The fixture profiles' `secrets.env`: placeholders, never credentials.
+const FIXTURE_SECRETS: &str = "OPENROUTER_API_KEY=\"fixture-openrouter-placeholder\"\nSHADOWCODE_FIXTURE_KEY=\"fixture-value-not-a-credential\"\n";
+
+/// A private file (as ShadowCode writes them), unless the fixture has one.
+fn write_private(path: &Path, text: &str) {
+    if path.exists() {
+        return;
+    }
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, text).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
 /// Rebuild a released profile in a temporary folder.
 fn profile(version: &str) -> Profile {
     let dir = fixtures().join(version);
@@ -83,6 +100,14 @@ fn profile(version: &str) -> Profile {
     ] {
         copy_tree(&dir.join("profile").join(label), target, &root);
     }
+    // Every released profile also had these two files, which the repository
+    // cannot hold (`.gitignore` and scripts/check-secrets.mjs keep any
+    // `secrets.env` and `last-workspace.txt` out of Git): write them here.
+    write_private(&paths.secrets_file(), FIXTURE_SECRETS);
+    write_private(
+        &paths.state.join("last-workspace.txt"),
+        &format!("{}\n", project.display()),
+    );
     let sql = fs::read_to_string(dir.join("shadow-agent.sql"))
         .unwrap()
         .replace("@ROOT@", &root.to_string_lossy());

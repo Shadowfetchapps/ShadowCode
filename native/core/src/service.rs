@@ -142,7 +142,10 @@ impl Service {
         let workspace = Workspace::open(&workspace)?.path;
         #[cfg(unix)]
         let remote = Arc::new(crate::remote::Manager::new(paths.clone()));
-        // The app log for bug reports (events, errors and timings only).
+        let engine = Engine::open(paths.clone())?;
+        // The app log for bug reports (events, errors and timings only). It
+        // starts once the profile has opened: a profile this version refuses
+        // (a newer database) is left exactly as it was, without a log folder.
         let level = Config::load(&paths, None)
             .ok()
             .and_then(|config| config.logging["level"].as_str().map(str::to_owned))
@@ -154,7 +157,6 @@ impl Service {
                 crate::updates::commit().unwrap_or("unknown")
             );
         }
-        let engine = Engine::open(paths)?;
         let terminals = Arc::new(crate::terminal::Terminals::new(engine.notifier()));
         Ok(Self {
             engine,
