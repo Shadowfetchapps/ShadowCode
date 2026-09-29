@@ -45,6 +45,21 @@ export type ChatItem = (
       /** A follow-up was started from this card. */
       resolved?: boolean;
     }
+  /** A local model ran out of memory while loading (agent.completed with
+   * local_out_of_memory). Nothing ran; the card offers a way on. */
+  | {
+      kind: "memory";
+      taskId: string;
+      /** The engine's plain explanation (also shown above the card). */
+      text: string;
+      model: string;
+      /** A smaller context (tokens) that is still usable, if any. */
+      smallerContext?: number;
+      /** The task's request, sent again by "Use … and retry". */
+      request: string;
+      /** A later message was sent after this card. */
+      resolved?: boolean;
+    }
   /** A subagent run started by this task (subagent.* events). */
   | { kind: "subagent"; taskId?: string; text: string; run: SubagentRun }
   /** Provider change inside one conversation (agent.handoff). */

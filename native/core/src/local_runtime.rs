@@ -158,6 +158,8 @@ pub struct Loaded {
     pub backend: String,
     pub cpu_fallback: bool,
     pub fallback_reason: Option<String>,
+    /// The GPU attempt failed because its free memory ran out.
+    pub fallback_out_of_memory: bool,
     pub since: f64,
     pub pid: Option<u32>,
     pub provenance: Value,
@@ -242,6 +244,9 @@ pub struct LocalRuntime {
 enum LoadFailure {
     /// The process exited before it became ready.
     Exited(String),
+    /// It exited because an allocation failed: the model and its context did
+    /// not fit in the GPU's free memory, or in system memory.
+    OutOfMemory(Memory, String),
     /// It exited because another program took its port first (the port is
     /// picked free just before launch, so another program can win the race).
     PortTaken(String),
@@ -250,6 +255,164 @@ enum LoadFailure {
 
 /// Launches tried on fresh ports before a port conflict is reported.
 const PORT_ATTEMPTS: usize = 3;
+
+/// Which memory ran out while llama-server loaded a model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Memory {
+    Gpu,
+    System,
+}
+
+/// llama.cpp's own words when an allocation fails during load (weights, KV
+/// cache or compute buffers) on CUDA, ROCm, Vulkan, Metal, SYCL or the CPU.
+pub fn memory_shortage(output: &str, gpu: GpuMode) -> Option<Memory> {
+    const DEVICE: &[&str] = &[
+        "cudamalloc failed",
+        "hipmalloc failed",
+        "cuda error: out of memory",
+        "erroroutofdevicememory",
+        "out of device memory",
+        "device memory allocation of size",
+        "unable to allocate cuda",
+        "unable to allocate rocm",
+        "unable to allocate vulkan",
+        "unable to allocate metal",
+        "unable to allocate sycl",
+        "failed to allocate cuda",
+        "failed to allocate rocm",
+        "failed to allocate vulkan",
+        "failed to allocate metal",
+        "failed to allocate sycl",
+    ];
+    const HOST: &[&str] = &[
+        "unable to allocate cpu",
+        "failed to allocate cpu",
+        "cpu_buffer_type_alloc_buffer: failed",
+        "std::bad_alloc",
+        "cannot allocate memory",
+    ];
+    const EITHER: &[&str] = &[
+        "failed to allocate compute buffers",
+        "failed to allocate buffer for kv cache",
+        "out of memory",
+    ];
+    let text = output.to_ascii_lowercase();
+    let seen = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
+    if gpu != GpuMode::Off && seen(DEVICE) {
+        Some(Memory::Gpu)
+    } else if seen(HOST) {
+        Some(Memory::System)
+    } else if seen(DEVICE) || seen(EITHER) {
+        Some(if gpu == GpuMode::Off {
+            Memory::System
+        } else {
+            Memory::Gpu
+        })
+    } else {
+        None
+    }
+}
+
+/// The lines of a load log that name failed allocations (at most 12).
+fn allocation_lines(output: &str) -> String {
+    output
+        .lines()
+        .filter(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("out of memory")
+                || line.contains("outofdevicememory")
+                || line.contains("allocat") && (line.contains("fail") || line.contains("unable"))
+        })
+        .take(12)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A local model could not load because memory ran out. Models load before
+/// any tool runs, so the project is unchanged. The message says what to do;
+/// the server's own output stays in `detail`.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct OutOfMemory {
+    pub model_id: String,
+    pub model: String,
+    pub context_tokens: u64,
+    /// What ran out on the last attempt.
+    pub memory: Memory,
+    /// The GPU ran out first and the automatic CPU attempt ran out too.
+    pub cpu_tried: bool,
+    /// Half the context, while that is still a usable context. Setting
+    /// `local_engine.context_size` to it and retrying is the first thing to try.
+    pub smaller_context: Option<u64>,
+    /// llama-server's last output.
+    pub detail: String,
+}
+
+impl OutOfMemory {
+    fn new(spec: &LaunchSpec, memory: Memory, cpu_tried: bool, detail: String) -> Self {
+        let half = spec.ctx / 2;
+        Self {
+            model_id: spec.id.clone(),
+            model: spec.name.clone(),
+            context_tokens: spec.ctx,
+            memory,
+            cpu_tried,
+            smaller_context: (half >= crate::local_engine::MIN_CONTEXT).then_some(half),
+            detail,
+        }
+    }
+}
+
+/// 16384 → "16,384".
+fn grouped(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+impl std::fmt::Display for OutOfMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let context = grouped(self.context_tokens);
+        match (self.memory, self.cpu_tried) {
+            (Memory::Gpu, _) => write!(
+                f,
+                "Not enough free GPU memory to load {} with a {context}-token context.",
+                self.model
+            )?,
+            (Memory::System, true) => write!(
+                f,
+                "{} did not fit in the GPU's free memory, and running it on the CPU ran out of system memory too ({context}-token context).",
+                self.model
+            )?,
+            (Memory::System, false) => write!(
+                f,
+                "Not enough free system memory to load {} with a {context}-token context.",
+                self.model
+            )?,
+        }
+        write!(f, " Nothing in your project was changed. ")?;
+        let others = if self.memory == Memory::Gpu && !self.cpu_tried {
+            "close other programs that use the GPU"
+        } else {
+            "close other programs"
+        };
+        match self.smaller_context {
+            Some(smaller) => write!(
+                f,
+                "Try a smaller context ({} tokens), {others}, or choose a smaller model.",
+                grouped(smaller)
+            ),
+            None => write!(f, "Choose a smaller model, or {others}."),
+        }
+    }
+}
+impl std::error::Error for OutOfMemory {}
 
 /// llama-server's own words for a port it could not listen on.
 fn port_in_use(output: &str) -> bool {
@@ -335,6 +498,7 @@ impl LocalRuntime {
             "backend": loaded.backend,
             "cpu_fallback": loaded.cpu_fallback,
             "fallback_reason": loaded.fallback_reason,
+            "fallback_out_of_memory": loaded.fallback_out_of_memory,
             "vision": loaded.vision,
             "in_use": self.in_use(),
             "provenance": loaded.provenance,
@@ -470,7 +634,13 @@ impl LocalRuntime {
                 }
                 Err(error) => {
                     if let Ok(mut errors) = self.errors.lock() {
-                        errors.insert(spec.id.clone(), format!("{error:#}"));
+                        // A memory shortage keeps its short, plain message:
+                        // the picker shows only the start of a load error.
+                        let text = match error.downcast_ref::<OutOfMemory>() {
+                            Some(memory) => memory.to_string(),
+                            None => format!("{error:#}"),
+                        };
+                        errors.insert(spec.id.clone(), text);
                     }
                     Err(error)
                 }
@@ -486,28 +656,55 @@ impl LocalRuntime {
         abort: &CancellationToken,
         allow_cpu_fallback: bool,
     ) -> Result<Server> {
-        match launch_on_free_port(spec, sources, spec.gpu, cancel, abort).await {
-            Ok(server) => Ok(server),
-            Err(LoadFailure::Exited(first)) if spec.gpu != GpuMode::Off && allow_cpu_fallback => {
-                let mut server =
-                    match launch_on_free_port(spec, sources, GpuMode::Off, cancel, abort).await {
-                        Ok(server) => server,
-                        Err(LoadFailure::Exited(second)) => {
-                            bail!("{second}\nThe GPU attempt failed first: {first}")
-                        }
-                        Err(LoadFailure::PortTaken(error)) => bail!("{error}"),
-                        Err(LoadFailure::Other(error)) => return Err(error),
-                    };
-                server.info.cpu_fallback = true;
-                server.info.backend = "cpu".into();
-                server.info.fallback_reason = Some(first);
-                Ok(server)
+        let first = match launch_on_free_port(spec, sources, spec.gpu, cancel, abort).await {
+            Ok(server) => return Ok(server),
+            Err(LoadFailure::OutOfMemory(memory, message))
+                if spec.gpu == GpuMode::Off || !allow_cpu_fallback =>
+            {
+                return Err(OutOfMemory::new(spec, memory, false, message).into())
+            }
+            Err(LoadFailure::OutOfMemory(_, message)) => (true, message),
+            Err(LoadFailure::Exited(message)) if spec.gpu != GpuMode::Off && allow_cpu_fallback => {
+                (false, message)
             }
             Err(LoadFailure::Exited(message) | LoadFailure::PortTaken(message)) => {
-                Err(anyhow!(message))
+                return Err(anyhow!(message))
             }
-            Err(LoadFailure::Other(error)) => Err(error),
-        }
+            Err(LoadFailure::Other(error)) => return Err(error),
+        };
+        // The GPU load failed: try once on the CPU.
+        let (gpu_memory, first) = first;
+        let mut server = match launch_on_free_port(spec, sources, GpuMode::Off, cancel, abort).await
+        {
+            Ok(server) => server,
+            Err(LoadFailure::OutOfMemory(_, second)) if gpu_memory => {
+                return Err(OutOfMemory::new(
+                    spec,
+                    Memory::System,
+                    true,
+                    format!("{second}\nThe GPU attempt failed first: {first}"),
+                )
+                .into())
+            }
+            Err(LoadFailure::Exited(second) | LoadFailure::OutOfMemory(_, second)) => {
+                bail!("{second}\nThe GPU attempt failed first: {first}")
+            }
+            Err(LoadFailure::PortTaken(error)) => bail!("{error}"),
+            Err(LoadFailure::Other(error)) => return Err(error),
+        };
+        server.info.cpu_fallback = true;
+        server.info.backend = "cpu".into();
+        server.info.fallback_out_of_memory = gpu_memory;
+        server.info.fallback_reason = Some(if gpu_memory {
+            format!(
+                "The GPU did not have enough free memory for {} with a {}-token context, so it runs on the CPU. Last output:\n{first}",
+                spec.name,
+                grouped(spec.ctx)
+            )
+        } else {
+            first
+        });
+        Ok(server)
     }
 
     fn clear_snapshot(&self) {
@@ -757,8 +954,21 @@ async fn launch(
                 let message = format!(
                     "llama-server exited before it became ready ({status}). Last output:\n{output}"
                 );
+                // The allocation error can be well before the tail.
+                let everything = stderr
+                    .lock()
+                    .map(|ring| ring.tail(STDERR_RING_BYTES))
+                    .unwrap_or_default();
                 return Err(if port_in_use(&output) {
                     LoadFailure::PortTaken(message)
+                } else if let Some(memory) = memory_shortage(&everything, gpu) {
+                    LoadFailure::OutOfMemory(
+                        memory,
+                        format!(
+                            "llama-server exited before it became ready ({status}): an allocation failed.\n{}\nLast output:\n{output}",
+                            allocation_lines(&everything)
+                        ),
+                    )
                 } else {
                     LoadFailure::Exited(message)
                 });
@@ -852,6 +1062,7 @@ async fn launch(
             },
             cpu_fallback: false,
             fallback_reason: None,
+            fallback_out_of_memory: false,
             since: crate::now(),
             pid,
             provenance: json!({

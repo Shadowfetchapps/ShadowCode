@@ -1302,7 +1302,9 @@ pub fn picker_rows(catalog: &Value, default_id: &str) -> Vec<Value> {
             if is_loaded {
                 reason = format!(
                     "Loaded · {}",
-                    if loaded["cpu_fallback"] == true {
+                    if loaded["fallback_out_of_memory"] == true {
+                        "CPU fallback (not enough free GPU memory)".to_owned()
+                    } else if loaded["cpu_fallback"] == true {
                         "CPU fallback (GPU load failed)".to_owned()
                     } else {
                         reason

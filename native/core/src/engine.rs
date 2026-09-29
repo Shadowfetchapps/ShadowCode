@@ -41,6 +41,10 @@ mod command;
 pub use command::CommandRequest;
 mod child;
 pub(crate) use child::{ChildLink, ChildSpec};
+#[cfg(debug_assertions)]
+mod faults;
+#[cfg(debug_assertions)]
+pub use faults::Fault;
 #[derive(Default)]
 struct LaunchContext<'a> {
     system_context: Option<String>,
@@ -188,10 +192,16 @@ struct Inner {
     local_jobs: Mutex<VecDeque<Weak<Running>>>,
     local_job_changed: Notify,
     vendors: Arc<crate::cli_agent::catalog::VendorCatalog>,
+    #[cfg(debug_assertions)]
+    faults: faults::Faults,
     _profile_lock: Arc<crate::paths::ProfileLock>,
 }
 #[derive(Clone)]
 pub struct Engine(Arc<Inner>);
+
+/// What the conversation shows when a bug in ShadowCode stops a task (a
+/// panic inside the job). The details go to the log.
+const WORKER_PANIC: &str = "ShadowCode hit an internal error and stopped this task. Your files and this conversation were kept; you can send the message again.";
 
 /// Kept outside the job worker so the follow-up task's future is checked for
 /// `Send` without the worker's own opaque type in scope.
@@ -235,8 +245,36 @@ impl Engine {
             local_jobs: Mutex::new(VecDeque::new()),
             local_job_changed: Notify::new(),
             vendors,
+            #[cfg(debug_assertions)]
+            faults: faults::Faults::default(),
             _profile_lock: profile_lock,
         })))
+    }
+    /// Test builds only: make the next job that reaches `fault` fail there.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn inject_fault(&self, fault: Fault) {
+        self.0.faults.arm(fault);
+    }
+    #[cfg(debug_assertions)]
+    async fn trip_faults(&self, running: &Running) -> Result<()> {
+        if self.0.faults.take(Fault::PanicBeforeStream) {
+            panic!("injected fault: panic before the model stream");
+        }
+        if self.0.faults.take(Fault::PanicInStoreWrite) {
+            self.0
+                .store
+                .run(|store| -> Result<()> {
+                    let _connection = store.lock()?;
+                    panic!("injected fault: panic inside a database write");
+                })
+                .await?;
+        }
+        if self.0.faults.take(Fault::PanicHoldingJobRecord) {
+            let _record = running.record();
+            panic!("injected fault: panic while holding the job record");
+        }
+        Ok(())
     }
     /// Subscription runtimes: availability, models, usage (cached, bounded).
     pub fn vendors(&self) -> Arc<crate::cli_agent::catalog::VendorCatalog> {
@@ -890,10 +928,7 @@ impl Engine {
             !job.finished.load(Ordering::Acquire),
             "Task already finished"
         );
-        let mut record = job
-            .record
-            .lock()
-            .map_err(|_| anyhow!("Job lock poisoned"))?;
+        let mut record = job.record();
         // Check the status before flagging the steer control: a rejected pause
         // on a queued task must not leave it parked once it starts running.
         ensure!(
@@ -937,10 +972,7 @@ impl Engine {
             .context("Job not found or already finished")?;
         // Capture observed hashes now if tools already ran; pause() may have empty map.
         job.steer.resume()?;
-        let mut record = job
-            .record
-            .lock()
-            .map_err(|_| anyhow!("Job lock poisoned"))?;
+        let mut record = job.record();
         if record.status == "paused" {
             record.status = "running".into();
             self.0.store.save_job(&json!(*record))?;
@@ -1038,10 +1070,7 @@ impl Engine {
             return Ok(());
         };
         let task_id = {
-            let mut record = job
-                .record
-                .lock()
-                .map_err(|_| anyhow!("Job lock poisoned"))?;
+            let mut record = job.record();
             ensure!(!only_if_queued || record.status == "queued", LEFT_QUEUE);
             job.cancel.cancel();
             if matches!(record.status.as_str(), "queued" | "running") {
@@ -1241,7 +1270,13 @@ impl Engine {
                     self.await_local_job(&job).await?;
                     let _slot=tokio::select! {_=job.cancel.cancelled()=>bail!("Task cancelled while queued"),slot=self.0.slots.acquire()=>slot.context("Task scheduler stopped")?};
                     self.run(&job).await
-                }).catch_unwind().await.unwrap_or_else(|_|Err(anyhow!("The task worker panicked. Its checkpoints and history were retained.")));
+                }).catch_unwind().await.unwrap_or_else(|panic| {
+                    let detail = panic.downcast_ref::<&str>().map(|s| (*s).to_owned())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_default();
+                    tracing::error!("Task worker panicked: {detail}");
+                    Err(anyhow!("{WORKER_PANIC}"))
+                });
                 let plan = outcome
                     .as_ref()
                     .map(|(_, plan)| plan.clone())
@@ -1255,20 +1290,18 @@ impl Engine {
                 }
                 // A subscription ran out: keep going on a local model when
                 // the user chose that (limits.on_limit = "local").
-                let limited = job
-                    .record
-                    .lock()
-                    .ok()
-                    .filter(|r| r.status == "limit_reached" && r.mode != "command")
-                    .map(|r| r.clone());
+                let limited = {
+                    let record = job.record();
+                    (record.status == "limit_reached" && record.mode != "command")
+                        .then(|| record.clone())
+                };
                 if let Some(record) = limited {
                     spawn_limit_fallback(self.clone(), record);
                 }
             }
             if let Ok(mut queues) = self.0.queues.lock() {
-                if let Ok(record) = job.record.lock() {
-                    queues.jobs.remove(&record.id);
-                }
+                let id = job.record().id.clone();
+                queues.jobs.remove(&id);
                 if let Some(lane) = queues.lanes.get_mut(&workspace) {
                     lane.pop_front();
                     if lane.is_empty() {
@@ -1424,10 +1457,7 @@ impl Engine {
         if running.finished.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mut job = running
-            .record
-            .lock()
-            .map_err(|_| anyhow!("Job lock poisoned"))?;
+        let mut job = running.record();
         if running.finished.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -1440,6 +1470,13 @@ impl Engine {
             .err()
             .and_then(|e| e.downcast_ref::<crate::cli_agent::runner::LimitReached>())
             .map(|limit| json!({"vendor":limit.vendor.id(),"detail":limit.detail,"usage":limit.usage}));
+        // A local model that ran out of memory while loading: the window
+        // offers a smaller context or another model.
+        let out_of_memory = outcome
+            .as_ref()
+            .err()
+            .and_then(|e| e.downcast_ref::<crate::local_runtime::OutOfMemory>())
+            .map(|memory| json!(memory));
         job.status = if cancelled {
             "cancelled"
         } else if success {
@@ -1490,6 +1527,9 @@ impl Engine {
         if let Some(limit) = limit {
             job.result.as_mut().unwrap()["limit_reached"] = limit;
         }
+        if let Some(memory) = out_of_memory {
+            job.result.as_mut().unwrap()["local_out_of_memory"] = memory;
+        }
         if job.mode == "command" {
             if let Some(event) = self
                 .0
@@ -1514,7 +1554,8 @@ impl Engine {
     /// as the database allows, in its saved row with a terminal event, so the
     /// conversation shows a failure instead of a task that runs forever.
     fn finish_after_failed_save(&self, running: &Running, error: &anyhow::Error) {
-        let record = running.record.lock().ok().map(|mut record| {
+        let mut record = {
+            let mut record = running.record();
             record.status = "failed".into();
             record.summary = format!("Could not save the final task state: {error:#}");
             record.finished_at = Some(crate::now());
@@ -1526,28 +1567,24 @@ impl Engine {
                 "usage_is_estimated": record.usage_is_estimated,
             }));
             record.clone()
-        });
-        if let Some(mut record) = record {
-            self.0.approvals.deny_task(&record.task_id);
-            let payload = record.result.clone().unwrap_or(Value::Null);
-            if let Ok(event) = self.0.store.add_event(
-                "agent.completed",
-                &payload,
-                Some(&record.session_id),
-                Some(&record.task_id),
-            ) {
-                record.event_cursor = event["id"].as_i64().unwrap_or(record.event_cursor);
-                if let Ok(mut current) = running.record.lock() {
-                    current.event_cursor = record.event_cursor;
-                }
-                let _ = self.0.sender.send(event);
-            }
-            let _ = self.0.store.save_job(&json!(record));
-            let _ = self.0.store.execute(
-                "UPDATE tasks SET status='failed',summary=?,completed_at=? WHERE id=?",
-                rusqlite::params![record.summary, crate::now(), record.task_id],
-            );
+        };
+        self.0.approvals.deny_task(&record.task_id);
+        let payload = record.result.clone().unwrap_or(Value::Null);
+        if let Ok(event) = self.0.store.add_event(
+            "agent.completed",
+            &payload,
+            Some(&record.session_id),
+            Some(&record.task_id),
+        ) {
+            record.event_cursor = event["id"].as_i64().unwrap_or(record.event_cursor);
+            running.record().event_cursor = record.event_cursor;
+            let _ = self.0.sender.send(event);
         }
+        let _ = self.0.store.save_job(&json!(record));
+        let _ = self.0.store.execute(
+            "UPDATE tasks SET status='failed',summary=?,completed_at=? WHERE id=?",
+            rusqlite::params![record.summary, crate::now(), record.task_id],
+        );
         running.finished.store(true, Ordering::Release);
         running.done.notify_waiters();
         self.0.local_job_changed.notify_waiters();
@@ -1556,10 +1593,7 @@ impl Engine {
         // Queue removal and starting work share this lock. A stale queue button
         // can never cancel a task that has already transitioned to running.
         let job = {
-            let mut record = running
-                .record
-                .lock()
-                .map_err(|_| anyhow!("Job lock poisoned"))?;
+            let mut record = running.record();
             ensure!(
                 !running.cancel.is_cancelled(),
                 "Task cancelled before starting"
@@ -1578,6 +1612,8 @@ impl Engine {
                 store.execute("UPDATE tasks SET status='running' WHERE id=?", [&task_id])
             })
             .await?;
+        #[cfg(debug_assertions)]
+        self.trip_faults(running).await?;
         let events = TaskEvents {
             store: self.0.store.clone(),
             session_id: job.session_id.clone(),
@@ -1797,23 +1833,24 @@ impl Engine {
             crate::checkpoint::capture::not_needed()
         };
         #[cfg(unix)]
-        let outcome = crate::cli_agent::runner::run(crate::cli_agent::runner::Request {
-            vendor,
-            options,
-            config: cli,
-            prompt,
-            images,
-            session_id: job.session_id.clone(),
-            task_id: job.task_id.clone(),
-            job_id: job.id.clone(),
-            events: &events,
-            approvals: &self.0.approvals,
-            cancel: running.cancel.clone(),
-            steer: &running.steer,
-            approvals_required: running.config.permissions.shell_asks(),
-            catalog: Some(self.0.vendors.clone()),
-        })
-        .await;
+        let (outcome, reported) =
+            crate::cli_agent::runner::run_reporting_usage(crate::cli_agent::runner::Request {
+                vendor,
+                options,
+                config: cli,
+                prompt,
+                images,
+                session_id: job.session_id.clone(),
+                task_id: job.task_id.clone(),
+                job_id: job.id.clone(),
+                events: &events,
+                approvals: &self.0.approvals,
+                cancel: running.cancel.clone(),
+                steer: &running.steer,
+                approvals_required: running.config.permissions.shell_asks(),
+                catalog: Some(self.0.vendors.clone()),
+            })
+            .await;
         #[cfg(unix)]
         self.record_vendor_changes(checkpoint, running, &job, &events, vendor.label())
             .await;
@@ -1831,8 +1868,24 @@ impl Engine {
                 catalog.refresh(vendor, &config, limited).await;
             });
         }
+        // A failed, limited or cancelled turn keeps the tokens and cost the
+        // vendor already reported: they count against the user's plan.
         #[cfg(unix)]
-        let outcome = outcome?;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if reported.any() {
+                    let mut usage = reported.usage;
+                    usage.source = "vendor".into();
+                    usage.estimated = !reported.tokens_reported;
+                    if let Err(record) = self.record_usage(running, &events, &job, usage, "vendor")
+                    {
+                        tracing::warn!("Could not record a failed vendor turn's usage: {record:#}");
+                    }
+                }
+                return Err(error);
+            }
+        };
         #[cfg(not(unix))]
         let outcome: crate::cli_agent::runner::RunOutcome = {
             let _ = (options, prompt, events);
@@ -1849,10 +1902,7 @@ impl Engine {
         usage.source = "vendor".into();
         usage.estimated = !outcome.usage_reported;
         {
-            let mut record = running
-                .record
-                .lock()
-                .map_err(|_| anyhow!("Job lock poisoned"))?;
+            let mut record = running.record();
             // No token counts from the protocol: say so instead of a zero.
             record.usage_is_estimated = !outcome.usage_reported;
             record.steps = record.steps.saturating_add(1);
@@ -1960,10 +2010,7 @@ impl Engine {
     ) -> Result<()> {
         crate::usage::price_turn(&mut turn, &running.config.model, &self.0.paths.state);
         let total = {
-            let mut record = running
-                .record
-                .lock()
-                .map_err(|_| anyhow!("Job lock poisoned"))?;
+            let mut record = running.record();
             record.usage.add(&turn);
             record.usage_is_estimated |= turn.estimated;
             self.0.store.save_job(&json!(*record))?;
@@ -1999,6 +2046,7 @@ impl Engine {
         }
         // Held until this task returns: the local model lease lives in it.
         let prepare_started = Instant::now();
+        let prepare_wall = crate::now();
         let managed = crate::local_engine::is_managed(&running.config.model);
         let preparation = managed.then(|| running.clock.span(crate::timing::Section::Preparation));
         let runtime_phase = Mutex::new(None);
@@ -2055,6 +2103,19 @@ impl Engine {
             running.turn.effort.as_deref(),
         );
         if managed {
+            // This task's load moved the model to the CPU because the GPU ran
+            // out of memory: say why replies are slow and what to change.
+            if let Some(loaded) = self.0.local_llama.loaded().filter(|loaded| {
+                loaded.cpu_fallback && loaded.fallback_out_of_memory && loaded.since >= prepare_wall
+            }) {
+                events.emit(
+                    "agent.warning",
+                    json!({"kind":"local_memory","text":format!(
+                        "The GPU did not have enough free memory for {} with a {}-token context, so it is running on the CPU and replies will be slower. To use the GPU, close other programs that use it, lower the context size in Settings › Local models, or choose a smaller model.",
+                        loaded.name, loaded.ctx
+                    )}),
+                )?;
+            }
             running.clock.local_ready();
             events.emit(
                 "local.runtime_ready",
@@ -2432,10 +2493,7 @@ impl Engine {
                             // Never estimate missing output or increment steps; a
                             // successful response is counted only below as before.
                             self.record_usage(running, &events, &job, usage, "failed_attempt")?;
-                            let record = running
-                                .record
-                                .lock()
-                                .map_err(|_| anyhow!("Job lock poisoned"))?;
+                            let record = running.record();
                             let caps = autonomy::effective_caps(
                                 &running.config.agent.autonomy_profile,
                                 running.config.agent.max_steps,
@@ -2488,10 +2546,7 @@ impl Engine {
                 }
             };
             {
-                let mut record = running
-                    .record
-                    .lock()
-                    .map_err(|_| anyhow!("Job lock poisoned"))?;
+                let mut record = running.record();
                 if response.usage.total_tokens == 0 {
                     response.usage.prompt_tokens = (context::estimate_tokens(&json!(messages))
                         + context::estimate_tokens(&json!(schemas)))
@@ -2876,16 +2931,21 @@ fn vendor_job(job: &Job, running: Option<&Running>) -> bool {
             .is_some_and(|decision| crate::cli_agent::is_cli_provider(&decision.provider))
 }
 impl Running {
+    /// The job's live record. A panic while it was held (a bug elsewhere in
+    /// the job) must not leave the job unfinishable: the record is plain
+    /// data, so the lock is recovered and the job can still be marked failed,
+    /// saved and removed from the queue.
+    fn record(&self) -> std::sync::MutexGuard<'_, Job> {
+        self.record.lock().unwrap_or_else(|poisoned| {
+            self.record.clear_poison();
+            poisoned.into_inner()
+        })
+    }
     fn snapshot(&self) -> Result<Job> {
-        self.record
-            .lock()
-            .map(|v| {
-                let mut job = v.clone();
-                if !self.finished.load(Ordering::Acquire) {
-                    job.timings = Some(self.clock.snapshot(false));
-                }
-                job
-            })
-            .map_err(|_| anyhow!("Job lock poisoned"))
+        let mut job = self.record().clone();
+        if !self.finished.load(Ordering::Acquire) {
+            job.timings = Some(self.clock.snapshot(false));
+        }
+        Ok(job)
     }
 }

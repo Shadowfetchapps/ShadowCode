@@ -11,6 +11,7 @@ import {
 import { ActivityTimeline } from "../ActivityTimeline";
 import { CommandCardView, OpCard, type ChatItem } from "../cards";
 import { LimitFallbackItem } from "../LimitFallback";
+import { LocalMemoryItem } from "../LocalMemory";
 import { Markdown } from "../Markdown";
 import { CopyButton, UserMessage } from "../MessageActions";
 import { SubagentCard } from "../SubagentCard";
@@ -210,6 +211,21 @@ const TranscriptRow = memo(function TranscriptRow({
         onOpenLocal={actions.onOpenLocal}
       />
     );
+  else if (item.kind === "memory")
+    node = (
+      <LocalMemoryItem
+        item={item}
+        disabled={locked}
+        onUseContext={async (card, contextTokens) => {
+          await api.saveConfig({
+            local_engine: { context_size: contextTokens },
+          });
+          actions.onRetry(card.request);
+        }}
+        onChoose={actions.onChooseModel}
+        onOpenLocal={actions.onOpenLocal}
+      />
+    );
   else if (item.kind === "user")
     node = (
       <UserMessage
@@ -347,7 +363,11 @@ export function TranscriptRows({
               : undefined
           }
           fallback={row.item.kind === "limit" ? fallback : null}
-          locked={row.item.kind === "limit" ? locked : false}
+          locked={
+            row.item.kind === "limit" || row.item.kind === "memory"
+              ? locked
+              : false
+          }
           forkDisabled={
             row.item.kind === "agent" || row.item.kind === "user"
               ? forkDisabled

@@ -130,7 +130,11 @@ impl Engine {
         let outcome = std::panic::AssertUnwindSafe(self.run(&running))
             .catch_unwind()
             .await
-            .unwrap_or_else(|_| Err(anyhow!("The subagent worker panicked.")));
+            .unwrap_or_else(|_| {
+                Err(anyhow!(
+                    "The subagent stopped because of an internal error in ShadowCode."
+                ))
+            });
         let plan = outcome
             .as_ref()
             .map(|(_, plan)| plan.clone())
@@ -163,10 +167,7 @@ impl Engine {
             return Ok(());
         };
         let (total, session_id, task_id) = {
-            let mut record = parent
-                .record
-                .lock()
-                .map_err(|_| anyhow!("Job lock poisoned"))?;
+            let mut record = parent.record();
             record.usage.add(child);
             record.usage_is_estimated |= estimated;
             self.0.store.save_job(&json!(*record))?;

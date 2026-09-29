@@ -419,9 +419,24 @@ impl Store {
     }
 
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.connection
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Database lock was poisoned"))
+        match self.connection.lock() {
+            Ok(connection) => Ok(connection),
+            // A panic while the connection was held (a bug in one task) must
+            // not make every later task and the conversation's final state
+            // unsaveable. SQLite keeps each statement atomic; roll back a
+            // transaction the panicking code left open, then carry on.
+            Err(poisoned) => {
+                let connection = poisoned.into_inner();
+                self.connection.clear_poison();
+                if !connection.is_autocommit() {
+                    connection
+                        .execute_batch("ROLLBACK")
+                        .context("Could not roll back after an internal error")?;
+                }
+                tracing::warn!("Recovered the database connection after a panic");
+                Ok(connection)
+            }
+        }
     }
     /// Run database work on tokio's blocking pool. Async code uses this for
     /// writes and large reads: they wait on the connection lock and on

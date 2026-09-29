@@ -266,6 +266,22 @@ pub struct RunOutcome {
     pub native_session: Option<String>,
 }
 
+/// Token counts and cost the vendor reported during a turn. They are kept
+/// when the turn fails, hits the plan limit or is cancelled: the vendor
+/// already counted them against the user's plan or bill.
+#[derive(Clone, Debug, Default)]
+pub struct ReportedUsage {
+    pub usage: Usage,
+    /// The protocol reported token counts (not only a cost).
+    pub tokens_reported: bool,
+}
+impl ReportedUsage {
+    /// Anything worth recording: token counts or a cost.
+    pub fn any(&self) -> bool {
+        self.tokens_reported || self.usage.cost_usd.is_some()
+    }
+}
+
 /// The vendor account hit its plan limit. The job stops with status
 /// `limit_reached`; ShadowCode never retries, buys credits, or redeems a
 /// reset on the user's behalf.
@@ -295,13 +311,38 @@ impl std::error::Error for LimitReached {}
 /// no approval channel, so it is refused while the user's permission mode
 /// asks before actions. Nothing is ever re-run once a turn started.
 pub async fn run(request: Request<'_>) -> Result<RunOutcome> {
+    run_reporting_usage(request).await.0
+}
+
+/// [`run`], also returning what the vendor reported it used, which is kept
+/// whether or not the turn succeeded.
+pub async fn run_reporting_usage(request: Request<'_>) -> (Result<RunOutcome>, ReportedUsage) {
+    let mut reported = ReportedUsage::default();
+    let outcome = run_counted(request, &mut reported).await;
+    (outcome, reported)
+}
+
+async fn run_counted(request: Request<'_>, reported: &mut ReportedUsage) -> Result<RunOutcome> {
     ensure_ready(request.vendor, &request)?;
     if request.vendor == Vendor::Codex && !codex_app_server_available(&request.options.binary).await
     {
-        return run_exec_fallback(&request, "this Codex CLI has no `app-server` command").await;
+        return run_exec_fallback(
+            &request,
+            "this Codex CLI has no `app-server` command",
+            reported,
+        )
+        .await;
     }
     let mut reached_ready = false;
-    match run_once(request.vendor, false, &request, &mut reached_ready).await {
+    match run_once(
+        request.vendor,
+        false,
+        &request,
+        &mut reached_ready,
+        reported,
+    )
+    .await
+    {
         Err(error)
             if request.vendor == Vendor::Codex
                 && !reached_ready
@@ -311,13 +352,17 @@ pub async fn run(request: Request<'_>) -> Result<RunOutcome> {
                 && error.downcast_ref::<ProtocolLineLimit>().is_none()
                 && !request.cancel.is_cancelled() =>
         {
-            run_exec_fallback(&request, &format!("{error:#}")).await
+            run_exec_fallback(&request, &format!("{error:#}"), reported).await
         }
         other => other,
     }
 }
 
-async fn run_exec_fallback(request: &Request<'_>, reason: &str) -> Result<RunOutcome> {
+async fn run_exec_fallback(
+    request: &Request<'_>,
+    reason: &str,
+    reported: &mut ReportedUsage,
+) -> Result<RunOutcome> {
     let reason = clip(&redact(reason), 400);
     if request.approvals_required {
         bail!(
@@ -329,7 +374,7 @@ async fn run_exec_fallback(request: &Request<'_>, reason: &str) -> Result<RunOut
         json!({"text":format!("Codex app-server could not start a session ({reason}); using `codex exec`, which runs the whole turn without approval prompts.")}),
     )?;
     let mut reached_ready = false;
-    run_once(Vendor::Codex, true, request, &mut reached_ready).await
+    run_once(Vendor::Codex, true, request, &mut reached_ready, reported).await
 }
 
 /// `codex app-server` is used when help mentions it; otherwise exec fallback.
@@ -371,6 +416,7 @@ async fn run_once(
     codex_exec_fallback: bool,
     request: &Request<'_>,
     reached_ready: &mut bool,
+    reported: &mut ReportedUsage,
 ) -> Result<RunOutcome> {
     ensure_ready(vendor, request)?;
     let mut adapter = adapter_for(vendor, codex_exec_fallback);
@@ -403,8 +449,12 @@ async fn run_once(
         stdin = None;
     }
     let mut collected = String::new();
-    let mut usage = Usage::default();
-    let mut usage_reported = false;
+    // Counted into the caller's record as they arrive, so a failed,
+    // limited or cancelled turn keeps what the vendor already reported.
+    let ReportedUsage {
+        usage,
+        tokens_reported: usage_reported,
+    } = reported;
     let mut native_session: Option<String> = None;
     let mut malformed = 0usize;
     let mut last_line = Instant::now();
@@ -711,8 +761,8 @@ async fn run_once(
                                 vendor,
                                 other,
                                 &mut collected,
-                                &mut usage,
-                                &mut usage_reported,
+                                usage,
+                                usage_reported,
                                 &mut native_session,
                                 &mut message_id,
                                 &mut pending_text,
@@ -791,8 +841,8 @@ async fn run_once(
     }
     Ok(RunOutcome {
         text: collected,
-        usage,
-        usage_reported,
+        usage: usage.clone(),
+        usage_reported: *usage_reported,
         native_session,
     })
 }
