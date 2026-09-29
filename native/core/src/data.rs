@@ -130,6 +130,13 @@ fn expand(path: &Path) -> PathBuf {
     }
 }
 
+/// Make a copied file private and durable before anything relies on it.
+fn seal(path: &Path) -> Result<()> {
+    private_file(path)?;
+    fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
 fn sync_dir(path: &Path) {
     if let Ok(dir) = fs::File::open(path) {
         let _ = dir.sync_all();
@@ -279,7 +286,7 @@ fn copy_database(source: &Path, target: &Path) -> Result<i64> {
     let copy = Connection::open(target)?;
     copy.pragma_update(None, "user_version", version)?;
     drop(copy);
-    private_file(target)?;
+    seal(target)?;
     Ok(version)
 }
 
@@ -337,7 +344,7 @@ fn write_backup(paths: &AppPaths, folder: &Path, options: BackupOptions<'_>) -> 
                         let relative = format!("{DATABASE}{suffix}");
                         let copy = folder.join(&relative);
                         fs::copy(&source, &copy)?;
-                        private_file(&copy)?;
+                        seal(&copy)?;
                         if suffix.is_empty() {
                             continue; // added below with the others
                         }
@@ -367,7 +374,7 @@ fn write_backup(paths: &AppPaths, folder: &Path, options: BackupOptions<'_>) -> 
         private_directory(target.parent().context("backup folder")?)?;
         fs::copy(&source, &target)
             .with_context(|| format!("Cannot copy {} into the backup", source.display()))?;
-        private_file(&target)?;
+        seal(&target)?;
         let (bytes, sha256) = sha256_file(&target)?;
         files.push(FileEntry {
             path: relative,
@@ -386,6 +393,9 @@ fn write_backup(paths: &AppPaths, folder: &Path, options: BackupOptions<'_>) -> 
         files,
         raw_copy,
     };
+    for directory in ["state", "config", "agents"] {
+        sync_dir(&folder.join(directory));
+    }
     atomic_write(
         &folder.join(MANIFEST),
         serde_json::to_string_pretty(&manifest)?.as_bytes(),
@@ -720,7 +730,7 @@ pub fn schedule_restore(paths: &AppPaths, path: &Path, include_secrets: bool) ->
         private_directory(target.parent().context("staging folder")?)?;
         fs::copy(&source, &target)
             .with_context(|| format!("Cannot copy {} from the backup", file.path))?;
-        private_file(&target)?;
+        seal(&target)?;
         // The staged copy must be exactly what was checked.
         let (bytes, sha256) = sha256_file(&target)?;
         ensure!(

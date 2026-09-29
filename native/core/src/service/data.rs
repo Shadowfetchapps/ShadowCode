@@ -17,7 +17,8 @@ struct DataBody {
 }
 
 fn absolute(path: &str, what: &str) -> Result<PathBuf> {
-    let path = expand_path(path.trim()).with_context(|| format!("Choose {what}"))?;
+    ensure!(!path.trim().is_empty(), "Choose {what}");
+    let path = expand_path(path.trim())?;
     ensure!(path.is_absolute(), "Give the full path of {what}");
     Ok(path)
 }
