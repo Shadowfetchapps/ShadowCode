@@ -4,7 +4,7 @@
 > that run on a schedule, a task started from a GitHub or GitLab issue, and
 > ShadowCode running in GitHub Actions. For everyday use see the
 > [user guide](USER_GUIDE.md); routes are in the
-> [API contract](API_CONTRACT_0.28.md#automations).
+> [API contract](API_CONTRACT.md#automations).
 
 ## Scheduled automations
 

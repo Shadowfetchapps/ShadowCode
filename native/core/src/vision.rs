@@ -244,10 +244,6 @@ pub fn image_refs(message: &Value) -> Vec<ImageRef> {
         .collect()
 }
 
-pub fn count_images(messages: &[Value]) -> usize {
-    messages.iter().map(|m| image_refs(m).len()).sum()
-}
-
 /// Load attachment bytes and shape messages for the wire protocol.
 /// Stored history keeps only `_shadow_images` path refs.
 pub fn hydrate_for_provider(

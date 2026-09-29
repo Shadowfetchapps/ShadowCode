@@ -1,0 +1,113 @@
+model:
+  default: mock
+  provider: local
+  endpoint: http://127.0.0.1:39153/v1
+  api_key_env: SHADOWCODE_FIXTURE_KEY
+  name: fixture-coder
+  context_limit: 16384
+  keep_alive: 30m
+permissions:
+  mode: allow_edits
+  level: workspace
+  require_approval_for_dangerous: true
+  network: false
+  allow_root: false
+  profile: ''
+  approve_shell: false
+agent:
+  max_steps: 12
+  tool_timeout_sec: 60
+  parallel_reads: true
+  compact_ratio: 0.7
+  model_retries: 3
+  retry_backoff_sec: 1.0
+  max_fix_retries: 3
+  max_output_bytes: 256000
+  max_task_tokens: 1000000
+  autonomy_profile: normal
+  summary_compaction: true
+  summary_timeout_sec: 60
+ui:
+  ability: none
+  host: 127.0.0.1
+  notify: false
+  notify_after_sec: 4.0
+  port: 7430
+  theme: dark
+onboarding:
+  completed: true
+  workspace: @ROOT@/project
+routing:
+  coder: mock
+  enabled: false
+  planner: mock
+  reviewer: mock
+  tester: mock
+mcp:
+  servers: []
+hooks:
+  approved: []
+verification:
+  commands: []
+git:
+  allow_destructive: false
+  auto_commit: false
+logging:
+  level: info
+trusted_workspaces:
+- @ROOT@/project
+guardian:
+  allow_prepare_patch: false
+  enabled: false
+  interval_sec: 3600
+cli_agents:
+  enabled: true
+  claude_enabled: true
+  codex_binary: codex
+  grok_binary: grok
+  claude_binary: claude
+  cursor_binary: cursor-agent
+  antigravity_binary: agy
+  approval_timeout_sec: 600
+  stall_timeout_sec: 900
+  max_run_time_sec: 7200
+local_engine:
+  directories: []
+  files: []
+  imports: []
+  excluded: []
+  llama_binary: ''
+  context_size: 0
+network:
+  mode: online
+  shell: on
+  allow: []
+  allow_local_dev: []
+  searxng_url: ''
+sandbox:
+  require: false
+  home_binds:
+  - .cargo
+  - .rustup
+  - .nvm
+  - .npm
+  - .cache/pip
+  - .local/bin
+  - .gitconfig
+  - .pyenv
+  - .bun
+  - .deno
+  landlock: true
+checkpoints:
+  shell: true
+  vendor: true
+  keep: 200
+  max_copy_files: 5000
+  max_copy_bytes: 67108864
+limits:
+  fallback_model: ''
+  on_limit: local
+updates:
+  check: null
+a_setting_from_the_future:
+  kept: true

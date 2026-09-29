@@ -1,7 +1,6 @@
 //! Code-intelligence tools (repo_map, search_code, LSP-backed definitions,
 //! references and diagnostics) and the post-edit diagnostics hook.
 use super::*;
-use std::path::PathBuf;
 
 const MAX_BASELINE_BYTES: u64 = 512_000;
 
@@ -225,11 +224,6 @@ impl ToolExecutor {
             }
             Err(error) => Err(error),
         }
-    }
-
-    pub fn with_code_intel_dir(mut self, dir: PathBuf) -> Self {
-        self.code_intel_dir = Some(dir);
-        self
     }
 }
 

@@ -140,7 +140,16 @@ impl Service {
             }
             let mut preview = serde_json::to_value(&*cfg)?;
             config::merge(&mut preview, values.clone());
-            let updated: Config = serde_json::from_value(preview)?;
+            let updated: Config = serde_json::from_value(preview).map_err(|error| {
+                match config::failing_key(&values) {
+                    Some((key, detail)) => {
+                        anyhow::anyhow!("`{key}` has a value ShadowCode can't read ({detail})")
+                    }
+                    None => {
+                        anyhow::anyhow!("A setting has a value ShadowCode can't read ({error})")
+                    }
+                }
+            })?;
             updated.validate()?;
             if !text("api_key").is_empty() {
                 let key = if text("api_key_env").is_empty() {

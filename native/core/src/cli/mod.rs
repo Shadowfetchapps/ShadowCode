@@ -432,6 +432,9 @@ pub async fn run(options: Options) -> Result<i32> {
     )?)?
     .path;
     let paths = options.paths()?;
+    if let Some(command @ (Command::Restore { .. } | Command::Reset { .. })) = &options.command {
+        return data_command(&paths, command, options.json);
+    }
     if let Some(Command::Tui { session }) = &options.command {
         ensure!(
             !options.json,
@@ -640,6 +643,127 @@ pub async fn run(options: Options) -> Result<i32> {
     }
     Ok(outcome.code)
 }
+/// `shadowcode restore` and `shadowcode reset`. Both are scheduled like in
+/// Settings › Your data; when no ShadowCode is running on this profile they
+/// finish right away (this command holds the profile lock and never opens
+/// the database).
+fn data_command(paths: &AppPaths, command: &Command, json_output: bool) -> Result<i32> {
+    use crate::data;
+    let (value, yes) = match command {
+        Command::Restore {
+            path,
+            include_secrets,
+            yes,
+        } => {
+            let path = std::env::current_dir()?.join(expand(path)?);
+            let inspection = data::inspect(paths, &path)?;
+            if !json_output {
+                let summary = &inspection.summary;
+                outln!("Backup: {}", inspection.path.display());
+                if !inspection.manifest.app_version.is_empty() {
+                    outln!("Made by: ShadowCode {}", inspection.manifest.app_version);
+                }
+                outln!(
+                    "Holds: {} conversations, {} tasks, {} goals, {} automations",
+                    summary["conversations"],
+                    summary["tasks"],
+                    summary["goals"],
+                    summary["automations"]
+                );
+                outln!(
+                    "API keys: {}",
+                    match (inspection.manifest.includes_secrets, *include_secrets) {
+                        (true, true) => "restored from the backup",
+                        (true, false) => "kept as they are (add --include-secrets to restore them)",
+                        (false, _) => "not in the backup; kept as they are",
+                    }
+                );
+                for problem in &inspection.problems {
+                    outln!("Problem: {problem}");
+                }
+            }
+            ensure!(
+                inspection.restorable,
+                "This backup cannot be restored: {}",
+                inspection.problems.join("; ")
+            );
+            if !*yes {
+                if json_output {
+                    outln!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &json!({"inspection": inspection, "restored": false})
+                        )?
+                    );
+                } else {
+                    outln!("Nothing was changed. Run again with --yes to restore; your current data is backed up first.");
+                }
+                return Ok(0);
+            }
+            (
+                json!(data::schedule_restore(paths, &path, *include_secrets)?),
+                true,
+            )
+        }
+        Command::Reset { yes } => {
+            if !*yes {
+                if json_output {
+                    outln!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &json!({"folders": [&paths.config, &paths.data, &paths.state], "kept": data::KEPT_ON_RESET, "reset": false})
+                        )?
+                    );
+                } else {
+                    outln!("Reset moves your settings, conversations and history into folders named '<folder>.reset-<time>' next to:");
+                    for folder in [&paths.config, &paths.data, &paths.state] {
+                        outln!("  {}", folder.display());
+                    }
+                    outln!("Nothing is deleted. Backups, worktrees and downloaded models stay where they are ({}).", data::KEPT_ON_RESET.join(", "));
+                    outln!("Nothing was changed. Run again with --yes to reset.");
+                }
+                return Ok(0);
+            }
+            (json!(data::schedule_reset(paths)?), true)
+        }
+        _ => unreachable!(),
+    };
+    debug_assert!(yes);
+    match paths.lock() {
+        Ok(_lock) => {
+            let result = data::apply_pending(paths)?.unwrap_or(Value::Null);
+            if json_output {
+                outln!("{}", serde_json::to_string_pretty(&result)?);
+            } else if result["kind"] == "restore" {
+                outln!(
+                    "Restored. The data you had before is backed up in {}",
+                    result["backup_of_previous_data"].as_str().unwrap_or("")
+                );
+            } else {
+                outln!("Reset done. Your previous data was moved to:");
+                for folder in result["moved_to"].as_array().into_iter().flatten() {
+                    outln!("  {}", folder.as_str().unwrap_or(""));
+                }
+            }
+        }
+        Err(error) if format!("{error:#}").contains("already running") => {
+            if json_output {
+                outln!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({"scheduled": value}))?
+                );
+            } else {
+                outln!("ShadowCode is running on this profile. This finishes the next time it starts: quit ShadowCode (and any `shadowcode serve`) and open it again. Cancel it in Settings › Your data.");
+            }
+        }
+        Err(error) => {
+            data::cancel_pending(paths)?;
+            return Err(error);
+        }
+    }
+    Ok(0)
+}
+
 /// `shadowcode rules`: the profile folder and every item, switched on or off.
 fn rules_text(value: &Value, _: Option<&str>) -> String {
     let mut out = format!(
@@ -868,8 +992,26 @@ async fn execute(backend: &Backend, workspace: &Path, options: &Options) -> Resu
         }
         Command::Sqlite {path,sql,params,limit,timeout_ms}=>backend.call("POST","/api/sqlite",json!({"path":path,"sql":sql,"params":serde_json::from_str::<Value>(params).context("--params must be a JSON array")?,"limit":limit,"timeout_ms":timeout_ms})).await?,
         Command::Memory {note,task,replace,expected_hash}=>backend.call("POST","/api/memory",json!({"action":if *replace{"replace"}else if note.is_some(){"append"}else{"read"},"scope":if task.is_some(){"task"}else{"project"},"task_id":task,"note":note,"expected_hash":expected_hash})).await?,
-        Command::Doctor { test_model } => {
-            backend
+        Command::Doctor { test_model, repair } => {
+            let repaired = if *repair {
+                let report = backend.call("POST", "/api/data/repair", json!({})).await?;
+                if !options.json {
+                    outln!("Repair (a backup was made first: {})", report["backup"].as_str().unwrap_or(""));
+                    for check in report["checks"].as_array().into_iter().flatten() {
+                        outln!(
+                            "[{}] {}: {}",
+                            watch::plain(check["status"].as_str().unwrap_or("")),
+                            watch::plain(check["label"].as_str().unwrap_or("")),
+                            watch::plain(check["detail"].as_str().unwrap_or(""))
+                        );
+                    }
+                    outln!();
+                }
+                Some(report)
+            } else {
+                None
+            };
+            let mut doctor = backend
                 .call(
                     "GET",
                     if *test_model {
@@ -879,7 +1021,54 @@ async fn execute(backend: &Backend, workspace: &Path, options: &Options) -> Resu
                     },
                     Value::Null,
                 )
-                .await?
+                .await?;
+            if let Some(report) = repaired {
+                let damaged = report["ok"] == false;
+                doctor["repair"] = report;
+                if damaged {
+                    return Ok(Outcome {
+                        code: 1,
+                        value: doctor,
+                        raw: None,
+                    });
+                }
+            }
+            doctor
+        }
+        Command::Backup {
+            include_secrets,
+            output,
+        } => {
+            let folder = match output {
+                Some(folder) => Some(std::env::current_dir()?.join(expand(folder)?)),
+                None => None,
+            };
+            let mut value = backend
+                .call(
+                    "POST",
+                    "/api/data/backups",
+                    json!({"include_secrets": include_secrets, "folder": folder}),
+                )
+                .await?;
+            let bytes: u64 = value["manifest"]["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|f| f["bytes"].as_u64())
+                .sum();
+            value["headline"] = json!(format!(
+                "Backup saved to {}",
+                value["path"].as_str().unwrap_or("")
+            ));
+            value["items"] = json!([
+                {"label": "Files", "value": value["manifest"]["files"].as_array().map_or(0, Vec::len).to_string()},
+                {"label": "Size", "value": format!("{:.1} MB", bytes as f64 / 1_000_000.0)},
+                {"label": "API keys", "value": if value["manifest"]["includes_secrets"] == true { "included: keep this backup private" } else { "not included" }},
+            ]);
+            value
+        }
+        Command::Restore { .. } | Command::Reset { .. } => {
+            unreachable!("Restore and reset are handled before the engine opens")
         }
         Command::Understand { save } => {
             backend

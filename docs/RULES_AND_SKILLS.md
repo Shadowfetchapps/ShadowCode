@@ -217,4 +217,4 @@ reports; it never changes a file.
 - `shadowcode rules preview [--agent claude]` shows what each agent reads.
 
 Add `--json` for machine-readable output. The HTTP-style routes behind these
-are in the [API contract](API_CONTRACT_0.28.md#rules-and-skills).
+are in the [API contract](API_CONTRACT.md#rules-and-skills).

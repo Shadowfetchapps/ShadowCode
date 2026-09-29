@@ -32,7 +32,7 @@ runs in-process with the window. There is no HTTP server between them.
 - **Desktop** (`src-tauri/src/main.rs`): hosts the React build (`ui/dist`,
   embedded) in the system WebKit webview and exposes one IPC command, `api`,
   which forwards `{method, path, body}` to the `Service`. The UI contract is
-  [docs/API_CONTRACT_0.28.md](docs/API_CONTRACT_0.28.md). A window can also
+  [docs/API_CONTRACT.md](docs/API_CONTRACT.md). A window can also
   attach to an engine already running in a headless `serve` or TUI process.
   Closing an attached window leaves that engine's work running.
 - **Service** (`service.rs`): routes requests (`/api/picker`,
@@ -113,10 +113,14 @@ vendor with official interfaces only:
   keyed by vendor, account and pool. After a restart they appear as
   *Last checked …* until the next probe. A snapshot older than 30 minutes is
   marked stale. Disconnect deletes the vendor's rows.
-- **Database.** SQLite `user_version` is 25 (`store.rs`). Opening an older
+- **Database.** SQLite `user_version` is 27 (`store.rs`). Opening an older
   database first copies it to `shadow-agent.pre-native-<id>.sqlite` (mode 600)
   with the SQLite backup API. Migrations then run forward in order inside one
-  transaction. A database from a newer version is refused. The database runs
+  transaction. A database from a newer version is refused from its file
+  header before anything is written, naming the version that last opened it
+  (`native_meta` `app_version`). `tests/upgrade_fixtures.rs` opens a profile
+  written by every release since 0.28.0. Backups, scheduled restores and
+  resets, and repair are in `data.rs` ([DATA.md](docs/DATA.md)). The database runs
   in WAL mode behind one connection lock; async code does writes and large
   reads through `Store::run` (tokio's blocking pool), so a slow `fsync` never
   stalls a worker that is streaming a model reply.

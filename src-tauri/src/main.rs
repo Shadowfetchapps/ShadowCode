@@ -93,6 +93,20 @@ async fn pick_local_model(
     .await
 }
 
+/// Settings › Your data: where to save a backup, or which backup to restore.
+#[tauri::command]
+async fn pick_data_folder(
+    app: tauri::AppHandle,
+    purpose: String,
+) -> std::result::Result<Option<PathBuf>, String> {
+    let title = match purpose.as_str() {
+        "backup" => "Choose where to save the backup",
+        "restore" => "Choose a ShadowCode backup folder",
+        _ => return Err("Unknown folder purpose".into()),
+    };
+    pick_path(app, true, title).await
+}
+
 async fn pick_path(
     app: tauri::AppHandle,
     folder: bool,
@@ -390,6 +404,7 @@ fn run() -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             api,
             pick_directory,
+            pick_data_folder,
             pick_local_model,
             export_session,
             export_diagnostics,

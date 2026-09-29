@@ -534,7 +534,8 @@ The editor's project must be trusted in ShadowCode (or start the agent with
 | Settings | `~/.config/shadow-agent/config.yaml` ([example](config.example.yaml)) |
 | Secrets for HTTP providers, including the OpenRouter key (`OPENROUTER_API_KEY`) | `~/.config/shadow-agent/secrets.env` (mode 600) |
 | Remote access: switches, paired devices (token digests only), phone notifications | `~/.config/shadow-agent/remote.json` (mode 600) |
-| Conversations, jobs, events, goals, usage snapshots | `~/.local/state/shadow-agent/shadow-agent.db` (SQLite, schema version 26; backed up as `shadow-agent.pre-native-<id>.sqlite` before a migration) |
+| Conversations, jobs, events, goals, usage snapshots | `~/.local/state/shadow-agent/shadow-agent.db` (SQLite, database format 27; copied to `shadow-agent.pre-native-<id>.sqlite` before an upgrade changes it) |
+| Backups (Settings › Your data, `shadowcode backup`) | `~/.local/share/shadow-agent/backups` |
 | OpenRouter model list (cache) | `~/.local/state/shadow-agent/openrouter-models.json` |
 | The update check's last answer | `~/.local/state/shadow-agent/update-check.json` |
 | Webview storage | `~/.local/share/shadow-agent/webview` |
@@ -548,9 +549,11 @@ The editor's project must be trusted in ShadowCode (or start the agent with
 | Your rules, skills, commands and agents for every project, Git imports | `~/.config/shadowcode/profile/` |
 | Rules & skills switches, imports and export links | `~/.config/shadow-agent/rulebook.json` (mode 600) |
 
-The directories are still named `shadow-agent` for compatibility. `--profile
-DIR` keeps a separate set, for example for development. The Antigravity
-directories follow `XDG_DATA_HOME` and are shared by all profiles.
+The directories are named `shadow-agent`, and keep that name in every 1.x
+version so every upgrade finds your data. `--profile DIR` keeps a separate
+set, for example for development. The Antigravity directories follow
+`XDG_DATA_HOME` and are shared by all profiles. Backing up, restoring,
+repairing and resetting are in [Your data](docs/DATA.md).
 
 ## Build from source
 

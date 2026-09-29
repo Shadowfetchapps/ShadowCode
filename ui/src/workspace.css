@@ -347,13 +347,6 @@ kbd {
   color: var(--muted);
   margin: 0 0 20px;
 }
-.suggestions {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  margin: 38px auto 0;
-  max-width: 650px;
-}
 .msg-user {
   margin: 12px 0 28px;
 }
@@ -862,27 +855,6 @@ kbd {
   font-weight: 500;
   color: var(--text-2);
 }
-.ctx-bar {
-  width: 48px;
-  height: 4px;
-  background: var(--border);
-  border-radius: 2px;
-  position: relative;
-  overflow: hidden;
-  flex-shrink: 0;
-  cursor: default;
-}
-.ctx-bar .ctx-fill {
-  position: absolute;
-  inset: 0;
-  height: 100%;
-  background: var(--accent);
-  border-radius: 2px;
-  transition: width 0.4s;
-}
-.ctx-bar.ctx-warn .ctx-fill {
-  background: var(--danger);
-}
 .version {
   margin-left: 5px;
   color: var(--muted);
@@ -960,39 +932,6 @@ kbd {
 .drawer-body .empty {
   padding: 40px 15px;
 }
-.terminal-form {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: 7px;
-  padding: 8px;
-}
-.terminal-form input {
-  width: 100%;
-  min-width: 0;
-  background: transparent;
-  border: 0;
-  outline: none;
-  font: 12px var(--mono);
-}
-.terminal-result {
-  margin-top: 14px;
-  background: var(--surface-2);
-  border-radius: 8px;
-  padding: 12px;
-}
-.terminal-result header {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-.terminal-result pre {
-  max-height: 350px;
-  overflow: auto;
-}
 .loading-task {
   display: flex;
   align-items: center;
@@ -1058,9 +997,6 @@ kbd {
     padding-left: 26px;
     padding-right: 26px;
   }
-  .suggestions {
-    gap: 8px;
-  }
 }
 @media (max-width: 760px) {
   .app.with-sidebar,
@@ -1115,12 +1051,6 @@ kbd {
   }
   .welcome .welcome-title {
     font-size: 29px;
-  }
-  .suggestions {
-    grid-template-columns: 1fr;
-    max-width: 370px;
-    margin-top: 25px;
-    gap: 7px;
   }
   .composer-hint,
   .version {

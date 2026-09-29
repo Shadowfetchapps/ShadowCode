@@ -397,6 +397,7 @@ export function createRemoteBridge(options: RemoteOptions = {}): Bridge & {
         // Native file pickers, the desktop's own focus tracking and quitting
         // the desktop app do not apply to a browser.
         case "pick_directory":
+        case "pick_data_folder":
         case "pick_local_model":
         case "set_visible_session":
         case "desktop_quit":

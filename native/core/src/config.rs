@@ -109,7 +109,6 @@ pub struct PermissionsConfig {
     /// governed by `network.mode` and the per-task web flag instead.
     pub network: bool,
     pub allow_root: bool,
-    pub profile: String,
     /// Native shell tools require explicit approval unless their exact command
     /// is approved for this task. `ask` mode always asks for shell.
     pub approve_shell: bool,
@@ -129,7 +128,6 @@ impl Default for PermissionsConfig {
             require_approval_for_dangerous: true,
             network: false,
             allow_root: false,
-            profile: String::new(),
             approve_shell: true,
             web: false,
             offline: false,
@@ -204,7 +202,7 @@ impl NetworkConfig {
         }
         ensure!(
             self.allow_local_dev.len() <= 32,
-            "At most 32 local dev servers can be allowed"
+            "network.allow_local_dev holds at most 32 entries"
         );
         for entry in &self.allow_local_dev {
             crate::web::normalize_allow_entry(entry)
@@ -289,8 +287,6 @@ pub struct Config {
     pub mcp: Value,
     pub hooks: crate::hooks::HookConfig,
     pub verification: crate::verification::CheckConfig,
-    pub git: Value,
-    pub logging: Value,
     pub trusted_workspaces: Vec<String>,
     #[serde(default)]
     pub guardian: Value,
@@ -314,6 +310,9 @@ pub struct Config {
     /// The daily update check (`updates.check`); see [`crate::updates`].
     #[serde(default)]
     pub updates: crate::updates::UpdatesConfig,
+    /// Top-level keys this version does not know (settings from a newer
+    /// version, `voice`, `code_intel`, and retired keys such as the old
+    /// `git` and `logging` groups) are kept as they are and written back.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -323,14 +322,15 @@ impl Default for Config {
             model: ModelConfig::default(),
             permissions: PermissionsConfig::default(),
             agent: AgentConfig::default(),
-            ui: json!({"theme":"light","notify":true,"notify_after_sec":4,"ability":"none"}),
+            // Every key the app reads from the untyped groups has its default
+            // here, so `shadowcode config KEY VALUE` can set it and
+            // config.example.yaml documents it (tests/config_keys.rs).
+            ui: json!({"theme":"light","notify":true,"notify_approval":true,"notify_failed":true,"notify_limit":true,"notify_finished":true,"notify_sound":false}),
             onboarding: json!({"completed":false,"workspace":""}),
-            routing: json!({"enabled":false,"planner":"","coder":"","reviewer":"","tester":""}),
-            mcp: json!({"servers":[]}),
+            routing: json!({"enabled":false,"planner":"","coder":"","reviewer":"","tester":"","architecture":"","small_edits":"","vision":"","local":""}),
+            mcp: json!({"servers":[],"approved":[],"share_with_cli_agents":true}),
             hooks: crate::hooks::HookConfig::default(),
             verification: crate::verification::CheckConfig::default(),
-            git: json!({"auto_commit":false,"allow_destructive":false}),
-            logging: json!({"level":"info"}),
             trusted_workspaces: Vec::new(),
             guardian: json!({"enabled":false,"interval_sec":3600,"allow_prepare_patch":false}),
             cli_agents: crate::cli_agent::CliAgentsConfig::default(),
@@ -348,14 +348,19 @@ impl Default for Config {
 impl Config {
     pub fn load(paths: &AppPaths, workspace: Option<&Path>) -> Result<Self> {
         let mut base = serde_json::to_value(Self::default())?;
-        if paths.config_file().exists() {
-            let mut user = read_yaml(&paths.config_file())?;
-            migrate_permissions(&mut user);
-            merge(&mut base, user);
+        let file = paths.config_file();
+        let mut user = None;
+        if file.exists() {
+            let mut value = read_yaml(&file)?;
+            migrate_permissions(&mut value);
+            merge(&mut base, value.clone());
+            user = Some(value);
         }
-        let mut config: Self =
-            serde_json::from_value(base.clone()).context("Invalid user configuration")?;
-        config.validate()?;
+        let mut config: Self = serde_json::from_value(base.clone())
+            .map_err(|error| unreadable(&file, user.as_ref(), error))?;
+        config
+            .validate()
+            .with_context(|| format!("{} needs a fix", file.display()))?;
         config.apply_runtime(false);
         if let Some(workspace) = workspace {
             let canonical = workspace.canonicalize()?;
@@ -378,8 +383,11 @@ impl Config {
                 {
                     base["permissions"]["level"] = json!("read_only");
                 }
-                config = serde_json::from_value(base)?;
-                config.validate()?;
+                config = serde_json::from_value(base)
+                    .map_err(|error| unreadable(&overlay, Some(&project), error))?;
+                config
+                    .validate()
+                    .with_context(|| format!("{} needs a fix", overlay.display()))?;
                 config.apply_runtime(false);
             }
         }
@@ -410,14 +418,20 @@ impl Config {
         self.permissions.web = self.web_tools_allowed(task_web);
     }
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.ui.is_object(), "UI configuration must be an object");
-        ensure!(self.limits.is_object(), "limits must be an object");
+        ensure!(
+            self.ui.is_object(),
+            "ui must be a group of settings, for example `ui: {{theme: system}}`"
+        );
+        ensure!(
+            self.limits.is_object(),
+            "limits must be a group of settings, for example `limits: {{on_limit: local}}`"
+        );
         ensure!(
             matches!(
                 self.limits["on_limit"].as_str(),
                 None | Some("local" | "ask")
             ),
-            "limits.on_limit must be \"local\" or \"ask\""
+            "limits.on_limit must be local or ask"
         );
         ensure!(
             self.limits["fallback_model"].is_null()
@@ -428,74 +442,93 @@ impl Config {
         );
         ensure!(
             valid_keep_alive(&self.model.keep_alive),
-            "Ollama residency must be -1, 0, or a positive duration such as 5m, 30m or 1h"
+            "model.keep_alive must be \"-1\" (keep loaded), \"0\" (unload) or a duration such as \"5m\", \"30m\" or \"1h\" (up to 86400 of a unit); found {:?}",
+            self.model.keep_alive
         );
         let guardian: crate::guardian::GuardianConfig =
             serde_json::from_value(self.guardian.clone())
-                .context("Invalid Guardian configuration")?;
+                .context("guardian has a value ShadowCode can't read; use enabled (true/false), interval_sec (seconds) and allow_prepare_patch (true/false)")?;
         ensure!(
             (60..=86400).contains(&guardian.interval_sec),
-            "Guardian interval must be between 60 and 86400 seconds"
+            "guardian.interval_sec must be between 60 and 86400 seconds; found {}",
+            guardian.interval_sec
         );
         ensure!(
             (1024..=4_000_000).contains(&self.model.context_limit),
-            "Context limit must be between 1024 and 4000000"
+            "model.context_limit must be between 1024 and 4000000 tokens; found {}",
+            self.model.context_limit
+        );
+        let agent = &self.agent;
+        ensure!(
+            (1..=1000).contains(&agent.max_steps),
+            "agent.max_steps must be between 1 and 1000; found {}",
+            agent.max_steps
         );
         ensure!(
-            (1..=1000).contains(&self.agent.max_steps),
-            "Task step limit must be between 1 and 1000"
+            (1..=3600).contains(&agent.tool_timeout_sec),
+            "agent.tool_timeout_sec must be between 1 and 3600 seconds; found {}",
+            agent.tool_timeout_sec
         );
         ensure!(
-            (1..=3600).contains(&self.agent.tool_timeout_sec),
-            "Tool timeout must be between 1 and 3600 seconds"
+            agent.compact_ratio.is_finite() && (0.2..=0.95).contains(&agent.compact_ratio),
+            "agent.compact_ratio must be between 0.2 and 0.95; found {}",
+            agent.compact_ratio
         );
         ensure!(
-            self.agent.compact_ratio.is_finite()
-                && (0.2..=0.95).contains(&self.agent.compact_ratio),
-            "Invalid context compaction ratio"
+            agent.model_retries <= 10,
+            "agent.model_retries must be between 0 and 10; found {}",
+            agent.model_retries
         );
         ensure!(
-            self.agent.model_retries <= 10 && self.agent.max_fix_retries <= 10,
-            "Retry limit is too large"
+            agent.max_fix_retries <= 10,
+            "agent.max_fix_retries must be between 0 and 10; found {}",
+            agent.max_fix_retries
         );
         ensure!(
-            self.agent.retry_backoff_sec.is_finite()
-                && (0.0..=30.0).contains(&self.agent.retry_backoff_sec),
-            "Invalid retry delay"
+            agent.retry_backoff_sec.is_finite() && (0.0..=30.0).contains(&agent.retry_backoff_sec),
+            "agent.retry_backoff_sec must be between 0 and 30 seconds; found {}",
+            agent.retry_backoff_sec
         );
         ensure!(
-            (5..=600).contains(&self.agent.summary_timeout_sec),
-            "Compaction summary timeout must be between 5 and 600 seconds"
+            (5..=600).contains(&agent.summary_timeout_sec),
+            "agent.summary_timeout_sec must be between 5 and 600 seconds; found {}",
+            agent.summary_timeout_sec
         );
         ensure!(
-            (4096..=4_000_000).contains(&self.agent.max_output_bytes),
-            "Invalid tool output limit"
+            (4096..=4_000_000).contains(&agent.max_output_bytes),
+            "agent.max_output_bytes must be between 4096 and 4000000; found {}",
+            agent.max_output_bytes
         );
         ensure!(
-            self.agent.max_task_tokens > 0,
-            "Token budget must be positive"
+            agent.max_task_tokens > 0,
+            "agent.max_task_tokens must be greater than 0"
         );
         ensure!(
             matches!(
-                self.agent.autonomy_profile.as_str(),
+                agent.autonomy_profile.as_str(),
                 "unlimited" | "conservative" | "normal" | "extended" | "custom"
             ),
-            "Autonomy profile must be unlimited, conservative, normal, extended, or custom"
+            "agent.autonomy_profile must be unlimited, conservative, normal, extended or custom; found {:?}",
+            agent.autonomy_profile
         );
         ensure!(
             valid_secret_name(&self.model.api_key_env),
-            "Invalid API key environment name"
+            "model.api_key_env must be the name of the variable that holds the key, such as OPENAI_API_KEY (letters, digits and _), never the key itself"
         );
         if !self.model.endpoint.is_empty() {
-            let url =
-                reqwest::Url::parse(&self.model.endpoint).context("Invalid model endpoint")?;
+            let url = reqwest::Url::parse(&self.model.endpoint).with_context(|| {
+                format!(
+                    "model.endpoint must be a web address such as http://127.0.0.1:11434/v1; found {:?}",
+                    self.model.endpoint
+                )
+            })?;
             ensure!(
                 matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
-                "Endpoint must use HTTP or HTTPS"
+                "model.endpoint must start with http:// or https://"
             );
             ensure!(
                 url.username().is_empty() && url.password().is_none(),
-                "Use a stored API key instead of credentials in an endpoint URL"
+                "model.endpoint must not contain a user name or password; remove them and store the API key in Settings instead"
             );
         }
         ensure!(
@@ -503,11 +536,12 @@ impl Config {
                 self.ui.get("theme").and_then(Value::as_str),
                 Some("light" | "dark" | "system")
             ),
-            "Unknown theme"
+            "ui.theme must be system, light or dark; found {}",
+            self.ui.get("theme").unwrap_or(&Value::Null)
         );
         ensure!(
             self.mcp.get("servers").is_some_and(Value::is_array),
-            "MCP servers must be an array"
+            "mcp.servers must be a list (use `servers: []` for none)"
         );
         #[cfg(unix)]
         crate::mcp::registry::validate_config(&self.mcp)?;
@@ -577,13 +611,65 @@ impl Config {
     }
 }
 
+/// An error for settings serde cannot read, naming the key. The key is found
+/// by reading the defaults with one of the user's values at a time.
+fn unreadable(file: &Path, user: Option<&Value>, error: serde_json::Error) -> anyhow::Error {
+    let fix = "Fix the value, or delete that line to use the default.";
+    match user.and_then(failing_key) {
+        Some((key, detail)) => anyhow::anyhow!(
+            "{}: `{key}` has a value ShadowCode can't read ({detail}). {fix}",
+            file.display()
+        ),
+        None => anyhow::anyhow!(
+            "{}: a setting has a value ShadowCode can't read ({error}). {fix}",
+            file.display()
+        ),
+    }
+}
+
+/// The dotted path of the first user value that alone makes the settings
+/// unreadable, with serde's reason.
+pub fn failing_key(user: &Value) -> Option<(String, String)> {
+    fn leaves(value: &Value, path: &mut Vec<String>, found: &mut Vec<(Vec<String>, Value)>) {
+        match value {
+            Value::Object(map) if !map.is_empty() => {
+                for (key, child) in map {
+                    path.push(key.clone());
+                    leaves(child, path, found);
+                    path.pop();
+                }
+            }
+            other => found.push((path.clone(), other.clone())),
+        }
+    }
+    let defaults = serde_json::to_value(Config::default()).ok()?;
+    let mut found = Vec::new();
+    leaves(user, &mut Vec::new(), &mut found);
+    for (path, value) in found {
+        let overlay = path
+            .iter()
+            .rev()
+            .fold(value, |inner, key| json!({ key.as_str(): inner }));
+        let mut probe = defaults.clone();
+        merge(&mut probe, overlay);
+        if let Err(error) = serde_json::from_value::<Config>(probe) {
+            return Some((path.join("."), error.to_string()));
+        }
+    }
+    None
+}
+
 fn read_yaml(path: &Path) -> Result<Value> {
     let value: Value = serde_yaml_ng::from_str(&read_text(path)?)
         .with_context(|| format!("Invalid YAML in {}", path.display()))?;
     if value.is_null() {
         return Ok(json!({}));
     }
-    ensure!(value.is_object(), "Configuration must be a mapping");
+    ensure!(
+        value.is_object(),
+        "{} must be a list of `key: value` settings",
+        path.display()
+    );
     Ok(value)
 }
 

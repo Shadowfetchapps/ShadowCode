@@ -135,31 +135,32 @@ pub fn activations(config: &Config) -> Result<Vec<Activation>> {
 pub fn validate_config(value: &Value) -> Result<()> {
     let servers = value["servers"]
         .as_array()
-        .context("MCP servers must be an array")?;
+        .context("mcp.servers must be a list (use `servers: []` for none)")?;
     ensure!(
         servers.len() <= 64 && value.to_string().len() <= 512_000,
-        "MCP configuration is too large"
+        "mcp holds at most 64 servers and 512 KB of settings"
     );
     let approved: Vec<Activation> =
-        serde_json::from_value(value.get("approved").cloned().unwrap_or_else(|| json!([])))?;
+        serde_json::from_value(value.get("approved").cloned().unwrap_or_else(|| json!([])))
+            .context("mcp.approved entries must be {workspace, server, hash}")?;
     ensure!(
         approved.len() <= 256,
-        "At most 256 MCP activations may be stored"
+        "mcp.approved holds at most 256 entries"
     );
     let mut seen = HashSet::new();
     for entry in approved {
         ensure!(
             Path::new(&entry.workspace).is_absolute() && entry.workspace.len() <= 4096,
-            "MCP activation needs an absolute workspace"
+            "mcp.approved: workspace must be an absolute path"
         );
         validate_id(&entry.server)?;
         ensure!(
             entry.hash.len() == 64 && entry.hash.bytes().all(|c| c.is_ascii_hexdigit()),
-            "Invalid MCP definition hash"
+            "mcp.approved: hash must be the 64-character hash of the server definition"
         );
         ensure!(
             seen.insert((entry.workspace, entry.server)),
-            "Duplicate MCP activation"
+            "mcp.approved lists the same server twice for one project"
         );
     }
     Ok(())

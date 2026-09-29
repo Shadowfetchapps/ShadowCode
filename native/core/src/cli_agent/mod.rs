@@ -31,7 +31,6 @@ pub mod claude;
 pub mod claude_probe;
 pub mod codex;
 pub mod codex_probe;
-pub mod discovery;
 pub mod doctor;
 pub mod handoff;
 mod lines;

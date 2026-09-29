@@ -2,7 +2,7 @@ import { request } from "./transport";
 import type { ForgeCli, RemoteInfo } from "./forge";
 import type { PrDraft } from "../hooks/useDrawerMemory";
 
-/** "Start from an issue" (`/api/issues…`, docs/API_CONTRACT_0.28.md). */
+/** "Start from an issue" (`/api/issues…`, docs/API_CONTRACT.md). */
 
 export type IssueComment = { author: string; body: string; created_at: string };
 

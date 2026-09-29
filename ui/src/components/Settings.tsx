@@ -9,6 +9,7 @@ import { AppearancePage, PermissionsPage } from "./settings/PreferencePages";
 import { AdvancedPage, type AdvancedTab } from "./settings/AdvancedPage";
 import { RemotePage } from "./settings/RemotePage";
 import { AboutPage } from "./settings/AboutPage";
+import { DataPage } from "./settings/DataPage";
 import { RulesPage } from "./settings/RulesPage";
 
 export type SettingsSection =
@@ -20,6 +21,7 @@ export type SettingsSection =
   | "permissions"
   | "appearance"
   | "remote"
+  | "data"
   | "advanced"
   | "about";
 export type { AdvancedTab };
@@ -33,6 +35,7 @@ const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: "permissions", label: "Permissions & network" },
   { id: "appearance", label: "Appearance" },
   { id: "remote", label: "Remote access" },
+  { id: "data", label: "Your data" },
   { id: "advanced", label: "Advanced" },
   { id: "about", label: "About" },
 ];
@@ -128,6 +131,7 @@ export function Settings({
           <AppearancePage cfg={cfg} onSave={onSave} />
         )}
         {section === "remote" && <RemotePage onToast={onToast} />}
+        {section === "data" && <DataPage onToast={onToast} />}
         {section === "advanced" && (
           <AdvancedPage
             cfg={cfg}

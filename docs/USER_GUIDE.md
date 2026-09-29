@@ -661,6 +661,17 @@ manages ShadowCode's updates, About says so instead and the switch is not
 shown. A check that fails (for example with no network) stays quiet; About
 shows why the last one didn't work.
 
+## Your data: back up, restore, repair, start over
+
+**Settings › Your data** backs up your conversations, tasks, goals,
+automations and settings to a private folder (API keys only if you tick the
+box), restores a backup after checking it, checks and repairs the database,
+and resets ShadowCode by moving everything aside, never deleting it. Restores
+and resets happen the next time ShadowCode starts. It also lists the copies
+made automatically before each upgrade. The same is on the command line:
+`shadowcode backup`, `shadowcode restore FOLDER`, `shadowcode doctor --repair`
+and `shadowcode reset`. See [Your data](DATA.md) for the details.
+
 ## The shell sandbox
 
 ShadowCode runs shell commands from local and OpenRouter models in a sandbox

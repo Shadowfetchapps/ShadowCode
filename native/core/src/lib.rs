@@ -18,6 +18,7 @@ pub mod config;
 pub mod context;
 #[cfg(unix)]
 pub mod control;
+pub mod data;
 pub mod effort;
 pub mod engine;
 pub mod events;

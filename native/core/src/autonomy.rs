@@ -141,14 +141,6 @@ pub enum RunawayAction {
     Pause,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaimLevel {
-    ModelClaim,
-    Observed,
-    Verified,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AutonomyCaps {
     pub max_steps: usize,

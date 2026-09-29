@@ -84,6 +84,9 @@ The same as the desktop window, with these exceptions:
   `/api/preview…` is refused and the tab says so.
 - **Remote access settings stay on this computer.** A remote device cannot
   see or change pairing, devices, the address or phone notifications.
+- **Your data stays on this computer.** Backups, restore, repair and reset
+  (Settings › Your data, `/api/data…`) are refused: a backup can hold API
+  keys, and a restore or reset replaces everything.
 - **No secrets.** Secret files (`.env`, `secrets.env`, private keys,
   credential JSON), also when reached through a symlink or a spelling such as
   `.env/`, are not shown or diffed, ShadowCode's own settings folder
@@ -152,6 +155,6 @@ token); `POST /_remote/pair`; `GET /_remote/session`; `GET /_remote/stream`
 `shadowcode:events {session_id, type}` and, when terminals are allowed,
 `shadowcode:terminal {type, terminal_id}`); `/api/*` (the application API,
 filtered by `remote::policy`). Management routes are `/api/remote*`; see
-[API_CONTRACT_0.28.md](API_CONTRACT_0.28.md#remote-access). The UI picks its
+[API_CONTRACT.md](API_CONTRACT.md#remote-access). The UI picks its
 transport in `ui/src/lib/transport.ts`: Tauri IPC in the desktop, HTTP
 (`ui/src/lib/remote.ts`) in a browser.

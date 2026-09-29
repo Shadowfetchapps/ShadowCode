@@ -34,6 +34,7 @@ const SECTIONS = [
   "Permissions & network",
   "Appearance",
   "Remote access",
+  "Your data",
   "Advanced",
   "About",
 ];

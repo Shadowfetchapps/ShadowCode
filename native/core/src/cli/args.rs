@@ -76,6 +76,37 @@ pub enum Command {
     Doctor {
         #[arg(long)]
         test_model: bool,
+        /// First back up the database, check its integrity, rebuild its
+        /// indexes and clear regenerable caches (Settings › Your data › Repair).
+        #[arg(long)]
+        repair: bool,
+    },
+    /// Back up your conversations, jobs, goals and settings to a folder.
+    Backup {
+        /// Also copy API keys (secrets.env) and remote-access pairing.
+        /// Anyone with the backup can then use those keys.
+        #[arg(long)]
+        include_secrets: bool,
+        /// Folder to put the backup in (default: the profile's backups folder).
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
+    /// Check a backup and restore it (the current data is backed up first).
+    Restore {
+        /// A backup folder, its manifest.json, or a database copy.
+        path: PathBuf,
+        /// Also restore API keys when the backup has them.
+        #[arg(long)]
+        include_secrets: bool,
+        /// Restore; without it only the check runs.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Start over: move settings and history aside (nothing is deleted).
+    Reset {
+        /// Reset; without it only what would move is shown.
+        #[arg(long)]
+        yes: bool,
     },
     /// Read or append project notes, or select an exact task's notes.
     Memory {

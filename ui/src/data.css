@@ -1,0 +1,87 @@
+/* Settings › Your data: backups, restore, check and repair, reset. */
+.data-page > button {
+  justify-self: start;
+}
+.data-page button svg {
+  vertical-align: -2px;
+  margin-right: 5px;
+}
+.data-pending {
+  border: 1px solid var(--warn);
+  border-radius: 12px;
+  padding: 10px 14px;
+  display: grid;
+  gap: 8px;
+  background: var(--surface);
+}
+.data-pending p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.data-warning {
+  color: var(--warn);
+}
+.data-problem,
+.data-problems {
+  color: var(--danger);
+}
+.data-problems {
+  margin: 0;
+  padding-left: 18px;
+}
+.data-list,
+.data-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.data-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: var(--surface);
+}
+.data-list li > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.data-list small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.data-list button {
+  white-space: nowrap;
+}
+.data-checks {
+  gap: 4px;
+  font-size: 12px;
+}
+.data-check {
+  display: grid;
+  grid-template-columns: minmax(140px, auto) 1fr;
+  gap: 8px;
+}
+.data-check.pass strong {
+  color: var(--ok);
+}
+.data-check.warn strong {
+  color: var(--warn);
+}
+.data-check.fail strong {
+  color: var(--danger);
+}
+.data-check span {
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.data-folders code {
+  overflow-wrap: anywhere;
+}
