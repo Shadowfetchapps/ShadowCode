@@ -450,7 +450,7 @@ export function Stage({
             view: roles.view,
             saving: roles.saving,
             onToggle: (on) => void roles.save({ pipeline: on }),
-            onPreset: (id) => void roles.save({ preset: id }),
+            onPreset: (id) => void roles.save({ preset: id, pipeline: true }),
             onOpenSettings: () => openSettings("roles"),
           }
         }

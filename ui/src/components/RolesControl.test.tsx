@@ -87,10 +87,18 @@ it("turns roles on, picks a preset and opens Settings", () => {
   });
   fireEvent.click(toggle);
   expect(onToggle).toHaveBeenCalledWith(true);
-  fireEvent.change(screen.getByLabelText("Roles preset"), {
-    target: { value: "all-local" },
-  });
+  const presets = screen.getByRole("group", { name: "Presets" });
+  // Nothing is "in use" while roles are off.
+  expect(
+    screen
+      .getByRole("button", { name: "Claude Code plans" })
+      .getAttribute("aria-pressed"),
+  ).toBe("false");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Everything on this computer" }),
+  );
   expect(onPreset).toHaveBeenCalledWith("all-local");
+  expect(presets.querySelectorAll("button")).toHaveLength(2);
   fireEvent.click(
     screen.getByRole("button", { name: /Choose a model for each role/ }),
   );
@@ -108,6 +116,11 @@ it("turns roles on, picks a preset and opens Settings", () => {
   expect(
     screen.getByText("Plan: Claude Code · Implement: Qwen3 14B"),
   ).toBeTruthy();
+  expect(
+    screen
+      .getByRole("button", { name: "Claude Code plans" })
+      .getAttribute("aria-pressed"),
+  ).toBe("true");
   // A cloud role in a conversation on this computer asks first.
   expect(screen.getByText(/Claude Code runs in the cloud/)).toBeTruthy();
   expect(screen.getByText(/Ask answers on the model you picked/)).toBeTruthy();

@@ -200,6 +200,10 @@ struct Inner {
 #[derive(Clone)]
 pub struct Engine(Arc<Inner>);
 
+/// A Plan → Implement → Review task orchestrates its roles; each role's own
+/// conversation can be paused and steered instead.
+const ROLES_NOT_STEERED: &str = "A Plan → Implement → Review task can't be paused or steered. Stop it, or open the running role's transcript to pause or steer that role.";
+
 /// Kept outside the job worker so the follow-up task's future is checked for
 /// `Send` without the worker's own opaque type in scope.
 fn spawn_limit_fallback(engine: Engine, record: Job) {
@@ -945,6 +949,7 @@ impl Engine {
         let job = self
             .running(id)?
             .context("Job not found or already finished")?;
+        ensure!(job.roles.is_none(), "{ROLES_NOT_STEERED}");
         ensure!(!job.cancel.is_cancelled(), "Task is cancelling");
         ensure!(
             !job.finished.load(Ordering::Acquire),
@@ -978,6 +983,7 @@ impl Engine {
         let job = self
             .running(id)?
             .context("Job not found or already finished")?;
+        ensure!(job.roles.is_none(), "{ROLES_NOT_STEERED}");
         job.steer.set_instruction(instruction)?;
         if let Some(path) = edited_path.filter(|p| !p.trim().is_empty()) {
             job.steer.note_edit(path, "manual edit noted by user")?;

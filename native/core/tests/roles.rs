@@ -659,6 +659,17 @@ async fn a_vendor_roles_approvals_reach_the_parent_and_stop_ends_it() {
     )
     .await;
     let child_job = started["payload"]["job_id"].as_str().unwrap().to_owned();
+    // The task orchestrates its roles: it is stopped, not paused or steered.
+    let refused = service
+        .engine
+        .pause_job(job["id"].as_str().unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("can't be paused or steered"), "{refused}");
+    assert!(service
+        .engine
+        .steer_job(job["id"].as_str().unwrap(), "faster", None)
+        .is_err());
     eventually(
         || {
             setup

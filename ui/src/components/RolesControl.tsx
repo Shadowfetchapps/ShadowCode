@@ -5,7 +5,7 @@ import type { TaskMode } from "../lib/effort";
 import { pipelineLine, rolesAsking, rolesBlocked } from "../lib/roles";
 
 /** The composer's compact roles control (in More): turn Plan → Implement →
- * Review on or off for this project, pick a preset, or open Settings ›
+ * Review on or off for this project, use a preset, or open Settings ›
  * Roles. */
 export function RolesControl({
   view,
@@ -19,6 +19,7 @@ export function RolesControl({
   saving: boolean;
   mode: TaskMode;
   onToggle: (on: boolean) => void;
+  /** Use a preset (and turn Plan → Implement → Review on). */
   onPreset: (id: string) => void;
   onOpenSettings: () => void;
 }) {
@@ -27,7 +28,6 @@ export function RolesControl({
   const on = view.setup.pipeline;
   const blocked = rolesBlocked(view);
   const asking = rolesAsking(view);
-  const preset = view.presets.find((p) => p.id === view.setup.preset);
   return (
     <div className="roles-control" role="group" aria-label="Roles">
       <label className="roles-toggle" htmlFor={id}>
@@ -42,45 +42,42 @@ export function RolesControl({
           onChange={(event) => onToggle(event.target.checked)}
         />
       </label>
-      <p className="composer-more-reason">
+      <p className="roles-note">
         {on
           ? pipelineLine(view)
           : "Off: each message runs on the model you picked."}
       </p>
       {on && mode === "ask" && (
-        <p className="composer-more-reason">
+        <p className="roles-note">
           Roles run Code and Plan messages. Ask answers on the model you picked.
         </p>
       )}
-      {on && blocked && (
-        <p className="composer-more-reason warn-text">{blocked}</p>
-      )}
+      {on && blocked && <p className="roles-note warn-text">{blocked}</p>}
       {on && !blocked && asking.length > 0 && (
-        <p className="composer-more-reason">
+        <p className="roles-note">
           {asking.join(" and ")} {asking.length === 1 ? "runs" : "run"} in the
           cloud. ShadowCode asks before this conversation&apos;s work leaves
           this computer.
         </p>
       )}
-      <label className="composer-chip roles-preset">
-        <span className="sr-only">Roles preset</span>
-        <select
-          value={preset ? preset.id : ""}
-          disabled={saving}
-          onChange={(event) => {
-            if (event.target.value) onPreset(event.target.value);
-          }}
-        >
-          <option value="">
-            {preset ? "Choose a preset…" : "Your own roles"}
-          </option>
-          {view.presets.map((p) => (
-            <option key={p.id} value={p.id} title={p.description}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="roles-presets-compact" role="group" aria-label="Presets">
+        {view.presets.map((preset) => {
+          const current = on && view.setup.preset === preset.id;
+          return (
+            <button
+              type="button"
+              key={preset.id}
+              className={`roles-chip ${current ? "on" : ""}`}
+              aria-pressed={current}
+              disabled={saving}
+              title={preset.description}
+              onClick={() => onPreset(preset.id)}
+            >
+              {preset.label}
+            </button>
+          );
+        })}
+      </div>
       <button type="button" className="roles-edit" onClick={onOpenSettings}>
         Choose a model for each role…
       </button>

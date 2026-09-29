@@ -1951,14 +1951,39 @@ div.activity-step {
   margin-left: auto;
   accent-color: var(--accent);
 }
-.roles-control .roles-preset {
-  width: 100%;
-  justify-content: space-between;
-  padding: 0 7px;
+.roles-note {
+  margin: -2px 0 3px;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
-.roles-control .roles-preset select {
-  max-width: 100%;
-  min-width: 0;
+.roles-presets-compact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 6px;
+}
+.roles-chip {
+  min-height: 26px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--pill);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+}
+.roles-chip:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.roles-chip.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 .roles-edit {
   justify-self: start;

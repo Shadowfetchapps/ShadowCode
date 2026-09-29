@@ -68,10 +68,16 @@ test("a local conversation runs Claude Code, Codex and a local reviewer as roles
   await expect(roles).toContainText(
     "Off: each message runs on the model you picked.",
   );
-  await roles.getByLabel("Roles preset").selectOption("claude-codex-local");
+  // A preset turns Plan → Implement → Review on (and closes More).
   await roles
-    .getByRole("switch", { name: /Plan → Implement → Review/ })
-    .check();
+    .getByRole("button", {
+      name: "Claude Code plans, Codex implements, local reviews",
+    })
+    .click();
+  await openMore(page);
+  await expect(
+    roles.getByRole("switch", { name: /Plan → Implement → Review/ }),
+  ).toBeChecked();
   await expect(roles).toContainText(
     "Plan: Claude Code · Implement: Codex · Review: qwen3:14b",
   );
