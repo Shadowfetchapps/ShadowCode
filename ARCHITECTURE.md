@@ -66,6 +66,14 @@ runs in-process with the window. There is no HTTP server between them.
   approvals, stall detection and cancellation. The vendor runs the agent loop
   with its own tools and sandbox. ShadowCode's tools are never injected into
   it.
+- **Rulebook** (`rulebook/`): the user's profile
+  (`~/.config/shadowcode/profile/`: `AGENTS.md`, skills, commands, agents, Git
+  imports) merged with the project's own files, with per-item switches. The
+  native loop gets it in the system prompt; each vendor adapter gets it
+  through the vendor's own per-run mechanism (`LaunchOptions::rulebook`:
+  Claude `--append-system-prompt-file` and `--plugin-dir`, Codex
+  `developerInstructions`, a labelled first-prompt block for ACP). Nothing is
+  written to vendor folders. See [docs/RULES_AND_SKILLS.md](docs/RULES_AND_SKILLS.md).
 - **Native agent loop**: used for local GGUF rows, OpenRouter rows
   (`openrouter.rs`: key check, cached model list, picker rows) and configured
   OpenAI-compatible endpoints. It handles context accounting and compaction,

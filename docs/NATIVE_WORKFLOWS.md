@@ -97,8 +97,18 @@ Settings. Malformed definitions appear as
 discovery issues. Ambiguous names and aliases are rejected. Built-in names stay
 reserved; a skill with the same name can be invoked using `/skill <name>`.
 Discovery remains confined to the project and does not follow directory symlinks
-to load external skills. User-global skill catalogs and automatic invocation
-remain outside this implementation.
+to load external skills.
+
+Your profile (`~/.config/shadowcode/profile/`: `skills/`, `commands/`, and
+imported profiles) adds skills and commands to every project. A project
+definition with the same name or alias wins, and the profile one is reported
+as not used. Profile files may carry fields other agents use (`allowed-tools`,
+`model`, …); they are ignored there. Each item can be switched off in
+**Settings › Rules & skills**. See [rules and skills](RULES_AND_SKILLS.md).
+
+With a vendor CLI model (Claude Code, Codex, Cursor, Grok, Antigravity),
+`/name` and `/skill name` send the skill's expanded instructions as the
+prompt, since the vendor does not know ShadowCode's commands.
 
 Each definition is limited to 64 KB, arguments to 32 KB, and expanded workflow
 text to 128 KB. Discovery accepts at most 256 files and 2 MB of file contents.
