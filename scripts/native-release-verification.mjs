@@ -55,6 +55,9 @@ const OPTIONAL_RUST_TESTS = new Set([
   'live_managed_install_and_semantic_search', 'real_servers_smoke',
   'voice::whisper::tests::transcribes_with_a_local_model',
   'voice::capture::tests::records_from_the_default_microphone',
+  // Network: headers and a multi-GB download from huggingface.co.
+  'local_downloads::tests::catalog_matches_hugging_face',
+  'local_downloads::tests::live_download_pause_resume_verify',
 ]);
 export const scriptDigest = gate => createHash('sha256').update(GATES[gate].script).digest('hex');
 export async function digest(file) {

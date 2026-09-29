@@ -29,7 +29,7 @@
     <binary>shadowcode</binary>
   </provides>
   <releases>
-    <release version="0.34.0" date="2026-09-28T23:00:00Z">
+    <release version="0.34.1" date="2026-09-29">
       <description>
         <p>Start with no account using a free model that runs on your computer, see when an update is out, and benefit from a full reliability, polish, vendor and security pass.</p>
       </description>

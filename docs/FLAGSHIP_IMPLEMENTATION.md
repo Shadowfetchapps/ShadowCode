@@ -4,9 +4,9 @@ Goal: a dependable, easy-to-use native workspace combining supported vendor logi
 
 Baseline: `e371baaa4c690527173a322f7e0e1cfae4db329a`. Implementation branch: `flagship/reliability-foundation`. Preserve the existing architecture and provider integrations. The complete [acceptance specification](FLAGSHIP_ACCEPTANCE_SPEC.md) remains in scope; this ledger is not a narrowed definition of completion.
 
-Current release checkpoint (September 28, 2026): signed **0.33.1 is published and installed**; 0.34.0 is prepared (see [the 0.34.0 pass](#0340-consolidation-and-consumer-readiness-pass)), with retained data and successful installed-window checks. See [the final release and installation evidence](#signed-0331-publication-and-installed-app-verification). Earlier pending statements below describe their historical checkpoints. Broader physical desktop, GPU endurance and live provider lifecycle acceptance remain open.
+Current release checkpoint (September 28, 2026): signed **0.33.1 is published and installed**; 0.34.1 is prepared (see [the 0.34 pass](#034-consolidation-and-consumer-readiness-pass)), with retained data and successful installed-window checks. See [the final release and installation evidence](#signed-0331-publication-and-installed-app-verification). Earlier pending statements below describe their historical checkpoints. Broader physical desktop, GPU endurance and live provider lifecycle acceptance remain open.
 
-## 0.34.0 consolidation and consumer-readiness pass
+## 0.34 consolidation and consumer-readiness pass
 
 Checkpoint (September 28, 2026). `main` had stayed at 0.32.0 while 0.33.1 was published from this branch; an unrelated uncommitted "calmer workspace" draft sat in another checkout and 12 uncommitted files (batch verification refresh) in this branch's working copy. All three were consolidated: the draft is preserved as `wip/calmer-workspace-draft`, its More menu and AppStream enrichment were ported, the batch refresh was committed (`b800c1f`), and `main` fast-forwarded to it (1072 Rust / 524 UI unit / 76 e2e passed).
 
@@ -21,7 +21,7 @@ Six parallel review branches then ran, each fix with a regression test that fail
 
 Integration fixes: the closed More menu is hidden explicitly (WebKit laid out its content); Q1/Q5 provider-error helpers were unified; loopback runtimes get 15 minutes for the first byte (CPU prompt processing) while the 120-second stall between bytes stays; the linuxdeploy GTK plugin is pinned by SHA-256; lintian is required in CI and release builds; Prettier debt cleared.
 
-Integrated verification before tagging: `cargo test --workspace --locked` 1169 passed / 0 failed / 13 ignored; clippy clean except vendored glib; UI 576 unit and 88 Playwright tests; release-auth/installer/release script suites 176 tests. Package, real-window, first-run and installer results for the tagged candidate are recorded by the release workflow gates. Still open: Wayland and physical-desktop qualification, GPU allocation exhaustion (LOC-03), live Cursor tool/MCP and OpenRouter Claude caching, rewinding user edits made during a vendor turn, vendor usage lost when a vendor turn fails.
+The first tag, `v0.34.0` ([run 36499751141](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36499751141)), stopped in the `native-source` gate because two new opt-in network tests were not listed as optional; nothing was signed, and 0.34.1 lists them. Integrated verification before tagging: `cargo test --workspace --locked` 1169 passed / 0 failed / 13 ignored; clippy clean except vendored glib; UI 576 unit and 88 Playwright tests; release-auth/installer/release script suites 176 tests. Package, real-window, first-run and installer results for the tagged candidate are recorded by the release workflow gates. Still open: Wayland and physical-desktop qualification, GPU allocation exhaustion (LOC-03), live Cursor tool/MCP and OpenRouter Claude caching, rewinding user edits made during a vendor turn, vendor usage lost when a vendor turn fails.
 
 ## Implemented increments
 
