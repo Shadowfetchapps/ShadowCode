@@ -75,6 +75,7 @@ mod preview;
 mod remote;
 mod review;
 mod sandbox;
+mod second_opinion;
 mod sessions;
 mod settings;
 mod terminals;
@@ -293,6 +294,7 @@ impl Service {
             "automations" => self.automation_routes(&call).await,
             "issues" => self.issue_routes(&call).await,
             "review" => self.review_routes(&call).await,
+            "second-opinions" => self.second_opinion_routes(&call).await,
             "feed" => self.feed_routes(&call).await,
             "terminals" => self.terminal_routes(&call).await,
             #[cfg(unix)]

@@ -519,7 +519,8 @@ impl Store {
     /// with a `compare_id` meta row) are left out unless `include_compare`;
     /// every row carries `compare_id` and `compare_lane` (null for ordinary
     /// conversations). Subagent conversations are always left out here; see
-    /// `sessions_listed_with`. A worktree task's conversation carries
+    /// `sessions_listed_with`. Second-opinion reviewers' conversations
+    /// (`second_opinion` meta) are never listed. A worktree task's conversation carries
     /// `worktree_task` and `worktree_source` (its project) and is listed under
     /// that project.
     pub fn sessions_listed(
@@ -561,6 +562,7 @@ impl Store {
             OR EXISTS(SELECT 1 FROM tasks t WHERE t.session_id=s.id AND t.prompt LIKE ? ESCAPE '!'))
             AND (? OR NOT EXISTS(SELECT 1 FROM session_meta c WHERE c.session_id=s.id AND c.key='compare_id'))
             AND (? OR NOT EXISTS(SELECT 1 FROM session_meta a WHERE a.session_id=s.id AND a.key='subagent_parent'))
+            AND NOT EXISTS(SELECT 1 FROM session_meta o WHERE o.session_id=s.id AND o.key='second_opinion')
             ORDER BY s.updated_at DESC LIMIT ?", params![workspace.map(|p|p.to_string_lossy()),workspace.map(|p|p.to_string_lossy()),workspace.map(|p|p.to_string_lossy()),needle,needle,needle,include_compare,include_subagents,limit.clamp(1,10000)])
     }
     /// Move a conversation to another folder (a worktree task's conversation
@@ -875,6 +877,20 @@ impl Store {
                         }
                     }
                     None => doomed.push(child),
+                }
+            }
+        }
+        // Second-opinion reviewers' conversations go with the conversation
+        // they belong to; one still running is left for its record's pruning.
+        for parent in doomed.clone() {
+            let reviews: Vec<String> = tx
+                .prepare("SELECT session_id FROM session_meta WHERE key=? AND value=?")?
+                .query_map(params![keys::SECOND_OPINION_OF, parent], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for review in reviews {
+                let active: i64 = tx.query_row("SELECT count(*) FROM desktop_jobs WHERE json_extract(payload,'$.session_id')=? AND json_extract(payload,'$.status') IN ('queued','running','paused','cancelling')",[&review],|r|r.get(0))?;
+                if active == 0 && !doomed.contains(&review) {
+                    doomed.push(review);
                 }
             }
         }
@@ -1195,9 +1211,10 @@ impl Store {
         )?.into_iter().map(|row|row["payload"].clone()).collect())
     }
     /// Small polling records. Full prompts/results remain available by exact ID.
+    /// `second_opinion` names the review a job runs (null for other jobs).
     pub fn job_summaries(&self, limit: usize) -> Result<Vec<Value>> {
         Ok(self.query(
-            "SELECT json_object('id',id,'workspace',json_extract(payload,'$.workspace'),'session_id',json_extract(payload,'$.session_id'),'task_id',json_extract(payload,'$.task_id'),'status',json_extract(payload,'$.status'),'mode',json_extract(payload,'$.mode'),'purpose',substr(json_extract(payload,'$.routing.purpose'),1,32),'model',substr(json_extract(payload,'$.model'),1,512),'started_at',json_extract(payload,'$.started_at'),'finished_at',json_extract(payload,'$.finished_at'),'event_cursor',json_extract(payload,'$.event_cursor'),'task',substr(json_extract(payload,'$.task'),1,512),'task_truncated',CASE WHEN length(json_extract(payload,'$.task'))>512 THEN json('true') ELSE json('false') END) AS payload FROM desktop_jobs WHERE rowid IN (SELECT rowid FROM desktop_jobs ORDER BY rowid DESC LIMIT ?) OR json_extract(payload,'$.status') IN ('queued','running','paused','cancelling') ORDER BY rowid DESC",
+            "SELECT json_object('id',id,'workspace',json_extract(payload,'$.workspace'),'session_id',json_extract(payload,'$.session_id'),'task_id',json_extract(payload,'$.task_id'),'status',json_extract(payload,'$.status'),'mode',json_extract(payload,'$.mode'),'purpose',substr(json_extract(payload,'$.routing.purpose'),1,32),'model',substr(json_extract(payload,'$.model'),1,512),'started_at',json_extract(payload,'$.started_at'),'finished_at',json_extract(payload,'$.finished_at'),'event_cursor',json_extract(payload,'$.event_cursor'),'task',substr(json_extract(payload,'$.task'),1,512),'task_truncated',CASE WHEN length(json_extract(payload,'$.task'))>512 THEN json('true') ELSE json('false') END,'second_opinion',(SELECT value FROM session_meta m WHERE m.session_id=json_extract(payload,'$.session_id') AND m.key='second_opinion')) AS payload FROM desktop_jobs WHERE rowid IN (SELECT rowid FROM desktop_jobs ORDER BY rowid DESC LIMIT ?) OR json_extract(payload,'$.status') IN ('queued','running','paused','cancelling') ORDER BY rowid DESC",
             [limit.clamp(1,100)],
         )?.into_iter().map(|row|row["payload"].clone()).collect())
     }

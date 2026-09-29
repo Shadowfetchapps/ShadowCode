@@ -78,6 +78,11 @@ impl MetaTransaction<'_> {
         )?;
         Ok(())
     }
+    pub fn delete(&self, key: &str) -> Result<()> {
+        self.tx
+            .execute("DELETE FROM native_meta WHERE key=?", [key])?;
+        Ok(())
+    }
     /// A JSON document; a document that does not parse as `T` is an error.
     pub fn json<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
         self.get(key)?

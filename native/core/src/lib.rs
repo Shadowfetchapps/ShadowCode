@@ -64,6 +64,7 @@ pub mod review;
 pub mod routing;
 pub mod runtime;
 pub mod sandbox;
+pub mod second_opinion;
 pub mod service;
 #[cfg(unix)]
 pub mod sqlite;

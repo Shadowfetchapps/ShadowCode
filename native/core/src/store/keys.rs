@@ -40,6 +40,19 @@ pub fn worktree_task_record(id: &str) -> String {
 pub fn worktree_task_index(workspace: &Path) -> String {
     format!("worktree_task_index:{}", workspace.display())
 }
+/// `native_meta`: one second opinion (JSON `second_opinion::Record`).
+pub fn second_opinion(id: &str) -> String {
+    format!("second_opinion:{id}")
+}
+/// `native_meta`: a project's second opinion ids, newest first (JSON list).
+pub fn second_opinion_index(workspace: &Path) -> String {
+    format!("second_opinion_index:{}", workspace.display())
+}
+/// `native_meta`: a project's second opinion preferences (JSON
+/// `second_opinion::Prefs`: the reviewer last chosen, review before commit).
+pub fn second_opinion_prefs(workspace: &Path) -> String {
+    format!("second_opinion_prefs:{}", workspace.display())
+}
 /// `native_meta`: set once `goals.db` from before 0.28 was imported.
 pub const LEGACY_GOALS_IMPORTED: &str = "legacy_goals_imported";
 /// `native_meta`: set once the pre-0.28 background process list was imported.
@@ -62,6 +75,11 @@ pub const SUBAGENT_PARENT: &str = "subagent_parent";
 pub const SUBAGENT_RUN: &str = "subagent_run";
 /// `session_meta`: the agent definition a subagent conversation ran.
 pub const SUBAGENT_AGENT: &str = "subagent_agent";
+/// `session_meta`: the second opinion a hidden reviewer conversation ran.
+pub const SECOND_OPINION: &str = "second_opinion";
+/// `session_meta`: the conversation a second opinion belongs to; deleting
+/// that conversation deletes the reviewer's conversation too.
+pub const SECOND_OPINION_OF: &str = "second_opinion_of";
 /// `session_meta`: the automation a conversation was started by.
 pub const AUTOMATION_ID: &str = "automation_id";
 /// `session_meta`: the automation run (history row) of a conversation.
@@ -117,6 +135,17 @@ mod tests {
         );
         assert_eq!(native_session("codex"), "native_session:codex");
         assert_eq!(rewind_undo("ab12"), "rewind_undo:ab12");
+        assert_eq!(second_opinion("ab12"), "second_opinion:ab12");
+        assert_eq!(
+            second_opinion_index(project),
+            "second_opinion_index:/home/u/project"
+        );
+        assert_eq!(
+            second_opinion_prefs(project),
+            "second_opinion_prefs:/home/u/project"
+        );
+        assert_eq!(SECOND_OPINION, "second_opinion");
+        assert_eq!(SECOND_OPINION_OF, "second_opinion_of");
         assert_eq!(subagent_run("ab12"), "subagent:ab12");
         assert_eq!(subagent_index("s1"), "subagent_index:s1");
         assert_eq!(
