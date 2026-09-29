@@ -1281,15 +1281,16 @@ mod tests {
 
     #[test]
     fn credentials_in_the_changes_are_hidden_from_the_reviewer() {
-        let raw = "diff --git a/config.py b/config.py\n--- a/config.py\n+++ b/config.py\n@@ -1 +1 @@\n-TOKEN = None\n+TOKEN = \"ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\"\n";
+        // Built at runtime: no token-shaped literal in the source.
+        let token = format!("ghp_{}", "0123456789abcdefghijklmnopqrstuvwxyzAB");
+        let raw = format!("diff --git a/config.py b/config.py\n--- a/config.py\n+++ b/config.py\n@@ -1 +1 @@\n-TOKEN = None\n+TOKEN = \"{token}\"\n");
+        let raw = raw.as_str();
         let context = staged_context(&[("M".into(), "config.py".into())], raw);
         let text = prompt(Kind::Review, &context, None, "", "the staged changes");
         assert!(text.contains("ghp_0123456789"));
         let hidden = redaction::redact_text(&text);
         assert!(hidden.count >= 1);
-        assert!(!hidden
-            .text
-            .contains("ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"));
+        assert!(!hidden.text.contains(&token));
     }
 
     #[test]

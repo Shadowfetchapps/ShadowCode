@@ -238,7 +238,8 @@ mod tests {
 
     #[test]
     fn runs_and_log_lines_are_included_without_paths_or_private_models() {
-        let secret = "sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef";
+        // Built at runtime: no key-shaped literal in the source.
+        let secret = &format!("sk-or-v1-{}", "0123456789abcdef".repeat(3));
         let extra = json!({
             "runs": [
                 {"status":"completed","run":{"model_id":"api:openrouter:qwen/qwen3-coder","model":"qwen/qwen3-coder","provider":"openrouter","route":"native_http","effort":"high","app_version":"1.0.0","settings_hash":"abc123abc123","rules_hash":"def456def456"}},

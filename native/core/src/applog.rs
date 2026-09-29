@@ -353,7 +353,8 @@ mod tests {
 
     #[test]
     fn lines_are_redacted_bounded_and_keep_home_private() {
-        let secret = "sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef";
+        // Built at runtime: no key-shaped literal in the source.
+        let secret = &format!("sk-or-v1-{}", "0123456789abcdef".repeat(3));
         let line = clean(
             &format!("failed with key {secret} in /home/ada/project\nsecond line"),
             Some("/home/ada"),
