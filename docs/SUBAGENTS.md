@@ -118,9 +118,10 @@ as a child with its own conversation and role card:
    checkpointed patch that asks for approval in **Ask** mode, so the review
    is in front of you when you decide. Rewind covers it.
 
-Every role receives a bounded summary of the conversation so far (the same
-handoff as a model switch, at most 12,000 characters) besides the request,
-the plan (8,000) and the diff (24,000). A **Plan** message runs the plan role
+The plan and implement roles receive a bounded summary of the conversation
+so far (the same handoff as a model switch, at most 12,000 characters) besides
+the request; the implement and review roles receive the plan (up to 8,000
+characters) and the review role the diff (up to 24,000). A **Plan** message runs the plan role
 only and answers with the plan. **Ask** messages are not affected. Skipped
 roles are left out. If the plan or the implementation does not finish, the
 task stops and nothing is applied; a review that fails leaves the decision to

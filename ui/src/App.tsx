@@ -487,6 +487,7 @@ export default function App() {
       sessionId,
       workspace,
       target: selectedTarget,
+      roles: roles.pipeline,
       busy: busy || submitting,
       queueing,
       openSession: nav.openSession,

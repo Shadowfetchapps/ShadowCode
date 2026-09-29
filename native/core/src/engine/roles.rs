@@ -8,9 +8,10 @@
 //! 4. the task applies the diff to the project with `apply_agent_changes`,
 //!    an ordinary checkpointed patch that asks for approval in Ask mode.
 //!
-//! Each role receives a bounded summary of the conversation so far (the
-//! model-switch handoff, `cli_agent::handoff::build`), the request, and the
-//! previous roles' plan and diff. A Plan task runs the plan role only.
+//! The plan and implement roles receive a bounded summary of the
+//! conversation so far (the model-switch handoff, `cli_agent::handoff::build`)
+//! and the request; later roles also receive the plan, and the review role
+//! the diff. A Plan task runs the plan role only.
 //! Approvals of every role are asked in this conversation with the role's
 //! name; stopping the task stops the running role; every role's usage counts
 //! toward this task.

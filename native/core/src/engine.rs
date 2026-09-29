@@ -54,6 +54,10 @@ struct LaunchContext<'a> {
     /// The user agreed to hand this conversation (or its attachments) to a
     /// cloud route for this turn.
     handoff_consent: bool,
+    /// The caller can ask the user for consent and resend (the window's
+    /// composer): an `@agent` on a cloud role asks first instead of being
+    /// refused when it runs.
+    interactive: bool,
     turn: TurnOptions,
 }
 
@@ -587,6 +591,7 @@ impl Engine {
                 permission_limit: limit,
                 owner,
                 handoff_consent,
+                interactive: true,
                 turn,
                 ..Default::default()
             },
@@ -684,7 +689,7 @@ impl Engine {
             None
         };
         let mention_consent = match (&pipeline, context.command.is_some()) {
-            (None, false) => self.mention_consent(
+            (None, false) if context.interactive => self.mention_consent(
                 RoleTurn {
                     mode: &request.mode,
                     task: &request.task,
