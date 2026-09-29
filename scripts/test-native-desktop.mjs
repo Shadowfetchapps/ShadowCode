@@ -498,9 +498,21 @@ try {
   console.log(`  ..  picker rows usable ${pickerLoadMs} ms after the workspace opened`);
   await until("Welcome model action", () => visible(".welcome-model-setup button"));
   await screenshot("welcome-model-ready");
-  await click(".welcome-model-setup button");
-  await until("Welcome action opens picker", () => visible(".unified-picker-menu"));
-  note("first-run Choose a model opens the unified picker after model discovery");
+  // With a ready model (a signed-in vendor CLI on this machine) the welcome
+  // offers "Choose a model"; with none (a clean CI host) it offers a free
+  // download, an OpenRouter key or a subscription instead.
+  const canChoose = await execute("return [...document.querySelectorAll('.welcome-model-setup button')].some(b => b.textContent.trim() === 'Choose a model' && b.getClientRects().length > 0)");
+  if (canChoose) {
+    await clickButton("Choose a model", "//div[contains(@class,'welcome-model-setup')]");
+    await until("Welcome action opens picker", () => visible(".unified-picker-menu"));
+    note("first-run Choose a model opens the unified picker after model discovery");
+  } else {
+    const setup = await execute("return document.querySelector('.welcome-model-setup').innerText");
+    assert.match(setup, /free model|Download/i, "No-model welcome offers a free model");
+    assert.match(setup, /OpenRouter/i, "No-model welcome offers an OpenRouter key");
+    assert.match(setup, /subscription/i, "No-model welcome offers a subscription");
+    note("no model ready: the welcome offers a free model, an OpenRouter key or a subscription");
+  }
   await until("Vendor rows probed", async () => {
     const data = await api("GET", "/api/picker");
     const vendorsChecked = installed.every((vendor) => data.targets.some((t) => t.provider === `cli:${vendor}` && t.reason !== "Not checked yet"));

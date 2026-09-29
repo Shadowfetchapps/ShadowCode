@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.34.1: Ready for everyone
+## 0.34.2: Ready for everyone
 
 For people starting out:
 - **Start with no account.** If no model is ready after you open a project,
@@ -83,6 +83,16 @@ Packaging:
 - The AppImage build uses the pinned, source-built runtime instead of
   upstream's newest.
 
+## 0.34.1: Failed release attempt (unpublished)
+
+[Release run 36507326107](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36507326107)
+at `206fd03` passed `native-source` but stopped in the required
+`native-window` gate. On a clean CI host no model is ready, so the welcome
+offers a free model, an OpenRouter key or a subscription instead of
+"Choose a model"; the window test only knew the second case. The test now
+checks both. Nothing was signed or published; the `v0.34.1` tag stays
+unchanged, and 0.34.2 ships the same changes.
+
 ## 0.34.0: Failed release attempt (unpublished)
 
 [Release run 36499751141](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36499751141)
@@ -90,8 +100,7 @@ at `3409d59` stopped in the required `native-source` gate: every Rust test
 passed, but two new opt-in network tests (the Hugging Face catalog check and
 a multi-GB download) were not on the gate's list of allowed optional tests,
 and the gate refuses any unlisted skip. Nothing was signed or published. The
-`v0.34.0` tag stays unchanged; 0.34.1 lists those tests and ships the same
-changes.
+`v0.34.0` tag stays unchanged.
 
 ## 0.33.1: Reliability and daily workflow
 

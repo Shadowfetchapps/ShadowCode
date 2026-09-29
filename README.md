@@ -45,18 +45,18 @@ your computer. You don't need Ollama, LM Studio or any other model server.
   own terminal, go from commit to pull request, preview the app you're
   building, dictate with your voice, and follow along from your phone.
 
-ShadowCode **0.34.1** is available in [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.34.1).
-See the [0.34.1 release notes](docs/RELEASE_NOTES.md) for changes and qualification
+ShadowCode **0.34.2** is available in [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.34.2).
+See the [0.34.2 release notes](docs/RELEASE_NOTES.md) for changes and qualification
 limits, and the [release history](CHANGELOG.md).
 
 ## Install
 
 Releases target x86_64 Linux with glibc 2.39 or newer (Ubuntu 24.04 or later).
 Check [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/releases)
-for published versions. The 0.34.1 packages and checksums are:
+for published versions. The 0.34.2 packages and checksums are:
 
-- `ShadowCode_0.34.1_amd64.AppImage`
-- `ShadowCode_0.34.1_amd64.deb`
+- `ShadowCode_0.34.2_amd64.AppImage`
+- `ShadowCode_0.34.2_amd64.deb`
 - `SHA256SUMS`, `RELEASE-MANIFEST.json`, `RELEASE-AUTH` and
   `RELEASE-AUTH.sig` (download these beside the package; the installer checks
   the publisher's signature before running anything)
@@ -68,7 +68,7 @@ assets are checksum-only and cannot be installed by this new entry point; use
 the instructions shipped with that released version for those existing assets.
 The 0.33.0 release attempt failed before signing and publication. Its tag stays
 unchanged. Version 0.33.1 was the first signed release; the public trust policy
-in `release/trust` now authorizes 0.33.0 through 0.34.1.
+in `release/trust` now authorizes 0.33.0 through 0.34.2.
 For development, use [Build from source](#build-from-source).
 
 Obtain an independently authenticated installer bundle as described below,
@@ -82,7 +82,7 @@ bundle and bootstrap requirements.
 From that independently authenticated installer bundle, run:
 
 ```bash
-bash /path/to/trusted-bundle/scripts/install-appimage.sh /path/to/downloads/ShadowCode_0.34.1_amd64.AppImage
+bash /path/to/trusted-bundle/scripts/install-appimage.sh /path/to/downloads/ShadowCode_0.34.2_amd64.AppImage
 ```
 
 The installer takes the AppImage path (or `--recover`), resolves its own trusted
@@ -116,22 +116,22 @@ as `--trust-dir` are not installer options.
   not yet qualified.
 
 After obtaining and verifying the intended package, run the AppImage without installing it:
-`./ShadowCode_0.34.1_amd64.AppImage --appimage-extract-and-run`. FUSE is not
+`./ShadowCode_0.34.2_amd64.AppImage --appimage-extract-and-run`. FUSE is not
 required.
 
 ### Debian package
 
 Verify the Debian artifact using the independently trusted verifier bundle.
-`verified-deb-0.34.1` must not already exist; install the verified snapshot:
+`verified-deb-0.34.2` must not already exist; install the verified snapshot:
 
 ```bash
 bash /path/to/trusted-bundle/scripts/verify-native-release.sh \
   --bundle-dir /path/to/downloads \
   --trust-dir /path/to/trusted-bundle/release/trust \
-  --artifact ShadowCode_0.34.1_amd64.deb \
-  --stage-dir ./verified-deb-0.34.1 \
-  --expect-version 0.34.1
-sudo apt install ./verified-deb-0.34.1/ShadowCode_0.34.1_amd64.deb
+  --artifact ShadowCode_0.34.2_amd64.deb \
+  --stage-dir ./verified-deb-0.34.2 \
+  --expect-version 0.34.2
+sudo apt install ./verified-deb-0.34.2/ShadowCode_0.34.2_amd64.deb
 ```
 
 This manual Debian verification does not provide the AppImage installer's durable

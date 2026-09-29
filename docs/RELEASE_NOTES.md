@@ -1,6 +1,6 @@
-# ShadowCode 0.34.1
+# ShadowCode 0.34.2
 
-ShadowCode 0.34.1 is ready for everyone: you can start with no account at all,
+ShadowCode 0.34.2 is ready for everyone: you can start with no account at all,
 the app tells you when an update is out, and a full quality pass fixed dozens
 of bugs across the engine, the window, the vendors and security. The 0.33.1
 notes follow below.
@@ -49,8 +49,8 @@ your account balance.
 
 ## Download
 
-`ShadowCode_0.34.1_amd64.AppImage`, `ShadowCode_0.34.1_amd64.deb` and
-`ShadowCode_0.34.1_appimage-runtime-sources.tar.gz`, with `SHA256SUMS`,
+`ShadowCode_0.34.2_amd64.AppImage`, `ShadowCode_0.34.2_amd64.deb` and
+`ShadowCode_0.34.2_appimage-runtime-sources.tar.gz`, with `SHA256SUMS`,
 `RELEASE-MANIFEST.json`, `RELEASE-AUTH` and `RELEASE-AUTH.sig`. Install the
 AppImage with the authenticated installer described in the
 [README](../README.md#install); the signature is checked before anything

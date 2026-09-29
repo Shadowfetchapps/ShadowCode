@@ -7,7 +7,7 @@ and authentication receipts to the exact candidate before publication.
 Pushing a `v*` tag starts `.github/workflows/release.yml`. Publication follows
 build/qualification, protected signing review and verification of all seven
 public assets. The signing environment permits only the tag being released
-(`v0.34.1` for 0.34.1); every later version needs reviewed trust-policy,
+(`v0.34.2` for 0.34.2); every later version needs reviewed trust-policy,
 deployment-rule and tooling-pin updates. The workflow uses
 `docs/RELEASE_NOTES.md` as the release text.
 
@@ -134,8 +134,10 @@ The `v0.33.0` attempt at `9e385cb` failed before signing/publication in
 [run 36414378697](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36414378697).
 Do not move or overwrite that tag. The `v0.34.0` attempt at `3409d59` likewise
 stopped in the `native-source` gate ([run 36499751141](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36499751141))
-because two new opt-in network tests were not on the optional-test list;
-nothing was signed and its tag stays unchanged. Version 0.33.1 was published from
+because two new opt-in network tests were not on the optional-test list, and
+the `v0.34.1` attempt at `206fd03` stopped in `native-window` ([run 36507326107](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36507326107))
+because the window test expected a ready model on the clean CI host; nothing
+was signed and both tags stay unchanged. Version 0.33.1 was published from
 `e15c4480e65db5650af012bb2a9773dbe89acf84`, with all 15 required build gates and
 protected signing passing in [run 36427024374](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36427024374).
 The workflow publication job failed on a transient draft-listing response;
@@ -145,13 +147,13 @@ run green. Existing 0.33.0 receipts do not qualify the new package bytes.
 The first-authenticated install boundary remains 0.33.0; do not silently move
 this durable boundary.
 
-Public trust in `release/trust` currently allows epoch 1 and versions 0.33.0–0.34.1;
+Public trust in `release/trust` currently allows epoch 1 and versions 0.33.0–0.34.2;
 `release/install-policy` fixes the first authenticated version at 0.33.0.
 The `release-signing` environment has the signing secret and requires review by
 `Shadowfetchapps` (User ID `209457103`). Self-review is allowed and GitHub's
-default administrator override remains unchanged. For 0.34.1 its sole
-deployment rule is the tag `v0.34.1` (it was `v0.33.1` for 0.33.1);
-`NATIVE_RELEASE_SIGNING_ENVIRONMENT` points to that environment. For 0.34.1,
+default administrator override remains unchanged. For 0.34.2 its sole
+deployment rule is the tag `v0.34.2` (it was `v0.33.1` for 0.33.1);
+`NATIVE_RELEASE_SIGNING_ENVIRONMENT` points to that environment. For 0.34.2,
 `NATIVE_RELEASE_TOOLING_COMMIT` pins the tagged release commit itself, as it
 did for 0.33.1 (`e15c4480e65db5650af012bb2a9773dbe89acf84`).
 

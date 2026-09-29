@@ -1,6 +1,6 @@
 # ShadowCode user guide
 
-This guide describes the 0.34.1 workflow: open a
+This guide describes the 0.34.2 workflow: open a
 project, pick a model, describe the task, watch the agent work, then review
 what changed. Installation and a feature overview are in the
 [README](../README.md).
