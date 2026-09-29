@@ -78,6 +78,8 @@ export function Composer({
   mentions = [],
   onMention,
   onRemoveMention,
+  onlyChange = false,
+  onOnlyChange,
   context = [],
   onRemoveContext,
   history,
@@ -118,6 +120,9 @@ export function Composer({
   mentions?: Mention[];
   onMention?: (mention: Mention) => void;
   onRemoveMention?: (path: string) => void;
+  /** "Only change these": edits outside the mentioned files ask first. */
+  onlyChange?: boolean;
+  onOnlyChange?: (on: boolean) => void;
   /** Elements and console messages from the Preview tab (chips). */
   context?: readonly ContextAttachment[];
   onRemoveContext?: (id: string) => void;
@@ -313,6 +318,17 @@ export function Composer({
               <Eye size={13} aria-hidden="true" />
               Inspect attached context
             </button>
+            {onOnlyChange && (
+              <button
+                type="button"
+                className={`composer-chip only-change${onlyChange ? " on" : ""}`}
+                aria-pressed={onlyChange}
+                title="ShadowCode's own agent asks before changing any other file. Subscriptions are checked after each turn, and changes elsewhere are pointed out."
+                onClick={() => onOnlyChange(!onlyChange)}
+              >
+                Only change these
+              </button>
+            )}
             {contextInventoryOpen && (
               <ContextInventory
                 mentions={mentions}

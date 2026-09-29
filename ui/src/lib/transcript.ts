@@ -313,7 +313,7 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
         : event.type === "autonomy.budget"
           ? `Autonomy budget ${Math.round(Number(p.ratio || 0) * 100)}% of ${String(p.max_steps || "")} steps`
           : event.type === "context.compacted"
-            ? `Context compacted; ${String(p.omitted_messages || 0)} earlier messages omitted`
+            ? compactedNote(p)
             : `Context nearly full: ${String(p.used_estimated_tokens || 0)}/${String(p.limit || 0)} estimated tokens`;
     // Every model call reports its budget; the status bar shows the level, so
     // only a nearly full context earns a line in the conversation.
@@ -438,6 +438,40 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
         kind: "note",
         taskId,
         text: `Saved ${shown} before this step, so Rewind can bring ${names.length === 1 ? "it" : "them"} back`,
+      },
+    ];
+  }
+  if (event.type === "agent.stuck" && typeof p.text === "string") {
+    items = [
+      ...items,
+      { kind: "stuck", jobId: String(p.job_id || ""), text: p.text, taskId },
+    ];
+  }
+  if (event.type === "task.flags" && typeof p.text === "string") {
+    items = [...items, { kind: "note", taskId, text: p.text, warning: true }];
+  }
+  if (event.type === "tool_call.repaired") {
+    items = [
+      ...items,
+      {
+        kind: "note",
+        taskId,
+        text:
+          p.from === "text"
+            ? "The model wrote its tool call as text; ShadowCode read it and ran it"
+            : "ShadowCode repaired a tool call the model sent slightly wrong",
+      },
+    ];
+  }
+  if (event.type === "scope.outside" && Array.isArray(p.paths)) {
+    const paths = (p.paths as unknown[]).map(String);
+    items = [
+      ...items,
+      {
+        kind: "note",
+        taskId,
+        warning: true,
+        text: `Changed outside the files you chose: ${paths.slice(0, 5).join(", ")}${paths.length > 5 ? ` and ${paths.length - 5} more` : ""}. Review can undo them`,
       },
     ];
   }
@@ -1334,4 +1368,19 @@ export function tryOnFor(
 
 export function replay(events: EventRow[]): Transcript {
   return events.reduce(applyEvent, emptyTranscript());
+}
+
+/** The note for a context compaction: what was dropped and what was kept. */
+export function compactedNote(p: Record<string, unknown>): string {
+  const kept: string[] = [];
+  const pinned = Number(p.pinned || 0);
+  const rules = Number(p.rules_reapplied || 0);
+  if (pinned)
+    kept.push(`kept ${pinned} pinned answer${pinned === 1 ? "" : "s"}`);
+  if (rules)
+    kept.push(`re-applied ${rules} folder rule${rules === 1 ? "" : "s"}`);
+  const start = p.requested
+    ? `Conversation shortened as you asked; ${String(p.omitted_messages || 0)} earlier messages summarized`
+    : `Context compacted; ${String(p.omitted_messages || 0)} earlier messages omitted`;
+  return kept.length ? `${start}; ${kept.join(" and ")}` : start;
 }

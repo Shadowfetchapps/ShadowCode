@@ -15,6 +15,7 @@ import { LimitFallbackItem } from "../LimitFallback";
 import { LocalMemoryItem } from "../LocalMemory";
 import { ResumeCard } from "../ResumeCard";
 import { SpendLimitCard } from "../SpendLimitCard";
+import { StuckCard, type StuckAction } from "../StuckCard";
 import { Markdown } from "../Markdown";
 import { CopyButton, UserMessage } from "../MessageActions";
 import { SubagentCard } from "../SubagentCard";
@@ -50,6 +51,13 @@ export type RowActions = {
   onChooseModel: () => void;
   /** "Try on…": pick another model to continue this task on. */
   onTryOn: (taskId: string) => void;
+  /** Answer a stuck task's card (resume, a hint, another model, stop). */
+  onStuck?: (
+    jobId: string,
+    taskId: string | undefined,
+    action: StuckAction,
+    hint?: string,
+  ) => Promise<void>;
   /** Answer a spending limit card. */
   onSpendDecision: (
     item: SpendItem,
@@ -289,6 +297,17 @@ const TranscriptRow = memo(function TranscriptRow({
     );
   else if (item.kind === "spend")
     node = <SpendLimitCard item={item} onDecide={actions.onSpendDecision} />;
+  else if (item.kind === "stuck")
+    node = (
+      <StuckCard
+        text={item.text}
+        onAction={(action, hint) =>
+          actions.onStuck
+            ? actions.onStuck(item.jobId, item.taskId, action, hint)
+            : Promise.resolve()
+        }
+      />
+    );
   else if (item.kind === "resume")
     node = (
       <ResumeCard

@@ -79,6 +79,21 @@ export function useRowActions(handlers: RowHandlers): RowActions {
         void latest.current.continueOnFallback(item, choice),
       onChooseModel: () => latest.current.chooseModel(),
       onTryOn: (taskId: string) => latest.current.tryOn(taskId),
+      onStuck: async (
+        jobId: string,
+        taskId: string | undefined,
+        action: "resume" | "hint" | "other" | "stop",
+        hint?: string,
+      ) => {
+        if (action === "resume") await api.resumeJob(jobId);
+        else if (action === "hint") {
+          await api.steerJob(jobId, hint || "");
+          await api.resumeJob(jobId);
+        } else {
+          await api.cancelJob(jobId);
+          if (action === "other" && taskId) latest.current.tryOn(taskId);
+        }
+      },
       onSpendDecision: (item: SpendItem, action: "continue" | "stop") =>
         latest.current.decideSpending(item, action),
       onScheduleResume: (item: LimitItem) =>

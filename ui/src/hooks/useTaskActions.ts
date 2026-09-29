@@ -598,6 +598,7 @@ export function useTaskActions(c: TaskActionContext) {
           ? { effort: extras.effort }
           : {}),
         ...(mentions.length ? { mentions } : {}),
+        ...(mentions.length && extras?.onlyChange ? { only_change: true } : {}),
         ...(context.length ? { context } : {}),
         ...(c.roles && (!extras || extras.mode !== "ask")
           ? { roles: true }

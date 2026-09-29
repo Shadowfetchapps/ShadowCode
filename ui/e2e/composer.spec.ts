@@ -97,6 +97,36 @@ test("@ attaches files, effort and mode reach the engine, ↑ recalls the prompt
   await expect(prompt(page)).toHaveValue("");
 });
 
+test("Only change these limits edits to the mentioned files", async ({
+  page,
+}) => {
+  await chooseLocal(page);
+  // No mention, no toggle.
+  await expect(
+    page.getByRole("button", { name: "Only change these" }),
+  ).toHaveCount(0);
+  await prompt(page).pressSequentially("Fix @app");
+  await expect(
+    page
+      .getByRole("listbox", { name: "Mentions" })
+      .getByRole("option", { name: /src\/app\.ts/ }),
+  ).toBeVisible();
+  await prompt(page).press("Enter");
+  const toggle = page.getByRole("button", { name: "Only change these" });
+  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  await send(page).click();
+  await expect(page.getByRole("region", { name: "Task summary" })).toBeVisible({
+    timeout: 15000,
+  });
+  const [post] = await jobPosts(page);
+  expect(post.body).toMatchObject({
+    mentions: [{ path: "src/app.ts", kind: "file" }],
+    only_change: true,
+  });
+});
+
 test("inspects bounded @-attached context and discloses opaque provider context", async ({
   page,
 }) => {

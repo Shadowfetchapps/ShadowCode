@@ -520,6 +520,8 @@ export type StartJobRequest = {
   /** Run a Code task as Plan → Implement → Review (a Plan task as its plan
    * role) with the project's roles. */
   roles?: boolean;
+  /** "Only change these": edits outside `mentions` ask first. */
+  only_change?: boolean;
 };
 
 /** A conversation run in its own managed worktree ("Run in new worktree"),

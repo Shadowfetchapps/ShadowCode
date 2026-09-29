@@ -70,6 +70,8 @@ export function useComposerExtras({
   target: PickerTarget | undefined;
 }) {
   const [mentions, setMentions] = useState<Mention[]>([]);
+  // "Only change these": edits outside the mentioned files ask first.
+  const [onlyChange, setOnlyChange] = useState(false);
   const [mode, setMode] = useState<TaskMode>("code");
   const targetId = target?.id || "";
   const [effortState, setEffortState] = useState<{
@@ -85,6 +87,7 @@ export function useComposerExtras({
   // Mentions and preview context belong to the draft of one conversation.
   useEffect(() => {
     setMentions([]);
+    setOnlyChange(false);
     pendingAttachments.clear();
   }, [sessionId, workspace]);
   const addMention = useCallback(
@@ -117,6 +120,8 @@ export function useComposerExtras({
     restoreContext: pendingAttachments.restore,
     mentions,
     setMentions,
+    onlyChange: onlyChange && mentions.length > 0,
+    setOnlyChange,
     addMention,
     removeMention,
     history,
