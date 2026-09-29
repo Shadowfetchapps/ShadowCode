@@ -3412,6 +3412,323 @@ export function installFakeBackend(options: FakeOptions = {}) {
       return { path: `.shadow/attachments/${body.filename}`, kind: "text" };
     if (path === "/api/doctor")
       return { ok: true, version: "0.33.0-test", checks: [], suggestions: [] };
+    // Settings › Rules & skills: a profile, the project's own files, what
+    // each agent reads, Git imports, starter skills and the export.
+    if (path.startsWith("/api/rules")) {
+      const r = (state.rules ||= {
+        agents: "Answer in plain language.\n",
+        hash: "rh1",
+        sharing: true,
+        disabled: [] as string[],
+        installed: [] as string[],
+        imports: [] as Json[],
+        exported: [] as string[],
+      });
+      const home = "/home/tester/.config/shadowcode/profile";
+      const item = (
+        id: string,
+        scope: string,
+        kind: string,
+        name: string,
+        p: string,
+        description = "",
+        source = scope,
+      ) => ({
+        id,
+        scope,
+        source,
+        kind,
+        name,
+        path: p,
+        description,
+        enabled: !r.disabled.includes(id),
+        bytes: 100,
+        hash: "x",
+        overridden_by: null,
+      });
+      const starters = [
+        [
+          "careful-review",
+          "Careful review",
+          "Review a change for real defects.",
+        ],
+        [
+          "project-triage",
+          "Project triage",
+          "Sort open issues and pull requests.",
+        ],
+        ["cli-design", "CLI design", "Design a command-line interface."],
+        ["frontend-polish", "Frontend polish", "Finish a UI change."],
+      ];
+      const items = () => [
+        item(
+          "profile:AGENTS.md",
+          "profile",
+          "rules",
+          "AGENTS.md",
+          `${home}/AGENTS.md`,
+        ),
+        ...r.installed.map((n: string) =>
+          item(
+            `profile:skills/${n}/SKILL.md`,
+            "profile",
+            "skill",
+            n,
+            `${home}/skills/${n}/SKILL.md`,
+            starters.find((s) => s[0] === n)?.[2] || "",
+          ),
+        ),
+        ...r.imports.map((i: Json) =>
+          item(
+            `profile:imports/${i.name}/AGENTS.md`,
+            "profile",
+            "rules",
+            "AGENTS.md",
+            `${home}/imports/${i.name}/AGENTS.md`,
+            "",
+            `import:${i.name}`,
+          ),
+        ),
+        item("project:AGENTS.md", "project", "rules", "AGENTS.md", "AGENTS.md"),
+        item(
+          "project:.shadow/skills/release.md",
+          "project",
+          "skill",
+          "release",
+          ".shadow/skills/release.md",
+          "Cut a release",
+        ),
+      ];
+      const inventory = (runner: string) => {
+        const rows = items()
+          .filter((i) => i.kind === "rules" || i.kind === "skill")
+          .map((i) => {
+            const native = runner === "codex" && i.id === "project:AGENTS.md";
+            return {
+              path: i.path,
+              kind: i.kind === "skill" ? "skill" : `${i.scope}-rules`,
+              included: i.enabled && !native,
+              reason: !i.enabled
+                ? "Switched off"
+                : native
+                  ? "Codex reads this file itself"
+                  : "Included",
+              bytes: 100,
+              total_bytes: i.kind === "skill" ? null : 100,
+              from_line: null,
+              to_line: null,
+              entries: [],
+              truncated: false,
+            };
+          });
+        const bytes = rows.filter((x) => x.included).length * 100;
+        return {
+          items: rows,
+          included_bytes: bytes,
+          estimated_tokens: Math.ceil(bytes / 3),
+          truncated: false,
+        };
+      };
+      if (method === "GET" && path === "/api/rules")
+        return {
+          profile: {
+            path: home,
+            exists: true,
+            agents_md: {
+              content: r.agents,
+              hash: r.hash,
+              path: `${home}/AGENTS.md`,
+            },
+          },
+          workspace,
+          share_with_cli_agents: r.sharing,
+          items: items(),
+          imports: r.imports,
+          issues: [],
+          starters: starters.map(([name, title, summary]) => ({
+            name,
+            title,
+            summary,
+            installed: r.installed.includes(name),
+            path: `${home}/skills/${name}/SKILL.md`,
+          })),
+          limits: {
+            profile_file_bytes: 16000,
+            profile_total_bytes: 24000,
+            total_bytes: 48000,
+            skill_index_entries: 48,
+            skill_index_bytes: 6000,
+          },
+        };
+      if (method === "PUT" && path === "/api/rules/profile") {
+        if (body?.expected_hash !== r.hash)
+          throw new Error(
+            "File changed since it was read; inspect it again before editing",
+          );
+        r.agents = String(body?.content ?? "");
+        r.hash = `rh${Number(r.hash.slice(2)) + 1}`;
+        return { ok: true, hash: r.hash };
+      }
+      if (method === "POST" && path === "/api/rules/items") {
+        const id = String(body?.id || "");
+        r.disabled = r.disabled.filter((x: string) => x !== id);
+        if (!body?.enabled) r.disabled.push(id);
+        return { ok: true, id, enabled: Boolean(body?.enabled) };
+      }
+      if (method === "POST" && path === "/api/rules/sharing") {
+        r.sharing = Boolean(body?.enabled);
+        return { ok: true, share_with_cli_agents: r.sharing };
+      }
+      if (method === "GET" && path === "/api/rules/preview")
+        return {
+          workspace,
+          runners: [
+            [
+              "shadowcode",
+              "ShadowCode's own agent",
+              "System prompt; skills load with load_skill.",
+            ],
+            [
+              "claude",
+              "Claude Code",
+              "--append-system-prompt-file, and --plugin-dir for profile skills.",
+            ],
+            [
+              "codex",
+              "Codex",
+              "developerInstructions when the thread starts or resumes.",
+            ],
+            [
+              "cursor",
+              "Cursor",
+              "A labelled block before the first prompt of each run (new or resumed session).",
+            ],
+          ].map(([id, label, mechanism]) => ({
+            id,
+            label,
+            mechanism,
+            delivered: id === "shadowcode" || r.sharing,
+            sharing_off: id !== "shadowcode" && !r.sharing,
+            preview: inventory(id),
+            native_files: id === "codex" ? ["AGENTS.md"] : [],
+            native_skill_folders: id === "codex" ? [".agents/skills/"] : [],
+          })),
+        };
+      if (method === "GET" && path === "/api/rules/check")
+        return {
+          ok: false,
+          checked: 4,
+          errors: 1,
+          warnings: 1,
+          infos: 0,
+          note: "The checker only reports. It never changes a file.",
+          findings: [
+            {
+              severity: "error",
+              code: "missing-file",
+              scope: "profile",
+              path: `${home}/skills/draft`,
+              name: "",
+              message:
+                "This skill folder has no SKILL.md, so the skill cannot be used",
+              fix: "Add SKILL.md to the folder, or remove the folder.",
+            },
+            {
+              severity: "warning",
+              code: "unsafe-content",
+              scope: "project",
+              path: ".shadow/skills/release.md",
+              name: "release",
+              message:
+                'This text turns off approvals: "approval_policy = never". Agents still ask before acting, but review why it is here',
+              fix: "Remove or reword it unless you are sure it is safe.",
+            },
+          ],
+        };
+      if (method === "POST" && path === "/api/rules/starters") {
+        for (const name of body?.names || [])
+          if (!r.installed.includes(name)) r.installed.push(name);
+        return { installed: body?.names || [], skipped: [] };
+      }
+      if (method === "POST" && path === "/api/rules/imports") {
+        const url = String(body?.url || "");
+        if (!/^(https:\/\/|ssh:\/\/|[\w.-]+@[\w.-]+:)/.test(url))
+          throw new Error(
+            "Use an https:// or SSH (git@host:owner/repo) address. Other kinds of address are refused.",
+          );
+        const name =
+          url
+            .replace(/\.git$/, "")
+            .split(/[/:]/)
+            .pop() || "profile";
+        const imported = {
+          name,
+          url,
+          path: `${home}/imports/${name}`,
+          commit: {
+            commit: "4f2a9c1e0b7d4f2a9c1e0b7d4f2a9c1e0b7d4f2a",
+            short: "4f2a9c1e0b",
+            subject: "Team rules",
+            date: "2026-09-20T10:00:00Z",
+          },
+        };
+        r.imports.push(imported);
+        return imported;
+      }
+      m = path.match(/^\/api\/rules\/imports\/([^/]+)\/update$/);
+      if (m && method === "POST") {
+        const found = r.imports.find(
+          (i: Json) => i.name === decodeURIComponent(m![1]),
+        );
+        if (!found) throw new Error("Unknown imported profile");
+        return { name: found.name, changed: false, commit: found.commit };
+      }
+      m = path.match(/^\/api\/rules\/imports\/([^/]+)$/);
+      if (m && method === "DELETE") {
+        r.imports = r.imports.filter(
+          (i: Json) => i.name !== decodeURIComponent(m![1]),
+        );
+        return { ok: true };
+      }
+      if (method === "GET" && path === "/api/rules/export")
+        return {
+          targets: [
+            [
+              "claude",
+              "Claude Code",
+              "/home/tester/.claude",
+              "rules/shadowcode-profile.md",
+            ],
+            ["codex", "Codex", "/home/tester/.codex", "AGENTS.md"],
+          ].map(([id, label, dir, link]) => ({
+            id,
+            label,
+            home: dir,
+            enabled: r.exported.includes(id),
+            links: [
+              {
+                link: `${dir}/${link}`,
+                target: `${home}/AGENTS.md`,
+                state: r.exported.includes(id)
+                  ? "linked"
+                  : id === "codex"
+                    ? "blocked"
+                    : "available",
+              },
+            ],
+            created: r.exported.includes(id)
+              ? [{ link: `${dir}/${link}`, target: `${home}/AGENTS.md` }]
+              : [],
+          })),
+        };
+      m = path.match(/^\/api\/rules\/export\/(claude|codex)$/);
+      if (m) {
+        const target = m[1];
+        r.exported = r.exported.filter((t: string) => t !== target);
+        if (method === "POST") r.exported.push(target);
+        return { target, created: [], skipped: [], removed: [], kept: [] };
+      }
+    }
     // Settings › Remote access (desktop only).
     const remoteView = () => {
       const r = state.remote;
