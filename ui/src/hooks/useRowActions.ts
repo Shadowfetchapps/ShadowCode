@@ -8,6 +8,8 @@ import type { Transcript } from "../lib/transcript";
 import type { RunCheckAction } from "../components/RunCheck";
 
 type LimitItem = Extract<ChatItem, { kind: "limit" }>;
+type SpendItem = Extract<ChatItem, { kind: "spend" }>;
+type ResumeItem = Extract<ChatItem, { kind: "resume" }>;
 export type RowHandlers = {
   runCheck?: RunCheckAction;
   setTranscript: (update: SetStateAction<Transcript>) => void;
@@ -22,6 +24,14 @@ export type RowHandlers = {
   copy: (text: string) => Promise<void>;
   continueOnFallback: (item: LimitItem, choice: Fallback) => Promise<void>;
   chooseModel: () => void;
+  tryOn: (taskId: string) => void;
+  decideSpending: (
+    item: SpendItem,
+    action: "continue" | "stop",
+  ) => Promise<void>;
+  scheduleResume: (item: LimitItem) => Promise<void>;
+  cancelResume: () => Promise<void>;
+  resumeNow: (item: ResumeItem) => Promise<void>;
   openLocal: () => void;
   fork: (eventId: number) => Promise<void>;
   openSession: (sessionId: string) => Promise<void>;
@@ -68,6 +78,13 @@ export function useRowActions(handlers: RowHandlers): RowActions {
       onContinue: (item: LimitItem, choice: Fallback) =>
         void latest.current.continueOnFallback(item, choice),
       onChooseModel: () => latest.current.chooseModel(),
+      onTryOn: (taskId: string) => latest.current.tryOn(taskId),
+      onSpendDecision: (item: SpendItem, action: "continue" | "stop") =>
+        latest.current.decideSpending(item, action),
+      onScheduleResume: (item: LimitItem) =>
+        void latest.current.scheduleResume(item),
+      onCancelResume: () => void latest.current.cancelResume(),
+      onResumeNow: (item: ResumeItem) => void latest.current.resumeNow(item),
       onOpenLocal: () => latest.current.openLocal(),
       onFork: (eventId: number) => void latest.current.fork(eventId),
       onOpenSession: (sessionId: string) =>

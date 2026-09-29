@@ -39,6 +39,7 @@ export type RunStatus =
   | "cancelled"
   | "timed_out"
   | "needs_approval"
+  | "spending_limit"
   | "interrupted"
   | "missed"
   | "skipped";
@@ -233,6 +234,7 @@ export const STATUS_TEXT: Record<string, string> = {
   cancelled: "Stopped",
   timed_out: "Hit its time limit",
   needs_approval: "Stopped for approval",
+  spending_limit: "Stopped at the spending limit",
   interrupted: "Interrupted",
   missed: "Missed",
   skipped: "Skipped",

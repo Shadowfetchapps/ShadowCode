@@ -12,6 +12,7 @@ import type { ChatItem } from "../components/cards";
 import type { DrawerTab } from "../components/Drawer";
 import type { AdvancedTab, SettingsSection } from "../components/Settings";
 import { continuationTask, type Fallback } from "../lib/allowance";
+import { clockTime } from "../lib/spending";
 import { sendBlockedByImages, type Attachment } from "../lib/attachments";
 import { isReady, type PickerTarget } from "../lib/picker";
 import { draftKey, isSessionCommand, writeStore } from "../lib/storage";
@@ -45,6 +46,14 @@ const DRAWERS: Record<string, DrawerTab> = {
   background: "background",
   worktrees: "worktrees",
 };
+
+/** The task "Try on…" continues: who stopped and what was asked. */
+export type TryOn = { taskId: string; from: string; request: string };
+
+/** The follow-up "Try on…" sends. */
+export function tryOnTask(from: string, request: string): string {
+  return `Continue where ${from} stopped. The request was:\n\n${request}`;
+}
 
 /** A cloud route asked for consent before the conversation leaves this
  * computer; `original` restores the composer on Cancel. */
@@ -341,6 +350,103 @@ export function useTaskActions(c: TaskActionContext) {
     );
   }
 
+  /** "Try on…": the same conversation continues the stopped task on the
+   * model the user picked. Nothing falls back on its own. */
+  async function tryOnModel(targetId: string, tryOn: TryOn) {
+    if (c.composerLocked || c.submittingRef.current) return;
+    await c.selectTarget(targetId);
+    c.pin();
+    await startTask(
+      {
+        task: tryOnTask(tryOn.from, tryOn.request),
+        workspace: c.workspace || undefined,
+        session_id: c.sessionId || undefined,
+        model: targetId,
+        purpose: "coder",
+        queue: c.queueing,
+        images: [],
+        web: false,
+      },
+      null,
+    );
+  }
+
+  /** A scheduled resume is recorded on a conversation that may have no
+   * running task (whose events would stream): read its new rows. */
+  async function reloadIdleConversation() {
+    const sid = c.selectedRef.current;
+    if (!sid || c.busy) return;
+    const detail = await api.session(sid).catch(() => null);
+    if (detail && c.selectedRef.current === sid && !c.submittingRef.current)
+      c.conversation.load(detail, c.jobRef.current, true);
+  }
+
+  /** "Resume at …": continue on the same model when its plan resets. */
+  async function scheduleResume(item: Extract<ChatItem, { kind: "limit" }>) {
+    if (!c.sessionId || !item.jobId) return;
+    try {
+      const { resume, scheduler } = await api.scheduleResume(
+        c.sessionId,
+        item.jobId,
+      );
+      c.toast(
+        scheduler
+          ? `Will resume on ${resume.label} at ${clockTime(resume.at)}.`
+          : `Will resume on ${resume.label} at ${clockTime(resume.at)} if ShadowCode is open then.`,
+        "ok",
+      );
+      await c.refresh().catch(() => undefined);
+      await reloadIdleConversation();
+    } catch (e) {
+      c.toast(String(e), "err");
+    }
+  }
+
+  async function cancelResume() {
+    if (!c.sessionId) return;
+    try {
+      await api.cancelResume(c.sessionId);
+      await c.refresh().catch(() => undefined);
+      await reloadIdleConversation();
+    } catch (e) {
+      c.toast(String(e), "err");
+    }
+  }
+
+  /** A due resume that needs the user's review before the conversation goes
+   * to a cloud model: the usual consent dialog shows what is sent. */
+  async function resumeNow(item: Extract<ChatItem, { kind: "resume" }>) {
+    if (c.composerLocked || c.submittingRef.current || !item.task) return;
+    await c.selectTarget(item.target);
+    c.pin();
+    await startTask(
+      {
+        task: item.task,
+        workspace: c.workspace || undefined,
+        session_id: c.sessionId || undefined,
+        model: item.target,
+        purpose: "coder",
+        queue: c.queueing,
+        images: [],
+        web: false,
+      },
+      null,
+    );
+  }
+
+  /** Answer a spending limit card. */
+  async function decideSpending(
+    item: Extract<ChatItem, { kind: "spend" }>,
+    action: "continue" | "stop",
+  ) {
+    try {
+      await api.decideSpending(item.jobId, item.promptId, action);
+      await c.refresh().catch(() => undefined);
+    } catch (e) {
+      c.toast(String(e), "err");
+    }
+  }
+
   /** In "ask" mode the engine records the stop after the job ends, when the
    * job's own event stream has closed: read it from the conversation. */
   async function followLimit(done: Job) {
@@ -508,6 +614,11 @@ export function useTaskActions(c: TaskActionContext) {
       Boolean(selectedTarget),
     startTask,
     continueOnFallback,
+    tryOnModel,
+    scheduleResume,
+    cancelResume,
+    resumeNow,
+    decideSpending,
     followLimit,
     saveLimits,
     submit,

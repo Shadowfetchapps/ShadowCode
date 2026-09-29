@@ -486,6 +486,68 @@ export type Usage = {
   turns?: number;
 };
 
+/** Spending limits for paid API models (`spending` in the settings;
+ * `null` turns a limit off). */
+export type SpendingLimits = {
+  task_usd: number | null;
+  daily_usd: number | null;
+};
+
+/** GET /api/spending. */
+export type SpendingStatus = {
+  limits: SpendingLimits;
+  today: {
+    day: string;
+    usd: number;
+    estimated: boolean;
+    unknown_turns: number;
+    limit: number | null;
+    resets_at: number;
+  };
+  /** Limit cards waiting for an answer (`spend.limit_reached` payloads). */
+  waiting: Record<string, unknown>[];
+};
+
+/** GET /api/spending/estimate: shown only for paid models with prices. */
+export type SpendEstimate =
+  | { show: false; reason: string }
+  | {
+      show: true;
+      low_usd: number;
+      high_usd: number;
+      label: string;
+      context_tokens: number;
+      model: string;
+      detail: string;
+    };
+
+/** A one-shot continuation after a plan limit resets
+ * (`/api/sessions/{id}/scheduled-resume`). */
+export type ScheduledResume = {
+  id: string;
+  session_id: string;
+  job_id: string;
+  target: string;
+  label: string;
+  at: number;
+};
+
+/** What exactly ran a job (`Job.run`, `agent.completed` `run`). */
+export type RunRecord = {
+  model_id: string;
+  model: string;
+  provider: string;
+  route: string;
+  vendor?: string | null;
+  vendor_version?: string | null;
+  effort?: string | null;
+  app_version: string;
+  app_commit?: string | null;
+  settings_hash: string;
+  rules_hash?: string | null;
+  recorded_at?: number;
+};
+
 function consentFrom(value: unknown): ConsentRequest | null {
   if (
     value &&
@@ -745,8 +807,17 @@ export type Job = {
     usage?: Record<string, number>;
     verification?: Record<string, unknown>;
     /** Set when a subscription reported its plan limit (status limit_reached). */
-    limit_reached?: { vendor: string; detail?: string; usage?: unknown };
+    limit_reached?: {
+      vendor: string;
+      detail?: string;
+      usage?: unknown;
+      /** When the plan resets, when the vendor said (Unix seconds). */
+      resets_at?: number | null;
+    };
+    run?: RunRecord;
   };
+  /** What exactly ran this job. */
+  run?: RunRecord | null;
   /** Set on the answer to a "Run in new worktree" start. */
   worktree_task?: WorktreeTask;
 };
@@ -1609,6 +1680,39 @@ export const api = {
       "/api/code-intel/reindex",
       "POST",
       {},
+    ),
+  scheduledResume: (sessionId: string) =>
+    get<{ resume: ScheduledResume | null; scheduler: boolean }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/scheduled-resume`,
+    ),
+  /** "Resume at <time>": continue the conversation on the same model when
+   * the plan limit of `jobId` resets. */
+  scheduleResume: (sessionId: string, jobId: string) =>
+    send<{ resume: ScheduledResume; scheduler: boolean }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/scheduled-resume`,
+      "POST",
+      { job_id: jobId },
+    ),
+  cancelResume: (sessionId: string) =>
+    send<{ resume: ScheduledResume | null }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/scheduled-resume`,
+      "DELETE",
+    ),
+  spending: () => get<SpendingStatus>("/api/spending"),
+  spendEstimate: (sessionId: string, model: string, draftChars: number) =>
+    get<SpendEstimate>(
+      `/api/spending/estimate?session_id=${encodeURIComponent(sessionId)}&model=${encodeURIComponent(model)}&draft_chars=${Math.max(0, Math.round(draftChars))}`,
+    ),
+  /** Answer a task's spending limit card. */
+  decideSpending: (
+    jobId: string,
+    promptId: string,
+    action: "continue" | "stop",
+  ) =>
+    send<{ action: string; limit?: number | null; text?: string }>(
+      `/api/jobs/${encodeURIComponent(jobId)}/spending`,
+      "POST",
+      { prompt_id: promptId, action },
     ),
   setSessionTarget: (sessionId: string, targetId: string) =>
     send<{ ok: boolean }>(

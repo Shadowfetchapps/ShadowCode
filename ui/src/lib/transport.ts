@@ -178,6 +178,10 @@ export const exportDiagnostics = (
  * engine names the folder; the window never passes a path. */
 export const openRulesFolder = () => invoke<null>("open_rules_folder");
 
+/** Opens the app log folder in the file manager (desktop only), for bug
+ * reports. The engine names the folder; the window never passes a path. */
+export const openLogsFolder = () => invoke<null>("open_logs_folder");
+
 export async function openExternal(url: string) {
   const parsed = new URL(url);
   if (!["https:", "http:"].includes(parsed.protocol))

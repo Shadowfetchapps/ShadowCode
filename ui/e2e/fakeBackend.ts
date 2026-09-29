@@ -38,6 +38,13 @@ export type FakeOptions = {
   downloadSteps?: number;
   /** The first download attempt stops a third of the way with an error. */
   downloadDrops?: boolean;
+  /** An OpenRouter key is saved, so API rows are ready. */
+  openrouterKey?: boolean;
+  /** Tasks on a paid API row stop at the per-task spending limit after
+   * their edit and wait for Continue or Stop. */
+  spendLimitOnApi?: boolean;
+  /** Tasks on a paid API row meet a busy provider twice before answering. */
+  retryOnApi?: boolean;
 };
 
 export function installFakeBackend(options: FakeOptions = {}) {
@@ -578,10 +585,14 @@ export function installFakeBackend(options: FakeOptions = {}) {
     ],
     openrouter: {
       /** The saved key never leaves the fake either; only `info` is served. */
-      key: null as null | string,
-      info: null as null | Json,
-      fetched_at: null as null | number,
+      key: (options.openrouterKey ? "sk-or-fixture" : null) as null | string,
+      info: (options.openrouterKey
+        ? { label: "sk-or-v1-…fix", usage: 0.42, limit: null }
+        : null) as null | Json,
+      fetched_at: (options.openrouterKey ? now() - 600 : null) as null | number,
     },
+    /** Paid-model spending today (GET /api/spending). */
+    spentToday: 0.42,
     jobs: [] as Json[],
     events: [] as Json[],
     cursor: 0,
@@ -1181,6 +1192,66 @@ export function installFakeBackend(options: FakeOptions = {}) {
   function script(job: Json, local: boolean) {
     const sid = job.session_id;
     const tid = job.task_id;
+    const paid = job.provider === "openrouter";
+    /** Paid rows: the task limit is reached after the edit (spendLimitOnApi). */
+    const spendSteps: [string, Json][] =
+      paid && options.spendLimitOnApi
+        ? [
+            [
+              "spend.notice",
+              {
+                job_id: job.id,
+                kind: "task",
+                spent: 0.8,
+                limit: 1,
+                text: "This task has spent $0.80 of its $1.00 limit on paid models.",
+              },
+            ],
+            [
+              "spend.limit_reached",
+              {
+                id: `p-${job.id}`,
+                job_id: job.id,
+                kind: "task",
+                limit: 1,
+                spent: 1.04,
+                estimated: false,
+                raise_to: 2,
+                title: "This task reached its spending limit",
+                text: "It has spent $1.04 on paid models, and the limit for one task is $1.00. It is paused between steps; nothing is running.",
+                continue_label: "Continue (limit raised to $2.00)",
+              },
+            ],
+          ]
+        : [];
+    /** Paid rows: a busy provider before the answer (retryOnApi). */
+    const retrySteps: [string, Json][] =
+      paid && options.retryOnApi
+        ? [
+            [
+              "model.retry",
+              {
+                attempt: 1,
+                max_attempts: 5,
+                reason: "rate_limited",
+                status: 429,
+                delay_ms: 2000,
+                retry_after: true,
+              },
+            ],
+            [
+              "model.retry",
+              {
+                attempt: 2,
+                max_attempts: 5,
+                reason: "overloaded",
+                status: 503,
+                delay_ms: 4000,
+                retry_after: false,
+              },
+            ],
+          ]
+        : [];
     const steps: [string, Json][] = [
       ...(local && options.localStartup
         ? ([
@@ -1294,6 +1365,7 @@ export function installFakeBackend(options: FakeOptions = {}) {
           restored: false,
         },
       ],
+      ...spendSteps,
       [
         "tool.started",
         { tool: "exec", call_id: "c3", arguments: { command: "npm test" } },
@@ -1315,6 +1387,7 @@ export function installFakeBackend(options: FakeOptions = {}) {
           commands: [{ command: "npm test", success: true, exit_code: 0 }],
         },
       ],
+      ...retrySteps,
       [
         "model.delta",
         {
@@ -1325,17 +1398,24 @@ export function installFakeBackend(options: FakeOptions = {}) {
     ];
     let index = 0;
     const tick = () => {
-      // Tests hold a conversation's task mid-way (state.held).
-      if (index > 1 && state.held?.includes(sid)) {
+      // Tests hold a conversation's task mid-way (state.held); a spending
+      // limit card holds it until it is answered.
+      if (
+        (index > 1 && state.held?.includes(sid)) ||
+        (job.spendWait && job.status !== "cancelling")
+      ) {
         setTimeout(tick, step);
         return;
       }
       if (job.status === "cancelling") {
         job.status = "cancelled";
         emit(sid, tid, "agent.completed", {
-          summary: "Task cancelled",
+          summary: job.spendStop
+            ? "Stopped at your per-task spending limit. Changes made so far remain available for review or rewind."
+            : "Task cancelled",
           success: false,
           cancelled: true,
+          run: runRecord(job, local),
         });
         job.event_cursor = state.cursor;
         return;
@@ -1344,9 +1424,11 @@ export function installFakeBackend(options: FakeOptions = {}) {
         if (index === 0) job.status = "running";
         const [type, payload] = steps[index++];
         if (type === "checkpoint.updated") applyEdit(tid);
+        if (type === "spend.limit_reached") job.spendWait = true;
         emit(sid, tid, type, payload);
         job.event_cursor = state.cursor;
-        setTimeout(tick, step);
+        // A retry waits a moment, as the engine does.
+        setTimeout(tick, type === "model.retry" ? Math.max(step, 900) : step);
         return;
       }
       const verification = {
@@ -1370,10 +1452,32 @@ export function installFakeBackend(options: FakeOptions = {}) {
         verification,
         timings: job.timings,
         usage: {},
+        run: runRecord(job, local),
       });
       job.event_cursor = state.cursor;
     };
     setTimeout(tick, step);
+  }
+
+  /** The run record the engine keeps with each job (`Job.run`). */
+  function runRecord(job: Json, local: boolean) {
+    const vendor = String(job.provider || "").startsWith("cli:")
+      ? job.model_name.split(" · ")[0]
+      : null;
+    return {
+      model_id: job.model,
+      model: job.model_name,
+      provider: local ? "llamacpp" : job.provider,
+      route: local ? "local_llamacpp" : vendor ? "vendor_cli" : "native_http",
+      vendor,
+      vendor_version: vendor ? "codex-cli 0.158.0" : null,
+      effort: null,
+      app_version: "1.0.0",
+      app_commit: "8d2847100000",
+      settings_hash: "4f2a9c1b7d3e",
+      rules_hash: null,
+      recorded_at: now(),
+    };
   }
 
   /** A Codex turn that stops at the plan limit, then what the engine does
@@ -1428,7 +1532,13 @@ export function installFakeBackend(options: FakeOptions = {}) {
       ],
       [
         "limit.reached",
-        { vendor: "codex", usage: spent, detail, job_id: job.id },
+        {
+          vendor: "codex",
+          usage: spent,
+          detail,
+          job_id: job.id,
+          resets_at: spent.windows[0]?.resets_at ?? now() + 3 * 3600,
+        },
       ],
     ];
     let index = 0;
@@ -3081,6 +3191,102 @@ export function installFakeBackend(options: FakeOptions = {}) {
         ),
         job: { ...job },
       };
+    }
+    if (
+      (m = path.match(/^\/api\/jobs\/([^/]+)\/spending$/)) &&
+      method === "POST"
+    ) {
+      const job = state.jobs.find((j: Json) => j.id === m![1]);
+      if (!job?.spendWait || body.prompt_id !== `p-${job.id}`)
+        throw new Error("This spending question was already answered");
+      const stop = body.action === "stop";
+      job.spendWait = false;
+      emit(job.session_id, job.task_id, "spend.limit_resolved", {
+        prompt_id: body.prompt_id,
+        job_id: job.id,
+        kind: "task",
+        action: stop ? "stop" : "continue",
+        limit: stop ? null : 2,
+        text: stop
+          ? "Stopped at your spending limit. Changes made so far are kept."
+          : "Continuing. This task's limit is now $2.00.",
+      });
+      if (stop) {
+        job.spendStop = true;
+        job.status = "cancelling";
+        notify("job.changed", job.session_id);
+      }
+      return { action: stop ? "stop" : "continue", limit: stop ? null : 2 };
+    }
+    if (path === "/api/spending" && method === "GET")
+      return {
+        limits: { task_usd: 1, daily_usd: 10, ...state.config.spending },
+        today: {
+          day: "2026-09-29",
+          usd: state.spentToday,
+          estimated: true,
+          unknown_turns: 0,
+          limit: state.config.spending?.daily_usd ?? 10,
+          resets_at: now() + 6 * 3600,
+        },
+        waiting: [],
+      };
+    if (path === "/api/spending/estimate" && method === "GET") {
+      const target = pickerTargets().find((t) => t.id === q.get("model"));
+      return target?.provider === "openrouter"
+        ? {
+            show: true,
+            low_usd: 0.004,
+            high_usd: 0.03,
+            label: "about $0.01–$0.03",
+            context_tokens: 12000,
+            model: target.model,
+            detail:
+              "Worked out from the conversation so far and the model's listed prices.",
+          }
+        : { show: false, reason: "not_paid" };
+    }
+    if ((m = path.match(/^\/api\/sessions\/([^/]+)\/scheduled-resume$/))) {
+      const sid = m[1];
+      state.resumes = state.resumes || {};
+      if (method === "GET")
+        return { resume: state.resumes[sid] || null, scheduler: true };
+      if (method === "DELETE") {
+        const resume = state.resumes[sid];
+        delete state.resumes[sid];
+        if (resume)
+          emit(sid, resume.task_id, "resume.cancelled", {
+            resume_id: resume.id,
+            at: resume.at,
+            target: resume.target,
+            label: resume.label,
+            job_id: resume.job_id,
+          });
+        return { resume: resume || null };
+      }
+      const job = state.jobs.find((j: Json) => j.id === body.job_id);
+      const at = job?.result?.limit_reached?.usage?.windows?.[0]?.resets_at;
+      if (!job || job.status !== "limit_reached" || !at)
+        throw new Error("The vendor did not say when the limit resets");
+      const resume = {
+        id: `r-${job.id}`,
+        session_id: sid,
+        job_id: job.id,
+        task_id: job.task_id,
+        target: job.model,
+        label: "Codex",
+        at,
+      };
+      state.resumes[sid] = resume;
+      emit(sid, job.task_id, "resume.scheduled", {
+        resume_id: resume.id,
+        at,
+        target: resume.target,
+        label: resume.label,
+        job_id: job.id,
+        scheduler: true,
+      });
+      return { resume, scheduler: true };
     }
     if ((m = path.match(/^\/api\/jobs\/([^/]+)\/cancel$/))) {
       const job = state.jobs.find((j: Json) => j.id === m![1]);

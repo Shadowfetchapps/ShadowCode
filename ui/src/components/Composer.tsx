@@ -62,6 +62,7 @@ export function Composer({
   commands,
   placeholder,
   hint,
+  estimate,
   busy,
   queueing,
   submitting,
@@ -94,6 +95,8 @@ export function Composer({
   commands: SlashCommand[];
   placeholder: string;
   hint: string;
+  /** "about $0.01–$0.05" for the next message on a paid model. */
+  estimate?: { label: string; detail: string } | null;
   busy: boolean;
   queueing: boolean;
   submitting: boolean;
@@ -509,11 +512,15 @@ export function Composer({
           </button>
         </div>
       </form>
-      {sendBlocked && (
+      {sendBlocked ? (
         <p className="composer-blocked" id="composer-blocked" role="status">
           {sendBlocked}
         </p>
-      )}
+      ) : estimate ? (
+        <p className="composer-estimate" title={estimate.detail}>
+          Next message: {estimate.label}
+        </p>
+      ) : null}
     </div>
   );
 }
