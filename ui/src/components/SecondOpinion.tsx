@@ -316,6 +316,13 @@ export function OpinionNotes({ opinion }: { opinion: SecondOpinion }) {
           the rest from the files.
         </p>
       )}
+      {Boolean(opinion.redacted) && (
+        <p className="hint">
+          {opinion.redacted === 1
+            ? "One value that looked like a password or key was hidden from the reviewer."
+            : `${opinion.redacted} values that looked like passwords or keys were hidden from the reviewer.`}
+        </p>
+      )}
       {opinion.omitted.length > 0 && (
         <p className="hint">
           Not sent: {opinion.omitted.join(", ")} (secret files).

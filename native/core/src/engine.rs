@@ -1377,6 +1377,19 @@ impl Engine {
                 json!({"ok":false,"from":from,"reason":"A Compare lane keeps its own model, so it did not continue on a local model."}),
             );
         }
+        // A second opinion is the chosen model's opinion; another model
+        // finishing it would be passed off as that model's review.
+        if self
+            .0
+            .store
+            .session_meta(&job.session_id, keys::SECOND_OPINION)?
+            .is_some()
+        {
+            return self.note_limit_fallback(
+                &job,
+                json!({"ok":false,"from":from,"reason":"A second opinion keeps the model you chose, so it did not continue on a local model."}),
+            );
+        }
         let Some((id, name)) = self.local_fallback(&config, &job.workspace).await? else {
             return self.note_limit_fallback(
                 &job,

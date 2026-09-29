@@ -244,7 +244,13 @@ async fn staged_review_is_read_only_and_reads_messy_findings_onto_hunks() {
 
     fs::write(f.project.join("lib.txt"), "value = 2\n").unwrap();
     fs::write(f.project.join(".env"), "TOKEN=very-secret-value\n").unwrap();
-    git(&f.project, &["add", "lib.txt", ".env"]);
+    // A credential inside an ordinary file is hidden, not sent.
+    fs::write(
+        f.project.join("config.py"),
+        "TOKEN = \"ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\"\n",
+    )
+    .unwrap();
+    git(&f.project, &["add", "lib.txt", ".env", "config.py"]);
     let current = call(
         service,
         "GET",
@@ -252,7 +258,7 @@ async fn staged_review_is_read_only_and_reads_messy_findings_onto_hunks() {
         Value::Null,
     )
     .await;
-    assert_eq!(current["files"], json!(["lib.txt"]));
+    assert_eq!(current["files"], json!(["config.py", "lib.txt"]));
     assert_eq!(current["omitted"], json!([".env"]));
 
     let record = call(
@@ -306,6 +312,18 @@ async fn staged_review_is_read_only_and_reads_messy_findings_onto_hunks() {
         "a secret file reached the reviewer"
     );
     assert!(prompt.contains("Secret files left out: .env"));
+    // The review request carries the change with the credential hidden.
+    // (The native loop's own repository map is outside the request.)
+    let request = asked[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .map(|m| m["content"].to_string())
+        .collect::<String>();
+    assert!(request.contains("config.py"));
+    assert!(!request.contains("ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"));
+    assert!(done["redacted"].as_u64().unwrap() >= 1);
     let refused = asked
         .iter()
         .flat_map(|r| r["messages"].as_array().unwrap().clone())
@@ -323,7 +341,7 @@ async fn staged_review_is_read_only_and_reads_messy_findings_onto_hunks() {
     assert_eq!(finding["suggested_fix"], "Keep value = 1.");
     assert_eq!(finding["status"], "open");
     assert!(finding["hunk"].as_str().unwrap().starts_with("@@ -1"));
-    assert_eq!(done["diff"][0]["path"], "lib.txt");
+    assert_eq!(done["diff"][1]["path"], "lib.txt");
     // Usage is recorded like any job's and shown with the model.
     assert!(done["usage"]["total_tokens"].as_u64().unwrap() > 0);
     assert!(!done["model_name"].as_str().unwrap().is_empty());
@@ -773,5 +791,76 @@ async fn live_review_of_a_staged_change_by_a_real_model() {
         "{done:#}"
     );
     assert!(done["usage"]["total_tokens"].as_u64().unwrap_or(0) > 0);
+    service.engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_second_opinion_that_hits_a_plan_limit_stays_on_its_model() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    git(&project, &["init", "-q"]);
+    fs::write(project.join("a.txt"), "one\n").unwrap();
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-qm", "Base"]);
+    fs::write(project.join("a.txt"), "two\n").unwrap();
+    git(&project, &["add", "a.txt"]);
+    let project = project.canonicalize().unwrap();
+    let fake = FakeCodex::new(root.path(), json!({"auth":"chatgpt","turn":"limit"}));
+    let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+    Config::patch(
+        &paths,
+        json!({
+            "model":{"provider":"local","endpoint":"http://127.0.0.1:9/v1","name":"fixture","context_limit":16384},
+            "trusted_workspaces":[project],
+            "cli_agents": cli_agents(&fake),
+        }),
+    )
+    .unwrap();
+    let service = Service::open(paths, Some(project.clone())).unwrap();
+    let record = call(
+        &service,
+        "POST",
+        "/api/second-opinions",
+        json!({"kind":"review","source":"staged","model":"cli:codex"}),
+    )
+    .await;
+    let done = finished(&service, record["id"].as_str().unwrap()).await;
+    assert_eq!(done["status"], "limit_reached", "{done:#}");
+    let hidden = done["review_session"].as_str().unwrap();
+    // The limit's follow-up is decided just after the job ends.
+    let started = Instant::now();
+    let fallback = loop {
+        let found = service
+            .engine
+            .store()
+            .events_after(hidden, 0, None, 10_000)
+            .unwrap()
+            .into_iter()
+            .find(|e| e["type"] == "limit.fallback");
+        if let Some(found) = found {
+            break found;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "no limit.fallback"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(fallback["payload"]["ok"], false, "{fallback:#}");
+    assert!(fallback["payload"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("keeps the model you chose"));
+    // No other job ran in the reviewer's conversation.
+    assert_eq!(
+        service
+            .engine
+            .store()
+            .session_jobs(hidden, 10)
+            .unwrap()
+            .len(),
+        1
+    );
     service.engine.shutdown().await.unwrap();
 }

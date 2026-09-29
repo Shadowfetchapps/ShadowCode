@@ -1066,7 +1066,9 @@ same_model, consented, job_id, review_session, review_task, status:
 "queued"|"running"|"completed"|"failed"|"cancelled"|"limit_reached"|"interrupted",
 created_at, finished_at, diff_hash, files, omitted, diff: [{path, status,
 diff, binary}], truncated, context_chars, summary, findings: Finding[],
-format_note, error, usage: Usage, model_name, reviewer_changed}`.
+format_note, error, usage: Usage, model_name, reviewer_changed, redacted}`
+(`redacted`: credentials recognised in the request and replaced before it
+was sent).
 `Finding`: `{id: "f1"…, file, line, end_line, hunk (header of the reviewed
 hunk), severity: "high"|"medium"|"low"|"info", title, explanation,
 suggested_fix, status: "open"|"dismissed"|"fixing", fix_job_id,

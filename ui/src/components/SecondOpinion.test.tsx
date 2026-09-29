@@ -276,6 +276,7 @@ it("a failed or oddly formed review explains itself", () => {
         reviewer_changed: ["src/app.ts"],
         truncated: true,
         same_model: true,
+        redacted: 2,
       })}
       actions={actions()}
       onCancel={vi.fn()}
@@ -289,6 +290,7 @@ it("a failed or oddly formed review explains itself", () => {
     "asked only to read",
     "Only part of the changes fit",
     "less independent",
+    "2 values that looked like passwords or keys were hidden",
   ])
     expect(card.textContent).toContain(text);
 });

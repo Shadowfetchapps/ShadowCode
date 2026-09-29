@@ -485,6 +485,8 @@ pub struct Record {
     pub model_name: String,
     /// Files the reviewer's job reported changing (it should change none).
     pub reviewer_changed: Vec<String>,
+    /// Secret-looking values replaced before the request was sent.
+    pub redacted: usize,
 }
 
 impl Record {
@@ -707,7 +709,15 @@ pub(crate) async fn start(engine: &Engine, request: Start<'_>) -> Result<Record>
     if fixed + context.diff_bytes() > MAX_PROMPT_BYTES {
         context.fit(MAX_PROMPT_BYTES.saturating_sub(fixed));
     }
-    let text = prompt(request.kind, &context, writer.as_ref(), &question, about);
+    // Recognizable credentials in the changes or the answer never leave.
+    let redaction = redaction::redact_text(&prompt(
+        request.kind,
+        &context,
+        writer.as_ref(),
+        &question,
+        about,
+    ));
+    let text = redaction.text;
     ensure!(
         text.len() <= MAX_PROMPT_BYTES,
         "The changes are too large to send for a second opinion"
@@ -826,6 +836,7 @@ pub(crate) async fn start(engine: &Engine, request: Start<'_>) -> Result<Record>
         omitted: context.omitted.clone(),
         truncated: context.truncated,
         context_chars: text.chars().count(),
+        redacted: redaction.count,
         diff: context.diff,
         model_name: job.model.clone(),
         ..Default::default()
@@ -1266,6 +1277,19 @@ mod tests {
         let mut other = context.clone();
         other.diff[0].diff.push_str("+more\n");
         assert_ne!(context.fingerprint(), other.fingerprint());
+    }
+
+    #[test]
+    fn credentials_in_the_changes_are_hidden_from_the_reviewer() {
+        let raw = "diff --git a/config.py b/config.py\n--- a/config.py\n+++ b/config.py\n@@ -1 +1 @@\n-TOKEN = None\n+TOKEN = \"ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\"\n";
+        let context = staged_context(&[("M".into(), "config.py".into())], raw);
+        let text = prompt(Kind::Review, &context, None, "", "the staged changes");
+        assert!(text.contains("ghp_0123456789"));
+        let hidden = redaction::redact_text(&text);
+        assert!(hidden.count >= 1);
+        assert!(!hidden
+            .text
+            .contains("ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"));
     }
 
     #[test]

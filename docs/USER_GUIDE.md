@@ -352,7 +352,8 @@ Each second opinion is a task of its own and counts toward usage like any
 other: a subscription uses its plan's allowance, an API key is billed per
 token, and a model on this computer costs nothing. At most 60 kB of changes
 are sent; the rest of a large change is named, and the reviewer can read it
-from the files. Secret files (`.env`, keys) are never sent. In offline mode
+from the files. Secret files (`.env`, keys) are never sent, and values that
+look like passwords or keys inside other files are hidden. In offline mode
 only models on this computer can review. When the work ran on this computer
 (the conversation's last turn, or the model that wrote the change), a cloud
 reviewer is never picked for you, and choosing one shows the consent dialog

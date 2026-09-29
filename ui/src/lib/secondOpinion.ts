@@ -70,6 +70,8 @@ export type SecondOpinion = {
   usage?: Usage;
   model_name: string;
   reviewer_changed: string[];
+  /** Secret-looking values hidden before the request was sent. */
+  redacted?: number;
 };
 
 export type OpinionPrefs = { model: string | null; before_commit: boolean };
