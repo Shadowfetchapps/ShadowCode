@@ -4,7 +4,7 @@ Goal: a dependable, easy-to-use native workspace combining supported vendor logi
 
 Baseline: `e371baaa4c690527173a322f7e0e1cfae4db329a`. Implementation branch: `flagship/reliability-foundation`. Preserve the existing architecture and provider integrations. The complete [acceptance specification](FLAGSHIP_ACCEPTANCE_SPEC.md) remains in scope; this ledger is not a narrowed definition of completion.
 
-Current release checkpoint (September 28, 2026): signed **0.33.1 is published and installed**; 0.34.2 is prepared (see [the 0.34 pass](#034-consolidation-and-consumer-readiness-pass)), with retained data and successful installed-window checks. See [the final release and installation evidence](#signed-0331-publication-and-installed-app-verification). Earlier pending statements below describe their historical checkpoints. Broader physical desktop, GPU endurance and live provider lifecycle acceptance remain open.
+Current release checkpoint (September 28, 2026): signed **0.33.1 is published and installed**; **0.34.2 is published** (run 36515721147: all 15 gates, signing and publication passed; installed here with the authenticated installer; see [the 0.34 pass](#034-consolidation-and-consumer-readiness-pass)), with retained data and successful installed-window checks. See [the final release and installation evidence](#signed-0331-publication-and-installed-app-verification). Earlier pending statements below describe their historical checkpoints. Broader physical desktop, GPU endurance and live provider lifecycle acceptance remain open.
 
 ## 0.34 consolidation and consumer-readiness pass
 

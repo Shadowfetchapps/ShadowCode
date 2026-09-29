@@ -4,6 +4,10 @@ The helpers in `scripts/native-release-auth.mjs` and `scripts/verify-native-rele
 
 The Bash verifier loads `scripts/native-release-auth-lib.sh` from its own script directory. Keep both reviewed code files together in the trusted tooling bundle; do not obtain the library from the candidate download or source metadata as shell code. The installer uses the same reviewed routines for current candidates and signed historical receipts; it never sources release metadata as code.
 
+## Published release: 0.34.2
+
+[Version 0.34.2](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.34.2) was published on September 29, 2026 from `3f81044e1fe3d8f24cc1293e8efde79db5533213` by [run 36515721147](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36515721147): all 15 required gates, protected signing and publication completed in the workflow. The downloaded AppImage and .deb verify with `verify-native-release.sh` against the tracked trust bundle, and the authenticated installer upgraded an installed 0.33.1 to it. The `v0.34.0` and `v0.34.1` attempts stopped in required gates before signing and stay unchanged (see [RELEASING.md](RELEASING.md)).
+
 ## Published release: 0.33.1
 
 The `v0.33.0` release attempt at `9e385cb` failed its source-integrity gate

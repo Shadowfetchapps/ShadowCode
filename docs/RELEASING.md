@@ -1,6 +1,6 @@
 # Release procedure
 
-The most recent documented release is [**0.33.1**](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.33.1). Updating version files or
+The most recent documented release is [**0.34.2**](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.34.2), published on September 29, 2026 from `3f81044` by [run 36515721147](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36515721147) with all 15 gates, protected signing and publication passing. Updating version files or
 these instructions does not publish or sign a release. Bind final build, test
 and authentication receipts to the exact candidate before publication.
 
