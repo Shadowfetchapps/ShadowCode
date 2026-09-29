@@ -1,5 +1,6 @@
 import { api } from "../../api";
 import {
+  Fragment,
   memo,
   useLayoutEffect,
   useMemo,
@@ -15,6 +16,12 @@ import { LocalMemoryItem } from "../LocalMemory";
 import { Markdown } from "../Markdown";
 import { CopyButton, UserMessage } from "../MessageActions";
 import { SubagentCard } from "../SubagentCard";
+import {
+  AskAnotherModelButton,
+  AskAnotherModelForm,
+  TaskOpinions,
+  useAskOpen,
+} from "../TranscriptOpinions";
 import { TaskSummary, type DiffStat } from "../TaskSummary";
 import type { RunCheckAction } from "../RunCheck";
 import type { TaskActivity } from "../../lib/activity";
@@ -125,6 +132,57 @@ export function transcriptRows(
     });
   });
   return rows;
+}
+
+type AgentItem = Extract<ChatItem, { kind: "agent" }>;
+
+/** An answer with Copy, "Ask another model" (a second opinion that changes
+ * nothing) and Fork from here. */
+function AgentAnswer({
+  item,
+  forkDisabled,
+  actions,
+}: {
+  item: AgentItem;
+  forkDisabled: boolean;
+  actions: RowActions;
+}) {
+  const ask = useAskOpen();
+  return (
+    <div className="msg-agent">
+      {item.who && <div className="who">{item.who}</div>}
+      <Markdown>{item.text}</Markdown>
+      {!item.live && (
+        <div className="agent-actions" role="group" aria-label="Answer actions">
+          <CopyButton
+            text={item.text}
+            onCopy={actions.onCopy}
+            label="Copy answer"
+          />
+          {item.taskId && (
+            <AskAnotherModelButton
+              taskId={item.taskId}
+              open={ask.open}
+              onOpen={ask.toggle}
+            />
+          )}
+          {item.eventId && (
+            <button
+              type="button"
+              className="ghost fork-action"
+              disabled={forkDisabled}
+              onClick={() => actions.onFork(item.eventId!)}
+            >
+              Fork from here
+            </button>
+          )}
+        </div>
+      )}
+      {ask.open && item.taskId && (
+        <AskAnotherModelForm taskId={item.taskId} onClose={ask.close} />
+      )}
+    </div>
+  );
 }
 
 /** One row. Props are the item (kept by reference while unchanged), its
@@ -238,33 +296,7 @@ const TranscriptRow = memo(function TranscriptRow({
     );
   else
     node = (
-      <div className="msg-agent">
-        {item.who && <div className="who">{item.who}</div>}
-        <Markdown>{item.text}</Markdown>
-        {!item.live && (
-          <div
-            className="agent-actions"
-            role="group"
-            aria-label="Answer actions"
-          >
-            <CopyButton
-              text={item.text}
-              onCopy={actions.onCopy}
-              label="Copy answer"
-            />
-            {item.eventId && (
-              <button
-                type="button"
-                className="ghost fork-action"
-                disabled={forkDisabled}
-                onClick={() => actions.onFork(item.eventId!)}
-              >
-                Fork from here
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+      <AgentAnswer item={item} forkDisabled={forkDisabled} actions={actions} />
     );
   if (stranded)
     return (
@@ -328,6 +360,13 @@ export function TranscriptRows({
     anchor.current = null;
   }, [shown, scrollRef]);
   const start = Math.max(0, rows.length - shown);
+  // Second opinions about a task follow the task's last row.
+  const lastOfTask = useMemo(() => {
+    const last = new Map<string, string>();
+    for (const row of rows)
+      if (row.item.taskId) last.set(row.item.taskId, row.key);
+    return new Set(last.values());
+  }, [rows]);
   return (
     <>
       {start > 0 && (
@@ -347,34 +386,38 @@ export function TranscriptRows({
         </div>
       )}
       {rows.slice(start).map((row) => (
-        <TranscriptRow
-          key={row.key}
-          rowKey={row.key}
-          item={row.item}
-          timelineHere={row.timelineHere}
-          timelineAbove={row.timelineAbove}
-          stranded={row.stranded}
-          queued={row.queued}
-          activity={
-            // Only rows that draw a timeline or summary follow the activity.
-            row.item.taskId &&
-            (row.item.kind === "summary" || row.stranded || row.timelineHere)
-              ? activity[row.item.taskId]
-              : undefined
-          }
-          fallback={row.item.kind === "limit" ? fallback : null}
-          locked={
-            row.item.kind === "limit" || row.item.kind === "memory"
-              ? locked
-              : false
-          }
-          forkDisabled={
-            row.item.kind === "agent" || row.item.kind === "user"
-              ? forkDisabled
-              : false
-          }
-          actions={actions}
-        />
+        <Fragment key={row.key}>
+          <TranscriptRow
+            rowKey={row.key}
+            item={row.item}
+            timelineHere={row.timelineHere}
+            timelineAbove={row.timelineAbove}
+            stranded={row.stranded}
+            queued={row.queued}
+            activity={
+              // Only rows that draw a timeline or summary follow the activity.
+              row.item.taskId &&
+              (row.item.kind === "summary" || row.stranded || row.timelineHere)
+                ? activity[row.item.taskId]
+                : undefined
+            }
+            fallback={row.item.kind === "limit" ? fallback : null}
+            locked={
+              row.item.kind === "limit" || row.item.kind === "memory"
+                ? locked
+                : false
+            }
+            forkDisabled={
+              row.item.kind === "agent" || row.item.kind === "user"
+                ? forkDisabled
+                : false
+            }
+            actions={actions}
+          />
+          {row.item.taskId && lastOfTask.has(row.key) && (
+            <TaskOpinions taskId={row.item.taskId} />
+          )}
+        </Fragment>
       ))}
     </>
   );

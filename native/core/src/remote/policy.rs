@@ -347,6 +347,10 @@ mod tests {
         ),
         ("issues", "allowed"),
         ("review", "allowed; secret files hidden"),
+        (
+            "second-opinions",
+            "allowed: read-only reviews; secret files never sent; consent and offline rules apply",
+        ),
         ("feed", "allowed"),
         (
             "git",

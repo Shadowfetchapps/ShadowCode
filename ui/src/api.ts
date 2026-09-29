@@ -409,6 +409,11 @@ export type ConsentRequest = {
     to?: string | null;
     excerpt_chars?: number;
     images?: number;
+    reason?: string;
+    /** `second_opinion`: a review or second opinion, not a turn. */
+    purpose?: string;
+    /** Changed files the review includes. */
+    files?: number;
   };
 };
 
@@ -749,6 +754,9 @@ export type Job = {
   };
   /** Set on the answer to a "Run in new worktree" start. */
   worktree_task?: WorktreeTask;
+  /** The second opinion this job runs (job summaries); such jobs run in a
+   * hidden conversation and are not the user's queued follow-ups. */
+  second_opinion?: string | null;
 };
 export type Health = {
   ok: boolean;

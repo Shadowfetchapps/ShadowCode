@@ -1,0 +1,295 @@
+/* Second opinions: reviewer picker, findings, the transcript card and the
+   Git tab's reviewed changes. */
+.opinion-reviewer {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.opinion-reviewer select {
+  max-width: 100%;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+}
+.opinion-reviewer .hint {
+  margin: 0;
+}
+.opinion-panel,
+.opinion-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+}
+.opinion-card {
+  margin: 6px 0;
+  border-left: 3px solid var(--accent);
+}
+.opinion-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.opinion-head .hint {
+  margin: 0;
+}
+.opinion-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.opinion-title strong {
+  overflow-wrap: anywhere;
+}
+.opinion-title .grow {
+  flex: 1;
+}
+.opinion-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.opinion-status.is-ok {
+  color: var(--ok);
+}
+.opinion-status.is-warn {
+  color: var(--warn);
+}
+.opinion-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.opinion-question {
+  margin: 0;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.opinion-question span {
+  font-weight: 600;
+  color: var(--muted);
+  margin-right: 4px;
+}
+.opinion-summary {
+  min-width: 0;
+}
+.opinion-error {
+  margin: 0;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+.opinion-findings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.opinion-finding {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.opinion-finding.is-high {
+  border-left-color: var(--danger);
+}
+.opinion-finding.is-low,
+.opinion-finding.is-info {
+  border-left-color: var(--border-strong);
+}
+.opinion-finding.is-dismissed {
+  opacity: 0.7;
+}
+.opinion-finding.is-dismissed strong {
+  text-decoration: line-through;
+}
+.opinion-finding header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.opinion-finding header strong {
+  overflow-wrap: anywhere;
+}
+.opinion-finding header .dim {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.opinion-finding p {
+  margin: 0;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.opinion-severity {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: var(--pill);
+  padding: 0 7px;
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+.opinion-severity.is-high {
+  color: var(--danger);
+}
+.opinion-severity.is-medium {
+  color: var(--warn);
+}
+.opinion-fix {
+  font-size: 12px;
+  min-width: 0;
+}
+.opinion-fix > span {
+  font-weight: 600;
+  color: var(--muted);
+}
+.opinion-fix p {
+  margin: 2px 0;
+}
+.opinion-finding-actions {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.opinion-finding-actions button.mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.opinion-fixing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ok);
+}
+.opinion-card-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.opinion-card-actions button.mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.opinion-reviewed {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.opinion-file h5 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.opinion-file {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.opinion-hunk {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+}
+.opinion-ask {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  min-width: 0;
+}
+.opinion-ask textarea {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+}
+.opinion-ask .hint {
+  margin: 0;
+}
+.opinion-ask .row.end,
+.opinion-panel .row.end {
+  justify-content: flex-end;
+}
+.opinion-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+  min-width: 0;
+}
+.opinion-controls .opinion-reviewer {
+  flex: 1 1 200px;
+}
+.opinion-controls label.check {
+  font-size: 12px;
+  color: var(--text-2);
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.opinion-gate {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.review-opinion {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 24px;
+  /* The diff below keeps most of the height. */
+  max-height: 40vh;
+  overflow-y: auto;
+  flex: none;
+}
+.review-opinion .opinion-controls .opinion-reviewer {
+  flex: 0 1 420px;
+}
+/* Findings under a hunk of the Review view. */
+.review-hunk > .opinion-findings {
+  margin: -4px 0 12px;
+}
+.review-file .opinion-count {
+  flex: none;
+  font-size: 11px;
+  border-radius: var(--pill);
+  padding: 0 6px;
+  background: var(--surface-3);
+  color: var(--warn);
+}

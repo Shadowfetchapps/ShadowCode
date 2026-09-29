@@ -274,6 +274,20 @@ another; cloud lanes can run concurrently. If cleanup cannot finish, retained
 copies remain visible for retry. Save unsaved app editor drafts before starting
 a comparison. Details: [compare](docs/COMPARE.md).
 
+## Second opinions
+
+Another model can review a change or an answer without touching your files:
+it runs read-only, like **Ask**. In the Git tab, **Review staged changes**
+(or **Review before every commit**) lists findings next to the diff they
+point at, with **Ask the agent to fix this** and **Dismiss**; the commit waits
+until you have seen them, never longer than you want. A task's **Review
+changes** has **Review with another model**, and **Ask another model** under
+an answer adds a labelled second opinion to the conversation that you can
+continue on that model. ShadowCode suggests a different model from the one
+that wrote the change, records usage and cost like any task, keeps offline
+mode local, and asks before local work goes to a cloud reviewer. Details:
+[user guide](docs/USER_GUIDE.md#get-a-second-opinion).
+
 ## Working in the window
 
 - **Composer.** Type `@` to attach project files or folders (or a

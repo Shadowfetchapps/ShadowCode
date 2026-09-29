@@ -7,6 +7,7 @@ import { relativeTime } from "../lib/picker";
 import { TerminalPanel } from "./TerminalPanel";
 import type { ToolsView } from "./ToolsTab";
 import { exportSession } from "../lib/transport";
+import type { PickerTarget } from "../lib/picker";
 import {
   type DrawerMemory,
   type DrawerMemoryUpdate,
@@ -82,6 +83,7 @@ export function Drawer({
   onMemory,
   onDiscardFileDraft,
   onResolveFileDraftConflict,
+  targets = [],
 }: {
   tab: DrawerTab;
   onTab: (t: DrawerTab) => void;
@@ -105,6 +107,8 @@ export function Drawer({
     path: string,
     choice: "mine" | "saved",
   ) => Promise<void>;
+  /** Picker rows, for the Git tab's reviewer. */
+  targets?: PickerTarget[];
 }) {
   const tool = isToolTab(tab) ? tab : null;
   useEffect(() => {
@@ -180,6 +184,9 @@ export function Drawer({
               memory={memory}
               onMemory={onMemory}
               onOpenTerminal={() => onTab("terminal")}
+              workspace={workspace}
+              sessionId={sessionId}
+              targets={targets}
             />
           </Suspense>
         )}

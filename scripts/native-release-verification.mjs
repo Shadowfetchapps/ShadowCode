@@ -58,6 +58,8 @@ const OPTIONAL_RUST_TESTS = new Set([
   // Network: headers and a multi-GB download from huggingface.co.
   'local_downloads::tests::catalog_matches_hugging_face',
   'local_downloads::tests::live_download_pause_resume_verify',
+  // A real model: a local OpenAI-compatible server or a signed-in vendor CLI.
+  'live_review_of_a_staged_change_by_a_real_model',
 ]);
 export const scriptDigest = gate => createHash('sha256').update(GATES[gate].script).digest('hex');
 export async function digest(file) {

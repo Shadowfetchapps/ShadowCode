@@ -317,6 +317,54 @@ staged changes to a pull request:
 Switching branches and committing wait while the agent works; push and pull
 requests do not.
 
+## Get a second opinion
+
+Another model can check a change or an answer without touching your files.
+It reads what it is sent (and may read files in the project), but it cannot
+edit files or run commands: ShadowCode runs it the way it runs **Ask**, with
+no write or shell tools, and a subscription CLI runs in its plan or read-only
+mode with every edit or command request denied. It runs in the background of
+the project, after any task that is already running there.
+
+- **Review before commit.** In the drawer's **Git** tab, under **Review
+  before commit**, pick a reviewer and choose **Review staged changes**.
+  ShadowCode suggests a different model from the one that wrote the change
+  and remembers your choice for the project. The findings appear with the
+  part of the diff they point at: file, line, how serious (High, Medium, Low
+  or Note), why it matters and a suggested fix. **Ask the agent to fix this**
+  queues a follow-up task in the conversation that made the change (or the
+  one you have open); **Dismiss** folds a finding away (**Show again** brings
+  it back).
+- **Review before every commit.** With this box ticked, **Review and
+  commit** first reviews the staged changes, and the commit waits until the
+  findings are on screen. It never blocks you: **Commit without waiting**
+  stops the review and commits, and **Commit anyway** commits with findings
+  still open. A review of the same staged changes is not repeated.
+- **Review one task.** In a task's **Review changes**, pick a model and
+  choose **Review with another model**. Findings sit under the hunks they
+  point at, the file list counts them, and findings about no particular
+  line are listed above the diff. If you undo changes afterwards, the review
+  says the changes are different now.
+- **Ask another model** (the speech-bubble button under an answer) sends
+  the request, that answer and the task's changes to a model you pick, with
+  an optional question of your own. Its reply appears as a labelled card
+  after the task, with the model, the tokens used and the cost. **Continue
+  with …** makes that model the conversation's model and drafts a message
+  quoting its opinion; earlier turns are handed over as a summary, as with
+  any model switch. **What the reviewer read** opens the reviewer's own
+  conversation.
+
+Each second opinion is a task of its own and counts toward usage like any
+other: a subscription uses its plan's allowance, an API key is billed per
+token, and a model on this computer costs nothing. At most 60 kB of changes
+are sent; the rest of a large change is named, and the reviewer can read it
+from the files. Secret files (`.env`, keys) are never sent, and values that
+look like passwords or keys inside other files are hidden. In offline mode
+only models on this computer can review. When the work ran on this computer
+(the conversation's last turn, or the model that wrote the change), a cloud
+reviewer is never picked for you, and choosing one shows the consent dialog
+first; nothing is sent until you choose **Send**.
+
 ## Terminal
 
 The drawer's **Terminal** tab (`` Ctrl+` ``) is your own login shell in the

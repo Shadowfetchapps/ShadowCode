@@ -42,6 +42,8 @@ import { useConversationMenu } from "./hooks/useConversationMenu";
 import { useNotificationLinks } from "./hooks/useNotificationLinks";
 import { useWorktreeTask } from "./hooks/useWorktreeTask";
 import { WorktreeBar } from "./components/WorktreeBar";
+import { ConsentDialog } from "./components/ConsentDialog";
+import { useConversationOpinions } from "./hooks/useConversationOpinions";
 import { isLocal, vendorKey, type PickerTarget } from "./lib/picker";
 import { limitsFrom, resolveFallback } from "./lib/allowance";
 import {
@@ -190,7 +192,9 @@ export default function App() {
           (item) =>
             item.workspace === workspace &&
             item.status === "queued" &&
-            item.task_id !== liveTaskId,
+            item.task_id !== liveTaskId &&
+            // A second opinion waiting its turn shows on its own card.
+            !item.second_opinion,
         )
         .slice()
         .reverse(),
@@ -517,6 +521,19 @@ export default function App() {
         }
       : undefined,
   });
+  const secondOpinions = useConversationOpinions({
+    workspace,
+    sessionId,
+    targets: pickerTargets,
+    toast,
+    selectTarget: nav.selectTarget,
+    draft: (text) => {
+      setTask((current) => (current.trim() ? `${current}\n\n${text}` : text));
+      promptRef.current?.focus();
+    },
+    reviewTask: (taskId) => reviewChanges(undefined, taskId),
+    openSession: nav.openSession,
+  });
   const onDecide = useStableCallback(
     (id: string, answer: ApprovalDecision) => void controls.decide(id, answer),
   );
@@ -666,6 +683,7 @@ export default function App() {
         queuedTaskIds={queuedTaskIds}
         fallback={fallback}
         rowActions={rowActions}
+        opinions={secondOpinions.context}
         onDecide={onDecide}
         commandCards={commandCards}
         approvals={approvals}
@@ -705,6 +723,7 @@ export default function App() {
                 }}
                 memory={memory.memory}
                 onMemory={memory.update}
+                targets={pickerTargets}
               />
             </Suspense>
           ) : undefined
@@ -719,6 +738,14 @@ export default function App() {
           )
         }
       />
+      {secondOpinions.consent && (
+        <ConsentDialog
+          request={secondOpinions.consent.request}
+          attachments={[]}
+          onSend={secondOpinions.consent.send}
+          onCancel={secondOpinions.consent.cancel}
+        />
+      )}
       {panel && (
         <Drawer
           key={workspace}
@@ -754,6 +781,7 @@ export default function App() {
           onMemory={memory.update}
           onDiscardFileDraft={memory.discardFileDraft}
           onResolveFileDraftConflict={memory.resolveFileDraftConflict}
+          targets={pickerTargets}
         />
       )}
       <Toasts toasts={toasts} onDismiss={dismiss} />

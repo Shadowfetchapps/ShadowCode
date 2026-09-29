@@ -2,7 +2,7 @@
  * and a pull request with its CI checks. Per-file review and hunk staging
  * live in the Changes tab. Git runs with the user's own sign-in; nothing
  * here stores a credential. */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CircleCheck,
   CircleDashed,
@@ -30,6 +30,26 @@ import {
   type DrawerMemoryUpdate,
 } from "../hooks/useDrawerMemory";
 import { Empty } from "./cards";
+import { ConsentDialog } from "./ConsentDialog";
+import {
+  OpinionHead,
+  OpinionNotes,
+  ReviewedChanges,
+  ReviewerSelect,
+  type FindingActions,
+} from "./SecondOpinion";
+import {
+  useOpinionOptions,
+  useSecondOpinions,
+} from "../hooks/useSecondOpinions";
+import type { PickerTarget } from "../lib/picker";
+import {
+  isActiveOpinion,
+  openFindings,
+  opinionApi,
+  suggestReviewer,
+} from "../lib/secondOpinion";
+import { Markdown } from "./Markdown";
 import "../tools.css";
 
 type Toast = (text: string, kind?: "ok" | "err" | "info") => void;
@@ -53,12 +73,22 @@ export function BranchPanel({
   memory,
   onMemory,
   onOpenTerminal,
+  workspace = "",
+  sessionId = "",
+  targets = [],
 }: {
   busy: boolean;
   toast: Toast;
   memory: DrawerMemory;
   onMemory: DrawerMemoryUpdate;
   onOpenTerminal: () => void;
+  /** The project; reviews before commit need it. */
+  workspace?: string;
+  /** The open conversation ("Ask the agent to fix this" queues there
+   * when it wrote the change). */
+  sessionId?: string;
+  /** Picker rows to choose a reviewer from. */
+  targets?: PickerTarget[];
 }) {
   const [overview, setOverview] = useState<GitOverview | null>(null);
   const [status, setStatus] = useState<PrStatus | null>(null);
@@ -69,6 +99,15 @@ export function BranchPanel({
   const [note, setNote] = useState("");
   const [prNote, setPrNote] = useState("");
   const [created, setCreated] = useState<PullRequest | null>(null);
+  const review = useStagedReview({
+    workspace,
+    sessionId,
+    targets,
+    repo: Boolean(overview?.repo),
+    staged: overview?.staged || 0,
+    changed: overview?.changed || 0,
+    toast,
+  });
 
   const load = useCallback(async () => {
     try {
@@ -238,6 +277,11 @@ export function BranchPanel({
           onChange={(e) => setMessage(e.target.value)}
         />
         {note && <p className="hint git-note">{note}</p>}
+        {review.gate && (
+          <p className="hint opinion-gate" role="status">
+            {review.gate}
+          </p>
+        )}
         <div className="git-row end">
           <button
             type="button"
@@ -270,22 +314,100 @@ export function BranchPanel({
             type="button"
             className="mini primary-mini"
             disabled={
-              busy || !overview.staged || !message.trim() || Boolean(working)
+              busy ||
+              !overview.staged ||
+              !message.trim() ||
+              Boolean(working) ||
+              review.starting
             }
             onClick={() =>
               void run("commit", async () => {
+                // "Review before every commit": the commit waits until the
+                // findings are on screen, never longer than the user wants.
+                if (await review.holdCommit()) return;
                 await api.gitCommit(message);
                 setMessage("");
                 setNote("");
+                review.committed();
                 toast("Committed", "ok");
                 await load();
               })
             }
           >
-            Commit
+            {review.commitLabel}
           </button>
         </div>
       </section>
+
+      {review.enabled && (
+        <section
+          className="git-section"
+          aria-label="Review before commit"
+          aria-busy={review.running}
+        >
+          <h4>Review before commit</h4>
+          <div className="opinion-controls">
+            <ReviewerSelect
+              targets={targets}
+              value={review.reviewer}
+              onChange={review.choose}
+              offline={Boolean(review.options?.offline)}
+              writer={review.options?.writer}
+            />
+            <button
+              type="button"
+              className="mini"
+              disabled={
+                !overview.staged ||
+                !review.reviewer ||
+                review.running ||
+                review.starting
+              }
+              onClick={() => void review.start()}
+            >
+              {review.starting ? "Starting…" : "Review staged changes"}
+            </button>
+          </div>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={Boolean(review.options?.prefs.before_commit)}
+              onChange={(e) => void review.setBeforeCommit(e.target.checked)}
+            />{" "}
+            Review before every commit
+          </label>
+          {review.shown && (
+            <div className="opinion-panel">
+              <OpinionHead
+                opinion={review.shown}
+                title={`Review by ${review.shown.reviewer.label}`}
+                onCancel={() => void review.opinions.cancel(review.shown!.id)}
+              />
+              {review.shown.status === "completed" && review.shown.summary && (
+                <div className="opinion-summary">
+                  <Markdown>{review.shown.summary}</Markdown>
+                </div>
+              )}
+              <OpinionNotes opinion={review.shown} />
+              {review.shown.status === "completed" && (
+                <ReviewedChanges
+                  opinion={review.shown}
+                  actions={review.actions}
+                />
+              )}
+            </div>
+          )}
+          {review.opinions.consent && (
+            <ConsentDialog
+              request={review.opinions.consent.request}
+              destination={targets.find((t) => t.id === review.reviewer)?.name}
+              attachments={[]}
+              onSend={review.opinions.consent.send}
+              onCancel={review.opinions.consent.cancel}
+            />
+          )}
+        </section>
+      )}
 
       <section className="git-section" aria-label="Push">
         <h4>Push</h4>
@@ -587,4 +709,213 @@ export function BranchPanel({
       )}
     </div>
   );
+}
+
+/** The Git tab's review of the staged changes: the reviewer (suggested,
+ * remembered per project), the latest review of the staged changes as they
+ * are now, and "Review before every commit", which holds a commit until
+ * the findings are on screen (never forced: the user can commit anyway). */
+function useStagedReview({
+  workspace,
+  sessionId,
+  targets,
+  repo,
+  staged,
+  changed,
+  toast,
+}: {
+  workspace: string;
+  sessionId: string;
+  targets: PickerTarget[];
+  repo: boolean;
+  staged: number;
+  changed: number;
+  toast: Toast;
+}) {
+  const enabled = Boolean(workspace && repo);
+  const scope = useMemo(
+    () =>
+      enabled
+        ? {
+            workspace,
+            source: "staged" as const,
+            // The latest review, with the diff its findings point into.
+            limit: "3",
+            diff: "1" as const,
+          }
+        : null,
+    [enabled, workspace],
+  );
+  const optionScope = useMemo(
+    () => (enabled ? { workspace, session_id: sessionId || undefined } : null),
+    [enabled, workspace, sessionId],
+  );
+  const opinions = useSecondOpinions(scope, toast);
+  const { options, setOptions } = useOpinionOptions(optionScope);
+  const [picked, setPicked] = useState("");
+  const [current, setCurrent] = useState("");
+  const [waiting, setWaiting] = useState(false);
+  const [starting, setStarting] = useState(false);
+
+  const suggested = options
+    ? suggestReviewer(targets, {
+        writer: options.writer?.model,
+        remembered: options.prefs.model,
+        offline: options.offline,
+        localOnly: options.local_only,
+      })
+    : "";
+  const reviewer = picked || suggested;
+
+  // The staged changes as they are now, to tell a fresh review from one of
+  // earlier changes.
+  useEffect(() => {
+    if (!enabled || !staged) {
+      setCurrent("");
+      return;
+    }
+    let live = true;
+    opinionApi
+      .current({ workspace, source: "staged" })
+      .then((now) => {
+        if (live) setCurrent(now.hash);
+      })
+      .catch(() => {
+        if (live) setCurrent("");
+      });
+    return () => {
+      live = false;
+    };
+  }, [enabled, workspace, staged, changed]);
+
+  const latest = opinions.items[0];
+  const running = Boolean(latest && isActiveOpinion(latest));
+  const fresh = Boolean(
+    latest && current && latest.diff_hash === current && staged,
+  );
+  const shown = latest && (running || fresh) ? latest : undefined;
+  const open = shown && fresh ? openFindings(shown) : [];
+  const beforeCommit = Boolean(options?.prefs.before_commit);
+
+  async function start() {
+    if (!reviewer || starting) return null;
+    setStarting(true);
+    try {
+      return await opinions.start({
+        kind: "review",
+        source: "staged",
+        workspace,
+        session_id: sessionId || undefined,
+        model: reviewer,
+      });
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  /** Before a commit: start the review, or stop one that is running (a
+   * review holds the project, so the commit could not run beside it).
+   * True when the commit should wait. */
+  async function holdCommit() {
+    if (!enabled) return false;
+    if (running && latest) {
+      await opinions.cancel(latest.id);
+      setWaiting(false);
+      return false;
+    }
+    if (beforeCommit) {
+      // The staged changes as they are at this click, not at the last read.
+      const now = await opinionApi
+        .current({ workspace, source: "staged" })
+        .catch(() => null);
+      if (now) setCurrent(now.hash);
+      if (latest && now && latest.diff_hash === now.hash) return false;
+      if (!reviewer) {
+        toast(
+          "Choose a reviewer model, or turn off Review before every commit.",
+          "info",
+        );
+        return true;
+      }
+      const record = await start();
+      if (record) setWaiting(true);
+      return true;
+    }
+    return false;
+  }
+
+  const gate = !enabled
+    ? ""
+    : running && waiting
+      ? "Reviewing the staged changes before this commit. The commit waits until you have seen the findings; Commit without waiting stops the review."
+      : running
+        ? "A review of the staged changes is running. Committing now stops it."
+        : waiting && fresh && shown
+          ? shown.status === "completed"
+            ? open.length
+              ? `The review found ${open.length} open finding${open.length === 1 ? "" : "s"} below. Fix or dismiss them, or commit anyway.`
+              : "The review is done. Commit when you are ready."
+            : "The review did not finish. You can commit anyway."
+          : "";
+  const commitLabel = !enabled
+    ? "Commit"
+    : running
+      ? waiting
+        ? "Commit without waiting"
+        : "Stop review and commit"
+      : fresh && open.length
+        ? "Commit anyway"
+        : beforeCommit && !fresh
+          ? "Review and commit"
+          : "Commit";
+
+  const actions: FindingActions = {
+    working: opinions.working,
+    fix: (opinion, finding) =>
+      void opinions.fix(opinion.id, finding.id).then((job) => {
+        if (job)
+          toast(
+            job.session_id === sessionId
+              ? "Fix queued in this conversation."
+              : "Fix queued in the conversation that made the change.",
+            "ok",
+          );
+      }),
+    setFinding: (opinion, finding, status) =>
+      void opinions.setFinding(opinion.id, finding.id, status),
+  };
+
+  return {
+    enabled,
+    options,
+    opinions,
+    reviewer,
+    running,
+    starting,
+    shown,
+    gate,
+    commitLabel,
+    actions,
+    start,
+    holdCommit,
+    committed: () => setWaiting(false),
+    choose: (id: string) => {
+      setPicked(id);
+      if (id)
+        void opinionApi
+          .savePrefs(workspace, { model: id })
+          .then((prefs) => setOptions((o) => (o ? { ...o, prefs } : o)))
+          .catch(() => undefined);
+    },
+    setBeforeCommit: async (on: boolean) => {
+      try {
+        const prefs = await opinionApi.savePrefs(workspace, {
+          before_commit: on,
+        });
+        setOptions((o) => (o ? { ...o, prefs } : o));
+      } catch (error) {
+        toast(String(error), "err");
+      }
+    },
+  };
 }

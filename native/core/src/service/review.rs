@@ -70,7 +70,7 @@ impl Service {
     }
 
     /// The conversation and project a task belongs to.
-    fn task_workspace(&self, task_id: &str) -> Result<(String, Workspace)> {
+    pub(super) fn task_workspace(&self, task_id: &str) -> Result<(String, Workspace)> {
         let store = self.engine.store();
         let task = store.task(task_id)?.context("Task not found")?;
         let session_id = task["session_id"]

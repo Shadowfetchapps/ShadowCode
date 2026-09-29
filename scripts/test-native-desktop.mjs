@@ -5,7 +5,7 @@
 // they are installed, read-only probes done by the app itself), a local GGUF
 // row served by a test-double llama-server (scripts/fake-llama-server.py, no
 // GPU, no weights), approvals, the activity timeline, the summary card, the
-// Changes drawer and its Tasks/Tools panels, native file editing, reload persistence,
+// Changes drawer and its Git/Tasks/Tools panels, native file editing, reload persistence,
 // a local model that runs out of memory (plain failure, smaller-context retry),
 // reconnecting through dropped/duplicated/stale events and a mid-stream reload
 // with a second conversation queued, every Settings page, the cloud consent dialog
@@ -738,6 +738,15 @@ try {
   await until("Drawer open", () => visible(".drawer"));
   const closeBox = await execute("const c=document.querySelector('.drawer-close').getBoundingClientRect(),t=document.querySelector('.drawer-tab-list button').getBoundingClientRect();return Math.abs(c.top-t.top)");
   assert.ok(closeBox < 8, "Drawer Close sits on the first row of tabs");
+  // Git: the second-opinion review before commit is offered (read only: no
+  // review starts, nothing is staged or committed).
+  await clickButton("Git", "//div[contains(@class,'drawer-tab-list')]");
+  await until("Git tab offers a review before commit", () => visible('section[aria-label="Review before commit"] select[aria-label="Reviewer model"]'), 20000);
+  await settle();
+  assert.doesNotMatch(await execute("return document.querySelector('.drawer').innerText"), /ApiError/, "Git tab shows no raw error");
+  await screenshot("drawer-git");
+  await accessibility("drawer-git");
+  note("Drawer: Git tab offers Review before commit with a reviewer picker (read-only)");
   await clickButton("Tasks", "//div[contains(@class,'drawer-tab-list')]");
   await until("Tasks panel", () => visible('input[aria-label="Search tasks"].search'));
   await screenshot("drawer-tasks");
