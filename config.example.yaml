@@ -95,6 +95,8 @@ agent:
   autonomy_profile: normal  # unlimited | conservative | normal | extended | custom
   summary_compaction: true  # let the model summarize history dropped to fit the context
   summary_timeout_sec: 60   # longest wait for that summary before the built-in digest, 5-600
+  stuck_check: true         # pause and ask when the same command fails the same way 3 times,
+                            # or a file is changed back and forth
 
 # Subscriptions (vendor CLIs). Settings › Advanced › Vendor tools edits these.
 cli_agents:

@@ -187,6 +187,25 @@ pub fn files(store: &Store, ws: &Workspace, task: &str) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+/// A text file before the task and now (`None`: missing). Binary or very
+/// large files are an error.
+pub fn contents(
+    store: &Store,
+    ws: &Workspace,
+    task: &str,
+    path: &str,
+) -> Result<(Option<String>, Option<String>)> {
+    let base = baseline(store, ws, task, path)?;
+    let now = current(ws, path)?;
+    let read = |bytes: &Option<Vec<u8>>| -> Result<Option<String>> {
+        match bytes {
+            None => Ok(None),
+            Some(_) => Ok(Some(text(bytes).context("Not a text file")?.to_owned())),
+        }
+    };
+    Ok((read(&base.bytes)?, read(&now.bytes)?))
+}
+
 /// One file's hunks: `{path, status, source, binary, hunks: [{id, header,
 /// lines}]}`.
 pub fn file(store: &Store, ws: &Workspace, task: &str, path: &str) -> Result<Value> {

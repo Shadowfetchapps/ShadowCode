@@ -98,6 +98,9 @@ pub struct ChatResponse {
     pub tool_calls: Vec<ToolCall>,
     pub usage: Usage,
     pub finish_reason: String,
+    /// Tool calls whose arguments were repaired (`crate::tool_repair`).
+    #[serde(default)]
+    pub repaired: usize,
 }
 
 /// Content-free observations for one HTTP attempt. Unknown counters remain
@@ -1164,12 +1167,21 @@ impl StreamDecoder {
         let mut ids = BTreeSet::new();
         for (_, part) in self.calls {
             ensure!(!part.name.is_empty(), "Tool call has no name");
-            let arguments: Value = serde_json::from_str(if part.args.is_empty() {
+            let arguments: Value = match serde_json::from_str::<Value>(if part.args.is_empty() {
                 "{}"
             } else {
                 &part.args
-            })
-            .context("Model returned incomplete or invalid tool arguments")?;
+            }) {
+                Ok(value) if value.is_object() => value,
+                _ => {
+                    // Almost JSON (a fence, trailing commas, single quotes,
+                    // raw newlines, encoded twice): repaired, and noted.
+                    let repaired = crate::tool_repair::arguments(&part.args)
+                        .context("Model returned incomplete or invalid tool arguments")?;
+                    self.response.repaired += 1;
+                    repaired
+                }
+            };
             ensure!(arguments.is_object(), "Tool arguments must be an object");
             let id = if part.id.is_empty() {
                 format!("call_{}", crate::id())

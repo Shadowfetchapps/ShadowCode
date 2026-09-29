@@ -255,6 +255,10 @@ pub struct AgentConfig {
     pub summary_compaction: bool,
     /// Longest wait for that summary before falling back.
     pub summary_timeout_sec: u64,
+    /// Pause and ask when the agent seems stuck: the same command failing
+    /// the same way three times, or a file changed back and forth
+    /// (`crate::stuck`).
+    pub stuck_check: bool,
 }
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -271,6 +275,7 @@ impl Default for AgentConfig {
             autonomy_profile: "normal".into(),
             summary_compaction: true,
             summary_timeout_sec: 60,
+            stuck_check: true,
         }
     }
 }

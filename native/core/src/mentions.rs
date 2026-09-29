@@ -202,6 +202,23 @@ pub fn search(root: &Path, query: &str, limit: usize) -> Result<Value> {
     }))
 }
 
+/// Whether `path` (relative to the project) is one of `scope`'s files or
+/// inside one of its folders.
+pub fn in_scope(scope: &[Mention], path: &str) -> bool {
+    let path = path.trim_start_matches("./");
+    scope.iter().any(|m| {
+        let target = m.path.trim_start_matches("./").trim_end_matches('/');
+        if m.kind == "dir" {
+            target.is_empty()
+                || target == "."
+                || path == target
+                || path.starts_with(&format!("{target}/"))
+        } else {
+            path == target
+        }
+    })
+}
+
 /// Check mentions from a request: inside the project, at most
 /// `MAX_MENTIONS`, paths normalized.
 pub fn validate(workspace: &Workspace, mentions: Vec<Mention>) -> Result<Vec<Mention>> {

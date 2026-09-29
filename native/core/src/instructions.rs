@@ -384,6 +384,42 @@ impl NestedGuidance {
     }
 }
 
+impl NestedGuidance {
+    /// Every guidance file delivered so far in this task, read again: sent
+    /// once more after the conversation is shortened, so folder rules are
+    /// not lost with the tool results that carried them.
+    pub fn delivered_again(&self, workspace: &Workspace) -> Vec<Value> {
+        let Ok(state) = self.state.lock() else {
+            return Vec::new();
+        };
+        let mut paths: Vec<&String> = state.delivered.iter().collect();
+        paths.sort();
+        let mut out = Vec::new();
+        let mut bytes = 0;
+        for path in paths {
+            let content = match state
+                .rules
+                .as_ref()
+                .and_then(|rules| rules.iter().find(|(p, _, _)| p == path))
+            {
+                Some((_, _, body)) => body.clone(),
+                None => match workspace.read(path) {
+                    Ok(file) => file.content,
+                    Err(_) => continue,
+                },
+            };
+            let budget = NESTED_FILE_BYTES.min(NESTED_TOTAL_BYTES.saturating_sub(bytes));
+            if budget == 0 || content.trim().is_empty() {
+                continue;
+            }
+            let text = truncate(&content, budget);
+            bytes += text.len();
+            out.push(json!({"path": path, "content": text}));
+        }
+        out
+    }
+}
+
 /// Project-relative paths a tool call touches, for nested guidance.
 pub fn touched_paths(tool: &str, arguments: &Value, output: &Value) -> Vec<String> {
     let mut paths = Vec::new();

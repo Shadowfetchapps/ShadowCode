@@ -71,6 +71,9 @@ pub fn always_allow(workspace: &Path) -> String {
 pub fn git_hooks(workspace: &Path) -> String {
     format!("git_hooks:{}", workspace.display())
 }
+/// `session_meta`: `/compact [focus]` asked to shorten the conversation at
+/// the start of its next turn (the value is the focus, maybe empty).
+pub const COMPACT_REQUEST: &str = "compact_request";
 /// `native_meta`: set once `goals.db` from before 0.28 was imported.
 pub const LEGACY_GOALS_IMPORTED: &str = "legacy_goals_imported";
 /// `native_meta`: set once the pre-0.28 background process list was imported.

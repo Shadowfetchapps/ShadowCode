@@ -83,6 +83,10 @@ pub struct TurnOptions {
     /// `--max-cost`: this task's spending limit on paid API models, in US
     /// dollars, instead of `spending.task_usd`.
     pub max_cost_usd: Option<f64>,
+    /// "Only change these": edits outside the @-mentioned files and folders
+    /// ask first (ShadowCode's own agent) or are pointed out after the turn
+    /// (subscription CLIs).
+    pub only_change: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1756,6 +1760,19 @@ impl Engine {
         if let Some(memory) = out_of_memory {
             job.result.as_mut().unwrap()["local_out_of_memory"] = memory;
         }
+        // Heads-ups: tests skipped or removed, CI changed, checks switched
+        // off (`crate::honesty`), from this task's recorded changes.
+        if job.mode == "code" && running.child.is_none() {
+            let flags = crate::honesty::for_task(&self.0.store, &running.workspace, &job.task_id);
+            if let Some(summary) = crate::honesty::summary(&flags) {
+                job.result.as_mut().unwrap()["honesty"] = summary.clone();
+                if let Err(error) =
+                    self.record_event(&job.session_id, Some(&job.task_id), "task.flags", &summary)
+                {
+                    tracing::warn!("task.flags error={error:#}");
+                }
+            }
+        }
         if job.mode == "command" {
             if let Some(event) = self
                 .0
@@ -1899,7 +1916,14 @@ impl Engine {
         )?
         .with_profile(self.0.paths.clone())
         .with_background(self.0.background.clone())
-        .with_extensions(self.tool_extensions(running, &job, &events));
+        .with_extensions(self.tool_extensions(running, &job, &events))
+        .with_scope(
+            running
+                .turn
+                .only_change
+                .then(|| running.turn.mentions.clone())
+                .filter(|m| !m.is_empty()),
+        );
         let result = if let Some(command) = &running.command {
             self.run_command_job(running, &job, &events, &tools, command)
                 .await
@@ -1971,6 +1995,22 @@ impl Engine {
                         summary["changed"] = json!(outcome.paths);
                         summary["ignored_saved"] = json!(outcome.ignored);
                         let _ = events.emit("checkpoint.updated", summary);
+                        // "Only change these": a subscription can't be
+                        // stopped mid-turn, so what it changed elsewhere is
+                        // pointed out afterwards (Review can undo it).
+                        if running.turn.only_change && !running.turn.mentions.is_empty() {
+                            let outside: Vec<&String> = outcome
+                                .paths
+                                .iter()
+                                .filter(|p| !crate::mentions::in_scope(&running.turn.mentions, p))
+                                .collect();
+                            if !outside.is_empty() {
+                                let _ = events.emit(
+                                    "scope.outside",
+                                    json!({"job_id":job.id,"paths":outside}),
+                                );
+                            }
+                        }
                     }
                 }
                 if let Some(text) = outcome.warning(&format!("this {label} turn")) {
@@ -2641,6 +2681,7 @@ impl Engine {
         }
         let mut repeated = HashMap::new();
         let mut observation_loop = autonomy::ObservationLoop::default();
+        let mut stuck = crate::stuck::Detector::default();
         if let Some(workflow) = &job.workflow {
             let mut selected = json!(workflow);
             selected["effective_mode"] = json!(job.mode);
@@ -2690,19 +2731,69 @@ impl Engine {
                 !running.cancel.is_cancelled(),
                 "Task cancelled. Completed changes remain checkpointed."
             );
-            if let Some(compacted) = crate::compaction::compact(
+            // `/compact [focus]` asked to shorten the conversation now.
+            let requested = if step == 0 {
+                let key = crate::store::keys::COMPACT_REQUEST;
+                let focus = self.0.store.session_meta(&job.session_id, key)?;
+                if focus.is_some() {
+                    self.0.store.delete_session_meta(&job.session_id, key)?;
+                }
+                focus
+            } else {
+                None
+            };
+            if let Some(compacted) = crate::compaction::compact_now(
                 &model,
                 &mut messages,
                 &schemas,
                 &running.config,
                 &running.cancel,
+                requested.as_deref(),
             )
             .await?
             {
                 if let Some(usage) = compacted.usage {
                     self.record_usage(running, &events, &job, usage, "compaction")?;
                 }
-                let compaction = compacted.event;
+                let mut compaction = compacted.event;
+                if requested.is_some() {
+                    compaction["requested"] = json!(true);
+                    compaction["focus"] = json!(requested);
+                }
+                // What must survive a shorter conversation: the answers the
+                // user pinned, word for word, and the folder rules already
+                // in use (sent again; they came with dropped tool results).
+                let pins = self.0.store.pins(&job.session_id).unwrap_or_default();
+                let guidance = tools.guidance_again();
+                let mut kept = String::new();
+                if !pins.is_empty() {
+                    kept.push_str("Pinned by the user; keep these word for word:\n");
+                    for pin in pins.iter().rev().take(8) {
+                        let body = crate::tools::truncate(pin["body"].as_str().unwrap_or(""), 3000);
+                        kept.push_str(&format!(
+                            "- {}: {}\n",
+                            pin["label"].as_str().unwrap_or("Pinned"),
+                            body
+                        ));
+                    }
+                }
+                if !guidance.is_empty() {
+                    kept.push_str("\nProject guidance for the folders this task touched, sent again after the conversation was shortened (it does not grant permissions):\n");
+                    for item in &guidance {
+                        kept.push_str(&format!(
+                            "### {}\n{}\n",
+                            item["path"].as_str().unwrap_or(""),
+                            item["content"].as_str().unwrap_or("")
+                        ));
+                    }
+                }
+                if !kept.is_empty() {
+                    messages.push(
+                        json!({"role":"system","content":crate::tools::truncate(&kept, 16_000)}),
+                    );
+                }
+                compaction["pinned"] = json!(pins.len().min(8));
+                compaction["rules_reapplied"] = json!(guidance.len());
                 events.emit("context.compacted", compaction.clone())?;
                 let outcomes = tools
                     .fire_hooks(hooks::context(
@@ -2967,6 +3058,46 @@ impl Engine {
                         && record.usage.total_tokens <= running.config.agent.max_task_tokens,
                     "Task token budget reached; completed changes are retained for review"
                 );
+            }
+            // Models on this computer sometimes write a tool call as text
+            // (`<tool_call>{…}</tool_call>`, a fenced JSON call): read it as
+            // the call it is, for tools offered in this request.
+            if response.tool_calls.is_empty()
+                && !schemas.is_empty()
+                && (crate::config::runs_on_this_computer(&running.config.model)
+                    || running.config.model.provider == "llamacpp")
+            {
+                let names: Vec<&str> = schemas
+                    .iter()
+                    .filter_map(|s| {
+                        s["function"]["name"]
+                            .as_str()
+                            .or_else(|| s["name"].as_str())
+                    })
+                    .collect();
+                if let Some((calls, text)) =
+                    crate::tool_repair::calls_from_text(&response.text, &names)
+                {
+                    response.tool_calls = calls
+                        .into_iter()
+                        .map(|call| crate::models::ToolCall {
+                            id: format!("call_{}", crate::id()),
+                            name: call.name,
+                            arguments: call.arguments,
+                        })
+                        .collect();
+                    response.text = text;
+                    events.emit(
+                        "tool_call.repaired",
+                        json!({"from":"text","count":response.tool_calls.len()}),
+                    )?;
+                }
+            }
+            if response.repaired > 0 {
+                events.emit(
+                    "tool_call.repaired",
+                    json!({"from":"arguments","count":response.repaired}),
+                )?;
             }
             if !response.tool_calls.is_empty() {
                 ensure!(response.tool_calls.len()<=32,"Model requested more than 32 tools in one response; no calls from that response were executed");
@@ -3237,8 +3368,38 @@ impl Engine {
                     }
                 }))
                 .buffered(4);
+                let mut stuck_hit = None;
                 while let Some((call, result)) = results.next().await {
                     let result = result?;
+                    if job.mode == "code" && running.config.agent.stuck_check {
+                        let hit = match call.name.as_str() {
+                            "exec" => stuck.command(
+                                call.arguments["command"].as_str().unwrap_or(""),
+                                result.success,
+                                result.output["exit_code"].as_i64(),
+                                &format!(
+                                    "{}\n{}",
+                                    result.output["stdout"].as_str().unwrap_or(""),
+                                    result.output["stderr"].as_str().unwrap_or("")
+                                ),
+                            ),
+                            "write_file" | "edit_file" | "delete_file" if result.success => {
+                                call.arguments["path"].as_str().and_then(|path| {
+                                    let hash = running
+                                        .workspace
+                                        .snapshot(path)
+                                        .ok()
+                                        .and_then(|s| s.hash)
+                                        .unwrap_or_else(|| "missing".into());
+                                    stuck.file(path, &hash)
+                                })
+                            }
+                            _ => None,
+                        };
+                        if stuck_hit.is_none() {
+                            stuck_hit = hit;
+                        }
+                    }
                     if call.name == "exec" {
                         running
                             .clock
@@ -3277,6 +3438,19 @@ impl Engine {
                     }
                     messages.push(tool_message);
                     self.save_tape(&job.id, &messages).await?;
+                }
+                if let Some(hit) = stuck_hit {
+                    // The user decides: keep going, a hint, another model, or
+                    // stop. The next step waits (`await_steering`).
+                    events.emit(
+                        "agent.stuck",
+                        json!({"job_id":job.id,"kind":hit.kind,"text":hit.text,"detail":hit.detail}),
+                    )?;
+                    if running.roles.is_none() && running.child.is_none() {
+                        if let Err(error) = self.pause_job(&job.id) {
+                            tracing::warn!("stuck.pause error={error:#}");
+                        }
+                    }
                 }
             }
             if !viewed_images.is_empty() {

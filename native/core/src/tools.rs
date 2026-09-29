@@ -90,6 +90,9 @@ pub struct ToolExecutor {
     mcp: crate::mcp::runner::Runner,
     /// Subagents, skills, nested guidance and a child's limits.
     extensions: crate::subagents::ToolExtensions,
+    /// "Only change these": the files and folders edits may touch without
+    /// asking; `None` when the task has no such limit.
+    scope: Option<Vec<crate::mentions::Mention>>,
 }
 impl ToolExecutor {
     pub fn new(
@@ -132,6 +135,7 @@ impl ToolExecutor {
             #[cfg(unix)]
             mcp,
             extensions: Default::default(),
+            scope: None,
         })
     }
     pub fn with_extensions(mut self, extensions: crate::subagents::ToolExtensions) -> Self {
@@ -501,6 +505,56 @@ impl ToolExecutor {
         .ok()?;
         crate::supply_chain::section(&verdicts)
     }
+    /// Folder guidance (AGENTS.md …) delivered so far, read again.
+    pub fn guidance_again(&self) -> Vec<Value> {
+        self.extensions
+            .guidance
+            .as_ref()
+            .map(|g| g.delivered_again(&self.workspace))
+            .unwrap_or_default()
+    }
+    /// Limit edits to these files and folders (edits elsewhere ask).
+    pub fn with_scope(mut self, scope: Option<Vec<crate::mentions::Mention>>) -> Self {
+        self.scope = scope;
+        self
+    }
+    /// Paths a file tool would change outside the task's scope.
+    fn outside_scope(&self, call: &ToolCall) -> Vec<String> {
+        let Some(scope) = &self.scope else {
+            return Vec::new();
+        };
+        let args = &call.arguments;
+        let paths: Vec<String> = match call.name.as_str() {
+            "write_file" | "edit_file" | "delete_file" | "create_directory" => args["path"]
+                .as_str()
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            "move_file" => [&args["src"], &args["dest"]]
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
+            "apply_patch" => {
+                crate::approvals::preview::native_contents(&self.workspace, &call.name, args)
+                    .into_iter()
+                    .map(|(path, _, _)| path)
+                    .collect()
+            }
+            _ => return Vec::new(),
+        };
+        paths
+            .into_iter()
+            .filter_map(|path| {
+                let rel = self
+                    .workspace
+                    .relative(&path)
+                    .ok()?
+                    .to_string_lossy()
+                    .into_owned();
+                (!crate::mentions::in_scope(scope, &rel)).then_some(rel)
+            })
+            .collect()
+    }
     /// The "Always allow in this project" rule that covers `command`.
     fn always_rule(&self, command: &str) -> Result<Option<String>> {
         crate::approvals::always::covering(&self.events.store, &self.workspace.path, command)
@@ -529,6 +583,17 @@ impl ToolExecutor {
         let background_prompt = self.background_prompt(call)?;
         self.preflight_paths(call)?;
         let decision = permissions::check(&self.config.permissions, &call.name, &call.arguments);
+        // "Only change these": an edit elsewhere asks first, even when edits
+        // are allowed.
+        let outside = self.outside_scope(call);
+        let decision = match decision {
+            Decision::Deny(reason) => Decision::Deny(reason),
+            _ if !outside.is_empty() => Decision::Ask(format!(
+                "Outside the files you chose for this task: {}",
+                outside.join(", ")
+            )),
+            decision => decision,
+        };
         #[cfg(unix)]
         let decision = if matches!(call.name.as_str(), "mcp_tools" | "mcp_call") {
             self.mcp
@@ -1127,19 +1192,29 @@ impl ToolExecutor {
                 let before = self.workspace.snapshot(path)?;
                 self.check_observed(path, &before, args["expected_hash"].as_str(), false)?;
                 let text = std::str::from_utf8(before.bytes.as_deref().context("File not found")?)?;
+                let mut loose_note = None;
                 let updated = if let Some(old) = args["old_string"].as_str() {
                     ensure!(!old.is_empty(), "old_string must not be empty");
                     let new = string(args, "new_string")?;
                     let count = text.matches(old).count();
-                    ensure!(count > 0, "old_string not found");
-                    ensure!(
-                        count == 1 || args["replace_all"] == true,
-                        "old_string is ambiguous; include more context"
-                    );
-                    if args["replace_all"] == true {
-                        text.replace(old, new)
+                    if count == 0 && args["replace_all"] != true {
+                        // Close but not exact (line endings, trailing spaces,
+                        // indentation): applied only when it matches one place.
+                        let (updated, how) =
+                            loose_replace(text, old, new).context("old_string not found")?;
+                        loose_note = Some(how);
+                        updated
                     } else {
-                        text.replacen(old, new, 1)
+                        ensure!(count > 0, "old_string not found");
+                        ensure!(
+                            count == 1 || args["replace_all"] == true,
+                            "old_string is ambiguous; include more context"
+                        );
+                        if args["replace_all"] == true {
+                            text.replace(old, new)
+                        } else {
+                            text.replacen(old, new, 1)
+                        }
                     }
                 } else {
                     self.check_observed(path, &before, args["expected_hash"].as_str(), true)?;
@@ -1150,12 +1225,21 @@ impl ToolExecutor {
                             .context("Provide old_string/new_string or hunks")?,
                     )?
                 };
-                self.commit_changes(vec![Change {
+                let mut result = self.commit_changes(vec![Change {
                     path: path.into(),
                     mode: before.mode,
                     before,
                     after: Some(updated.into_bytes()),
-                }])
+                }])?;
+                if let (Some(how), Some(object)) = (loose_note, result.as_object_mut()) {
+                    object.insert(
+                        "note".into(),
+                        json!(format!(
+                            "old_string matched one place {how}; check the result"
+                        )),
+                    );
+                }
+                Ok(result)
             }
             "apply_patch" => {
                 let patch = args["patch"]
@@ -1371,6 +1455,94 @@ impl ToolExecutor {
         Ok(payload)
     }
 }
+/// A way of comparing lines loosely, and its name.
+type LoosePass = (&'static str, fn(&str) -> String);
+
+/// Replace `old` in `text` when it differs only in line endings, trailing
+/// spaces or indentation, and matches exactly one place. Returns the new
+/// text and how it matched; `None` when it matches nowhere or more than once.
+pub fn loose_replace(text: &str, old: &str, new: &str) -> Option<(String, &'static str)> {
+    // Windows line endings in the file, Unix ones in the edit.
+    if text.contains("\r\n") && !old.contains('\r') {
+        let old_crlf = old.replace('\n', "\r\n");
+        if text.matches(&old_crlf).count() == 1 {
+            let new_crlf = new.replace("\r\n", "\n").replace('\n', "\r\n");
+            return Some((
+                text.replacen(&old_crlf, &new_crlf, 1),
+                "with other line endings",
+            ));
+        }
+    }
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let wanted: Vec<&str> = old.trim_end_matches('\n').split('\n').collect();
+    if wanted.is_empty() || wanted.len() > lines.len() {
+        return None;
+    }
+    let body = |line: &str| line.trim_end_matches(['\n', '\r']).to_owned();
+    let passes: [LoosePass; 2] = [
+        ("ignoring spaces at line ends", |l: &str| {
+            l.trim_end().to_owned()
+        }),
+        ("ignoring indentation", |l: &str| l.trim().to_owned()),
+    ];
+    for (how, norm) in passes {
+        let target: Vec<String> = wanted.iter().map(|l| norm(l)).collect();
+        if target.iter().all(|l| l.is_empty()) {
+            return None;
+        }
+        let starts: Vec<usize> = (0..=lines.len() - wanted.len())
+            .filter(|&start| (0..wanted.len()).all(|i| norm(&body(lines[start + i])) == target[i]))
+            .collect();
+        match starts.len() {
+            0 => continue,
+            1 => {}
+            _ => return None,
+        }
+        let start = starts[0];
+        let end = start + wanted.len();
+        let eol = if lines[end - 1].ends_with("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let had_eol = lines[end - 1].ends_with('\n');
+        // Re-indent the new text by the difference on the first real line.
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let first = wanted
+            .iter()
+            .position(|l| !l.trim().is_empty())
+            .unwrap_or(0);
+        let file_line = body(lines[start + first]);
+        let have = file_line[..indent(&file_line)].to_owned();
+        let gave = &wanted[first][..indent(wanted[first])];
+        let replaced: Vec<String> = new
+            .trim_end_matches('\n')
+            .split('\n')
+            .map(|line| {
+                let line = line.trim_end_matches('\r');
+                if how == "ignoring indentation" && !line.trim().is_empty() {
+                    match line.strip_prefix(gave) {
+                        Some(rest) => format!("{have}{rest}"),
+                        None => line.to_owned(),
+                    }
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect();
+        let mut out: String = lines[..start].concat();
+        if !new.is_empty() {
+            out.push_str(&replaced.join(eol));
+            if had_eol {
+                out.push_str(eol);
+            }
+        }
+        out.push_str(&lines[end..].concat());
+        return Some((out, how));
+    }
+    None
+}
+
 pub(crate) fn edit_line_hunks(text: &str, hunks: &[Value]) -> Result<String> {
     ensure!(
         !hunks.is_empty() && hunks.len() <= 128,
@@ -1590,4 +1762,38 @@ pub fn schemas_tiered(tier: DescriptionTier) -> Vec<Value> {
         DescriptionTier::Full => usize::MAX,
     };
     specs.into_iter().map(|(name,description,properties,required)|json!({"type":"function","function":{"name":name,"description":truncate(description, limit),"parameters":{"type":"object","properties":properties,"required":required,"additionalProperties":false}}})).collect()
+}
+
+#[cfg(test)]
+mod loose_tests {
+    use super::loose_replace;
+
+    #[test]
+    fn close_edits_apply_only_when_they_match_one_place() {
+        let crlf = "fn a() {\r\n    1\r\n}\r\n";
+        let (out, how) = loose_replace(crlf, "    1\n", "    2\n").unwrap();
+        assert_eq!(out, "fn a() {\r\n    2\r\n}\r\n");
+        assert_eq!(how, "with other line endings");
+        let trailing = "let a = 1;   \nlet b = 2;\n";
+        let (out, how) =
+            loose_replace(trailing, "let a = 1;\nlet b = 2;", "let a = 3;\nlet b = 4;").unwrap();
+        assert_eq!(out, "let a = 3;\nlet b = 4;\n");
+        assert_eq!(how, "ignoring spaces at line ends");
+        let nested = "impl A {\n        fn f() {\n            run();\n        }\n}\n";
+        let (out, how) = loose_replace(
+            nested,
+            "fn f() {\n    run();\n}",
+            "fn f() {\n    run();\n    done();\n}",
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "impl A {\n        fn f() {\n            run();\n            done();\n        }\n}\n"
+        );
+        assert_eq!(how, "ignoring indentation");
+        // Two places match: refused rather than guessed.
+        assert!(loose_replace("  x = 1\n    x = 1\n", "x = 1", "x = 2").is_none());
+        // Nothing close: refused.
+        assert!(loose_replace("a\nb\n", "c", "d").is_none());
+    }
 }

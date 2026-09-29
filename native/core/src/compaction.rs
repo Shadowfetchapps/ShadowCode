@@ -86,6 +86,7 @@ pub fn summary_request(
     dropped: &[Value],
     previous: Option<&str>,
     context_limit: usize,
+    focus: Option<&str>,
 ) -> Vec<Value> {
     let budget = (context_limit / 2).min(24_000) * 3;
     let lines: Vec<String> = dropped.iter().map(render).collect();
@@ -116,6 +117,12 @@ pub fn summary_request(
             truncate(previous, 3000)
         ));
     }
+    if let Some(focus) = focus.map(str::trim).filter(|f| !f.is_empty()) {
+        prompt.push_str(&format!(
+            "The user asked to keep this in particular: {}\n\n",
+            truncate(focus, 1000)
+        ));
+    }
     prompt.push_str("Conversation excerpt, oldest first:\n");
     prompt.push_str(&excerpt);
     vec![
@@ -137,10 +144,29 @@ pub async fn compact(
     config: &Config,
     cancel: &CancellationToken,
 ) -> Result<Option<Outcome>> {
+    compact_now(model, messages, schemas, config, cancel, None).await
+}
+
+/// Share of the context a `/compact` shortens the conversation to.
+const REQUESTED_RATIO: f64 = 0.2;
+
+/// [`compact`], or with `requested` (from `/compact [focus]`) shorten the
+/// conversation now, whatever its size, keeping the focus in the summary.
+pub async fn compact_now(
+    model: &ModelClient,
+    messages: &mut Vec<Value>,
+    schemas: &[Value],
+    config: &Config,
+    cancel: &CancellationToken,
+    requested: Option<&str>,
+) -> Result<Option<Outcome>> {
     let limit = config.model.context_limit;
-    let Some(compacted) =
-        context::compact_detailed(messages, schemas, limit, config.agent.compact_ratio)?
-    else {
+    let ratio = if requested.is_some() {
+        REQUESTED_RATIO.min(config.agent.compact_ratio)
+    } else {
+        config.agent.compact_ratio
+    };
+    let Some(compacted) = context::compact_detailed(messages, schemas, limit, ratio)? else {
         return Ok(None);
     };
     let event = compacted.details;
@@ -160,6 +186,7 @@ pub async fn compact(
         &compacted.dropped,
         compacted.previous_summary.as_deref(),
         limit,
+        requested,
     );
     let started = Instant::now();
     let attempt = cancel.child_token();
@@ -240,7 +267,7 @@ mod tests {
             dropped.push(json!({"role":"assistant","content":"","tool_calls":[{"id":format!("c{i}"),"type":"function","function":{"name":"read_file","arguments":format!("{{\"path\":\"src/f{i}.rs\"}}")}}]}));
             dropped.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":"read_file","content":"x".repeat(5000)}));
         }
-        let request = summary_request(&dropped, Some("Earlier: parser half done"), 8192);
+        let request = summary_request(&dropped, Some("Earlier: parser half done"), 8192, None);
         assert_eq!(request.len(), 2);
         let prompt = request[1]["content"].as_str().unwrap();
         assert!(prompt.len() <= 4096 * 3 + 4000, "{}", prompt.len());

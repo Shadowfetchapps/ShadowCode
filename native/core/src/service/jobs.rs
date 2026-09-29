@@ -9,6 +9,8 @@ use crate::store::keys;
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct StartBody {
+    /// "Only change these": keep edits to the @-mentioned files and folders.
+    only_change: Flag,
     workspace: Text,
     task: Text,
     purpose: Text,
@@ -406,6 +408,7 @@ impl Service {
             mentions: crate::mentions::validate(&Workspace::open(&workspace)?, mentions)?,
             roles: body.roles.is_true(),
             max_cost_usd: crate::spending::parse_max_cost(body.max_cost_usd.as_ref())?,
+            only_change: body.only_change.is_true(),
         };
         let mut limit: Option<crate::config::PermissionLevel> = body
             .permission_limit

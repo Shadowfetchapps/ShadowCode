@@ -54,7 +54,16 @@ const BUILTINS: &[(&str, &str, &str)] = &[
         "Open a saved conversation by unique ID prefix",
         "<id>",
     ),
-    ("pin", "Bookmark the latest response", "[label]"),
+    (
+        "pin",
+        "Bookmark the latest response (kept word for word when the conversation is shortened)",
+        "[label]",
+    ),
+    (
+        "compact",
+        "Shorten this conversation at its next message",
+        "[what to keep]",
+    ),
     ("cost", "Show recorded tokens; prices are not assumed", ""),
     ("context", "Show context usage and the configured limit", ""),
     ("skills", "Open reusable project skills", ""),
@@ -361,6 +370,21 @@ impl Service {
                 let mut result = card("Conversation resumed", "");
                 result["metadata"]["session_id"] = json!(id);
                 result
+            }
+            "compact" => {
+                let sid = sid
+                    .as_ref()
+                    .context("Start a conversation before shortening it")?;
+                let focus = crate::tools::truncate(args.trim(), 1000).to_owned();
+                store.set_session_meta(sid, crate::store::keys::COMPACT_REQUEST, &focus)?;
+                card(
+                    "Compact",
+                    &if focus.is_empty() {
+                        "The conversation will be shortened when you send the next message: earlier steps become a summary, and pinned answers and folder rules are kept.".to_owned()
+                    } else {
+                        format!("The conversation will be shortened when you send the next message, keeping: {focus}. Pinned answers and folder rules are kept too.")
+                    },
+                )
             }
             "pin" => {
                 let sid = sid

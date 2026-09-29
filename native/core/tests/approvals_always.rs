@@ -183,3 +183,75 @@ async fn risky_commands_are_explained_and_never_offered_always_allow() {
     assert!(!asking.await.unwrap().success);
     assert!(always::list(&f.store, &f.project).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn only_change_these_asks_before_editing_other_files() {
+    use shadowcode_core::mentions::Mention;
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir_all(project.join("src/ui")).unwrap();
+    fs::write(project.join("src/ui/button.ts"), "export const a = 1;\n").unwrap();
+    fs::write(project.join("README.md"), "# Demo\n").unwrap();
+    let store = Arc::new(Store::open(&root.path().join("db")).unwrap());
+    let session = store.create_session(&project, "mock", "").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let task = store.create_task(&session, "t").unwrap();
+    let (sender, _) = tokio::sync::broadcast::channel(100);
+    let mut config = Config::default();
+    config.permissions.mode = PermissionMode::AllowEdits;
+    let tools = Arc::new(
+        ToolExecutor::new(
+            Arc::new(Workspace::open(&project).unwrap()),
+            config,
+            ApprovalHub::default(),
+            TaskEvents {
+                store: store.clone(),
+                session_id: session.clone(),
+                task_id: task,
+                sender,
+            },
+            CancellationToken::new(),
+        )
+        .unwrap()
+        .with_scope(Some(vec![Mention {
+            path: "src/ui".into(),
+            kind: "dir".into(),
+        }])),
+    );
+    let write = |path: &str| {
+        let tools = tools.clone();
+        let path = path.to_owned();
+        tokio::spawn(async move {
+            tools
+                .execute(ToolCall {
+                    id: shadowcode_core::id(),
+                    name: "write_file".into(),
+                    arguments: json!({"path":path,"content":"changed\n"}),
+                })
+                .await
+                .unwrap()
+        })
+    };
+    // Inside the chosen folder: allowed as usual (edits are allowed).
+    let inside = write("src/ui/new.ts").await.unwrap();
+    assert!(inside.success, "{}", inside.error);
+    assert!(tools.approvals.list(None).is_empty());
+    // Elsewhere: asks, and says why.
+    let outside = write("README.md");
+    let card = pending(&tools).await.expect("asks");
+    assert_eq!(
+        card.reason,
+        "Outside the files you chose for this task: README.md"
+    );
+    tools
+        .approvals
+        .answer(&card.id, &session, Answer::deny())
+        .unwrap();
+    assert!(!outside.await.unwrap().success);
+    assert_eq!(
+        fs::read_to_string(project.join("README.md")).unwrap(),
+        "# Demo\n"
+    );
+}
