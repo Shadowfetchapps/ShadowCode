@@ -392,6 +392,19 @@ async fn staged_review_is_read_only_and_reads_messy_findings_onto_hunks() {
         listed["second_opinions"][0]["findings"][0]["status"],
         "dismissed"
     );
+    // Lists leave the reviewed diff out unless asked for it.
+    assert_eq!(listed["second_opinions"][0]["diff"], json!([]));
+    let with_diff = call(
+        service,
+        "GET",
+        &format!("/api/second-opinions?workspace={workspace}&source=staged&diff=1&limit=1"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        with_diff["second_opinions"][0]["diff"][1]["path"],
+        "lib.txt"
+    );
 
     // "Review before every commit" is a per-project preference.
     let prefs = call(

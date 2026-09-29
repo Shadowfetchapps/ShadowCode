@@ -240,14 +240,19 @@ export function installFakeSecondOpinions() {
     if (!p.startsWith("/api/second-opinions")) return undefined;
     let m: RegExpMatchArray | null;
     if (p === "/api/second-opinions" && method === "GET")
+      // Like the engine: at most `limit`, and the reviewed diff only when
+      // asked for.
       return {
         workspace,
-        second_opinions: records.filter(
-          (r) =>
-            (!q.get("session_id") || r.session_id === q.get("session_id")) &&
-            (!q.get("task_id") || r.task_id === q.get("task_id")) &&
-            (!q.get("source") || r.source === q.get("source")),
-        ),
+        second_opinions: records
+          .filter(
+            (r) =>
+              (!q.get("session_id") || r.session_id === q.get("session_id")) &&
+              (!q.get("task_id") || r.task_id === q.get("task_id")) &&
+              (!q.get("source") || r.source === q.get("source")),
+          )
+          .slice(0, Number(q.get("limit") || 20))
+          .map((r) => (q.get("diff") === "1" ? r : { ...r, diff: [] })),
       };
     if (p === "/api/second-opinions" && method === "POST") return start(body);
     if (p === "/api/second-opinions/options") {

@@ -102,6 +102,11 @@ export type OpinionScope = {
   session_id?: string;
   task_id?: string;
   source?: "staged" | "task";
+  /** Lists only: at most this many records (default 20). */
+  limit?: string;
+  /** Lists only: include each record's reviewed diff (`"1"`); lists
+   * leave it out otherwise, since only the Git tab shows it. */
+  diff?: "1";
 };
 
 const query = (params: Record<string, string | undefined>) => {

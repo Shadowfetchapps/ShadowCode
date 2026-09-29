@@ -434,7 +434,7 @@ function useTaskOpinion(
   files: ReviewFile[] | null,
 ) {
   const scope = useMemo(
-    () => ({ task_id: taskId, source: "task" as const }),
+    () => ({ task_id: taskId, source: "task" as const, limit: "5" }),
     [taskId],
   );
   const optionScope = useMemo(() => ({ task_id: taskId }), [taskId]);

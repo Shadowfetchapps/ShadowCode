@@ -1034,9 +1034,10 @@ written when a request is refused.
   change did. `session_id` (staged reviews) is the conversation the user is
   in; without it, the conversation of the latest turn in the project that
   changed files.
-- `GET /api/second-opinions?workspace=&session_id=&task_id=&source=&limit=20`
+- `GET /api/second-opinions?workspace=&session_id=&task_id=&source=&limit=20&diff=`
   → `{workspace, second_opinions: Record[]}` newest first; running records
-  are brought up to date with their jobs.
+  are brought up to date with their jobs. Records come without their
+  reviewed `diff` (`[]`) unless `diff=1`.
 - `GET /api/second-opinions/{id}` → the record. `POST …/{id}/cancel` stops a
   running one.
 - `POST /api/second-opinions/{id}/findings/{finding} {status:

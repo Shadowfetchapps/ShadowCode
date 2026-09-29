@@ -93,9 +93,20 @@ impl Service {
                     Some(call.q("source")).filter(|s| !s.is_empty()),
                     call.limit(20, opinion::INDEX_LIMIT),
                 )?;
+                // The reviewed diff (up to 60 kB each) only when asked for:
+                // lists are read every second or two while a review runs.
+                let with_diff = call.q("diff") == "1";
                 Ok(json!({
                     "workspace": workspace,
-                    "second_opinions": records.iter().map(opinion::Record::to_json).collect::<Vec<_>>(),
+                    "second_opinions": records
+                        .into_iter()
+                        .map(|mut record| {
+                            if !with_diff {
+                                record.diff.clear();
+                            }
+                            record.to_json()
+                        })
+                        .collect::<Vec<_>>(),
                 }))
             }
             ("GET", ["options"]) => {

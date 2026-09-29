@@ -734,7 +734,16 @@ function useStagedReview({
 }) {
   const enabled = Boolean(workspace && repo);
   const scope = useMemo(
-    () => (enabled ? { workspace, source: "staged" as const } : null),
+    () =>
+      enabled
+        ? {
+            workspace,
+            source: "staged" as const,
+            // The latest review, with the diff its findings point into.
+            limit: "3",
+            diff: "1" as const,
+          }
+        : null,
     [enabled, workspace],
   );
   const optionScope = useMemo(
