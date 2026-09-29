@@ -4,7 +4,7 @@ import type { BillingMode, PickerTarget, UsageSnapshot } from "./lib/picker";
 import type { ContextAttachment } from "./lib/pendingAttachments";
 import type { PreviewOpened, PreviewServer } from "./lib/preview";
 
-// --- 0.28 contract: picker, accounts, local models (docs/API_CONTRACT_0.28.md)
+// --- Picker, accounts, local models (docs/API_CONTRACT.md)
 
 export type VendorModel = {
   id: string;

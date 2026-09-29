@@ -206,6 +206,13 @@ fn spawn_limit_fallback(engine: Engine, record: Job) {
 impl Engine {
     pub fn open(paths: AppPaths) -> Result<Self> {
         let profile_lock = Arc::new(paths.lock()?);
+        // A restore or reset scheduled in Settings › Your data (or by
+        // `shadowcode restore|reset`) finishes here: the lock is held and the
+        // database is not open yet. A failure is recorded for Settings and
+        // the profile opens as it is.
+        if let Err(error) = crate::data::apply_pending(&paths) {
+            tracing::warn!("scheduled data operation failed: {error:#}");
+        }
         let store = Arc::new(Store::open(&paths.database())?);
         store.recover_jobs()?;
         store.recover_goals()?;

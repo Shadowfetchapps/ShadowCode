@@ -110,4 +110,4 @@ bundled WebKitGTK and taken from the host like before) and `libasound.so.2`
 ## API
 
 `/api/voice/*` routes are listed in the
-[API contract](API_CONTRACT_0.28.md#voice-input).
+[API contract](API_CONTRACT.md#voice).

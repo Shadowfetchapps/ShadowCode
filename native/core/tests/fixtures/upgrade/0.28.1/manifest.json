@@ -1,0 +1,58 @@
+{
+  "branch_session_id": "3e8886ad50d144bf8b6136d9184aff3c",
+  "files": [
+    "config/config.yaml",
+    "config/secrets.env",
+    "state/last-workspace.txt"
+  ],
+  "goal_id": "6a2034b101f14497913575847d782431",
+  "jobs": [
+    {
+      "id": "0bc8f562e4f2478aa96ff7e738b8b6a8",
+      "status": "completed",
+      "task_id": "33329297519b4701939546c4cf424be2"
+    },
+    {
+      "id": "f17e81ee502d44a7a2c78fa8ea3d84a8",
+      "status": "completed",
+      "task_id": "eb57434851ea4541838c47fa3940cd52"
+    }
+  ],
+  "pin_id": 1,
+  "project_note": "Fixture project note",
+  "row_counts": {
+    "background_processes": 0,
+    "desktop_jobs": 4,
+    "events": 72,
+    "file_changes": 1,
+    "goal_runs": 1,
+    "goals": 2,
+    "job_messages": 24,
+    "milestones": 4,
+    "models": 0,
+    "native_meta": 0,
+    "pins": 2,
+    "projects": 1,
+    "queued_tasks": 0,
+    "session_meta": 2,
+    "sessions": 4,
+    "task_notes": 1,
+    "tasks": 4,
+    "usage_snapshots": 1
+  },
+  "run_goal_id": "f768d89b93fa4898aa859d28029ed6ee",
+  "schema_version": 25,
+  "second_session_id": "368ab42722164255864fd31fb2257c9a",
+  "session_id": "93ec2cb13eff4d848416d0ce9242a4aa",
+  "skipped": [],
+  "task_note": {
+    "note": "Fixture task note",
+    "task_id": "33329297519b4701939546c4cf424be2"
+  },
+  "usage_snapshot": {
+    "account": "fixture@example.invalid",
+    "pool": "primary",
+    "vendor": "codex"
+  },
+  "version": "0.28.1"
+}

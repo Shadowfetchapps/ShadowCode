@@ -1,6 +1,6 @@
 import { request } from "./transport";
 
-/** The drawer's Git panel API (`/api/git…`, docs/API_CONTRACT_0.28.md).
+/** The drawer's Git panel API (`/api/git…`, docs/API_CONTRACT.md).
  * Staging and committing stay on `api.gitAdd` / `api.gitCommit`. */
 
 export type RemoteInfo = {

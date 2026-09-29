@@ -3,8 +3,10 @@
 ShadowCode is a Rust engine (`native/core`), a Tauri desktop shell
 (`src-tauri`) and a React interface (`ui/`) embedded in one executable. Read
 [ARCHITECTURE.md](ARCHITECTURE.md) and the UI contract in
-[docs/API_CONTRACT_0.28.md](docs/API_CONTRACT_0.28.md) before changing a route
-or an event.
+[docs/API_CONTRACT.md](docs/API_CONTRACT.md) before changing a route
+or an event. Within 1.x the contract only grows: follow its
+[versioning policy](docs/API_CONTRACT.md#versioning-policy), and add every new
+route to its route index (`native/core/tests/api_contract.rs` checks it).
 
 ## Setup
 

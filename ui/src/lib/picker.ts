@@ -1,5 +1,5 @@
 /** Composer picker rows exactly as GET /api/picker returns them
- * (docs/API_CONTRACT_0.28.md). Nothing here invents availability or usage.
+ * (docs/API_CONTRACT.md). Nothing here invents availability or usage.
  * Three groups: subscriptions (vendor CLIs), API keys (OpenRouter, billed per
  * token) and models on this computer. */
 

@@ -1,6 +1,6 @@
 import { request } from "./transport";
 
-/** Scheduled automations (`/api/automations…`, docs/API_CONTRACT_0.28.md
+/** Scheduled automations (`/api/automations…`, docs/API_CONTRACT.md
  * and docs/AUTOMATIONS.md). Times are Unix seconds. */
 
 export type Schedule =

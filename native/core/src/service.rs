@@ -19,7 +19,9 @@
 //!    slow write never stalls an async worker; handlers that await engine or
 //!    process futures stay async.
 //! 4. Declare the module below and add its families to the table in
-//!    `dispatch`. Keep response shapes in `docs/API_CONTRACT_0.28.md`.
+//!    `dispatch`. Document every route in `docs/API_CONTRACT.md` (its route
+//!    index is checked by `native/core/tests/api_contract.rs`) and give the
+//!    family a remote-access decision in `remote/policy.rs`.
 use crate::{
     checkpoint,
     config::{self, Config, ModelConfig, PermissionLevel},
@@ -56,6 +58,7 @@ mod code_intel;
 mod commands;
 mod compare;
 mod composer;
+mod data;
 mod diagnostic_export;
 mod extensions;
 mod feed;
@@ -304,6 +307,7 @@ impl Service {
             "code-intel" => self.code_intel_routes(&call).await,
             "voice" => self.voice_routes(&call).await,
             "workspace" => self.workspace_routes(&call).await,
+            "data" => self.data_routes(&call).await,
             "config" | "routing" | "onboarding" | "health" | "version" | "doctor"
             | "diagnostic-exports" | "guardian" => self.settings_routes(&call).await,
             "about" | "updates" => self.about_routes(&call).await,

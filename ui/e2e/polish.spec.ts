@@ -33,6 +33,7 @@ const SECTIONS = [
   "Permissions & network",
   "Appearance",
   "Remote access",
+  "Your data",
   "Advanced",
   "About",
 ];
@@ -61,7 +62,7 @@ async function axeClean(page: Page, include?: string) {
 test("every Settings page shows its content from the top, light and dark", async ({
   page,
 }) => {
-  // Two themes × fifteen pages, each with an axe pass.
+  // Two themes × sixteen pages, each with an axe pass.
   test.setTimeout(150_000);
   for (const theme of ["light", "dark"]) {
     await page.evaluate(

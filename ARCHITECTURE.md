@@ -32,7 +32,7 @@ runs in-process with the window. There is no HTTP server between them.
 - **Desktop** (`src-tauri/src/main.rs`): hosts the React build (`ui/dist`,
   embedded) in the system WebKit webview and exposes one IPC command, `api`,
   which forwards `{method, path, body}` to the `Service`. The UI contract is
-  [docs/API_CONTRACT_0.28.md](docs/API_CONTRACT_0.28.md). A window can also
+  [docs/API_CONTRACT.md](docs/API_CONTRACT.md). A window can also
   attach to an engine already running in a headless `serve` or TUI process.
   Closing an attached window leaves that engine's work running.
 - **Service** (`service.rs`): routes requests (`/api/picker`,

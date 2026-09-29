@@ -1,0 +1,69 @@
+{
+  "automation_id": "c8a3440f1a4345a79d0637ec3e6c34f0",
+  "automation_run_id": "3b068bdb5cae44929c3859c5390a227e",
+  "branch_session_id": "101189d488334997a0cbdde829afd5fb",
+  "compare_id": "c0ffee00c0ffee00c0ffee00c0ffee00",
+  "editor_draft": {
+    "path": "README.md",
+    "revision": "389a9e79b8ac4ec99e72b2a9a107900f"
+  },
+  "files": [
+    "config/config.yaml",
+    "config/secrets.env",
+    "state/last-workspace.txt"
+  ],
+  "goal_id": "5a5a1a63b7634d6c8ad553ad7a81377b",
+  "jobs": [
+    {
+      "id": "3aaa9b90c2fc44fcb3574041c8aadf5a",
+      "status": "completed",
+      "task_id": "f16b1db76a46451bb7bc577b094f362d"
+    },
+    {
+      "id": "39f8d1af3cd649688eebe51b35b2ac52",
+      "status": "completed",
+      "task_id": "f77875a9fd844d259c224fe4d79a6256"
+    }
+  ],
+  "paused_automation_id": "cad5cc92bfca4a318c5724ec53dc8e69",
+  "pin_id": 1,
+  "project_note": "Fixture project note",
+  "row_counts": {
+    "automation_runs": 1,
+    "automations": 2,
+    "background_processes": 0,
+    "desktop_jobs": 5,
+    "editor_drafts": 1,
+    "events": 148,
+    "file_changes": 1,
+    "goal_runs": 1,
+    "goals": 2,
+    "job_messages": 29,
+    "milestones": 4,
+    "models": 0,
+    "native_meta": 3,
+    "pins": 2,
+    "projects": 1,
+    "queued_tasks": 0,
+    "session_meta": 6,
+    "sessions": 5,
+    "task_notes": 1,
+    "tasks": 5,
+    "usage_snapshots": 1
+  },
+  "run_goal_id": "3469eddb9e974847bb9f3cd16361d27e",
+  "schema_version": 27,
+  "second_session_id": "f03164a9df4141748c1150aece4e83e2",
+  "session_id": "167164ad64c7409896188e017c05e621",
+  "skipped": [],
+  "task_note": {
+    "note": "Fixture task note",
+    "task_id": "f16b1db76a46451bb7bc577b094f362d"
+  },
+  "usage_snapshot": {
+    "account": "fixture@example.invalid",
+    "pool": "primary",
+    "vendor": "codex"
+  },
+  "version": "0.34.2"
+}

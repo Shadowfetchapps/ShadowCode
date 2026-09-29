@@ -292,19 +292,26 @@ impl Store {
             fs::create_dir_all(parent)?;
         }
         let existed = path.exists();
+        // Downgrade protection: a database from a newer version is refused
+        // from its file header, before SQLite opens it for writing, so the
+        // newer version finds its data exactly as it left it.
+        if let Some(version) = header_user_version(path).filter(|v| *v > SCHEMA_VERSION) {
+            let writer = open_immutable(path).ok().and_then(|db| last_writer(&db));
+            return Err(newer_database(version, writer));
+        }
         let mut connection = Connection::open(path)?;
+        connection.busy_timeout(Duration::from_secs(10))?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version > SCHEMA_VERSION {
+            // Only when the header was stale (a newer version's unmerged log).
+            return Err(newer_database(version, last_writer(&connection)));
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         }
-        connection.busy_timeout(Duration::from_secs(10))?;
         connection.pragma_update(None, "foreign_keys", true)?;
-        let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        ensure!(
-            version <= SCHEMA_VERSION,
-            "This database was created by a newer ShadowCode version"
-        );
         if version < SCHEMA_VERSION {
             if existed {
                 let backup_path = path.with_extension(format!("pre-native-{}.sqlite", id()));
@@ -339,6 +346,15 @@ impl Store {
         }
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
+        // The last version that opened this profile, so an older version
+        // that refuses it can name the version to use. Best effort: it only
+        // improves a message.
+        if let Err(error) = connection.execute(
+            "INSERT INTO native_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value<>excluded.value",
+            params![keys::APP_VERSION, crate::VERSION],
+        ) {
+            tracing::warn!("could not record the app version: {error}");
+        }
         let store = Self {
             path: path.into(),
             connection: Mutex::new(connection),
@@ -347,6 +363,59 @@ impl Store {
         store.import_legacy_background()?;
         Ok(store)
     }
+}
+
+/// `PRAGMA user_version` read from the file header (bytes 60–63), or
+/// `None` for a missing, short or non-SQLite file.
+fn header_user_version(path: &Path) -> Option<i64> {
+    use std::io::Read;
+    let mut header = [0u8; 64];
+    fs::File::open(path).ok()?.read_exact(&mut header).ok()?;
+    (&header[..16] == b"SQLite format 3\0").then(|| {
+        i64::from(i32::from_be_bytes([
+            header[60], header[61], header[62], header[63],
+        ]))
+    })
+}
+
+/// Open a SQLite file so that nothing is ever written to it: no journal
+/// recovery, no write-ahead log, no locks.
+pub(crate) fn open_immutable(path: &Path) -> Result<Connection> {
+    let mut uri = String::from("file:");
+    for byte in path.to_string_lossy().bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-_.~".contains(&byte) {
+            uri.push(byte as char);
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri.push_str("?immutable=1");
+    Ok(Connection::open_with_flags(
+        uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?)
+}
+
+fn last_writer(db: &Connection) -> Option<String> {
+    db.query_row(
+        "SELECT value FROM native_meta WHERE key=?",
+        [keys::APP_VERSION],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .filter(|v| v.len() <= 64 && v.chars().all(|c| c.is_ascii_graphic()))
+}
+
+fn newer_database(version: i64, writer: Option<String>) -> anyhow::Error {
+    let writer = writer
+        .map(|v| format!("ShadowCode {v}"))
+        .unwrap_or_else(|| "a newer ShadowCode".into());
+    anyhow::anyhow!(
+        "This profile's database was last used by {writer} (database format {version}); this version ({}) reads formats up to {SCHEMA_VERSION}. Nothing was changed. Open it with that version or newer, or restore a backup made by this version (Settings › Your data, or `shadowcode restore PATH`).",
+        crate::VERSION
+    )
 }
 
 /// The flat pre-0.28 schema (user_version 24): every table plus the columns

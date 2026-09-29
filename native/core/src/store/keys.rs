@@ -40,6 +40,9 @@ pub fn worktree_task_record(id: &str) -> String {
 pub fn worktree_task_index(workspace: &Path) -> String {
     format!("worktree_task_index:{}", workspace.display())
 }
+/// `native_meta`: the ShadowCode version that last opened this database
+/// (since 1.0). An older version that refuses a newer database names it.
+pub const APP_VERSION: &str = "app_version";
 /// `native_meta`: set once `goals.db` from before 0.28 was imported.
 pub const LEGACY_GOALS_IMPORTED: &str = "legacy_goals_imported";
 /// `native_meta`: set once the pre-0.28 background process list was imported.
@@ -116,6 +119,7 @@ mod tests {
             "worktree_task_index:/home/u/project"
         );
         assert_eq!(native_session("codex"), "native_session:codex");
+        assert_eq!(APP_VERSION, "app_version");
         assert_eq!(rewind_undo("ab12"), "rewind_undo:ab12");
         assert_eq!(subagent_run("ab12"), "subagent:ab12");
         assert_eq!(subagent_index("s1"), "subagent_index:s1");

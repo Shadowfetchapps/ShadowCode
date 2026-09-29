@@ -12,6 +12,9 @@
 //!   are refused unless the user turned on "Allow
 //!   terminals over remote access". Agent shell commands still go through
 //!   the usual approvals.
+//! - Your data (`/api/data…`: backups, restore, repair, reset) is managed
+//!   only on this computer: a backup can hold API keys, and a restore or
+//!   reset replaces everything.
 //! - The computer's microphone (`/api/voice/start`, `recording`, `stop`,
 //!   `cancel`) is never switched on remotely; a remote client may still send
 //!   its own recording to `/api/voice/transcribe`.
@@ -43,6 +46,7 @@ pub const REDACTED_INPUT: &str =
 pub const MICROPHONE: &str =
     "The microphone of the computer running ShadowCode can't be switched on over remote access.";
 pub const INVALID_PATH: &str = "Invalid application command path";
+pub const DATA_LOCAL: &str = "Backups, restore, repair and reset are available only in Settings › Your data on the computer running ShadowCode.";
 pub const PREVIEW_LOCAL: &str =
     "The app preview works only in the ShadowCode window on the computer running your dev server.";
 
@@ -144,6 +148,7 @@ pub fn check(path: &str, body: &Value, access: &Access, paths: &AppPaths) -> Res
     let family = parts.first().copied().unwrap_or("");
     match family {
         "remote" | "views" | "runtime" | "owned-jobs" => return Err(Refusal(MANAGED_LOCALLY)),
+        "data" => return Err(Refusal(DATA_LOCAL)),
         "workspace"
             if matches!(
                 parts.get(1).copied(),
@@ -370,6 +375,10 @@ mod tests {
         ("hooks", "allowed: activation is hash-pinned"),
         ("sqlite", "allowed: read-only inspection"),
         ("memory", "allowed"),
+        (
+            "data",
+            "refused: backups can hold API keys; restore and reset replace everything",
+        ),
     ];
 
     #[test]
@@ -405,7 +414,7 @@ mod tests {
         let access = Access {
             allow_terminals: false,
         };
-        for family in ["remote", "preview", "terminals", "background"] {
+        for family in ["remote", "preview", "terminals", "background", "data"] {
             assert!(
                 check(&format!("/api/{family}"), &Value::Null, &access, &paths).is_err(),
                 "{family}"

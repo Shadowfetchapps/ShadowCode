@@ -1,6 +1,6 @@
 /**
  * Deterministic fake engine for UI tests. It implements the subset of
- * docs/API_CONTRACT_0.28.md the window uses and installs itself as
+ * docs/API_CONTRACT.md the window uses and installs itself as
  * window.__SHADOW_TEST_TRANSPORT__. The app honours that global only in builds
  * made with VITE_SHADOW_TEST_TRANSPORT=1 (see src/lib/transport.ts).
  *
@@ -305,6 +305,33 @@ export function installFakeBackend(options: FakeOptions = {}) {
         configured: false,
         error: null,
       },
+    },
+    data: {
+      pick: null as string | null,
+      pending: null as Json | null,
+      last: null as Json | null,
+      backups: [
+        {
+          path: "/home/dev/.local/share/shadow-agent/backups/shadowcode-backup-20260928-093000",
+          name: "shadowcode-backup-20260928-093000",
+          app_version: "0.34.2",
+          schema_version: 27,
+          created_at: now() - 86_400,
+          includes_secrets: false,
+          reason: "manual",
+          bytes: 2_480_000,
+        },
+      ] as Json[],
+      upgrade_copies: [
+        {
+          path: "/home/dev/.local/state/shadow-agent/shadow-agent.pre-native-0a1b2c.sqlite",
+          name: "shadow-agent.pre-native-0a1b2c.sqlite",
+          bytes: 2_048_000,
+          created_at: now() - 7 * 86_400,
+          schema_version: 26,
+        },
+      ] as Json[],
+      reset_folders: [] as string[],
     },
     config: {
       model: { default: "mock", provider: "mock", name: "mock-coder" },
@@ -3474,6 +3501,198 @@ export function installFakeBackend(options: FakeOptions = {}) {
       return remoteView();
     }
     if (path === "/api/remote/ntfy/test") return { ok: true };
+    if (path.startsWith("/api/data")) {
+      const d = state.data;
+      const folders = {
+        config: "/home/dev/.config/shadow-agent",
+        data: "/home/dev/.local/share/shadow-agent",
+        state: "/home/dev/.local/state/shadow-agent",
+      };
+      const backupsFolder = `${folders.data}/backups`;
+      const manifest = (b: Json) => ({
+        format: "shadowcode-backup",
+        format_version: 1,
+        app_version: b.app_version,
+        schema_version: b.schema_version,
+        created_at: b.created_at,
+        includes_secrets: b.includes_secrets,
+        reason: b.reason,
+        files: [
+          {
+            path: "state/shadow-agent.db",
+            bytes: b.bytes,
+            sha256: "0".repeat(64),
+          },
+        ],
+        raw_copy: false,
+      });
+      if (path === "/api/data" && method === "GET")
+        return {
+          folders,
+          database: {
+            path: `${folders.state}/shadow-agent.db`,
+            bytes: 2_531_328,
+            wal_bytes: 32_768,
+            schema_version: 27,
+            supported_schema_version: 27,
+          },
+          app_version: "0.34.2",
+          backups_folder: backupsFolder,
+          backups: [...d.backups].sort(
+            (a: Json, b: Json) => b.created_at - a.created_at,
+          ),
+          upgrade_copies: d.upgrade_copies,
+          reset_folders: d.reset_folders,
+          kept_on_reset: [
+            "backups",
+            "managed-worktrees",
+            "parallel-worktrees",
+            "local-models",
+            "voice",
+            "code-intel",
+          ],
+          pending: d.pending,
+          last_operation: d.last,
+        };
+      if (path === "/api/data/backups" && method === "POST") {
+        const stamp = `2026092${d.backups.length}-120000`;
+        const b = {
+          path: `${body?.folder || backupsFolder}/shadowcode-backup-${stamp}`,
+          name: `shadowcode-backup-${stamp}`,
+          app_version: "0.34.2",
+          schema_version: 27,
+          created_at: now(),
+          includes_secrets: Boolean(body?.include_secrets),
+          reason: "manual",
+          bytes: 2_500_000,
+        };
+        if (!body?.folder) d.backups.push(b);
+        return { path: b.path, manifest: manifest(b) };
+      }
+      if (path === "/api/data/backups/inspect") {
+        const target = String(body?.path || "");
+        const copy = d.upgrade_copies.find((c: Json) => c.path === target);
+        const backup = d.backups.find((b: Json) => b.path === target) || {
+          path: target,
+          app_version: "0.33.1",
+          schema_version: 27,
+          created_at: now() - 3 * 86_400,
+          includes_secrets: true,
+          reason: "manual",
+          bytes: 1_900_000,
+        };
+        const problems = target.includes("damaged")
+          ? ["The backup is incomplete: config/config.yaml is missing"]
+          : [];
+        return {
+          path: target,
+          kind: copy ? "database" : "backup",
+          manifest: copy
+            ? manifest({
+                ...copy,
+                app_version: "",
+                reason: "upgrade-copy",
+                includes_secrets: false,
+              })
+            : manifest(backup),
+          summary: {
+            conversations: 12,
+            tasks: 31,
+            jobs: 31,
+            goals: 2,
+            automations: 1,
+            comparisons: 0,
+            last_activity: now() - 90_000,
+          },
+          ignored: [],
+          problems,
+          restorable: problems.length === 0,
+        };
+      }
+      if (path === "/api/data/restore") {
+        if (String(body?.path || "").includes("damaged"))
+          throw new Error(
+            "This backup cannot be restored: The backup is incomplete: config/config.yaml is missing",
+          );
+        d.pending = {
+          kind: "restore",
+          requested_at: now(),
+          source: body.path,
+          include_secrets: Boolean(body.include_secrets),
+        };
+        return {
+          scheduled: true,
+          pending: d.pending,
+          message:
+            "The restore finishes the next time ShadowCode starts. Quit ShadowCode (and any `shadowcode serve`) and open it again.",
+        };
+      }
+      if (path === "/api/data/reset") {
+        if (body?.confirm !== "reset")
+          throw new Error('Send confirm: "reset" to schedule a reset');
+        d.pending = {
+          kind: "reset",
+          requested_at: now(),
+          source: null,
+          include_secrets: false,
+        };
+        return {
+          scheduled: true,
+          pending: d.pending,
+          message:
+            "The reset happens the next time ShadowCode starts. Quit ShadowCode (and any `shadowcode serve`) and open it again.",
+        };
+      }
+      if (path === "/api/data/pending" && method === "DELETE") {
+        const cancelled = Boolean(d.pending);
+        d.pending = null;
+        return { cancelled };
+      }
+      if (path === "/api/data/repair") {
+        const report = {
+          kind: "repair",
+          ok: true,
+          finished_at: now(),
+          checks: [
+            {
+              id: "integrity",
+              label: "Database integrity",
+              status: "pass",
+              detail: "No damage found",
+            },
+            {
+              id: "references",
+              label: "Links between records",
+              status: "pass",
+              detail: "All records point to existing ones",
+            },
+            {
+              id: "indexes",
+              label: "Search indexes",
+              status: "pass",
+              detail: "Rebuilt",
+            },
+            {
+              id: "journal",
+              label: "Write-ahead log",
+              status: "pass",
+              detail: "Merged into the database",
+            },
+            {
+              id: "caches",
+              label: "Caches",
+              status: "pass",
+              detail:
+                "Cleared state/openrouter-models.json (moved into the repair backup)",
+            },
+          ],
+          cleared: ["state/openrouter-models.json"],
+          backup: `${backupsFolder}/shadowcode-backup-20260929-120500-before-repair`,
+        };
+        d.last = report;
+        return report;
+      }
+    }
     if (path === "/api/about" && method === "GET") {
       const tag = "v0.33.0";
       const repo = "https://github.com/Shadowfetchapps/ShadowCode";
@@ -3563,6 +3782,7 @@ export function installFakeBackend(options: FakeOptions = {}) {
       if (command === "open_external") return null;
       if (command === "pick_local_model" || command === "pick_directory")
         return null;
+      if (command === "pick_data_folder") return state.data.pick;
       if (command === "export_session") return null;
       return null;
     },
