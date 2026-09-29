@@ -30,6 +30,9 @@ struct StartBody {
     /// Start a new conversation in a fresh managed worktree of the project
     /// (`crate::worktree_tasks`); `session_id` and `queue` are ignored.
     worktree: Flag,
+    /// This task's spending limit on paid API models in US dollars (the
+    /// CLI's `--max-cost`), instead of `spending.task_usd`.
+    max_cost_usd: Option<Value>,
 }
 
 /// POST /api/jobs/test.
@@ -50,6 +53,10 @@ struct JobActionBody {
     instruction: Text,
     path: Text,
     detail: Text,
+    /// `POST /api/jobs/<id>/spending`: the limit card being answered and
+    /// `continue` or `stop`.
+    prompt_id: Text,
+    action: Text,
 }
 
 #[derive(Default, Deserialize)]
@@ -161,6 +168,11 @@ impl Service {
                         body.detail.as_str(),
                     )?)),
                     ("POST", Some("rewind")) => self.engine.rewind_job(&job.id),
+                    ("POST", Some("spending")) => self.engine.decide_spending(
+                        &job.id,
+                        body.prompt_id.as_str(),
+                        body.action.as_str(),
+                    ),
                     ("GET", Some("events")) => Ok(
                         json!({"events":store.events_after(&job.session_id,call.q("after").parse().unwrap_or(0),job.finished_at.map(|_|job.event_cursor),call.limit(512,2000))?,"job":job}),
                     ),
@@ -358,6 +370,7 @@ impl Service {
         let turn = crate::engine::TurnOptions {
             effort: crate::effort::parse(body.effort.as_str())?,
             mentions: crate::mentions::validate(&Workspace::open(&workspace)?, mentions)?,
+            max_cost_usd: crate::spending::parse_max_cost(body.max_cost_usd.as_ref())?,
         };
         let mut limit: Option<crate::config::PermissionLevel> = body
             .permission_limit

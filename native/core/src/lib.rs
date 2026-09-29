@@ -3,6 +3,7 @@
 pub mod acp_server;
 pub mod agents;
 pub mod allowance;
+pub mod applog;
 pub mod approvals;
 pub mod automations;
 pub mod autonomy;
@@ -59,13 +60,16 @@ pub mod prompt_cache;
 pub mod redaction;
 #[cfg(unix)]
 pub mod remote;
+pub mod resume;
 pub mod retry;
 pub mod review;
 pub mod routing;
 pub mod rulebook;
+pub mod run_record;
 pub mod runtime;
 pub mod sandbox;
 pub mod service;
+pub mod spending;
 #[cfg(unix)]
 pub mod sqlite;
 pub mod steering;

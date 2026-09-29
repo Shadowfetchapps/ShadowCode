@@ -417,6 +417,23 @@ pub struct TaskOptions {
     /// How to handle a tool approval without an interactive terminal.
     #[arg(long, value_enum, default_value = "cancel")]
     pub approval: ApprovalMode,
+    /// Spending limit for this task on paid API models, in US dollars
+    /// (instead of `spending.task_usd`). Subscriptions and local models are
+    /// never limited.
+    #[arg(long, value_name = "USD", value_parser = parse_usd)]
+    pub max_cost: Option<f64>,
+}
+fn parse_usd(text: &str) -> Result<f64, String> {
+    let usd: f64 = text
+        .trim()
+        .trim_start_matches('$')
+        .parse()
+        .map_err(|_| format!("'{text}' is not an amount in US dollars"))?;
+    if usd.is_finite() && (0.01..=crate::spending::MAX_LIMIT_USD).contains(&usd) {
+        Ok(usd)
+    } else {
+        Err("the amount must be between 0.01 and 100000".into())
+    }
 }
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum ApprovalMode {

@@ -346,7 +346,16 @@ impl Service {
         }
         let failures = checks.iter().filter(|c| c["status"] == "fail").count();
         let mut report = json!({"ok":failures==0,"version":crate::VERSION,"runtime":"rust","checks":checks,"failures":failures,"project_map":map,"suggestions":checks.iter().filter(|c|c["status"]!="pass"&&c["fix"]!="").map(|c|c["fix"].clone()).collect::<Vec<_>>(),"telemetry":false});
-        report["diagnostic_export"] = self.diagnostic_exports.prepare(&report)?;
+        // Recent run records and the app log's last lines (redacted).
+        let runs = self
+            .engine
+            .store()
+            .active_and_recent_jobs(diagnostic_export::RUNS)?;
+        let extra = json!({
+            "runs": runs,
+            "log": crate::applog::tail(self.engine.paths(), diagnostic_export::LOG_BYTES),
+        });
+        report["diagnostic_export"] = self.diagnostic_exports.prepare(&report, &extra)?;
         Ok(report)
     }
 }

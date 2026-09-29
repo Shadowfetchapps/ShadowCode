@@ -41,6 +41,8 @@ mod command;
 pub use command::CommandRequest;
 mod child;
 pub(crate) use child::{ChildLink, ChildSpec};
+mod resume;
+mod spending;
 #[derive(Default)]
 struct LaunchContext<'a> {
     system_context: Option<String>,
@@ -65,6 +67,9 @@ pub struct TurnOptions {
     /// Attached context. Native models read the files' contents with the
     /// prompt; vendor CLIs get `@path` in the prompt text instead.
     pub mentions: Vec<crate::mentions::Mention>,
+    /// `--max-cost`: this task's spending limit on paid API models, in US
+    /// dollars, instead of `spending.task_usd`.
+    pub max_cost_usd: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -116,6 +121,10 @@ pub struct Job {
     pub steps: usize,
     #[serde(default)]
     pub timings: Option<crate::timing::Timings>,
+    /// What exactly ran this job (model, vendor CLI version, effort, app
+    /// version, settings and rules hashes); see [`crate::run_record`].
+    #[serde(default)]
+    pub run: Option<crate::run_record::RunRecord>,
 }
 struct Running {
     clock: crate::timing::Clock,
@@ -139,6 +148,9 @@ struct Running {
     /// ...and was let through; no other top-level local job starts until it
     /// has finished.
     local_admitted: AtomicBool,
+    /// Paid-model spending of the task the user started (subagents share
+    /// their parent's). `None` for vendor CLI and command jobs.
+    spend: Option<Arc<crate::spending::Meter>>,
 }
 #[derive(Default)]
 struct QueueState {
@@ -497,6 +509,39 @@ impl Engine {
         )
         .await
     }
+    /// A slash command or skill run (`/api/commands/run`): the skill's
+    /// guidance when there is one, and the caller's per-turn choices.
+    pub(crate) async fn start_workflow_owned(
+        &self,
+        request: StartRequest,
+        purpose: &str,
+        guidance: Option<Guidance>,
+        owner: Option<&JobOwner>,
+        turn: TurnOptions,
+    ) -> Result<Job> {
+        if let Some(guidance) = &guidance {
+            ensure!(
+                guidance.instructions.len() <= 132000,
+                "Workflow context is too large"
+            );
+        }
+        let (system_context, workflow) = match guidance {
+            Some(guidance) => (Some(guidance.instructions), Some(guidance.info)),
+            None => (None, None),
+        };
+        self.start_with_context(
+            request,
+            LaunchContext {
+                system_context,
+                purpose,
+                workflow,
+                owner,
+                turn,
+                ..Default::default()
+            },
+        )
+        .await
+    }
     /// A transport may reduce a task's authority without changing saved settings.
     pub async fn start_limited(
         &self,
@@ -763,6 +808,7 @@ impl Engine {
             result: None,
             steps: 0,
             timings: None,
+            run: None,
         };
         let cancel = match context.owner {
             Some(owner) => owner.register(self, &job.id)?,
@@ -782,6 +828,20 @@ impl Engine {
                 &crate::now().to_string(),
             )?;
         }
+        let spend = (context.command.is_none()
+            && crate::runtime::Runtime::for_model(&config.model) == crate::runtime::Runtime::Local)
+            .then(|| {
+                Arc::new(crate::spending::Meter::new(
+                    &job.id,
+                    TaskEvents {
+                        store: self.0.store.clone(),
+                        session_id: job.session_id.clone(),
+                        task_id: job.task_id.clone(),
+                        sender: self.0.sender.clone(),
+                    },
+                    context.turn.max_cost_usd,
+                ))
+            });
         let running = Arc::new(Running {
             clock,
             record: Mutex::new(job.clone()),
@@ -794,6 +854,7 @@ impl Engine {
             done: Notify::new(),
             steer: steering::SteerControl::default(),
             turn_plan,
+            spend,
             turn: context.turn,
             child: None,
             local_waiting: AtomicBool::new(false),
@@ -1439,7 +1500,8 @@ impl Engine {
             .as_ref()
             .err()
             .and_then(|e| e.downcast_ref::<crate::cli_agent::runner::LimitReached>())
-            .map(|limit| json!({"vendor":limit.vendor.id(),"detail":limit.detail,"usage":limit.usage}));
+            .map(|limit| json!({"vendor":limit.vendor.id(),"detail":limit.detail,"usage":limit.usage,
+                "resets_at":crate::resume::reset_time(&json!(limit.usage), &limit.detail, crate::now())}));
         job.status = if cancelled {
             "cancelled"
         } else if success {
@@ -1450,12 +1512,18 @@ impl Engine {
             "failed"
         }
         .into();
-        job.summary = match outcome {
-            Ok(text) if !cancelled => text,
-            Ok(_) => {
+        let spend_stop = running
+            .spend
+            .as_ref()
+            .filter(|_| cancelled && running.child.is_none())
+            .and_then(|meter| meter.stopped());
+        job.summary = match (outcome, spend_stop) {
+            (_, Some(kind)) => crate::spending::stopped_summary(kind),
+            (Ok(text), None) if !cancelled => text,
+            (Ok(_), None) => {
                 "Task cancelled. Completed changes remain available for review or rewind.".into()
             }
-            Err(error) => format!("{error:#}"),
+            (Err(error), None) => format!("{error:#}"),
         };
         job.finished_at = Some(crate::now());
         job.timings = Some(running.clock.snapshot(true));
@@ -1487,6 +1555,9 @@ impl Engine {
             json!({"success":success,"cancelled":cancelled,"summary":job.summary,"plan":plan,"usage":job.usage,"usage_is_estimated":job.usage_is_estimated,"verification":verification}),
         );
         job.result.as_mut().unwrap()["timings"] = json!(job.timings);
+        if let Some(run) = &job.run {
+            job.result.as_mut().unwrap()["run"] = json!(run);
+        }
         if let Some(limit) = limit {
             job.result.as_mut().unwrap()["limit_reached"] = limit;
         }
@@ -1500,6 +1571,22 @@ impl Engine {
             }
         }
         self.0.approvals.deny_task(&job.task_id);
+        tracing::info!(
+            "job.finished job={:?} status={:?} mode={:?} model={:?} steps={} seconds={:.1} tokens={} cost_usd={}{}",
+            job.id,
+            job.status,
+            job.mode,
+            job.run.as_ref().map_or(job.model.as_str(), |run| run.model_id.as_str()),
+            job.steps,
+            job.finished_at.unwrap_or(job.started_at) - job.started_at,
+            job.usage.total_tokens,
+            job.usage.cost_usd.map_or("unknown".into(), |cost| format!("{cost:.4}")),
+            if success || cancelled {
+                String::new()
+            } else {
+                format!(" error={:?}", crate::tools::truncate(&job.summary, 300))
+            }
+        );
         let mut saved = json!(*job);
         let event = self.0.store.finish_job(&mut saved)?;
         job.event_cursor = event["id"].as_i64().unwrap_or(0);
@@ -1756,10 +1843,19 @@ impl Engine {
             vendor,
         ) {
             Ok(Some((staged, rules, summary))) => {
+                self.record_run(
+                    running,
+                    summary["hash"].as_str().map(str::to_owned),
+                    Some(vendor),
+                )
+                .await?;
                 events.emit("rules.delivered", summary)?;
                 (staged, Some(rules))
             }
-            Ok(None) => (None, None),
+            Ok(None) => {
+                self.record_run(running, None, Some(vendor)).await?;
+                (None, None)
+            }
             Err(error) => {
                 events.emit(
                         "agent.warning",
@@ -1978,6 +2074,35 @@ impl Engine {
         Ok(false)
     }
 
+    /// Keep the run record (`Job::run`) of a job that is about to call its
+    /// model: the exact model, the vendor CLI and its version, the effort,
+    /// ShadowCode's version and the settings and rules hashes.
+    async fn record_run(
+        &self,
+        running: &Running,
+        rules_hash: Option<String>,
+        vendor: Option<crate::cli_agent::Vendor>,
+    ) -> Result<()> {
+        let mut record =
+            crate::run_record::RunRecord::new(&running.config, running.turn.effort.as_deref());
+        record.rules_hash = rules_hash;
+        if let Some(vendor) = vendor {
+            record.vendor = Some(vendor.product_label().to_owned());
+            record.vendor_version = self
+                .0
+                .vendors
+                .cached(vendor)
+                .await
+                .and_then(|status| status.version);
+        }
+        let mut job = running
+            .record
+            .lock()
+            .map_err(|_| anyhow!("Job lock poisoned"))?;
+        job.run = Some(record);
+        self.0.store.save_job(&json!(*job))
+    }
+
     /// Add a priced model request to the job's usage and report it.
     fn record_usage(
         &self,
@@ -1988,6 +2113,7 @@ impl Engine {
         purpose: &str,
     ) -> Result<()> {
         crate::usage::price_turn(&mut turn, &running.config.model, &self.0.paths.state);
+        self.record_spend(running, &turn)?;
         let total = {
             let mut record = running
                 .record
@@ -2178,6 +2304,12 @@ impl Engine {
         }
         let book = crate::rulebook::Book::load(&self.0.paths, Some(&running.workspace.path));
         let mut system = context::system_with_rules(&running.workspace, &job.mode, &book);
+        self.record_run(
+            running,
+            crate::run_record::rules_hash(&book.guidance(&running.workspace)),
+            None,
+        )
+        .await?;
         let notes = crate::memory::context(
             &self.0.paths,
             &self.0.store,
@@ -2282,6 +2414,9 @@ impl Engine {
             );
             self.await_steering(running, tools, &mut messages, &events, &job.id, &[])
                 .await?;
+            // Between model turns only: a spending limit never interrupts
+            // a tool call.
+            self.spend_gate(running).await?;
             ensure!(
                 !running.cancel.is_cancelled(),
                 "Task cancelled. Completed changes remain checkpointed."
@@ -2539,6 +2674,7 @@ impl Engine {
                     &running.config.model,
                     &self.0.paths.state,
                 );
+                self.record_spend(running, &response.usage)?;
                 record.usage.add(&response.usage);
                 record.steps = step + 1;
                 record.timings = Some(running.clock.snapshot(false));

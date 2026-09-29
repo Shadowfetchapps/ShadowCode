@@ -14,6 +14,9 @@ pub(crate) struct ChildLink {
     pub name: String,
     pub run_id: String,
     pub parent_session: String,
+    /// The job whose tool call started this child. Its spending meter
+    /// counts the child's paid model requests too.
+    pub parent_job: String,
     pub depth: usize,
     pub filter: Option<Arc<ToolFilter>>,
 }
@@ -68,6 +71,10 @@ impl Engine {
             "Subagents run on ShadowCode's own loop"
         );
         spec.config.validate()?;
+        // Paid requests count toward the task the user started.
+        let spend = self
+            .running(&spec.link.parent_job)?
+            .and_then(|parent| parent.spend.clone());
         let (job, running) = {
             let mut queues = self
                 .0
@@ -119,6 +126,7 @@ impl Engine {
                 steer: steering::SteerControl::default(),
                 turn_plan: Default::default(),
                 turn: Default::default(),
+                spend,
                 child: Some(spec.link),
                 local_waiting: AtomicBool::new(false),
                 local_admitted: AtomicBool::new(false),

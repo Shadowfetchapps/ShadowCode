@@ -67,6 +67,7 @@ mod inspection;
 mod issues;
 mod jobs;
 mod local_downloads;
+mod logs;
 mod memory;
 mod model_catalog;
 #[cfg(target_os = "linux")]
@@ -78,6 +79,7 @@ mod rules;
 mod sandbox;
 mod sessions;
 mod settings;
+mod spending;
 mod terminals;
 mod voice;
 mod workspace;
@@ -136,6 +138,18 @@ impl Service {
         let workspace = Workspace::open(&workspace)?.path;
         #[cfg(unix)]
         let remote = Arc::new(crate::remote::Manager::new(paths.clone()));
+        // The app log for bug reports (events, errors and timings only).
+        let level = Config::load(&paths, None)
+            .ok()
+            .and_then(|config| config.logging["level"].as_str().map(str::to_owned))
+            .unwrap_or_default();
+        if crate::applog::init(&paths, &level).is_ok() {
+            tracing::info!(
+                "app.opened version={:?} commit={:?}",
+                crate::VERSION,
+                crate::updates::commit().unwrap_or("unknown")
+            );
+        }
         let engine = Engine::open(paths)?;
         let terminals = Arc::new(crate::terminal::Terminals::new(engine.notifier()));
         Ok(Self {
@@ -314,6 +328,8 @@ impl Service {
             "providers" | "models" | "picker" | "local-models" => self.model_routes(&call).await,
             "plugins" | "mcp" | "hooks" | "sqlite" => self.extension_routes(&call).await,
             "rules" => self.rules_routes(&call).await,
+            "spending" => self.spending_routes(&call).await,
+            "logs" => self.logs_routes(&call).await,
             "commands" | "memory" => match (call.method.as_str(), call.path.as_str()) {
                 ("GET", "/api/commands") => self.command_catalog(),
                 ("POST", "/api/commands/run") => self.run_command(&call.body).await,

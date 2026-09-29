@@ -686,6 +686,8 @@ pub fn for_vendor(
         "bytes": plan.preview.included_bytes,
         "estimated_tokens": plan.preview.estimated_tokens,
         "truncated": plan.preview.truncated,
+        // Short SHA-256 of exactly the text delivered (the run record).
+        "hash": crate::run_record::rules_hash(&plan.text),
     });
     Ok(Some((staged, rules, summary)))
 }

@@ -174,7 +174,7 @@ async fn task(
         Some(id) => Some(session(backend, Some(id), workspace).await?),
         None => None,
     };
-    let mut body = json!({"workspace":workspace,"session_id":sid,"model":options.model,"purpose":options.purpose,"queue":options.queue});
+    let mut body = json!({"workspace":workspace,"session_id":sid,"model":options.model,"purpose":options.purpose,"queue":options.queue,"max_cost_usd":options.max_cost});
     let result = if let Some((name, args)) = workflow {
         body["name"] = json!(name);
         body["args"] = json!(args);

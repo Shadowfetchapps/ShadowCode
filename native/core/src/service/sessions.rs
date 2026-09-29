@@ -17,6 +17,11 @@ struct SessionBody {
     /// Fork: keep only the events before `event_id` (Edit & resend forks
     /// just before the edited message).
     before: Flag,
+    /// Scheduled resume: the task stopped at a plan limit (default: the
+    /// conversation's latest), and whether the user agreed to hand the
+    /// conversation to that cloud route.
+    job_id: Text,
+    handoff_consent: Flag,
 }
 
 impl Service {
@@ -99,6 +104,30 @@ impl Service {
                     "applies_to": if running { "next_turn" } else { "this_turn" },
                 }))
             }
+            // "Resume at <time>" after a plan limit (`crate::resume`).
+            ("GET", Some("scheduled-resume")) => Ok(json!({
+                "resume": crate::resume::for_session(&store, sid)?,
+                "scheduler": self.engine.automations_scheduled(),
+            })),
+            ("POST", Some("scheduled-resume")) => {
+                let job = store
+                    .current_job(sid, true)?
+                    .and_then(|job| job["id"].as_str().map(str::to_owned));
+                let job_id = body.job_id.non_empty().map(str::to_owned).or(job);
+                let job_id = job_id.context("Choose the task to resume")?;
+                let owner = self.engine.job(&job_id)?.context("Job not found")?;
+                ensure!(
+                    owner.session_id == sid,
+                    "That task belongs to another conversation"
+                );
+                let resume = self
+                    .engine
+                    .schedule_resume(&job_id, body.handoff_consent.is_true())?;
+                Ok(json!({"resume": resume, "scheduler": self.engine.automations_scheduled()}))
+            }
+            ("DELETE", Some("scheduled-resume")) => Ok(json!({
+                "resume": self.engine.cancel_resume(sid)?,
+            })),
             ("DELETE", None) => {
                 self.engine.delete_session(sid)?;
                 let mut selection = self

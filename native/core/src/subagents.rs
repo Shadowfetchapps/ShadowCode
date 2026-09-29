@@ -692,6 +692,7 @@ impl SubagentHost {
                 name: definition.name.clone(),
                 run_id: record.id.clone(),
                 parent_session: self.parent.session_id.clone(),
+                parent_job: self.parent.job_id.clone(),
                 depth: self.parent.depth + 1,
                 filter,
             },

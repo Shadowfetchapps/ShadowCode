@@ -311,6 +311,10 @@ pub struct Config {
     /// computer) or `"ask"`; `fallback_model` optionally names the
     /// `local:gguf:` row to use.
     pub limits: Value,
+    /// Spending limits for paid API models (never subscriptions or models on
+    /// this computer); see [`crate::spending`].
+    #[serde(default)]
+    pub spending: crate::spending::SpendingConfig,
     /// The daily update check (`updates.check`); see [`crate::updates`].
     #[serde(default)]
     pub updates: crate::updates::UpdatesConfig,
@@ -339,6 +343,7 @@ impl Default for Config {
             sandbox: crate::sandbox::SandboxConfig::default(),
             checkpoints: crate::checkpoint::CheckpointConfig::default(),
             limits: json!({"on_limit":"local","fallback_model":""}),
+            spending: crate::spending::SpendingConfig::default(),
             updates: crate::updates::UpdatesConfig::default(),
             extra: BTreeMap::new(),
         }
@@ -517,6 +522,7 @@ impl Config {
         self.network.validate()?;
         self.sandbox.validate()?;
         self.checkpoints.validate()?;
+        self.spending.validate()?;
         self.hooks.validate()?;
         self.verification.validate()?;
         ensure!(
