@@ -290,6 +290,19 @@ impl CliAdapter for ClaudeAdapter {
             args.push("--mcp-config".into());
             args.push(config);
         }
+        // The user's rulebook for this run: a private file appended to Claude
+        // Code's own system prompt (kept out of `ps`), and the profile skills
+        // as a per-run plugin. Nothing is written to ~/.claude.
+        if let Some(rules) = &options.rulebook {
+            if let Some(file) = &rules.file {
+                args.push("--append-system-prompt-file".into());
+                args.push(file.display().to_string());
+            }
+            if let Some(dir) = &rules.plugin_dir {
+                args.push("--plugin-dir".into());
+                args.push(dir.display().to_string());
+            }
+        }
         (options.binary.clone(), args)
     }
     fn on_start(&mut self, options: &LaunchOptions) -> Vec<String> {

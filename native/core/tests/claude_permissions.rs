@@ -15,6 +15,7 @@ fn launch(workspace: &Path) -> LaunchOptions {
         effort: None,
         legacy_effort: false,
         mcp_servers: Vec::new(),
+        rulebook: None,
     }
 }
 

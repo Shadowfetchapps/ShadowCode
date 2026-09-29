@@ -24,6 +24,7 @@ fn bound(turn_bound: bool) -> Box<dyn CliAdapter> {
         effort: None,
         legacy_effort: false,
         mcp_servers: vec![],
+        rulebook: None,
     });
     a.prompt("one", &[]).unwrap();
     let start = feed(&mut *a, response(1, json!({})));
