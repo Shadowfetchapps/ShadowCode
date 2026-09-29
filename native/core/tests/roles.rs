@@ -882,3 +882,71 @@ async fn an_agent_file_can_name_a_vendor_runner() {
     assert_eq!(runs[0]["payload"]["model_id"], "cli:codex");
     service.engine.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn declining_the_apply_approval_leaves_the_project_unchanged() {
+    let setup = setup(
+        json!({
+            "auth":"chatgpt",
+            "turn":"ok",
+            "mode_when":{"implement role":"edit"},
+            "edits":{"note.txt":"new\n"},
+        }),
+        json!({"permissions":{"mode":"ask"}}),
+        |_| answer("unused", json!([])),
+    )
+    .await;
+    let service = &setup.service;
+    call(
+        service,
+        "POST",
+        "/api/roles",
+        json!({"plan":roles::SKIP,"review":roles::SKIP,"implement":"","pipeline":true}),
+    )
+    .await;
+    // The conversation itself runs on Codex; its roles default to it.
+    let job = call(
+        service,
+        "POST",
+        "/api/jobs",
+        json!({"task":"Update the note","model":"cli:codex","roles":true}),
+    )
+    .await;
+    let sid = job["session_id"].as_str().unwrap().to_owned();
+    let task_id = job["task_id"].as_str().unwrap().to_owned();
+    let approval = eventually(
+        || {
+            service
+                .engine
+                .approvals()
+                .list(Some(sid.as_str()))
+                .into_iter()
+                .find(|a| a.task_id == task_id)
+        },
+        "the apply approval",
+    )
+    .await;
+    service
+        .engine
+        .approvals()
+        .decide(&approval.id, &sid, false)
+        .unwrap();
+    let done = finished(service, job["id"].as_str().unwrap()).await;
+    assert_eq!(done["status"], "completed", "{}", done["summary"]);
+    let summary = done["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("The changes were not applied"),
+        "{summary}"
+    );
+    assert_eq!(
+        fs::read_to_string(setup.project.join("note.txt")).unwrap(),
+        "old\n"
+    );
+    let finished_roles = events(service, &sid, "roles.finished");
+    assert_eq!(finished_roles[0]["payload"]["applied"], false);
+    assert_eq!(finished_roles[0]["payload"]["completed"], false);
+    assert!(events(service, &sid, "subagent.applied").is_empty());
+    // A skipped review leaves only the implement role's card.
+    assert_eq!(events(service, &sid, "subagent.finished").len(), 1);
+    service.engine.shutdown().await.unwrap();
+}

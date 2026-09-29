@@ -152,6 +152,15 @@ impl StageResult {
                     record.files.len(),
                     if record.files.len() == 1 { "" } else { "s" }
                 ));
+                // Binary files cannot go through the patch; say so.
+                match record.binary_files.len() {
+                    0 => {}
+                    1 => line.push_str(&format!(
+                        "; the binary file {} is not applied",
+                        record.binary_files[0]
+                    )),
+                    n => line.push_str(&format!("; {n} binary files are not applied")),
+                }
             }
         }
         if let Some(verdict) = &record.verdict {
@@ -521,9 +530,8 @@ impl Engine {
                 } else {
                     progress.set("apply", "failed", &result.error);
                     apply_note = format!(
-                        "The changes were not applied: {}. The diff is kept on the Implement card; ask to apply it (run {}) or run the task again.",
-                        crate::tools::truncate(&result.error, 400),
-                        record.id
+                        "The changes were not applied: {}. The Implement card lists them; run the task again to redo them.",
+                        crate::tools::truncate(&result.error, 400).trim_end_matches('.'),
                     );
                     applied = Some(false);
                 }
