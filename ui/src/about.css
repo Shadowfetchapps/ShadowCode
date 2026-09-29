@@ -98,3 +98,10 @@
   text-decoration: underline;
   text-underline-offset: 3px;
 }
+
+.about-logs {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  margin: 4px 0 12px;
+}

@@ -307,12 +307,19 @@ pub struct Config {
     /// computer) or `"ask"`; `fallback_model` optionally names the
     /// `local:gguf:` row to use.
     pub limits: Value,
+    /// Spending limits for paid API models (never subscriptions or models on
+    /// this computer); see [`crate::spending`].
+    #[serde(default)]
+    pub spending: crate::spending::SpendingConfig,
+    /// The app log for bug reports: `logging.level` is `error`, `warn`,
+    /// `info` (default) or `debug`; see [`crate::applog`].
+    pub logging: Value,
     /// The daily update check (`updates.check`); see [`crate::updates`].
     #[serde(default)]
     pub updates: crate::updates::UpdatesConfig,
     /// Top-level keys this version does not know (settings from a newer
     /// version, `voice`, `code_intel`, and retired keys such as the old
-    /// `git` and `logging` groups) are kept as they are and written back.
+    /// `git` group) are kept as they are and written back.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -339,6 +346,8 @@ impl Default for Config {
             sandbox: crate::sandbox::SandboxConfig::default(),
             checkpoints: crate::checkpoint::CheckpointConfig::default(),
             limits: json!({"on_limit":"local","fallback_model":""}),
+            spending: crate::spending::SpendingConfig::default(),
+            logging: json!({"level":"info"}),
             updates: crate::updates::UpdatesConfig::default(),
             extra: BTreeMap::new(),
         }
@@ -551,6 +560,7 @@ impl Config {
         self.network.validate()?;
         self.sandbox.validate()?;
         self.checkpoints.validate()?;
+        self.spending.validate()?;
         self.hooks.validate()?;
         self.verification.validate()?;
         ensure!(

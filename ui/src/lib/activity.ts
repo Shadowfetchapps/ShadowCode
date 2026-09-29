@@ -2,7 +2,7 @@ import type { RolesSummary } from "./roles";
 /** Activity derived only from recorded events: tool calls (native and vendor),
  * approvals, web sources, changed files, verification and completion. */
 import { localProgressLabel, type LocalPhase } from "./localProgress";
-import type { LocalRuntimeReceipt, TaskTimings } from "../api";
+import type { LocalRuntimeReceipt, RunRecord, TaskTimings } from "../api";
 
 export type StepId =
   | "local"
@@ -84,6 +84,11 @@ export type TaskActivity = {
     /** The subscription that reported its plan limit ("Codex"). */
     limitReached?: string;
   };
+  /** What exactly ran the task (agent.completed `run`). */
+  run?: RunRecord;
+  /** The plan limit this task stopped at (limit.reached): its job and when
+   * the plan resets, if the vendor said. */
+  limit?: { jobId?: string; resetsAt?: number };
 };
 
 export const emptyActivity = (taskId: string): TaskActivity => ({

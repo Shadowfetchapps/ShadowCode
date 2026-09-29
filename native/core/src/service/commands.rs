@@ -648,20 +648,15 @@ impl Service {
             images: Vec::new(),
             web: false,
         };
-        let job = if let Some(definition) = definition {
-            self.engine
-                .start_guided_owned(
-                    request,
-                    purpose,
-                    definition.guidance(args)?,
-                    self.job_owner.as_ref(),
-                )
-                .await?
-        } else {
-            self.engine
-                .start_limited_owned(request, purpose, None, self.job_owner.as_ref())
-                .await?
+        let turn = crate::engine::TurnOptions {
+            max_cost_usd: crate::spending::parse_max_cost(body.get("max_cost_usd"))?,
+            ..Default::default()
         };
+        let guidance = definition.map(|d| d.guidance(args)).transpose()?;
+        let job = self
+            .engine
+            .start_workflow_owned(request, purpose, guidance, self.job_owner.as_ref(), turn)
+            .await?;
         self.select_if(
             &workspace,
             Some(job.session_id.clone()),

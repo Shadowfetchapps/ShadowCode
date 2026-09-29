@@ -10,6 +10,57 @@ use std::{
 
 const MAX_CHECKS: usize = 96;
 const MAX_BYTES: usize = 256 * 1024;
+/// The app log's last lines in an export, at most this much.
+pub(super) const LOG_BYTES: usize = 96 * 1024;
+/// Run records of the latest jobs in an export.
+pub(super) const RUNS: usize = 12;
+
+/// A log line without paths: anything that looks like a file path is
+/// replaced (the log already has secrets redacted and home as `~`).
+fn scrub_paths(line: &str) -> String {
+    static PATH: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = PATH.get_or_init(|| {
+        regex::Regex::new(r#"(?:~|\.{1,2})?/[^\s"',;:()\[\]]*/[^\s"',;:()\[\]]*"#)
+            .expect("path regex")
+    });
+    re.replace_all(line, "<path>").into_owned()
+}
+
+/// A run record as it may leave the computer: public model ids (OpenRouter
+/// and vendor CLIs) stay; other ids can name local files or private hosts.
+fn public_run(run: &Value) -> Value {
+    let id = run["model_id"].as_str().unwrap_or("");
+    let public = id.starts_with(crate::openrouter::ID_PREFIX) || id.starts_with("cli:");
+    let mut out = serde_json::Map::new();
+    for key in [
+        "provider",
+        "route",
+        "vendor",
+        "vendor_version",
+        "effort",
+        "app_version",
+        "app_commit",
+        "settings_hash",
+        "rules_hash",
+        "recorded_at",
+    ] {
+        out.insert(key.into(), run[key].clone());
+    }
+    out.insert(
+        "model_id".into(),
+        json!(if public {
+            id
+        } else if id.starts_with("local:gguf:") {
+            "local:gguf:(hidden)"
+        } else {
+            "(custom model, hidden)"
+        }),
+    );
+    if public {
+        out.insert("model".into(), run["model"].clone());
+    }
+    Value::Object(out)
+}
 const TTL: Duration = Duration::from_secs(10 * 60);
 
 struct Snapshot {
@@ -48,7 +99,9 @@ fn label(id: &str) -> Option<&'static str> {
     })
 }
 
-fn project(report: &Value, captured_at: &str) -> Result<String> {
+/// `extra`: `runs` (recent jobs: `{status, run}`) and `log` (the app log's
+/// last lines, already redacted).
+fn project(report: &Value, extra: &Value, captured_at: &str) -> Result<String> {
     let checks = report["checks"]
         .as_array()
         .context("Doctor checks missing")?;
@@ -83,9 +136,17 @@ fn project(report: &Value, captured_at: &str) -> Result<String> {
         "os": std::env::consts::OS,
         "architecture": std::env::consts::ARCH,
         "scope": "Completed local Doctor check statuses only; this is not model, package or full-system qualification.",
-        "excluded": ["credentials", "paths", "project names and source", "configured model names", "prompts and task events", "raw logs and crash reports"],
+        "excluded": ["credentials", "paths", "project names and source", "custom and local model names", "prompts, answers and file contents", "crash reports"],
         "omitted_checks": omitted,
         "checks": selected,
+        "runs": extra["runs"].as_array().into_iter().flatten().take(RUNS).filter(|job| job["run"].is_object()).map(|job| json!({
+            "status": job["status"].as_str().unwrap_or(""),
+            "run": public_run(&job["run"]),
+        })).collect::<Vec<_>>(),
+        "log": {
+            "note": "The app log's last lines: events, errors and timings only, with secrets and paths removed.",
+            "lines": extra["log"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|line| scrub_paths(&crate::redaction::redact_text(line).text)).collect::<Vec<_>>(),
+        },
     });
     let content = format!("{}\n", serde_json::to_string_pretty(&value)?);
     ensure!(
@@ -96,9 +157,9 @@ fn project(report: &Value, captured_at: &str) -> Result<String> {
 }
 
 impl DiagnosticExports {
-    pub(super) fn prepare(&self, report: &Value) -> Result<Value> {
+    pub(super) fn prepare(&self, report: &Value, extra: &Value) -> Result<Value> {
         let captured_at = chrono::Utc::now().to_rfc3339();
-        let content = project(report, &captured_at)?;
+        let content = project(report, extra, &captured_at)?;
         let id = crate::id();
         let mut snapshots = self
             .0
@@ -151,7 +212,7 @@ mod tests {
             {"id":"model-response","status":"not_checked","detail":secret},
             {"id":"future-secret-check","status":"pass","detail":secret}
         ],"project_map":{"name":secret},"config":{"key":secret}});
-        let content = project(&report, "2026-01-01T00:00:00Z").unwrap();
+        let content = project(&report, &Value::Null, "2026-01-01T00:00:00Z").unwrap();
         assert!(!content.contains(secret));
         assert!(!content.contains("/home/alice"));
         assert_eq!(
@@ -176,18 +237,55 @@ mod tests {
     }
 
     #[test]
+    fn runs_and_log_lines_are_included_without_paths_or_private_models() {
+        let secret = "sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef";
+        let extra = json!({
+            "runs": [
+                {"status":"completed","run":{"model_id":"api:openrouter:qwen/qwen3-coder","model":"qwen/qwen3-coder","provider":"openrouter","route":"native_http","effort":"high","app_version":"1.0.0","settings_hash":"abc123abc123","rules_hash":"def456def456"}},
+                {"status":"failed","run":{"model_id":"local:gguf:/home/ada/models/secret-name.gguf","model":"secret-name","provider":"llamacpp","vendor":null}},
+                {"status":"completed","run":{"model_id":"cli:codex","model":"gpt-5","vendor":"Codex","vendor_version":"codex-cli 0.158.0"}},
+                {"status":"completed"}
+            ],
+            "log": [
+                "2026-09-29T10:00:00.000+02:00 INFO  event: tool.completed task=\"t\" tool=\"read_file\" success=true",
+                format!("2026-09-29T10:00:01.000+02:00 WARN  engine: could not read ~/work/app/.env with {secret}"),
+                "2026-09-29T10:00:02.000+02:00 ERROR engine: failed in /opt/project/src/main.rs"
+            ]
+        });
+        let content = project(&json!({"checks":[]}), &extra, "2026-01-01T00:00:00Z").unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let runs = value["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(
+            runs[0]["run"]["model_id"],
+            "api:openrouter:qwen/qwen3-coder"
+        );
+        assert_eq!(runs[0]["run"]["settings_hash"], "abc123abc123");
+        assert_eq!(runs[1]["run"]["model_id"], "local:gguf:(hidden)");
+        assert_eq!(runs[1]["run"]["model"], Value::Null);
+        assert_eq!(runs[2]["run"]["vendor_version"], "codex-cli 0.158.0");
+        let lines = value["log"]["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].as_str().unwrap().contains("tool=\"read_file\""));
+        for private in [secret, "secret-name", "/opt/project", "~/work", ".env"] {
+            assert!(!content.contains(private), "{private}");
+        }
+        assert!(lines[2].as_str().unwrap().contains("failed in <path>"));
+    }
+
+    #[test]
     fn cache_returns_exact_prepared_bytes_and_refuses_unknown_ids() {
         let cache = DiagnosticExports::default();
         let report = json!({"checks":[{"id":"runtime","status":"pass"}]});
-        let prepared = cache.prepare(&report).unwrap();
+        let prepared = cache.prepare(&report, &Value::Null).unwrap();
         let id = prepared["id"].as_str().unwrap();
         assert_eq!(cache.get(id).unwrap()["content"], prepared["content"]);
         assert!(cache.get("00000000000000000000000000000000").is_err());
         for _ in 0..4 {
-            cache.prepare(&report).unwrap();
+            cache.prepare(&report, &Value::Null).unwrap();
         }
         assert!(cache.get(id).is_err());
-        let latest = cache.prepare(&report).unwrap();
+        let latest = cache.prepare(&report, &Value::Null).unwrap();
         let latest_id = latest["id"].as_str().unwrap();
         {
             let mut snapshots = cache.0.lock().unwrap();
@@ -200,7 +298,12 @@ mod tests {
     fn projection_bounds_check_count_and_refuses_unknown_status() {
         let mut checks = vec![json!({"id":"runtime","status":"fail"}); MAX_CHECKS + 1];
         checks[0]["status"] = json!("passed");
-        let content = project(&json!({"checks":checks}), "2026-01-01T00:00:00Z").unwrap();
+        let content = project(
+            &json!({"checks":checks}),
+            &Value::Null,
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
         let value: Value = serde_json::from_str(&content).unwrap();
         assert_eq!(value["checks"].as_array().unwrap().len(), MAX_CHECKS - 1);
         assert_eq!(value["omitted_checks"], 2);

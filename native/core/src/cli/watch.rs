@@ -84,6 +84,40 @@ async fn approve(backend: &Backend, approval: &Value) -> Result<()> {
     }
     Ok(())
 }
+/// `Provider busy, retrying (2 of 5) in 4 s…` for a `model.retry` event.
+pub fn retry_line(payload: &Value) -> String {
+    let wait = payload["delay_ms"].as_u64().unwrap_or(0) as f64 / 1000.0;
+    let wait = if wait >= 1.0 {
+        format!("{wait:.0} s")
+    } else {
+        "a moment".into()
+    };
+    let why = match payload["reason"].as_str().unwrap_or("") {
+        "disconnected" | "stalled" | "connect_failed" => "Connection to the provider dropped",
+        _ => "Provider busy",
+    };
+    format!(
+        "{why}, retrying ({} of {}) in {wait}…",
+        payload["attempt"].as_u64().unwrap_or(1),
+        payload["max_attempts"].as_u64().unwrap_or(1)
+    )
+}
+
+/// What a non-interactive run says when it stops at a spending limit.
+pub fn spend_stop_message(card: &Value) -> String {
+    let raise = card["raise_to"].as_f64().unwrap_or(0.0);
+    let text = card["text"].as_str().unwrap_or("");
+    if card["kind"] == "daily" {
+        format!(
+            "Stopped at the daily spending limit. {text} Raise spending.daily_usd (`shadowcode config spending.daily_usd {raise:.2}`), wait until midnight, or use --interactive to decide in the terminal."
+        )
+    } else {
+        format!(
+            "Stopped at the spending limit for one task. {text} Run it again with --max-cost {raise:.2} to allow more, or use --interactive to decide in the terminal."
+        )
+    }
+}
+
 pub async fn job(
     backend: &Backend,
     initial: Value,
@@ -118,6 +152,8 @@ pub async fn job(
     };
     let mut streamed = HashSet::new();
     let mut announced = HashSet::new();
+    // A spending limit card waiting for an answer (`spend.limit_reached`).
+    let mut spend_card: Option<Value> = None;
     let mut text_open = false;
     let signal = interrupted(backend.parent);
     tokio::pin!(signal);
@@ -135,6 +171,17 @@ pub async fn job(
                 cursor = cursor.max(event["id"].as_i64().unwrap_or(0));
                 if event["task_id"].as_str() != Some(task_id.as_str()) {
                     continue;
+                }
+                match event["type"].as_str().unwrap_or("") {
+                    "spend.limit_reached" => spend_card = Some(event["payload"].clone()),
+                    "spend.limit_resolved"
+                        if spend_card
+                            .as_ref()
+                            .is_some_and(|card| card["id"] == event["payload"]["prompt_id"]) =>
+                    {
+                        spend_card = None
+                    }
+                    _ => {}
                 }
                 if options.events {
                     outln!(
@@ -174,6 +221,14 @@ pub async fn job(
                                         .unwrap_or("")
                                 )
                             );
+                        }
+                        "model.retry" => errln!("{}", plain(&retry_line(payload))),
+                        "spend.notice" | "spend.unknown" | "spend.limit_resolved" => {
+                            if text_open {
+                                outln!();
+                                text_open = false;
+                            }
+                            errln!("{}", plain(payload["text"].as_str().unwrap_or("")))
                         }
                         "routing.selected" | "routing.fallback" => errln!(
                             "Model: {} · {}",
@@ -231,6 +286,64 @@ pub async fn job(
             }
             if rows.len() == 512 {
                 continue;
+            }
+            if let Some(card) = spend_card.clone() {
+                let prompt = card["id"].as_str().unwrap_or("").to_owned();
+                let decide = |action: &'static str| {
+                    let path = format!(
+                        "/api/jobs/{}/spending",
+                        card["job_id"].as_str().unwrap_or(id.as_str())
+                    );
+                    let body = json!({"prompt_id": prompt, "action": action});
+                    async move { backend.call("POST", path, body).await }
+                };
+                if interactive {
+                    if text_open {
+                        outln!();
+                        text_open = false;
+                    }
+                    errln!(
+                        "\n{}\n{}",
+                        plain(card["title"].as_str().unwrap_or("")),
+                        plain(card["text"].as_str().unwrap_or(""))
+                    );
+                    err!(
+                        "{}? [y/N] ",
+                        plain(card["continue_label"].as_str().unwrap_or("Continue"))
+                    );
+                    std::io::stderr().flush()?;
+                    let answer = line().await?;
+                    let action = if matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") {
+                        "continue"
+                    } else {
+                        "stop"
+                    };
+                    if let Err(error) = decide(action).await {
+                        errln!(
+                            "The answer was not applied: {}",
+                            plain(&format!("{error:#}"))
+                        );
+                    }
+                    spend_card = None;
+                } else if owns_job && !matches!(options.approval, ApprovalMode::Wait) {
+                    // Nobody can answer here: stop cleanly and say how to
+                    // allow more. `--approval approve` never raises a limit.
+                    let _ = decide("stop").await;
+                    let stopped = backend
+                        .call("POST", format!("/api/jobs/{id}/cancel"), json!({}))
+                        .await?;
+                    return Ok(Outcome {
+                        code: 2,
+                        value: json!({"status":"spending_limit","message":spend_stop_message(&card),"limit":card,"job":stopped}),
+                        raw: None,
+                    });
+                } else if announced.insert(prompt.clone()) && !json_output && !options.events {
+                    errln!(
+                        "Waiting at the spending limit: {} Answer in the desktop, or run `shadowcode spending --job {} --decision continue` (or stop).",
+                        plain(card["text"].as_str().unwrap_or("")),
+                        plain(card["job_id"].as_str().unwrap_or(id.as_str()))
+                    );
+                }
             }
             let approvals = backend
                 .call(
@@ -408,4 +521,62 @@ pub async fn goal(
         };
     }
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_and_spending_lines_read_plainly() {
+        assert_eq!(
+            retry_line(
+                &json!({"attempt":2,"max_attempts":5,"reason":"rate_limited","delay_ms":4000})
+            ),
+            "Provider busy, retrying (2 of 5) in 4 s…"
+        );
+        assert_eq!(
+            retry_line(
+                &json!({"attempt":1,"max_attempts":3,"reason":"disconnected","delay_ms":300})
+            ),
+            "Connection to the provider dropped, retrying (1 of 3) in a moment…"
+        );
+        let task =
+            json!({"kind":"task","raise_to":2.0,"text":"It has spent $1.04 on paid models."});
+        let message = spend_stop_message(&task);
+        assert!(message.starts_with("Stopped at the spending limit for one task."));
+        assert!(message.contains("--max-cost 2.00"));
+        let daily =
+            json!({"kind":"daily","raise_to":20.0,"text":"Paid models have cost $10.20 today."});
+        assert!(spend_stop_message(&daily).contains("spending.daily_usd 20.00"));
+    }
+
+    #[test]
+    fn max_cost_is_a_dollar_amount() {
+        use clap::Parser;
+        let parsed = super::super::args::Options::try_parse_from([
+            "shadowcode",
+            "run",
+            "--max-cost",
+            "$0.50",
+            "Fix it",
+        ])
+        .unwrap();
+        match parsed.command {
+            Some(super::super::args::Command::Run(run)) => {
+                assert_eq!(run.options.max_cost, Some(0.5))
+            }
+            other => panic!("{other:?}"),
+        }
+        for bad in ["0", "-1", "lots", "1e9"] {
+            assert!(super::super::args::Options::try_parse_from([
+                "shadowcode",
+                "run",
+                "--max-cost",
+                bad,
+                "Fix it"
+            ])
+            .is_err());
+        }
+    }
 }

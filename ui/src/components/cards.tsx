@@ -26,6 +26,43 @@ export type ChatItem = (
       /** The plain limit.reached note of this task; a limit.fallback record
        * replaces it. */
       limitOf?: string;
+      /** A provider-busy retry line (model.retry), updated in place. */
+      retry?: { attempt: number; done?: boolean };
+    }
+  /** A spending limit reached on a paid model (spend.limit_reached): the
+   * task waits between steps for Continue or Stop. */
+  | {
+      kind: "spend";
+      taskId: string;
+      jobId: string;
+      promptId: string;
+      limitKind: "task" | "daily";
+      title: string;
+      text: string;
+      continueLabel: string;
+      /** How it ended: answered, lifted by a changed setting, or the task
+       * finished. */
+      resolved?: "continue" | "stop" | "lifted" | "ended";
+      outcome?: string;
+    }
+  /** "Resume at <time>" after a plan limit (resume.* events). */
+  | {
+      kind: "resume";
+      taskId?: string;
+      resumeId: string;
+      state:
+        | "scheduled"
+        | "cancelled"
+        | "started"
+        | "missed"
+        | "failed"
+        | "needs_consent";
+      at: number;
+      label: string;
+      target: string;
+      text: string;
+      /** The continuation to send (needs_consent). */
+      task?: string;
     }
   /** What happened after a plan limit (limit.fallback). */
   | {
@@ -44,6 +81,11 @@ export type ChatItem = (
       request?: string;
       /** A follow-up was started from this card. */
       resolved?: boolean;
+      /** The limited job and when its plan resets, if the vendor said. */
+      jobId?: string;
+      resetsAt?: number;
+      /** A resume is scheduled for this card's task. */
+      resumeScheduled?: boolean;
     }
   /** A local model ran out of memory while loading (agent.completed with
    * local_out_of_memory). Nothing ran; the card offers a way on. */

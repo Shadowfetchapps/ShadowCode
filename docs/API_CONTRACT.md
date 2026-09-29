@@ -430,6 +430,7 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `POST` | `/api/jobs/{id}/pause` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
 | `POST` | `/api/jobs/{id}/resume` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
 | `POST` | `/api/jobs/{id}/rewind` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
+| `POST` | `/api/jobs/{id}/spending` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
 | `POST` | `/api/jobs/{id}/steer` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
 | `GET` | `/api/jobs/{id}/verification` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
 | `GET` | `/api/local-models` | stable | allowed | [Accounts and models](#accounts-and-models) |
@@ -443,6 +444,8 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `POST` | `/api/local-models/load` | stable | allowed | [Accounts and models](#accounts-and-models) |
 | `POST` | `/api/local-models/remove` | stable | allowed | [Accounts and models](#accounts-and-models) |
 | `POST` | `/api/local-models/unload` | stable | allowed | [Accounts and models](#accounts-and-models) |
+| `GET` | `/api/logs` | stable | refused | [Settings and health](#settings-and-health) |
+| `POST` | `/api/logs/folder` | stable | refused | [Settings and health](#settings-and-health) |
 | `POST` | `/api/mcp/activation` | stable | allowed | [Extensions](#extensions) |
 | `GET` | `/api/mcp/servers` | stable | allowed | [Extensions](#extensions) |
 | `POST` | `/api/mcp/servers` | stable | allowed | [Extensions](#extensions) |
@@ -485,10 +488,10 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `GET` | `/api/review/tasks/{task_id}` | stable | allowed | [Review and rewind](#review-and-rewind) |
 | `GET` | `/api/review/tasks/{task_id}/file` | stable | allowed | [Review and rewind](#review-and-rewind) |
 | `POST` | `/api/review/tasks/{task_id}/undo` | stable | allowed | [Review and rewind](#review-and-rewind) |
-| `GET` | `/api/routing` | stable | allowed | [Settings and health](#settings-and-health) |
-| `PUT` | `/api/routing` | stable | allowed | [Settings and health](#settings-and-health) |
 | `GET` | `/api/roles` | stable | allowed | [Roles](#roles) |
 | `POST` | `/api/roles` | stable | allowed | [Roles](#roles) |
+| `GET` | `/api/routing` | stable | allowed | [Settings and health](#settings-and-health) |
+| `PUT` | `/api/routing` | stable | allowed | [Settings and health](#settings-and-health) |
 | `GET` | `/api/rules` | stable | allowed | [Rules and skills](#rules-and-skills) |
 | `GET` | `/api/rules/check` | stable | allowed | [Rules and skills](#rules-and-skills) |
 | `GET` | `/api/rules/export` | stable | refused | [Rules and skills](#rules-and-skills) |
@@ -531,7 +534,12 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `GET` | `/api/sessions/{id}/pins` | experimental | allowed | [Conversations](#conversations) |
 | `POST` | `/api/sessions/{id}/pins` | experimental | allowed | [Conversations](#conversations) |
 | `DELETE` | `/api/sessions/{id}/pins/{pin_id}` | experimental | allowed | [Conversations](#conversations) |
+| `DELETE` | `/api/sessions/{id}/scheduled-resume` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
+| `GET` | `/api/sessions/{id}/scheduled-resume` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
+| `POST` | `/api/sessions/{id}/scheduled-resume` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
 | `POST` | `/api/sessions/{id}/target` | stable | allowed | [Conversations](#conversations) |
+| `GET` | `/api/spending` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
+| `GET` | `/api/spending/estimate` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
 | `POST` | `/api/sqlite` | stable | allowed | [Extensions](#extensions) |
 | `GET` | `/api/subagents` | stable | allowed | [Subagents](#subagents) |
 | `GET` | `/api/subagents/{id}` | stable | allowed | [Subagents](#subagents) |
@@ -917,6 +925,50 @@ Config `limits: {on_limit: "local"|"ask", fallback_model: ""|"local:gguf:…"}`
 The fallback model is `fallback_model` when ready, else the last local model
 used in the project, else the first ready local model with tool support.
 
+Event `limit.reached {vendor, usage, detail, job_id, resets_at}` is recorded
+on the limited task when the vendor stops the turn; the job's
+`result.limit_reached` carries the same `resets_at`. `resets_at` (Unix
+seconds or null) is when the plan resets: the latest reset among the vendor's
+exhausted usage windows, else a time in the vendor's error text ("try again
+at 3:40 PM", "resets in 2h 5m", "try again at Oct 1st, 2026 3:40 PM", an RFC
+3339 time, Claude's `…|<unix seconds>`; read in this computer's time zone
+unless it says UTC), else the earliest reported window reset. Times in the
+past or more than 8 days away are not believed.
+
+### Resume after a plan limit
+
+A one-shot continuation on the same model when the plan resets. It is saved
+in `native_meta` `scheduled_resumes` (one per conversation), survives a
+restart, and is started by the automation scheduler (desktop and `shadowcode
+serve`; one-shot CLI commands never run it).
+
+- `GET /api/sessions/{id}/scheduled-resume` → `{resume: Resume|null,
+  scheduler: bool}`; `scheduler` is false when this engine does not run
+  schedules.
+- `POST /api/sessions/{id}/scheduled-resume {job_id?, handoff_consent?}` →
+  `{resume, scheduler}`. `job_id` (default: the conversation's latest job)
+  must be a job of this conversation with status `limit_reached` and a
+  future `resets_at`; otherwise 400. Replaces the conversation's earlier
+  schedule.
+- `DELETE /api/sessions/{id}/scheduled-resume` → `{resume: Resume|null}` (the
+  removed one).
+- `Resume = {id, session_id, workspace, job_id, task_id, target, label, task,
+  mode, web, at, created_at, handoff_consent}`: `target` is the limited job's
+  exact picker id (`routing.model_id`), `label` its product ("Codex").
+- At `at` the scheduler starts a queued job in the same conversation on
+  `target` with the task "Continue where <label> stopped when its plan limit
+  was reached. The request was: …", and sets the conversation's
+  `execution_target` to `target`. It never switches to another model: when
+  `target` cannot be resolved or started, nothing runs and the conversation
+  says why.
+- Events on the limited task (`resume_id, at, target, label, job_id` in each):
+  `resume.scheduled {scheduler}`, `resume.cancelled`, `resume.started`
+  (`job_id` is the new job), `resume.missed` (ShadowCode was not running and
+  the time is more than 12 hours past), `resume.failed {reason, task}`, and
+  `resume.needs_consent {reason, task}` (continuing would hand newer turns to
+  a cloud route; the window starts `task` on `target` through the usual
+  consent dialog).
+
 ### Usage, cost, retries and compaction
 
 One `Usage` shape is used for turns, jobs and conversations:
@@ -981,6 +1033,109 @@ Usage = {prompt_tokens, completion_tokens, total_tokens,
   DeepSeek's `prompt_cache_hit_tokens`).
 - Tool descriptions: models with 32K+ context, or hosted models with 16K+, get
   the complete native tool descriptions; smaller ones get them cut to 64 bytes.
+
+### Spending limits (paid API models)
+
+Limits on what paid per-token models cost: OpenRouter, or any
+compatible endpoint that is not on this computer. Subscriptions (vendor CLIs),
+models on this computer and the offline preview are never limited.
+
+- Config `spending: {task_usd: number|null, daily_usd: number|null}`
+  (defaults `1.0` and `10.0`; `null` turns a limit off; each between 0.01 and
+  100000). The engine reads it again before every model turn, so a change in
+  Settings applies to running tasks. A project's own config cannot change it.
+- A task's paid requests are counted as they are priced (see `Usage` above),
+  including failed attempts, compaction summaries and every subagent's
+  requests, which count toward the task the user started. Costs worked out
+  from the price list count and are marked `estimated`. The day's total spans
+  all tasks and projects of the profile and starts again at local midnight
+  (`native_meta` `spending_day`).
+- Before each model turn (never inside a tool call) the task checks its
+  limits:
+  - Event `spend.notice {job_id, kind, spent, limit, estimated, text}` once
+    per task (`kind: "task"`) or once per day (`kind: "daily"`) at 75%.
+  - Event `spend.limit_reached {id, job_id, kind, limit, spent, estimated,
+    raise_to, resets_at, title, text, continue_label}` at 100%: the task waits
+    (status stays `running`) until the card is answered, the limit no longer
+    applies, or the task is cancelled. A subagent at the limit shows the card
+    in the task that started it (`job_id` is that task's job).
+  - Event `spend.limit_resolved {prompt_id, job_id, kind, action, limit?,
+    reason?, text?}`: `action` `continue` (the per-task limit, or today's
+    limit, is raised to `raise_to`: the limit plus one more step of the
+    setting, past what is already spent) or `stop`. `reason` is set when
+    no one answered but the limit stopped applying (a setting changed, or
+    the day's total reset).
+  - Event `spend.unknown {job_id, model, text}` once per task when a paid
+    request has no known price; it is not counted as $0.
+- `POST /api/jobs/{id}/spending {prompt_id, action: "continue"|"stop"}`
+  answers the waiting card of job `{id}` (the task's own job) → the
+  `spend.limit_resolved` payload. `stop` cancels the task (and its
+  subagents); its summary is "Stopped at your per-task spending limit…" (or
+  daily). A wrong or answered `prompt_id` is 400.
+- `POST /api/jobs` and `POST /api/commands/run` accept `max_cost_usd`
+  (0.01–100000): this task's limit instead of `spending.task_usd` (the CLI's
+  `--max-cost`).
+- `GET /api/spending` → `{limits: {task_usd, daily_usd}, today: {day, usd,
+  estimated, unknown_turns, limit, resets_at}, waiting: [card + {session_id,
+  task_id}]}`; `today.limit` includes a raise for today.
+- `GET /api/spending/estimate?session_id=&model=&draft_chars=` → `{show:
+  false, reason: "not_paid"|"no_prices"}` or `{show: true, low_usd, high_usd,
+  label, context_tokens, model, detail}`: the next message on a paid model
+  with cached OpenRouter prices, from the conversation's saved message tape,
+  the tool list, the draft length (`draft_chars / 3` tokens) and a typical
+  answer: low = context × input price + 200 output tokens; high = three
+  reads of the context (a few tool steps) + 4,000 output tokens. `model` is
+  a picker id (default: the conversation's target). `label` is "about
+  $0.01–$0.05" (or "less than $0.01").
+- Automations: a run that reaches a limit stops with status
+  `spending_limit` (or waits, when its approvals wait).
+
+### Run record
+
+`Job.run` (also `result.run` and the `agent.completed` payload's `run`) says
+exactly what ran a job, recorded when it first calls its model:
+
+```ts
+RunRecord = {
+  model_id: string,          // exact picker/registry id
+  model: string,             // model name sent to the provider
+  provider: string,
+  route: "vendor_cli" | "local_llamacpp" | "native_http",
+  vendor: string|null,       // "Codex", … when a vendor CLI ran it
+  vendor_version: string|null, // the CLI's `--version` line
+  effort: "low"|"medium"|"high"|null,  // null = the model's default
+  app_version: string,
+  app_commit: string|null,   // when the build recorded it
+  settings_hash: string,     // first 12 hex of SHA-256 of the effective settings
+  rules_hash: string|null,   // same, of the rules and skills text delivered
+  recorded_at: number,
+}
+```
+
+Command jobs have no run record. `rules_hash` hashes exactly what the agent
+received (the vendor's `rules.delivered` text, or the rules part of the
+native system prompt).
+
+### App log
+
+A log for bug reports: `<state>/logs/shadowcode.log`
+(`~/.local/state/shadow-agent/logs/` by default), rotated at 5 MB into
+`.1` and `.2`. Every line is `<local time> <LEVEL> <target>: <message>`,
+passed through the secret redaction, with the home folder written as `~`.
+It holds events, errors and timings only: engine warnings, finished jobs
+(`job.finished job=… status=… model=… steps=… seconds=… tokens=…
+cost_usd=…`, and the error for a failed one), and an allow-list of fields
+per task event (for example `tool.completed tool success`, `model.retry
+attempt max_attempts reason delay_ms`); never prompts, answers, tool
+arguments or output, or file contents. `logging.level` (`error`, `warn`,
+`info`, `debug`) sets how much the engine writes.
+
+- `GET /api/logs` → `{folder, files: [{name, bytes}], max_file_bytes,
+  max_files}` (newest first).
+- `POST /api/logs/folder` → `{path}`: creates the folder. The desktop's
+  `open_logs_folder` command calls it and opens that path; the window never
+  supplies a path.
+- Remote access refuses `/api/logs…`.
 
 ### Task timings
 
@@ -1609,6 +1764,10 @@ Settings with API-visible meaning:
 - `checkpoints: {shell: true, vendor: true, keep: 1..10000 = 200,
   max_copy_files: ≤ 200000 = 5000, max_copy_bytes: ≤ 1 GiB = 64 MiB}`.
 - `updates.check: bool|null` (`null` follows the packaged default).
+- `spending.task_usd`, `spending.daily_usd` (number or null; defaults 1.0 and
+  10.0) — see [Spending limits](#spending-limits-paid-api-models).
+- `logging.level` (`error`, `warn`, `info`, `debug`; default `info`) — how
+  much the engine writes to the [app log](#app-log).
 - `ui`: `theme` (`system|light|dark`) and the notification switches `notify`,
   `notify_approval`, `notify_failed`, `notify_limit`, `notify_finished`
   (default true) and `notify_sound` (default false).
@@ -1661,9 +1820,15 @@ recorded once per conversation when a command runs without bubblewrap.
   UTF-8 JSON that would be saved: `{schema: 1, captured_at, app, version,
   runtime, os, architecture, scope, excluded, omitted_checks, checks: [{id,
   label, status}]}`. Only reviewed check ids with fixed labels and their
-  original status enter it; project maps, paths, configured model names,
-  detail/fix text, prompts and logs never do. At most 96 checks (the rest
-  counted as omitted), at most 256 KiB.
+  original status enter it; project maps, paths, custom and local model
+  names, detail/fix text, prompts and answers never do. At most 96 checks
+  (the rest counted as omitted), at most 256 KiB. The export also carries
+  `runs` (the run records of up to 12 recent jobs, `{status, run}`; see
+  [Run record](#run-record); model ids other than `api:openrouter:…` and
+  `cli:…` are hidden because they can name local files or private hosts) and
+  `log: {note, lines}`, the app log's last lines (at most 96 KiB; see
+  [App log](#app-log)) with secrets redacted again and every file path
+  replaced by `<path>`.
 - `GET /api/diagnostic-exports/{id}` → the same snapshot, for 10 minutes; at
   most four are retained per engine. Unknown or expired ids fail ("Diagnostic
   snapshot expired; run Doctor again"); Doctor is not rerun. The desktop
@@ -2573,8 +2738,9 @@ files. Behaviour: [RULES_AND_SKILLS.md](RULES_AND_SKILLS.md). Item ids are
 - Remote access refuses `/api/rules/imports…`, `/api/rules/export…` and
   `/api/rules/folder`.
 - Event `rules.delivered {vendor, mechanism, profile_files, project_files,
-  skills, plugin_skills, bytes, estimated_tokens, truncated}` for each vendor
-  run that received the rulebook. A failure to prepare it is an
+  skills, plugin_skills, bytes, estimated_tokens, truncated, hash}` for each
+  vendor run that received the rulebook; `hash` is the run record's
+  `rules_hash`. A failure to prepare it is an
   `agent.warning` with `kind: "rules"`; the run continues without it.
 - Doctor adds the check `rules-and-skills` (`pass` or `warn`), which the
   diagnostics export keeps as *Rules and skills*.

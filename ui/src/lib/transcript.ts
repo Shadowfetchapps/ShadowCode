@@ -24,6 +24,13 @@ import { localPhase } from "./localProgress";
 import { parseLocalRuntimeReceipt } from "./provenance";
 import { parseTimings } from "./timing";
 import { cursorCommandOutput } from "./vendorOutput";
+import {
+  clockTime,
+  money,
+  parseRunRecord,
+  retriedText,
+  retryText,
+} from "./spending";
 
 const ROUTE_PRODUCTS: Record<string, string> = {
   "cli:codex": "Codex",
@@ -467,6 +474,11 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     ];
   }
   if (event.type === "limit.reached") {
+    const resetsAt = Number(p.resets_at) || undefined;
+    touch((a) => ({
+      ...a,
+      limit: { jobId: p.job_id ? String(p.job_id) : undefined, resetsAt },
+    }));
     const vendor = providerLabel(p.vendor);
     limit = {
       vendor,
@@ -495,6 +507,10 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     items = items.filter(
       (item) => !(item.kind === "note" && item.limitOf === taskId),
     );
+    const stopped = {
+      jobId: activity[taskId]?.limit?.jobId,
+      resetsAt: activity[taskId]?.limit?.resetsAt,
+    };
     if (p.ok) {
       const to = String(p.to || "a local model");
       const card: ChatItem = {
@@ -505,6 +521,10 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
         from,
         to,
         target: String(p.target || ""),
+        request: items.find(
+          (item) => item.kind === "user" && item.taskId === taskId,
+        )?.text,
+        ...stopped,
       };
       // The follow-up's prompt is recorded before this event; the note goes
       // just above it.
@@ -544,6 +564,7 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
           text: `${from} reached its plan limit.`,
           from,
           request: request?.text || "",
+          ...stopped,
         },
       ];
       limit = undefined;
@@ -560,8 +581,56 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
           text: `${from} reached its plan limit. ${reason}`,
           from,
           reason,
+          request: items.find(
+            (item) => item.kind === "user" && item.taskId === taskId,
+          )?.text,
+          ...stopped,
         },
       ];
+    }
+  }
+  items = applySpendAndResume(items, event, taskId);
+  if (event.type === "model.retry") {
+    const attempt = Number(p.attempt) || 1;
+    const index = lastIndex(
+      items,
+      (item) =>
+        item.kind === "note" &&
+        item.taskId === taskId &&
+        Boolean(item.retry) &&
+        !item.retry?.done,
+    );
+    const note: ChatItem = {
+      kind: "note",
+      taskId,
+      text: retryText(p),
+      retry: { attempt },
+    };
+    items = [...items];
+    if (index < 0) items.push(note);
+    else items[index] = { ...note, key: items[index].key };
+  }
+  if (
+    (event.type === "model.stream" || event.type === "model.delta") &&
+    (p.text || p.message_id)
+  ) {
+    const index = lastIndex(
+      items,
+      (item) =>
+        item.kind === "note" &&
+        item.taskId === taskId &&
+        Boolean(item.retry) &&
+        !item.retry?.done,
+    );
+    if (index >= 0) {
+      const note = items[index] as Extract<ChatItem, { kind: "note" }>;
+      const attempts = note.retry?.attempt || 1;
+      items = [...items];
+      items[index] = {
+        ...note,
+        text: retriedText(attempts),
+        retry: { attempt: attempts, done: true },
+      };
     }
   }
   // Vendor account pushes carry `vendor`; per-task token/cost updates
@@ -1003,8 +1072,15 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
         items[forkIndex] = { ...item, eventId: event.id, live: false };
     }
     const verification = parseVerification(p.verification);
+    const run = parseRunRecord(p.run);
+    items = items.map((item) =>
+      item.kind === "spend" && item.taskId === taskId && !item.resolved
+        ? { ...item, resolved: "ended" as const }
+        : item,
+    );
     touch((a) => ({
       ...a,
+      ...(run ? { run } : {}),
       finishedAt: event.ts,
       timings: parseTimings(p.timings),
       verification: verification || a.verification,
@@ -1046,6 +1122,163 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     compaction,
     cursor: event.id || state.cursor,
   };
+}
+
+/** Spending limit cards and notices (spend.*) and scheduled resumes after a
+ * plan limit (resume.*). */
+function applySpendAndResume(
+  items: ChatItem[],
+  event: EventRow,
+  taskId: string,
+): ChatItem[] {
+  const p = event.payload || {};
+  switch (event.type) {
+    case "spend.notice":
+    case "spend.unknown":
+      return [...items, { kind: "note", taskId, text: String(p.text || "") }];
+    case "spend.limit_reached": {
+      const promptId = String(p.id || "");
+      if (
+        items.some(
+          (item) => item.kind === "spend" && item.promptId === promptId,
+        )
+      )
+        return items;
+      const limitKind = p.kind === "daily" ? "daily" : "task";
+      return [
+        ...items,
+        {
+          kind: "spend",
+          taskId,
+          jobId: String(p.job_id || ""),
+          promptId,
+          limitKind,
+          title: String(
+            p.title ||
+              (limitKind === "daily"
+                ? "Today's spending limit is reached"
+                : "This task reached its spending limit"),
+          ),
+          text: String(p.text || ""),
+          continueLabel: String(
+            p.continue_label ||
+              `Continue (limit raised to ${money(Number(p.raise_to) || 0)})`,
+          ),
+        },
+      ];
+    }
+    case "spend.limit_resolved": {
+      const promptId = String(p.prompt_id || "");
+      return items.map((item) =>
+        item.kind === "spend" && item.promptId === promptId
+          ? {
+              ...item,
+              resolved:
+                p.reason && p.action === "continue"
+                  ? "lifted"
+                  : p.action === "stop"
+                    ? "stop"
+                    : "continue",
+              outcome: String(
+                p.text ||
+                  (p.action === "stop"
+                    ? "Stopped at your spending limit."
+                    : "The limit no longer applies, so the task went on."),
+              ),
+            }
+          : item,
+      );
+    }
+  }
+  if (!event.type.startsWith("resume.")) return items;
+  const state = event.type.slice("resume.".length);
+  if (
+    ![
+      "scheduled",
+      "cancelled",
+      "started",
+      "missed",
+      "failed",
+      "needs_consent",
+    ].includes(state)
+  )
+    return items;
+  const at = Number(p.at) || 0;
+  const label = String(p.label || "the model");
+  const when = clockTime(at, event.ts || undefined);
+  const text =
+    state === "scheduled"
+      ? `Will resume on ${label} at ${when}, when its plan limit resets.`
+      : state === "cancelled"
+        ? `The resume on ${label} was cancelled.`
+        : state === "started"
+          ? `Resumed on ${label} as scheduled.`
+          : state === "missed"
+            ? `ShadowCode wasn't open at ${when}, so this conversation didn't resume on ${label}. Continue it yourself when you're ready.`
+            : state === "needs_consent"
+              ? `${label}'s limit has reset. Continuing there sends this conversation's newer turns to ${label}; review what is sent first.`
+              : `The resume on ${label} didn't start: ${String(p.reason || "unknown error")}`;
+  const card: ChatItem = {
+    kind: "resume",
+    taskId: taskId || undefined,
+    resumeId: String(p.resume_id || ""),
+    state: state as Extract<ChatItem, { kind: "resume" }>["state"],
+    at,
+    label,
+    target: String(p.target || ""),
+    text,
+    task: p.task ? String(p.task) : undefined,
+  };
+  // One row per scheduled resume, updated as it runs or is cancelled; the
+  // plan-limit card knows whether a resume is waiting.
+  const index = items.findIndex(
+    (item) => item.kind === "resume" && item.resumeId === card.resumeId,
+  );
+  const next = items.map((item) =>
+    item.kind === "limit" && item.taskId === taskId
+      ? { ...item, resumeScheduled: state === "scheduled" }
+      : item.kind === "resume" &&
+          item.state === "scheduled" &&
+          state === "scheduled" &&
+          item.resumeId !== card.resumeId
+        ? {
+            ...item,
+            state: "cancelled" as const,
+            text: `The resume on ${item.label} was replaced.`,
+          }
+        : item,
+  );
+  if (index < 0) return [...next, card];
+  next[index] = { ...card, key: items[index].key };
+  return next;
+}
+
+/** What "Try on…" continues for `taskId`: the request as the user wrote it
+ * and who stopped (the vendor or model that ran it). */
+export function tryOnFor(
+  transcript: Transcript,
+  taskId: string,
+  /** The picker's name for a model id, when it has one. */
+  nameOf: (id: string) => string | undefined = () => undefined,
+): { taskId: string; from: string; request: string } {
+  const request =
+    transcript.items.find(
+      (item) =>
+        item.kind === "user" && item.taskId === taskId && !item.continued,
+    )?.text ||
+    transcript.items.find(
+      (item) => item.kind === "user" && item.taskId === taskId,
+    )?.text ||
+    "";
+  const activity = transcript.activity[taskId];
+  const run = activity?.run;
+  const from =
+    activity?.finished?.limitReached ||
+    (run?.model_id ? nameOf(run.model_id) : undefined) ||
+    run?.vendor ||
+    run?.model ||
+    "the previous model";
+  return { taskId, from, request };
 }
 
 export function replay(events: EventRow[]): Transcript {

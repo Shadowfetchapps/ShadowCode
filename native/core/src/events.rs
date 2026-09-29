@@ -14,6 +14,7 @@ pub struct TaskEvents {
 }
 impl TaskEvents {
     pub fn emit(&self, kind: &str, payload: Value) -> Result<Value> {
+        crate::applog::task_event(kind, &self.task_id, &payload);
         let event =
             self.store
                 .add_event(kind, &payload, Some(&self.session_id), Some(&self.task_id))?;

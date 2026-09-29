@@ -213,6 +213,15 @@ pub enum Command {
         #[arg(long, requires="id", value_parser=["approve","deny"])]
         decision: Option<String>,
     },
+    /// Show spending limits for paid API models, today's total and tasks
+    /// waiting at a limit; answer one with --job and --decision.
+    Spending {
+        /// The waiting task's job ID.
+        #[arg(long)]
+        job: Option<String>,
+        #[arg(long, requires = "job", value_parser = ["continue", "stop"])]
+        decision: Option<String>,
+    },
     /// Create a durable goal and optionally run its milestones.
     Goal {
         instruction: String,
@@ -448,6 +457,23 @@ pub struct TaskOptions {
     /// How to handle a tool approval without an interactive terminal.
     #[arg(long, value_enum, default_value = "cancel")]
     pub approval: ApprovalMode,
+    /// Spending limit for this task on paid API models, in US dollars
+    /// (instead of `spending.task_usd`). Subscriptions and local models are
+    /// never limited.
+    #[arg(long, value_name = "USD", value_parser = parse_usd)]
+    pub max_cost: Option<f64>,
+}
+fn parse_usd(text: &str) -> Result<f64, String> {
+    let usd: f64 = text
+        .trim()
+        .trim_start_matches('$')
+        .parse()
+        .map_err(|_| format!("'{text}' is not an amount in US dollars"))?;
+    if usd.is_finite() && (0.01..=crate::spending::MAX_LIMIT_USD).contains(&usd) {
+        Ok(usd)
+    } else {
+        Err("the amount must be between 0.01 and 100000".into())
+    }
 }
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum ApprovalMode {

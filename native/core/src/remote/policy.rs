@@ -41,6 +41,8 @@ pub struct Refusal(pub &'static str);
 pub const TERMINALS_OFF: &str = "Terminals are turned off for remote access. Turn on \"Allow terminals over remote access\" in Settings › Remote access on the computer running ShadowCode.";
 pub const MANAGED_LOCALLY: &str =
     "Remote access is managed in Settings › Remote access on the computer running ShadowCode.";
+pub const LOGS_LOCAL: &str =
+    "The app log stays on the computer running ShadowCode. Open it there from Settings › About.";
 pub const SECRET_FILE: &str = "Secret files such as .env are not shown over remote access.";
 pub const PROFILE_FOLDER: &str =
     "ShadowCode's own settings folder cannot be opened over remote access.";
@@ -153,6 +155,7 @@ pub fn check(path: &str, body: &Value, access: &Access, paths: &AppPaths) -> Res
     match family {
         "remote" | "views" | "runtime" | "owned-jobs" => return Err(Refusal(MANAGED_LOCALLY)),
         "data" => return Err(Refusal(DATA_LOCAL)),
+        "logs" => return Err(Refusal(LOGS_LOCAL)),
         "workspace"
             if matches!(
                 parts.get(1).copied(),
@@ -312,6 +315,7 @@ mod tests {
     /// listing it.
     const REVIEWED_FAMILIES: &[(&str, &str)] = &[
         ("remote", "refused: managed on this computer"),
+        ("logs", "refused: the app log stays on this computer"),
         ("preview", "refused: loopback proxies and local processes"),
         ("terminals", "refused unless terminals are allowed"),
         ("background", "refused unless terminals are allowed"),
@@ -334,6 +338,10 @@ mod tests {
         ("worktree-tasks", "allowed"),
         ("sandbox", "allowed: status and scratch cleanup"),
         ("sessions", "allowed; profile folders refused"),
+        (
+            "spending",
+            "allowed: limits, today's paid total and the next-message estimate",
+        ),
         ("projects", "allowed; profile folders refused"),
         ("events", "allowed"),
         ("resolve", "allowed"),

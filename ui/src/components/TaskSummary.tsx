@@ -14,6 +14,7 @@ import { onVerificationRefresh } from "../lib/verificationRefresh";
 import type { LineCounts } from "../lib/diffStats";
 import { TaskTimingDetails } from "./TaskTimingDetails";
 import { LocalModelDetails } from "./LocalModelDetails";
+import { RunDetails } from "./RunDetails";
 import { RunCheck, type RunCheckAction } from "./RunCheck";
 import { RoleSummary } from "./RoleSummary";
 
@@ -33,8 +34,12 @@ export const TaskSummary = memo(function TaskSummary({
   runCheck,
   workspace,
   sessionId,
+  onTryOn,
 }: {
   activity: TaskActivity;
+  /** "Try on…": continue this task on another model the user picks
+   * (offered when the task did not finish). */
+  onTryOn?: () => void;
   workspace?: string;
   sessionId?: string;
   runCheck?: RunCheckAction;
@@ -270,6 +275,22 @@ export const TaskSummary = memo(function TaskSummary({
   // A stop the user asked for is not a failure, and an answer that changed
   // nothing needs no report. With nothing changed, no checks run and no
   // unverified claims, one quiet line says so.
+  // A task that did not finish can go on on another model (a plan limit's
+  // own card offers it next to Resume).
+  const tryOn =
+    onTryOn &&
+    activity.finished &&
+    !activity.finished.success &&
+    !activity.finished.limitReached ? (
+      <button
+        type="button"
+        className="mini"
+        title="Continue this task on another model you pick"
+        onClick={onTryOn}
+      >
+        Try on…
+      </button>
+    ) : null;
   const quiet =
     (stopped || limited || Boolean(activity.finished?.success)) &&
     changed.length === 0 &&
@@ -301,9 +322,11 @@ export const TaskSummary = memo(function TaskSummary({
         {activity.roles && <RoleSummary roles={activity.roles} />}
         <TaskTimingDetails timings={activity.timings} />
         <LocalModelDetails receipt={activity.localRuntime} />
-        {runCheck && (
+        <RunDetails run={activity.run} />
+        {(runCheck || tryOn) && (
           <div className="row task-summary-actions">
-            <RunCheck action={runCheck} />
+            {runCheck && <RunCheck action={runCheck} />}
+            {tryOn}
           </div>
         )}
       </section>
@@ -436,8 +459,10 @@ export const TaskSummary = memo(function TaskSummary({
       </div>
       <TaskTimingDetails timings={activity.timings} />
       <LocalModelDetails receipt={activity.localRuntime} />
+      <RunDetails run={activity.run} />
       <div className="row task-summary-actions">
         {runCheck && <RunCheck action={runCheck} />}
+        {tryOn}
         {changed.length > 0 && (
           <button
             type="button"

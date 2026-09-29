@@ -79,8 +79,18 @@ running them.
 - **Interrupted runs.** A run still going when ShadowCode quits is stopped
   with it and shows as _Interrupted_ next time.
 
+- **Spending limits.** A run on a paid API model that reaches its
+  [spending limit](USER_GUIDE.md#spending-limits-for-paid-models) stops
+  (status _Stopped at the spending limit_), or waits for your answer when the
+  automation waits for approvals.
+- **Resume after a plan limit.** "Resume at 3:40 PM" on a conversation that
+  hit a subscription's plan limit is a one-shot continuation that the same
+  scheduler starts at that time; it needs ShadowCode open then, like any
+  schedule.
+
 Statuses: Running, Finished, Failed, Stopped (by you), Hit its time limit,
-Stopped for approval, Interrupted, Missed, Skipped.
+Stopped for approval, Stopped at the spending limit, Interrupted, Missed,
+Skipped.
 
 ## Start from an issue
 

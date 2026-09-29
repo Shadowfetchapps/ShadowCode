@@ -1261,9 +1261,12 @@ async fn limit_reached(
         }
         None => super::usage::UsageSnapshot::limit_reached(&vendor.provider(), &detail),
     };
+    // When the plan resets, if the vendor says: the conversation offers to
+    // resume on the same model then.
+    let resets_at = crate::resume::reset_time(&json!(usage), &detail, crate::now());
     if let Err(error) = request.events.emit(
         "limit.reached",
-        json!({"vendor":vendor.id(),"usage":usage,"detail":detail,"job_id":request.job_id}),
+        json!({"vendor":vendor.id(),"usage":usage,"detail":detail,"job_id":request.job_id,"resets_at":resets_at}),
     ) {
         return error;
     }

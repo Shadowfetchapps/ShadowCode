@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { CircleArrowUp, Copy, RefreshCw } from "lucide-react";
+import { CircleArrowUp, Copy, FolderOpen, RefreshCw } from "lucide-react";
 import { api, type AboutInfo, type UpdateStatus } from "../../api";
 import { relativeTime } from "../../lib/picker";
-import { isRemote } from "../../lib/transport";
+import { canPickFiles, isRemote, openLogsFolder } from "../../lib/transport";
 import { announceUpdates } from "../../hooks/useUpdates";
 import "../../about.css";
 import { LoadError } from "../cards";
@@ -155,6 +155,24 @@ export function AboutPage({
         <a href={about.links.user_guide}>User guide</a>
         <a href={about.links.issues}>Report a problem</a>
       </nav>
+      {canPickFiles() && (
+        <div className="about-logs">
+          <p className="hint">
+            ShadowCode keeps a log for bug reports: which tasks ran, errors and
+            timings. It never holds your prompts, answers or files, and secrets
+            are removed. Attach it when you report a problem.
+          </p>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() =>
+              void openLogsFolder().catch((e) => onToast(String(e), "err"))
+            }
+          >
+            <FolderOpen size={14} aria-hidden="true" /> Open logs folder
+          </button>
+        </div>
+      )}
 
       <h4>Updates</h4>
       {updates.allowed && (

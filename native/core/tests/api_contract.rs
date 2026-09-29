@@ -57,6 +57,7 @@ const MODULES: &[(&str, &[&str])] = &[
         &["jobs", "run", "approvals", "checkpoints"],
     ),
     ("service/local_downloads.rs", &["local-models"]),
+    ("service/logs.rs", &["logs"]),
     ("service/memory.rs", &["memory"]),
     (
         "service/model_catalog.rs",
@@ -68,6 +69,7 @@ const MODULES: &[(&str, &[&str])] = &[
     ("service/rules.rs", &["rules"]),
     ("service/sandbox.rs", &["sandbox"]),
     ("service/second_opinion.rs", &["second-opinions"]),
+    ("service/spending.rs", &["spending"]),
     (
         "service/sessions.rs",
         &["sessions", "projects", "events", "resolve"],

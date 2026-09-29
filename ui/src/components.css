@@ -234,10 +234,15 @@ button.link {
   background: var(--hover);
   color: var(--text);
 }
-.composer-blocked {
+.composer-blocked,
+.composer-estimate {
   margin: 6px 4px 0;
   font-size: 12px;
   color: var(--muted);
+}
+.composer-estimate {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 .composer-control {
   position: relative;
@@ -987,6 +992,9 @@ div.activity-step {
   border-color: var(--border);
   background: transparent;
 }
+.spend-card .spend-outcome {
+  color: var(--text-2);
+}
 .msg-note.limit-note {
   display: flex;
   align-items: center;
@@ -1060,6 +1068,29 @@ div.activity-step {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+}
+.spend-limits {
+  gap: 2px;
+}
+.spend-limit-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+.spend-limit-row .check {
+  margin: 4px 0;
+}
+.spend-limit-amount {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+.field .spend-limit-amount input {
+  width: 96px;
+  font-variant-numeric: tabular-nums;
 }
 .account-card h4 {
   margin: 0;

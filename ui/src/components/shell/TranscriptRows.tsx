@@ -13,6 +13,8 @@ import { ActivityTimeline } from "../ActivityTimeline";
 import { CommandCardView, OpCard, type ChatItem } from "../cards";
 import { LimitFallbackItem } from "../LimitFallback";
 import { LocalMemoryItem } from "../LocalMemory";
+import { ResumeCard } from "../ResumeCard";
+import { SpendLimitCard } from "../SpendLimitCard";
 import { Markdown } from "../Markdown";
 import { CopyButton, UserMessage } from "../MessageActions";
 import { SubagentCard } from "../SubagentCard";
@@ -31,6 +33,8 @@ import type { Fallback } from "../../lib/allowance";
 export const ROW_WINDOW = 150;
 
 type LimitItem = Extract<ChatItem, { kind: "limit" }>;
+type SpendItem = Extract<ChatItem, { kind: "spend" }>;
+type ResumeItem = Extract<ChatItem, { kind: "resume" }>;
 
 /** Row callbacks. The app passes stable functions, so a memoized row only
  * re-renders when its own item or task activity changes. */
@@ -44,6 +48,18 @@ export type RowActions = {
   onRewind: (taskId: string) => void;
   onContinue: (item: LimitItem, choice: Fallback) => void;
   onChooseModel: () => void;
+  /** "Try on…": pick another model to continue this task on. */
+  onTryOn: (taskId: string) => void;
+  /** Answer a spending limit card. */
+  onSpendDecision: (
+    item: SpendItem,
+    action: "continue" | "stop",
+  ) => Promise<void>;
+  /** "Resume at …" after a plan limit, and its cancel. */
+  onScheduleResume: (item: LimitItem) => void;
+  onCancelResume: () => void;
+  /** A resume that needs the user's review before sending to the cloud. */
+  onResumeNow: (item: ResumeItem) => void;
   onOpenLocal: () => void;
   onFork: (eventId: number) => void;
   onEditResend: (
@@ -247,6 +263,7 @@ const TranscriptRow = memo(function TranscriptRow({
           readVerification={api.jobVerification}
           diffStats={actions.diffStats}
           onReview={(path) => actions.onReview(path, item.taskId)}
+          onTryOn={() => actions.onTryOn(item.taskId)}
           onRewind={
             // A subscription turn is rewindable once its project
             // checkpoint recorded the files it changed.
@@ -265,8 +282,20 @@ const TranscriptRow = memo(function TranscriptRow({
         fallback={fallback}
         disabled={locked}
         onContinue={(choice) => actions.onContinue(item, choice)}
-        onChoose={actions.onChooseModel}
+        onChoose={() => actions.onTryOn(item.taskId)}
         onOpenLocal={actions.onOpenLocal}
+        onScheduleResume={actions.onScheduleResume}
+      />
+    );
+  else if (item.kind === "spend")
+    node = <SpendLimitCard item={item} onDecide={actions.onSpendDecision} />;
+  else if (item.kind === "resume")
+    node = (
+      <ResumeCard
+        item={item}
+        disabled={locked}
+        onCancel={actions.onCancelResume}
+        onResumeNow={actions.onResumeNow}
       />
     );
   else if (item.kind === "memory")
@@ -403,7 +432,9 @@ export function TranscriptRows({
             }
             fallback={row.item.kind === "limit" ? fallback : null}
             locked={
-              row.item.kind === "limit" || row.item.kind === "memory"
+              row.item.kind === "limit" ||
+              row.item.kind === "memory" ||
+              row.item.kind === "resume"
                 ? locked
                 : false
             }

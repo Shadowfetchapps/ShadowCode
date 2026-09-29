@@ -84,6 +84,30 @@ after the job, such as GitHub-hosted runners (the
 actions the project's permissions deny stay denied, and it never approves
 another client's tasks.
 
+### Spending limits
+
+Tasks on paid API models (OpenRouter, or another per-token endpoint that is
+not on this computer) stop to ask at the spending limits in `spending`
+(default $1 per task and $10 per day; subscriptions and local models are never
+limited). `--max-cost USD` (on `run`, `command` and `skill`) sets this task's
+limit instead of `spending.task_usd`, for example `run --max-cost 0.50 "…"`.
+At 75% the terminal prints a one-line note. At the limit the task waits
+between model steps:
+
+- In an interactive terminal it asks `Continue (limit raised to $2.00)? [y/N]`;
+  `y` continues with the limit raised one step, anything else stops the task.
+- Without a terminal the task this command started stops cleanly and the
+  command exits with code 2 and `status: "spending_limit"`, saying how to
+  allow more (`--max-cost`, or `shadowcode config spending.daily_usd …` for
+  the daily limit). `--approval approve` never raises a spending limit.
+- With `--approval wait` the task keeps waiting for an answer in the desktop
+  or from a second terminal: `shadowcode spending` lists the limits, today's
+  total and waiting tasks, and `shadowcode spending --job JOB_ID --decision
+  continue` (or `stop`) answers one.
+
+A busy provider prints `Provider busy, retrying (2 of 5) in 4 s…` while the
+request is retried.
+
 Decisions are scoped to the saved session and operation. This command does not
 grant blanket permission for later commands. `exec "command"` is an exact
 user-requested terminal operation; project trust and configured restrictions
@@ -99,8 +123,9 @@ existing job does not take ownership of it.
 Invalid command-line syntax is reported by the argument parser on stderr before
 the engine starts. These usage errors are not JSON result records.
 
-Exit codes are 0 for success, 1 for a failed task/command, 2 for approval needed
-or invalid command-line syntax, and 130 for interruption. A model's prose is
+Exit codes are 0 for success, 1 for a failed task/command, 2 for approval needed,
+a spending limit nobody could answer, or invalid command-line syntax, and 130
+for interruption. A model's prose is
 not a guarantee of correctness; inspect recorded tool and verification results.
 The result of `exec` includes the subprocess's actual exit code.
 `serve` returns 0 after orderly shutdown. The source-built AppImage runtime

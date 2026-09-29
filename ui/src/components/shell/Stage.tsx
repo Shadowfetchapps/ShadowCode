@@ -46,6 +46,8 @@ import { trustRequestFor } from "../../lib/trust";
 import { chipInput } from "../../lib/usageChip";
 import { ContextChip } from "../ContextChip";
 import type { Roles } from "../../hooks/useRoles";
+import { useSpendEstimate } from "../../hooks/useSpendEstimate";
+import type { TryOn } from "../../hooks/useTaskActions";
 
 /** The main column: banners, the Compare view or the conversation, the
  * composer and the status line. It only lays out what the app's hooks
@@ -104,6 +106,8 @@ export function Stage({
   roles,
   reviewPanel,
   worktreeBar,
+  tryOn,
+  onTryOnModel,
 }: {
   conversation: ReturnType<typeof useConversation>;
   compare: ReturnType<typeof useCompare>;
@@ -170,6 +174,9 @@ export function Stage({
   reviewPanel?: ReactNode;
   /** The open conversation's worktree (Apply / Keep as branch / Discard). */
   worktreeBar?: ReactNode;
+  /** "Try on…" is choosing a model to continue a stopped task. */
+  tryOn?: TryOn | null;
+  onTryOnModel?: (targetId: string) => void;
 }) {
   const { transcript, job, busy, connection, history } = conversation;
   const { switching, sessionId, modelChoice, runningChoice } = nav;
@@ -188,10 +195,17 @@ export function Stage({
     !submitting &&
     !switching;
   const activeTaskId = transcript.activeTaskId || job?.task_id || "";
-  const pendingNote =
-    busy && modelChoice && runningChoice && modelChoice !== runningChoice
+  const pendingNote = tryOn
+    ? "Pick a model to continue the stopped task on"
+    : busy && modelChoice && runningChoice && modelChoice !== runningChoice
       ? "Applies to your next message"
       : undefined;
+  const estimate = useSpendEstimate(
+    sessionId,
+    selectedTarget,
+    task.length,
+    `${job?.id || ""}:${job?.status || ""}:${transcript.sessionUsage?.turns || 0}`,
+  );
   const hasContent = Boolean(task.trim() || files.attachments.length);
   const worktreeReason =
     actions.worktreeBlocked ||
@@ -379,6 +393,7 @@ export function Stage({
                   : "↵ Queue · Ctrl+Shift+↵ Run now in a worktree"
                 : "↵ Send"
               : "/ commands · @ files · ↑ earlier",
+          estimate,
           busy,
           queueing,
           submitting,
@@ -415,6 +430,10 @@ export function Stage({
           onRefresh: onRefreshModels,
           note: pendingNote,
           onSelect: (id) => {
+            if (tryOn && onTryOnModel) {
+              onTryOnModel(id);
+              return;
+            }
             void nav.selectTarget(id);
             promptRef.current?.focus();
           },

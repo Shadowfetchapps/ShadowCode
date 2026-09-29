@@ -27,7 +27,12 @@ import { useCompare } from "./hooks/useCompare";
 import { useStickyScroll } from "./hooks/useStickyScroll";
 import { useDrawerMemory } from "./hooks/useDrawerMemory";
 import { useStableCallback } from "./hooks/useStableCallback";
-import { useTaskActions, type Consent } from "./hooks/useTaskActions";
+import {
+  useTaskActions,
+  type Consent,
+  type TryOn,
+} from "./hooks/useTaskActions";
+import { tryOnFor } from "./lib/transcript";
 import { useAttachments } from "./hooks/useAttachments";
 import { useComposerExtras } from "./hooks/useComposerExtras";
 import { useConversationEdits } from "./hooks/useConversationEdits";
@@ -69,6 +74,8 @@ const ReviewView = lazy(() =>
  * layout lives in `components/shell/`. This component wires them together. */
 export default function App() {
   const [pickerOpen, setPickerOpen] = useState(false);
+  /** "Try on…": the next model picked continues this stopped task. */
+  const [tryOn, setTryOn] = useState<TryOn | null>(null);
   const [commands, setCommands] = useState<
     { name: string; description: string; arg_spec: string }[]
   >([]);
@@ -520,6 +527,20 @@ export default function App() {
     copy: messages.copy,
     continueOnFallback: actions.continueOnFallback,
     chooseModel: () => setPickerOpen(true),
+    tryOn: (taskId: string) => {
+      setTryOn(
+        tryOnFor(
+          conversation.transcript,
+          taskId,
+          (id) => pickerTargets.find((target) => target.id === id)?.name,
+        ),
+      );
+      setPickerOpen(true);
+    },
+    decideSpending: actions.decideSpending,
+    scheduleResume: actions.scheduleResume,
+    cancelResume: actions.cancelResume,
+    resumeNow: actions.resumeNow,
     openLocal: () => openSettings("local"),
     fork: controls.fork,
     openSession: nav.openSession,
@@ -688,7 +709,16 @@ export default function App() {
         onRefreshModels={() => picker.reload(true)}
         onModelDownloaded={adoptDownload}
         pickerOpen={pickerOpen}
-        setPickerOpen={setPickerOpen}
+        setPickerOpen={(open: boolean) => {
+          if (!open) setTryOn(null);
+          setPickerOpen(open);
+        }}
+        tryOn={tryOn}
+        onTryOnModel={(id: string) => {
+          const pending = tryOn;
+          setTryOn(null);
+          if (pending) void actions.tryOnModel(id, pending);
+        }}
         selectedTarget={selectedTarget}
         queuedJobs={queuedJobs}
         queuedTaskIds={queuedTaskIds}

@@ -23,6 +23,7 @@ import {
   usageDetailLines,
   usageLabel,
 } from "../../lib/picker";
+import { SpendingLimits } from "./SpendingLimits";
 
 const ORDER = ["codex", "claude", "cursor", "antigravity", "grok"];
 
@@ -710,6 +711,7 @@ export function AccountsPage({
         onChanged={onChanged}
         onToast={onToast}
       />
+      <SpendingLimits onToast={onToast} />
       {confirm && (
         <Dialog
           label={`Disconnect ${confirm.label}`}

@@ -134,6 +134,10 @@ impl Engine {
     /// next time past `now`. Returns the history rows it wrote.
     pub async fn automation_tick(&self, now: f64) -> Result<Vec<AutomationRun>> {
         let _tick = self.0.automations.tick.lock().await;
+        // One-shot continuations after a plan limit resets.
+        if let Err(error) = self.resume_tick(now).await {
+            tracing::warn!("Scheduled resumes: {error:#}");
+        }
         let store = self.0.store.clone();
         let due = store.run(move |s| s.due_automations(now)).await?;
         let mut rows = Vec::new();
@@ -531,6 +535,39 @@ impl Engine {
                     ));
                 }
                 _ = tokio::time::sleep(Duration::from_millis(400)) => {
+                    if let Some((meter, card)) = self.running(&job.id)?.and_then(|r| {
+                        let meter = r.spend.clone()?;
+                        let card = meter.pending()?;
+                        Some((meter, card))
+                    }) {
+                        let text = card.to_json()["text"].as_str().unwrap_or("").to_owned();
+                        match automation.options.on_approval {
+                            OnApproval::Stop => {
+                                let _ = meter.decide(&self.0.store, &card.id, "stop");
+                                self.cancel(&job.id).await?;
+                                break ("spending_limit".into(), format!(
+                                    "Stopped at the spending limit for paid models: {text}"
+                                ));
+                            }
+                            OnApproval::Wait => {
+                                if announced.insert(card.id.clone()) {
+                                    self.automation_event(
+                                        "automation.waiting",
+                                        json!({
+                                            "automation_id": automation.id,
+                                            "run_id": run.id,
+                                            "name": automation.name,
+                                            "notify": automation.options.notify,
+                                            "approval": "spending limit",
+                                        }),
+                                        Some(job.session_id.clone()),
+                                    )
+                                    .await;
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     let pending = self
                         .0
                         .approvals
