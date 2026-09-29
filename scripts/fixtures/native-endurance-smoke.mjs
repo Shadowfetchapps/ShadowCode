@@ -104,6 +104,10 @@ async function rendererSample(ctx) {
       retainedListenerRecords: Object.values(events).reduce((sum, item) => sum + item.retained, 0),
       elements: document.getElementsByTagName('*').length,
       summaries: document.querySelectorAll(arguments[0]).length,
+      // A random mark set on the first reading survives only if the page is
+      // never reloaded; WebKit coarsens performance.timeOrigin, so two reads
+      // of one document can differ by a millisecond.
+      pageMark: (window.__shadowEndurancePageMark ??= crypto.randomUUID()),
       documentTimeOrigin: performance.timeOrigin };
   `, [summary]);
 }
@@ -214,7 +218,7 @@ export async function nativeEndurance(ctx) {
       report.warmupTasks = index;
       if (index % report.warmupPolicy.batch !== 0) continue;
       const point = await sample(index, true);
-      assert.equal(point.renderer.documentTimeOrigin, cold.renderer.documentTimeOrigin, "No reload during warm-up");
+      assert.equal(point.renderer.pageMark, cold.renderer.pageMark, "No reload during warm-up");
       assert.ok(point.processCount <= cold.processCount, "No process growth hidden by warm-up");
       assert.ok(point.appPssKiB <= cold.appPssKiB + limits.appPssGrowthKiB, "App memory growth during warm-up");
       assert.ok(point.totals.pssKiB <= cold.totals.pssKiB + limits.treePssGrowthKiB, "Owned memory growth during warm-up");
@@ -251,7 +255,7 @@ export async function nativeEndurance(ctx) {
     assert.equal(database.prepare("SELECT count(*) AS n FROM desktop_jobs WHERE json_extract(payload,'$.status') IN ('queued','running','paused','cancelling')").get().n, 0);
     assert.equal((await ctx.modelRequests()).length, requestsBefore, "Endurance commands invoke no model");
     for (const point of report.samples.slice(1)) {
-      assert.equal(point.renderer.documentTimeOrigin, baseline.renderer.documentTimeOrigin, "No page reload masks accumulation");
+      assert.equal(point.renderer.pageMark, baseline.renderer.pageMark, "No page reload masks accumulation");
       assert.ok(point.processCount <= baseline.processCount, "No owned process accumulation");
       for (const initial of baseline.processes.filter(item => item.pid === ctx.appPid || /WebKitWebProcess$/.test(item.executable)))
         assert.ok(point.processes.some(item => item.pid === initial.pid && item.start === initial.start), "App and renderer have not restarted");

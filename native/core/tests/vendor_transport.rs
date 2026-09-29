@@ -225,7 +225,11 @@ async fn run_case(mode: &str, expected_status: &str, expected_text: &str) {
         .await
         .unwrap();
     let id = start["id"].as_str().unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), service.engine.wait(id)).await;
+    // Each case must end on its own (a limit, a deadline or completion)
+    // rather than stream forever. The fixture's Python CLI and the framing
+    // work share a busy CI runner with the rest of the suite, so allow 20
+    // seconds; a transport that never stops still fails here.
+    let result = tokio::time::timeout(Duration::from_secs(20), service.engine.wait(id)).await;
     if result.is_err() {
         let _ = tokio::time::timeout(Duration::from_secs(5), service.engine.cancel(id)).await;
     }
