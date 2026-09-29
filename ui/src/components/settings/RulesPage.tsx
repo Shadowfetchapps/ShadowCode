@@ -115,12 +115,12 @@ export function RulesPage({ onToast }: { onToast: Toast }) {
       <div className="kv">
         <div>
           <span>Profile folder</span>
-          <code>{overview.profile.path}</code>
+          <code title={overview.profile.path}>{overview.profile.path}</code>
         </div>
         {overview.workspace && (
           <div>
             <span>Project</span>
-            <code>{overview.workspace}</code>
+            <code title={overview.workspace}>{overview.workspace}</code>
           </div>
         )}
       </div>

@@ -699,7 +699,7 @@ try {
   // isolated profile folder (nothing outside it) and reaches the next local
   // task's system prompt (checked in the Stop step below).
   await clickButton("Rules & skills", "//nav[@aria-label='Settings sections']");
-  await until("Rules & skills page", async () => (await pageSettled()) && /Your rules/.test(await settingsText()), 20000);
+  await until("Rules & skills page", async () => (await pageSettled()) && /Your rules/i.test(await settingsText()), 20000);
   await fill("#profile-agents-md", WINDOW_RULE);
   await clickButton("Save rules");
   const profileRules = path.join(profile, "config/shadowcode/profile/AGENTS.md");
