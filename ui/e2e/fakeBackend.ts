@@ -656,6 +656,10 @@ export function installFakeBackend(options: FakeOptions = {}) {
     approvals: [] as Json[],
     /** "Always allow in this project" commands. */
     alwaysAllowed: [] as Json[],
+    /** Saved API keys (names only) and which live in the keyring. */
+    keyNames: [] as string[],
+    keysInKeyring: [] as string[],
+    gitHooksRun: null as boolean | null,
     /** Files a kept comparison applied to the project (uncommitted). */
     applied: [] as Json[],
     /** Project files for @-mentions, the per-task review and rewinds. */
@@ -3826,6 +3830,27 @@ export function installFakeBackend(options: FakeOptions = {}) {
         stats[file] = { add, del };
       }
       return { stats };
+    }
+    if (path === "/api/secrets" && method === "GET") {
+      return {
+        keyring: { available: true, detail: null },
+        file: "/home/demo/.config/shadow-agent/secrets.env",
+        keys: state.keyNames.map((name: string) => ({
+          name,
+          place: state.keysInKeyring.includes(name) ? "keyring" : "file",
+        })),
+      };
+    }
+    if (path === "/api/secrets/move" && method === "POST") {
+      state.keysInKeyring =
+        body.to === "keyring"
+          ? [...new Set([...state.keysInKeyring, body.name])]
+          : state.keysInKeyring.filter((n: string) => n !== body.name);
+      return route("GET", "/api/secrets", {});
+    }
+    if (path === "/api/workspace/git/hooks") {
+      if (method === "POST") state.gitHooksRun = body.run;
+      return { workspace: "/work/demo", hooks: [], run: state.gitHooksRun };
     }
     if (path === "/api/approvals/always" && method === "GET") {
       return { workspace: "/work/demo", commands: state.alwaysAllowed };

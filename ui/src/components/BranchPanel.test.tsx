@@ -112,7 +112,9 @@ it("suggests an editable message, then commits it", async () => {
   expect(screen.getByText(/Drafted by qwen3-coder/)).toBeTruthy();
   fireEvent.change(box, { target: { value: "Add login" } });
   fireEvent.click(screen.getByRole("button", { name: "Commit" }));
-  await waitFor(() => expect(api.gitCommit).toHaveBeenCalledWith("Add login"));
+  await waitFor(() =>
+    expect(api.gitCommit).toHaveBeenCalledWith("Add login", {}),
+  );
   expect(toast).toHaveBeenCalledWith("Committed", "ok");
 });
 

@@ -492,3 +492,43 @@
 .approval-check.check-danger {
   border-color: var(--danger);
 }
+
+/* ---------- secrets, hooks and lockfiles ---------- */
+.secret-findings ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.secret-findings > ul {
+  list-style: none;
+  padding-left: 0;
+  display: grid;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.secret-file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.secret-file code {
+  overflow-wrap: anywhere;
+}
+.hook-list {
+  padding-left: 18px;
+}
+.lockfile-summary {
+  margin: 4px 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.lockfile-summary p {
+  margin: 0 0 4px;
+}
+.lockfile-summary ul {
+  margin: 4px 0;
+  padding-left: 18px;
+}

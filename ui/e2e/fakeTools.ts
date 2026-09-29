@@ -9,6 +9,8 @@
 export type FakeToolsOptions = {
   /** `gh` is installed and signed in. */
   ghReady?: boolean;
+  /** The staged changes (and so the pushed commits) hold a token. */
+  secrets?: boolean;
 };
 
 export function installFakeTools(options: FakeToolsOptions = {}) {
@@ -310,6 +312,20 @@ export function installFakeTools(options: FakeToolsOptions = {}) {
     }
     if (path === "/api/workspace/git/commit" && method === "POST") {
       if (!git.staged) fail("nothing to commit");
+      const finding = {
+        path: "src/config.js",
+        line: 2,
+        kind: "a GitHub token",
+        preview: "ghp_aB… (40 characters)",
+      };
+      if (options.secrets && !body.allow_secrets)
+        return {
+          ok: false,
+          status: 409,
+          secrets: [finding],
+          error:
+            "1 change looks like it contains a secret. Nothing was committed.",
+        };
       git.commits.push(String(body.message));
       git.staged = 0;
       git.changed = 0;
@@ -337,6 +353,22 @@ export function installFakeTools(options: FakeToolsOptions = {}) {
       };
     }
     if (path === "/api/git/push" && method === "POST") {
+      if (options.secrets && !body.allow_secrets)
+        return {
+          ok: false,
+          status: 409,
+          secrets: [
+            {
+              path: "src/config.js",
+              line: 2,
+              kind: "a GitHub token",
+              preview: "ghp_aB… (40 characters)",
+              commit: "0123456789ab",
+            },
+          ],
+          error:
+            "1 change looks like it contains a secret. Nothing was pushed.",
+        };
       git.upstream[git.branch] = `origin/${git.branch}`;
       git.ahead = 0;
       return {

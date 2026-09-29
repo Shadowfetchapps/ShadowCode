@@ -7,6 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
+import { KeyStorage } from "./KeyStorage";
 import { RefreshCw } from "lucide-react";
 import {
   api,
@@ -818,6 +819,7 @@ export function AccountsPage({
           </div>
         </Dialog>
       )}
+      <KeyStorage />
     </section>
   );
 }

@@ -441,6 +441,24 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
       },
     ];
   }
+  if (event.type === "packages.checked" && p.section) {
+    const section = p.section as {
+      title?: string;
+      level?: string;
+      items?: unknown[];
+    };
+    const lines = (section.items || []).map(String);
+    if (lines.length)
+      items = [
+        ...items,
+        {
+          kind: "note",
+          taskId,
+          text: `${section.title || "New packages"}: ${lines.join("; ")}`,
+          warning: section.level === "warn" || section.level === "danger",
+        },
+      ];
+  }
   if (
     event.type === "approval.granted" &&
     p.scope === "project" &&

@@ -5,6 +5,7 @@ import { ChangesTab } from "./ChangesTab";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { DiffHunk, LayoutToggle, type DiffLayout } from "./DiffView";
 import { Empty } from "./cards";
+import { LockfileSummary } from "./LockfileSummary";
 import { hunkKey, useTaskReview } from "../hooks/useReview";
 import type {
   DrawerMemory,
@@ -83,6 +84,8 @@ export function ReviewView({
     writeStore("shadow:diff-layout", next);
   };
   const [confirm, setConfirm] = useState<Confirm>(null);
+  // The lockfile whose full diff is shown (its summary comes first).
+  const [lockDiff, setLockDiff] = useState("");
   const review = useTaskReview({
     taskId,
     initialPath,
@@ -326,12 +329,22 @@ export function ReviewView({
                     showFile={false}
                   />
                 )}
+                {detail.lockfile && !detail.binary && !detail.secret && (
+                  <LockfileSummary
+                    change={detail.lockfile}
+                    showDiff={lockDiff === detail.path}
+                    onToggleDiff={() =>
+                      setLockDiff((p) => (p === detail.path ? "" : detail.path))
+                    }
+                  />
+                )}
                 {detail.binary ? null : detail.secret ? (
                   <p className="hint">
                     This looks like a secret file, so its contents aren’t shown.
                     Undo file still puts it back as it was.
                   </p>
-                ) : !detail.hunks.length ? (
+                ) : detail.lockfile && lockDiff !== detail.path ? null : !detail
+                    .hunks.length ? (
                   <p className="hint">
                     {detail.status === "unchanged"
                       ? "This file is back to how it was before the task."

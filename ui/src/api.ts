@@ -775,6 +775,33 @@ export type ApprovalAssessment = {
   read: boolean;
   checks: ApprovalCheck[];
 };
+/** A possible secret found before a commit or push. */
+export type SecretFinding = {
+  path: string;
+  line: number | null;
+  kind: string;
+  /** The first characters and the length, never the value. */
+  preview: string;
+  commit?: string;
+};
+/** One of the project's own Git hooks. */
+export type GitHook = { name: string; path: string; preview: string };
+/** A commit's answer: done, or refused in band (secrets, hooks question). */
+export type CommitResult = {
+  ok: boolean;
+  status?: number;
+  error?: string;
+  secrets?: SecretFinding[];
+  secrets_truncated?: boolean;
+  needs_hooks_choice?: boolean;
+  hooks?: GitHook[];
+  hooks_ran?: boolean;
+};
+export type SecretStorage = {
+  keyring: { available: boolean; detail: string | null };
+  file: string;
+  keys: { name: string; place: "file" | "keyring" }[];
+};
 /** One "Always allow in this project" command. */
 export type AlwaysAllowed = { command: string; added_at: number };
 export type ReviewFile = {
@@ -799,6 +826,14 @@ export type ReviewFileDetail = ReviewFile & {
   /** A secret file (`.env`, keys): its contents are not shown, but it can
    * still be undone as a whole. */
   secret?: boolean;
+  /** A lockfile: the packages it adds, updates and removes. */
+  lockfile?: LockfileChange;
+};
+export type LockfileChange = {
+  summary: string;
+  added: { name: string; to?: string }[];
+  updated: { name: string; from?: string; to?: string }[];
+  removed: { name: string; from?: string }[];
 };
 export type LifecycleHook = {
   name: string;
@@ -2159,11 +2194,34 @@ export const api = {
       message: "",
       paths,
     }),
-  gitCommit: (message: string, paths: string[] = []) =>
-    send<{ ok: boolean }>("/api/workspace/git/commit", "POST", {
+  gitCommit: (
+    message: string,
+    options: { allow_secrets?: boolean; hooks?: "run" | "skip" } = {},
+  ) =>
+    send<CommitResult>("/api/workspace/git/commit", "POST", {
       message,
-      paths,
+      ...options,
     }),
+  gitUnstage: (paths: string[]) =>
+    send<{ ok: boolean }>("/api/workspace/git/unstage", "POST", { paths }),
+  gitIgnore: (path: string) =>
+    send<{ ok: boolean; path: string }>("/api/workspace/git/ignore", "POST", {
+      path,
+    }),
+  gitHooks: () =>
+    get<{ workspace: string; hooks: GitHook[]; run: boolean | null }>(
+      "/api/workspace/git/hooks",
+    ),
+  setGitHooks: (run: boolean | null) =>
+    send<{ workspace: string; hooks: GitHook[]; run: boolean | null }>(
+      "/api/workspace/git/hooks",
+      "POST",
+      { run },
+    ),
+  /** Where saved API keys live (never their values). */
+  secretStorage: () => get<SecretStorage>("/api/secrets"),
+  moveSecret: (name: string, to: "keyring" | "file") =>
+    send<SecretStorage>("/api/secrets/move", "POST", { name, to }),
   hunkAction: (path: string, hunk: DiffHunk, action: "accept" | "reject") =>
     send<{ ok: boolean; action: string; path: string }>(
       "/api/workspace/diff/hunk",

@@ -4,12 +4,12 @@ import { installFakeTools } from "./fakeTools";
 
 // The drawer's Terminal, Git and Tools tabs against the fake engine (with the
 // fake terminals and Git routes from fakeTools.ts layered on top).
-async function start(page: Page, ghReady = true) {
+async function start(page: Page, ghReady = true, secrets = false) {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   (page as Page & { errors?: string[] }).errors = errors;
   await page.addInitScript(installFakeBackend, { stepMs: 90 });
-  await page.addInitScript(installFakeTools, { ghReady });
+  await page.addInitScript(installFakeTools, { ghReady, secrets });
   await page.goto("/");
   await expect(
     page.getByRole("heading", { name: "What should we work on?" }),
@@ -279,4 +279,40 @@ test("goals, processes and worktrees moved from Settings to the drawer", async (
   await expect(
     tools.getByRole("button", { name: "Processes" }),
   ).toHaveAttribute("aria-pressed", "true");
+});
+
+test("a staged secret is shown before the commit and the push, and goes only when chosen", async ({
+  page,
+}) => {
+  await start(page, true, true);
+  await openDrawer(page, "Git");
+  const panel = drawer(page);
+  await panel.getByRole("button", { name: "Stage all" }).click();
+  await panel
+    .getByRole("textbox", { name: "Commit message" })
+    .fill("Add config");
+  await panel.getByRole("button", { name: "Commit", exact: true }).click();
+  const dialog = page.getByRole("dialog", {
+    name: "This commit may contain a secret",
+  });
+  await expect(dialog).toContainText("src/config.js");
+  await expect(dialog).toContainText("Line 2: looks like a GitHub token");
+  await expect(dialog).not.toContainText("ghp_aB3");
+  await dialog.getByRole("button", { name: "Commit anyway" }).click();
+  await expect(page.getByText("Committed")).toBeVisible();
+  const commits = (await fakeLog(page)).filter(
+    (r) => r.path === "/api/workspace/git/commit",
+  );
+  expect(commits.map((c) => Boolean(c.body.allow_secrets))).toEqual([
+    false,
+    true,
+  ]);
+
+  await panel.getByRole("button", { name: "Push" }).click();
+  const push = page.getByRole("dialog", {
+    name: "These commits may contain a secret",
+  });
+  await expect(push).toContainText("in commit 01234567");
+  await push.getByRole("button", { name: "Push anyway" }).click();
+  await expect(page.getByText("Pushed main to origin")).toBeVisible();
 });

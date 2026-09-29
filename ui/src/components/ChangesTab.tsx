@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type DiffHunk } from "../api";
 import { Empty } from "./cards";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { useCommitGuard } from "../hooks/useCommitGuard";
 import {
   remembered,
   type DrawerMemory,
@@ -53,6 +54,7 @@ export function ChangesTab({
   > | null>(null);
   const [view, setView] = useState<"unstaged" | "staged">("unstaged");
   const [discard, setDiscard] = useState<DiffHunk | null>(null);
+  const guard = useCommitGuard(toast);
 
   const load = useCallback(async () => {
     try {
@@ -293,9 +295,8 @@ export function ChangesTab({
           className="mini primary-mini"
           disabled={busy || !msg.trim()}
           onClick={() =>
-            void api
-              .gitCommit(msg)
-              .then(() => {
+            void guard
+              .commit(msg, () => {
                 setMsg("");
                 void load();
                 toast("Committed", "ok");
@@ -307,6 +308,7 @@ export function ChangesTab({
         </button>
       </div>
       <pre className="plan log">{git.log}</pre>
+      {guard.dialog}
       {discard && (
         <ConfirmDialog
           title="Discard this change?"

@@ -229,7 +229,9 @@ it("reviews before every commit: the commit waits for the findings, then goes ah
   });
   expect(screen.getByText(/found 1 open finding/)).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Commit anyway" }));
-  await waitFor(() => expect(api.gitCommit).toHaveBeenCalledWith("Fix add"));
+  await waitFor(() =>
+    expect(api.gitCommit).toHaveBeenCalledWith("Fix add", {}),
+  );
 });
 
 it("commit without waiting stops the running review first", async () => {
@@ -246,7 +248,9 @@ it("commit without waiting stops the running review first", async () => {
     name: "Stop review and commit",
   });
   fireEvent.click(button);
-  await waitFor(() => expect(api.gitCommit).toHaveBeenCalledWith("Fix add"));
+  await waitFor(() =>
+    expect(api.gitCommit).toHaveBeenCalledWith("Fix add", {}),
+  );
   expect(opinionApi.cancel).toHaveBeenCalledWith("o1");
   expect(opinionApi.start).not.toHaveBeenCalled();
 });
@@ -278,7 +282,9 @@ it("a fresh review lets the commit through; the choice and setting are saved", a
     }),
   );
   fireEvent.click(screen.getByRole("button", { name: "Commit" }));
-  await waitFor(() => expect(api.gitCommit).toHaveBeenCalledWith("Fix add"));
+  await waitFor(() =>
+    expect(api.gitCommit).toHaveBeenCalledWith("Fix add", {}),
+  );
   expect(opinionApi.start).not.toHaveBeenCalled();
 });
 

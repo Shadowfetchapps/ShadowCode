@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type AlwaysAllowed } from "../../api";
+import { GitHooksSetting } from "./GitHooksSetting";
 import { NotificationFields, notifyPrefs } from "./NotificationFields";
 import {
   SandboxSettings,
@@ -170,6 +171,7 @@ export function PermissionsPage({
         </div>
       )}
       <AlwaysAllowedList />
+      <GitHooksSetting />
       <fieldset className="mode-options">
         <legend>Network</legend>
         {[

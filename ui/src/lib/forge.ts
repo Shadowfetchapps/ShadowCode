@@ -1,4 +1,5 @@
 import { request } from "./transport";
+import type { SecretFinding } from "../api";
 
 /** The drawer's Git panel API (`/api/git…`, docs/API_CONTRACT.md).
  * Staging and committing stay on `api.gitAdd` / `api.gitCommit`. */
@@ -71,6 +72,10 @@ export type PrStatus = {
 
 export type PrCreated = {
   ok: boolean;
+  /** Refused in band: the commits to push may contain a secret. */
+  secrets?: SecretFinding[];
+  secrets_truncated?: boolean;
+  error?: string;
   url: string;
   number: number | null;
   provider: string;
@@ -109,12 +114,19 @@ export const forgeApi = {
     }),
   suggest: (kind: "commit" | "pr", base = "", remote = "") =>
     request<Suggestion>("/api/git/suggest", "POST", { kind, base, remote }),
-  push: (remote = "") =>
-    request<{ ok: boolean; remote: string; branch: string; output: string }>(
-      "/api/git/push",
-      "POST",
-      { remote },
-    ),
+  push: (remote = "", allowSecrets = false) =>
+    request<{
+      ok: boolean;
+      remote: string;
+      branch: string;
+      output: string;
+      secrets?: SecretFinding[];
+      secrets_truncated?: boolean;
+      error?: string;
+    }>("/api/git/push", "POST", {
+      remote,
+      ...(allowSecrets ? { allow_secrets: true } : {}),
+    }),
   prStatus: (remote = "", base = "") =>
     request<PrStatus>(`/api/git/pr?remote=${q(remote)}&base=${q(base)}`),
   createPr: (body: {
@@ -123,6 +135,7 @@ export const forgeApi = {
     base: string;
     draft: boolean;
     remote?: string;
+    allow_secrets?: boolean;
   }) => request<PrCreated>("/api/git/pr", "POST", body),
   checks: (number: number, remote = "") =>
     request<PrChecks>(
