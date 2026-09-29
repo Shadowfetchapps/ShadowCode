@@ -206,6 +206,26 @@ A write subagent's changes reach your project only when the main agent
 applies its diff, with your usual edit approval. Approvals a subagent needs
 appear in this conversation, labelled with its name.
 
+### Roles: a model for each step
+
+**Settings › Roles** chooses which model plans, implements, reviews and
+explores in a project: a subscription such as Claude Code or Codex, an
+OpenRouter model, or a model on this computer. Presets set all of them at
+once, for example *Claude Code plans, Codex implements, local reviews*.
+Subagents use their role's model.
+
+Turn on **Plan → Implement → Review** under **More** in the composer (the More
+button then shows *Roles*). A Code message then runs its roles one after
+another: the plan role writes a plan, the implement role makes the changes in
+its own copy of the project, the review role checks them, and you approve the
+changes as usual. Each role shows as a card with its model, cost and status,
+and the task's summary lists who did what. A Plan message runs the plan role
+only; Ask messages are not affected.
+
+When the conversation runs on this computer, ShadowCode asks before a cloud
+role receives its work, and remembers your answer for the conversation.
+Offline, cloud roles do not run. See [Subagents and roles](SUBAGENTS.md#roles).
+
 Projects can add their own agents in `.shadow/agents/`, `.claude/agents/` or
 `.opencode/agent/`, and ShadowCode reads `CLAUDE.md`, nested `AGENTS.md` files,
 Cursor rules and Claude Code skills. See [Subagents](SUBAGENTS.md).

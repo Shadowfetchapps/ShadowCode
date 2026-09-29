@@ -1,13 +1,19 @@
-# Subagents and files from other coding agents
+# Subagents, roles and files from other coding agents
 
 ShadowCode's own agent (local and OpenRouter models) can hand focused work to
-**subagents**: child agents with their own context. It also reads the project
-files other coding tools use, such as `CLAUDE.md`, Cursor rules, Claude Code
-commands and skills, and Claude Code / opencode agent definitions.
+**subagents**: child agents with their own context. A subagent runs on
+ShadowCode's own loop or on a vendor CLI (Codex, Claude Code, Cursor, Grok,
+Antigravity). A project's **roles** choose which model plans, implements,
+reviews and explores, and a Code task can run as **Plan → Implement →
+Review**, each step on its own model (see [Roles](#roles)). ShadowCode also
+reads the project files other coding tools use, such as `CLAUDE.md`, Cursor
+rules, Claude Code commands and skills, and Claude Code / opencode agent
+definitions.
 
-Vendor CLIs (Codex, Claude Code, Cursor, Antigravity, Grok) run their own
-agent loops, so subagents apply to ShadowCode's own agent only. Vendor CLIs do
-receive the project's enabled MCP servers (see the end of this page).
+A conversation on a vendor CLI runs that vendor's own agent loop, so its
+model does not start subagents itself; its roles still apply to Plan →
+Implement → Review tasks. Vendor CLIs receive the project's enabled MCP
+servers (see the end of this page).
 
 ## How a subagent runs
 
@@ -32,24 +38,112 @@ conversation. It can start one, or several at once with `tasks`.
   next start.
 - **Approvals.** When a subagent needs approval (a shell command, or an edit
   in its worktree in **Ask** mode), the card appears in the parent
-  conversation. Its reason starts with `Subagent <name>:`.
-- **Stop.** Stopping the parent task stops its subagents.
+  conversation. Its reason starts with `Subagent <name>:` (a role's with
+  `<Role> role (<model>):`). A vendor CLI's own permission requests are
+  asked the same way.
+- **Stop.** Stopping the parent task stops its subagents, including a
+  vendor CLI subagent's process.
 - **Limits.** At most 4 subagents run at the same time, and one task can start
   16 in total. Subagents cannot start their own subagents. A subagent stops
   after its step limit (the definition's `max_turns`, or 24).
-- **Models.** A subagent uses the parent task's model unless its definition or
-  the call names another model id from the picker. Subscription CLIs cannot
-  be subagent models. Only one local GGUF model runs at a time, so a subagent
-  on a different local model fails while the parent holds its own.
+- **Models.** A subagent uses, in order: the model the call names, its
+  definition's `model`, its role's model (`explore`, `plan`, `review`, and
+  write agents as `implement`), or the parent task's model. Any picker id
+  works, including vendor CLIs (`cli:claude`, `cli:codex:gpt-…`). A vendor
+  CLI subagent is a normal vendor job in its own conversation: the vendor's
+  tools and sandbox apply, read-only subagents run in the vendor's read-only
+  or plan mode (ShadowCode declines its requests to change files), and a
+  write subagent works in its own worktree and returns a diff.
+- **Cloud from a local conversation.** When the conversation runs on this
+  computer, a subagent may use a cloud model only for providers the user
+  allowed for this conversation (a Plan → Implement → Review task or an
+  `@agent` request asks first with the usual consent dialog). Otherwise it is
+  refused with the reason; a repository agent file or a model's own
+  `spawn_agent` call never moves local work to the cloud silently. Offline,
+  cloud subagents are refused.
+- **One local model at a time.** While the conversation's own local GGUF
+  model is loaded, a subagent must use that model or a cloud one; another
+  local model is refused with a clear message. A subagent of a cloud
+  conversation waits for the local runtime like any other task.
 
 Each subagent run appears in the conversation as a card. Click it to see the
-task, the result, changed files and token use. **Open transcript** shows the
+task, the result, changed files and token use. A run the project's roles
+chose is a role card: the role, the model or vendor CLI that played it, its
+cost (`$0 · local`, `Subscription`, or the API cost) and status; a review
+role also shows its verdict. **Open transcript** shows the
 subagent's own conversation. Subagent conversations are hidden from the
 sidebar. A subagent's tokens and cost also count toward the parent task's
 usage (and its conversation's total and token budget). Deleting the parent
 conversation deletes its subagent conversations and their saved diffs; if a
 fork of the conversation still shows a subagent's card, that subagent's
 conversation moves to the fork instead.
+
+## Roles
+
+A project's roles name a model for each kind of work. Choose them in
+**Settings › Roles**, or pick a preset from **More › Roles** in the composer.
+Each role is *the conversation's model* (the default), *skip* (plan and review
+only), or any row of the model picker: a subscription CLI, an OpenRouter
+model or a model on this computer.
+
+| Role | Does | Used by |
+| --- | --- | --- |
+| Plan | Reads the project and writes a plan. Read-only. | Plan → Implement → Review; the `plan` subagent |
+| Implement | Makes the changes in its own worktree. | Plan → Implement → Review; write subagents (`general`) |
+| Review | Checks the changes before they are applied. Read-only. | Plan → Implement → Review; the `review` subagent |
+| Explore | Answers questions about the code. Read-only. | The `explore` subagent |
+
+Presets: *Claude Code plans, Codex implements, local reviews*; *Claude Code
+plans*; *Local model reviews*; *Everything on this computer*. A preset with a
+local role uses the conversation's local model, else the model a plan limit
+would continue on (`limits.fallback_model`, the project's last local model, or
+the first ready one). Roles are saved by ShadowCode for the project, never in
+the repository, so a repository cannot redirect them. A conversation in a
+worktree uses its project's roles.
+
+### Plan → Implement → Review
+
+Turn it on under **More › Roles** (the More button then shows *Roles*), or
+in Settings. A **Code** message then runs its roles one after another, each
+as a child with its own conversation and role card:
+
+1. The **plan** role inspects the project read-only and writes a plan.
+2. The **implement** role gets the request and the plan and changes its own
+   worktree, started from the project's current files; its changes come back
+   as a diff.
+3. The **review** role gets the request, the plan and the diff (the project is
+   still unchanged) and ends with `Verdict: ready` or `Verdict: needs
+   changes`.
+4. The task applies the diff with `apply_agent_changes`: an ordinary,
+   checkpointed patch that asks for approval in **Ask** mode, so the review
+   is in front of you when you decide. Rewind covers it.
+
+Every role receives a bounded summary of the conversation so far (the same
+handoff as a model switch, at most 12,000 characters) besides the request,
+the plan (8,000) and the diff (24,000). A **Plan** message runs the plan role
+only and answers with the plan. **Ask** messages are not affected. Skipped
+roles are left out. If the plan or the implementation does not finish, the
+task stops and nothing is applied; a review that fails leaves the decision to
+you. The task's summary card lists each role with its model, status, changes
+and cost, and the next single-model turn receives the task as a handoff.
+
+Guardrails:
+
+- **Consent.** When the conversation runs on this computer (or has earlier
+  turns another provider has not seen), a cloud role asks first with the
+  usual consent dialog, which names each cloud role. Allowed providers are
+  remembered for the conversation; a subagent there may then use them too.
+- **Offline.** Cloud roles are refused with the reason; roles on this
+  computer run.
+- **One local model at a time.** Roles run one after another, so each may
+  use its own local GGUF model; the task holds the local runtime for its
+  roles, and other local tasks wait.
+- **Read-only projects** can run Plan tasks with roles; Code tasks are
+  refused because the implement role could not change files. Images cannot
+  be handed to roles yet.
+- Every role's approvals appear in the conversation with the role's name,
+  Stop ends the running role, and each role's tokens and cost count toward
+  the task.
 
 ## Asking for an agent
 
@@ -88,7 +182,7 @@ failure with the file, line and the assertion that failed.
 | `tools` as a map | opencode's form, `{write: false, bash: false}`: `false` removes a tool. |
 | `mode` | `read-only` (default) or `write`. Without `mode`, an agent whose `tools` include a writing tool (`Write`, `Edit`, `Bash`, …) is a write agent. opencode's `primary`/`subagent`/`all` values are ignored. |
 | `max_turns` (or `maxTurns`, `steps`) | Step limit, 1–200. Never more than the parent's `agent.max_steps`. |
-| `model` | A model id from the picker. Claude Code aliases such as `sonnet` or `inherit` are not ShadowCode ids; the parent's model is used and the run records a note. |
+| `model` | A model id from the picker, including a vendor CLI runner such as `cli:claude` or `cli:codex:gpt-6-luna`. Claude Code aliases such as `sonnet` or `inherit` are not ShadowCode ids; the parent's model (or the agent's role model) is used and the run records a note. |
 
 Other fields (for example `color` or `temperature`) are listed as ignored in
 `GET /api/agents`. A definition can only narrow what a subagent may do. It
@@ -191,20 +285,41 @@ mcp:
 
 ## API and events
 
+- `GET /api/roles?workspace=&session_id=&model=` → `{workspace, setup,
+  roles, presets, conversation, offline, consented}`. `setup` is `{pipeline,
+  plan, implement, review, explore, preset, updated_at}`; `roles.<role>` is
+  `{role, label, setting, id, name, provider, local, runner, vendor, cost,
+  skipped, blocked?, needs_consent?}` resolved for the conversation (its
+  `model`, else its remembered one). `POST /api/roles` takes `{workspace?,
+  session_id?, model?, preset?, pipeline?, plan?, implement?, review?,
+  explore?}` (absent fields keep their value; a preset is applied first) and
+  answers the same view. Unknown models and skipping the implement or
+  explore role are refused.
+- `POST /api/jobs` takes `roles: true` to run a Code task as Plan →
+  Implement → Review (a Plan task as its plan role). A cloud role that needs
+  consent answers `needs_consent` with `handoff.roles: [{role, label, name,
+  provider, agent?}]`; resend with `handoff_consent: true`. The task's
+  `routing.provider` is `shadowcode:roles` and its `model` names the roles.
 - `GET /api/agents?workspace=` → `{agents, shadowed, issues, dirs, settings, user_dir, workspace}`.
   Each agent has `name, description, model, tools, deny, mode, max_turns,
   source, path, hash, ignored, instructions_preview`.
 - `GET /api/subagents?session_id=` → `{runs}` for one parent conversation,
   oldest first. `GET /api/subagents/{run_id}` → one run: `agent, description,
   prompt, mode, model, parent_session, job_id, session_id, status, summary,
-  error, files, binary_files, patch, applied, usage, steps, notes`.
+  error, files, binary_files, patch, applied, usage, steps, notes, role,
+  model_id, runner, vendor, route, cost, verdict`.
 - `GET /api/sessions?include_subagents=true` includes subagent conversations;
   every row carries `subagent_parent`. `GET /api/sessions/{id}` includes
   `subagent_parent` and `subagent_run`.
 - Events in the parent conversation: `subagent.started {run_id, agent,
-  description, prompt, mode, model, job_id, session_id, depth}`,
-  `subagent.finished {run_id, status, summary, error, files, patch, usage,
-  steps, notes, duration_s, …}`, `subagent.applied {run_id, agent, paths}`,
+  description, prompt, mode, model, model_id, role, runner, vendor, route,
+  cost, job_id, session_id, depth}`, `subagent.finished {…the same, status,
+  summary, error, files, patch, usage, steps, notes, verdict, duration_s}`,
+  `subagent.applied {run_id, agent, role, paths}`, `roles.started {label,
+  stages}` and `roles.finished {label, stages: [{role, label, name, model_id,
+  runner, vendor, route, cost, status, skipped, error, run_id, session_id,
+  usage, files, additions, deletions, verdict, duration_s}], applied,
+  apply_note, files, completed}` for a Plan → Implement → Review task,
   and `context.attached {path, origin: "nested_guidance"}` for nested
   instructions. `mcp.warning {server?, text}` reports an MCP tool list that
   could not be read or was too large to offer as first-class tools.

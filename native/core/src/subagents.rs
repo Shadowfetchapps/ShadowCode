@@ -209,8 +209,15 @@ impl ToolExtensions {
         if let Some(host) = self.host.as_ref().filter(|_| offered("spawn_agent")) {
             note.push_str("\n\nSubagents (spawn_agent): delegate focused, self-contained work so your own context stays small; independent tasks can run in parallel via tasks. A subagent sees only the prompt you give it. Read-only agents cannot change files; write agents edit an isolated worktree and return a diff that you review and apply with apply_agent_changes. Available agents:");
             for agent in host.catalog().agents.iter().take(32) {
+                // The project's roles say which model runs an agent.
+                let runs_on = match host.role_model(agent) {
+                    Some((role, id)) if agent.model.is_none() => {
+                        format!("; {} role on {id}", role.id())
+                    }
+                    _ => String::new(),
+                };
                 note.push_str(&format!(
-                    "\n- {} ({}): {}",
+                    "\n- {} ({}{runs_on}): {}",
                     agent.name,
                     if agent.read_only() {
                         "read-only"

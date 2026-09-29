@@ -41,6 +41,7 @@ import { noticeVersion, useUpdateNotice } from "../../hooks/useUpdates";
 import { trustRequestFor } from "../../lib/trust";
 import { chipInput } from "../../lib/usageChip";
 import { ContextChip } from "../ContextChip";
+import type { Roles } from "../../hooks/useRoles";
 
 /** The main column: banners, the Compare view or the conversation, the
  * composer and the status line. It only lays out what the app's hooks
@@ -95,6 +96,7 @@ export function Stage({
   toast,
   issueOffer,
   extras,
+  roles,
   reviewPanel,
   worktreeBar,
 }: {
@@ -155,6 +157,8 @@ export function Stage({
     onDismiss: () => void;
   } | null;
   extras: ComposerExtras;
+  /** The project's roles (Plan → Implement → Review). */
+  roles?: Roles;
   /** The full-width Review view, shown instead of the conversation. */
   reviewPanel?: ReactNode;
   /** The open conversation's worktree (Apply / Keep as branch / Discard). */
@@ -441,6 +445,15 @@ export function Stage({
           onRun: () => void actions.submit({ worktree: true }),
         }}
         worktreeNote={actions.worktreeBlocked}
+        roles={
+          roles && {
+            view: roles.view,
+            saving: roles.saving,
+            onToggle: (on) => void roles.save({ pipeline: on }),
+            onPreset: (id) => void roles.save({ preset: id }),
+            onOpenSettings: () => openSettings("roles"),
+          }
+        }
       />
       <StatusBar
         busy={busy}

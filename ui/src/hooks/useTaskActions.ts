@@ -110,6 +110,9 @@ export type TaskActionContext = {
   pin: () => void;
   /** @-mentions, prompt history, effort and task mode. */
   extras?: ComposerExtras;
+  /** Code and Plan messages run as Plan → Implement → Review with the
+   * project's roles. */
+  roles?: boolean;
   /** The project is a Git repository (worktree runs need one). */
   gitRepo: boolean;
   /** The open conversation already runs in its own worktree. */
@@ -490,6 +493,9 @@ export function useTaskActions(c: TaskActionContext) {
           : {}),
         ...(mentions.length ? { mentions } : {}),
         ...(context.length ? { context } : {}),
+        ...(c.roles && (!extras || extras.mode !== "ask")
+          ? { roles: true }
+          : {}),
       },
       original,
     );

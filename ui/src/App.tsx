@@ -41,6 +41,7 @@ import { useConversationBadges } from "./hooks/useConversationBadges";
 import { useConversationMenu } from "./hooks/useConversationMenu";
 import { useNotificationLinks } from "./hooks/useNotificationLinks";
 import { useWorktreeTask } from "./hooks/useWorktreeTask";
+import { useRoles } from "./hooks/useRoles";
 import { WorktreeBar } from "./components/WorktreeBar";
 import { isLocal, vendorKey, type PickerTarget } from "./lib/picker";
 import { limitsFrom, resolveFallback } from "./lib/allowance";
@@ -244,6 +245,14 @@ export default function App() {
     sessionId,
     target: selectedTarget,
   });
+  // Roles belong to the project (a worktree conversation's own project).
+  const roles = useRoles({
+    workspace,
+    sessionId,
+    model: modelChoice,
+    version: cfg,
+    toast,
+  });
   const scroll = useStickyScroll({
     active: nav.ready && !switching,
     content: [
@@ -431,6 +440,7 @@ export default function App() {
     setRunningChoice: nav.setRunningChoice,
     pin: scroll.pin,
     extras,
+    roles: roles.pipeline,
     gitRepo: git.repo,
     inWorktree: Boolean(worktree.task),
   });
@@ -687,6 +697,7 @@ export default function App() {
         toast={toast}
         issueOffer={issueOffer}
         extras={extras}
+        roles={roles}
         reviewPanel={
           review.target ? (
             <Suspense fallback={<p role="status">Opening review…</p>}>
@@ -807,6 +818,15 @@ export default function App() {
           },
           onCatalogChanged: reloadCatalog,
           onModelDownloaded: adoptDownload,
+          roles: workspace
+            ? {
+                workspace,
+                sessionId,
+                model: modelChoice,
+                targets: pickerTargets,
+                onChanged: () => void roles.reload(),
+              }
+            : undefined,
           onSave: async (values) => {
             try {
               await api.saveConfig(values);

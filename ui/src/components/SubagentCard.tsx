@@ -4,14 +4,29 @@ import {
   Check,
   ChevronRight,
   CircleAlert,
+  ClipboardList,
+  Compass,
   ExternalLink,
+  Hammer,
   LoaderCircle,
+  SearchCheck,
 } from "lucide-react";
+import type { RoleId } from "../api";
 import { Markdown } from "./Markdown";
 import { statusLabel, type SubagentRun } from "../lib/subagents";
+import { ROLE_LABELS, roleCost, verdictLabel } from "../lib/roles";
+
+const ROLE_ICONS: Record<RoleId, typeof Bot> = {
+  plan: ClipboardList,
+  implement: Hammer,
+  review: SearchCheck,
+  explore: Compass,
+};
 
 /** A subagent run inside the parent transcript: one line while collapsed,
- * its result, changed files and a link to its own conversation when open. */
+ * its result, changed files and a link to its own conversation when open.
+ * A run the project's roles chose is a role card: the role, the model or
+ * vendor CLI that played it, its cost and status. */
 export function SubagentCard({
   run,
   onOpen,
@@ -23,11 +38,20 @@ export function SubagentCard({
   const [open, setOpen] = useState(false);
   const running = run.status === "running" || run.status === "queued";
   const ok = run.status === "completed";
-  const tone = running ? "running" : ok ? "ok" : "warn";
+  const needsChanges = run.verdict === "needs_changes";
+  const tone = running ? "running" : ok && !needsChanges ? "ok" : "warn";
   const label = run.description || run.prompt;
   const bodyId = `subagent-${run.runId}`;
+  const role = run.role;
+  const Icon = role ? ROLE_ICONS[role] : Bot;
+  const cost =
+    role || run.runner === "vendor" ? roleCost(run.cost, run.usage) : "";
+  const verdict = verdictLabel(run.verdict);
   return (
-    <div className={`subagent-card tone-${tone}`}>
+    <div
+      className={`subagent-card tone-${tone}${role ? " role-card" : ""}`}
+      data-role={role}
+    >
       <button
         type="button"
         className="subagent-head"
@@ -40,15 +64,36 @@ export function SubagentCard({
           aria-hidden="true"
           className={`subagent-chevron ${open ? "is-open" : ""}`}
         />
-        <Bot size={14} aria-hidden="true" />
-        <strong className="subagent-name">@{run.agent}</strong>
-        <span className="subagent-label">{label}</span>
+        <Icon size={14} aria-hidden="true" />
+        {role ? (
+          <>
+            <strong className="subagent-name">{ROLE_LABELS[role]}</strong>
+            <span className="subagent-label">{run.model}</span>
+          </>
+        ) : (
+          <>
+            <strong className="subagent-name">@{run.agent}</strong>
+            <span className="subagent-label">{label}</span>
+          </>
+        )}
         <span className="subagent-meta">
-          {run.mode === "write" ? "worktree" : "read-only"}
-          {run.files.length > 0 &&
-            ` · ${run.files.length} file${run.files.length === 1 ? "" : "s"}`}
-          {run.applied && " · applied"}
+          {[
+            !role && run.runner === "vendor" ? run.model : "",
+            run.mode === "write" ? "worktree" : "read-only",
+            run.files.length > 0
+              ? `${run.files.length} file${run.files.length === 1 ? "" : "s"}`
+              : "",
+            run.applied ? "applied" : "",
+            cost,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
         </span>
+        {verdict && !running && (
+          <span className={`role-verdict ${needsChanges ? "warn" : "ok"}`}>
+            {verdict}
+          </span>
+        )}
         <span className={`subagent-status tone-${tone}`} role="status">
           {running ? (
             <LoaderCircle size={13} className="spin" aria-hidden="true" />
@@ -62,7 +107,7 @@ export function SubagentCard({
       </button>
       {open && (
         <div className="subagent-body" id={bodyId}>
-          {run.prompt && (
+          {run.prompt && !role && (
             <p className="subagent-prompt">
               <span>Task</span> {run.prompt}
             </p>
@@ -98,9 +143,13 @@ export function SubagentCard({
           {run.mode === "write" && !running && (
             <p className="subagent-note">
               {run.applied
-                ? "The parent agent applied these changes to the project."
+                ? role
+                  ? "These changes were applied to the project."
+                  : "The parent agent applied these changes to the project."
                 : run.patch
-                  ? "Changes were made in an isolated worktree. The parent agent reviews the diff and applies it with your usual edit approval."
+                  ? role
+                    ? "Changes were made in an isolated worktree. They are applied to the project with your usual edit approval after the review."
+                    : "Changes were made in an isolated worktree. The parent agent reviews the diff and applies it with your usual edit approval."
                   : "No changes to apply."}
             </p>
           )}
@@ -113,8 +162,21 @@ export function SubagentCard({
             <span>
               {[
                 run.model,
-                run.steps ? `${run.steps} steps` : "",
+                run.runner === "vendor"
+                  ? "vendor CLI"
+                  : run.runner === "shadowcode"
+                    ? "ShadowCode's agent"
+                    : "",
+                run.route === "local"
+                  ? "this computer"
+                  : run.route === "cloud"
+                    ? "cloud"
+                    : "",
+                run.steps
+                  ? `${run.steps} step${run.steps === 1 ? "" : "s"}`
+                  : "",
                 run.tokens ? `${run.tokens.toLocaleString()} tokens` : "",
+                cost,
                 run.durationS != null ? `${run.durationS}s` : "",
               ]
                 .filter(Boolean)

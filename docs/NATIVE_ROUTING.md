@@ -1,6 +1,6 @@
 # Models and routing in the native desktop
 
-> **Advanced.** This is reached through `config.yaml` (`routing`); there is no desktop control. For the everyday workflow see the [user guide](USER_GUIDE.md), [subscriptions](SUBSCRIPTIONS.md) and [local models](LOCAL_MODELS.md).
+> **Advanced.** This is reached through `config.yaml` (`routing`); there is no desktop control. For the everyday workflow see the [user guide](USER_GUIDE.md), [subscriptions](SUBSCRIPTIONS.md) and [local models](LOCAL_MODELS.md). To give each step of a task its own model or vendor CLI in the desktop (plan, implement, review, explore), use [Roles](SUBAGENTS.md#roles).
 
 Routing can choose a registered model for each task purpose when a task
 starts without an explicit model (CLI `run` without `--model`, goal

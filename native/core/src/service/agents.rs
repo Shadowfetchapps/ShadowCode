@@ -15,6 +15,9 @@ use crate::{
 struct RolesBody {
     workspace: Text,
     session_id: Text,
+    /// The picker id the conversation's next turn runs on (the composer's
+    /// choice); empty uses the conversation's remembered one.
+    model: Text,
     /// Code tasks run as Plan → Implement → Review.
     pipeline: Flag,
     /// A preset id (`crate::roles::PRESETS`), applied before the roles below.
@@ -46,27 +49,30 @@ impl Service {
             session,
         ))
     }
-    /// The model a conversation's next turn runs on (its remembered picker
-    /// id, else the project's, else the configured default).
+    /// The model a conversation's next turn runs on: the composer's choice,
+    /// else its remembered picker id, else the project's, else the
+    /// configured default.
     fn conversation_model(
         &self,
         config: &Config,
         project: &Path,
         session: Option<&str>,
+        chosen: &str,
     ) -> Result<crate::config::ModelConfig> {
         let store = self.engine.store();
-        let target = match session {
-            Some(sid) => store.session_meta(sid, keys::EXECUTION_TARGET)?,
-            None => None,
+        let target = match (chosen, session) {
+            ("", Some(sid)) => store.session_meta(sid, keys::EXECUTION_TARGET)?,
+            ("", None) => None,
+            (id, _) => Some(id.to_owned()),
         }
         .or(store.native_meta(&keys::execution_target(project))?);
         Ok(target
             .and_then(|id| self.resolve_model(&id, &config.model).ok())
             .unwrap_or_else(|| config.model.clone()))
     }
-    fn roles_view(&self, project: &Path, session: Option<&str>) -> Result<Value> {
+    fn roles_view(&self, project: &Path, session: Option<&str>, chosen: &str) -> Result<Value> {
         let config = Config::load(self.engine.paths(), Some(project))?;
-        let conversation = self.conversation_model(&config, project, session)?;
+        let conversation = self.conversation_model(&config, project, session, chosen)?;
         roles::view(
             &self.engine.store(),
             &config,
@@ -90,8 +96,12 @@ impl Service {
             let preset =
                 roles::preset(id).with_context(|| format!("Unknown roles preset '{id}'"))?;
             let local = if preset.roles.contains(&roles::LOCAL) {
-                let conversation =
-                    self.conversation_model(&config, &project, session.as_deref())?;
+                let conversation = self.conversation_model(
+                    &config,
+                    &project,
+                    session.as_deref(),
+                    body.model.as_str(),
+                )?;
                 self.engine
                     .local_choice(
                         &config,
@@ -142,7 +152,7 @@ impl Service {
             }
         }
         roles::save(&store, &project, &setup)?;
-        self.roles_view(&project, session.as_deref())
+        self.roles_view(&project, session.as_deref(), body.model.as_str())
     }
 
     pub(super) fn agent_routes(&self, call: &Call) -> Result<Value> {
@@ -174,7 +184,7 @@ impl Service {
             ("GET", ["roles"]) => {
                 let (project, session) =
                     self.roles_scope(call.q("workspace"), call.q("session_id"))?;
-                self.roles_view(&project, session.as_deref())
+                self.roles_view(&project, session.as_deref(), call.q("model"))
             }
             ("POST", ["roles"]) => self.save_roles(call),
             _ => Err(call.unavailable()),

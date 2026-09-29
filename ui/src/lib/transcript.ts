@@ -18,6 +18,7 @@ import {
 import type { UsageSnapshot } from "./picker";
 import { CONTINUATION } from "./allowance";
 import { applySubagentEvent, isSubagentEvent } from "./subagents";
+import { parseRolesFinished } from "./roles";
 import { keyRows } from "./rowKeys";
 import { localPhase } from "./localProgress";
 import { parseLocalRuntimeReceipt } from "./provenance";
@@ -77,6 +78,9 @@ export const emptyTranscript = (): Transcript => ({
   usageVersion: 0,
 });
 
+/** The routing provider of a Plan → Implement → Review task. */
+export const ROLES_PROVIDER = "shadowcode:roles";
+
 const VENDOR_LABELS: Record<string, string> = {
   codex: "Codex",
   claude: "Claude Code",
@@ -90,6 +94,7 @@ const VENDOR_LABELS: Record<string, string> = {
 export function providerLabel(value: unknown): string {
   const text = String(value || "").trim();
   if (!text) return "another model";
+  if (text === ROLES_PROVIDER) return "the roles";
   if (/^(local|llamacpp)/.test(text) || text === "this-computer")
     return "this computer";
   const vendor = text
@@ -399,6 +404,10 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     const verification = parseVerification(p);
     touch((a) => ({ ...a, verification }));
   }
+  if (event.type === "roles.finished") {
+    const roles = parseRolesFinished(p);
+    touch((a) => ({ ...a, roles }));
+  }
   if (event.type === "agent.handoff") {
     items = [
       ...items,
@@ -645,14 +654,24 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
         : p.inference === "cloud"
           ? " · Cloud"
           : "";
-    const note = warning
-      ? `Using default: ${selected}${where}. ${String(p.fallback_reason || "The saved model is unavailable.")}`
-      : `Using ${selected}${where}`;
+    // A Plan → Implement → Review task names its roles; some may run on
+    // this computer and some in the cloud.
+    const roles = p.provider === ROLES_PROVIDER;
+    const note = roles
+      ? `Plan → Implement → Review · ${raw.replace(/^Roles: /, "")}`
+      : warning
+        ? `Using default: ${selected}${where}. ${String(p.fallback_reason || "The saved model is unavailable.")}`
+        : `Using ${selected}${where}`;
     // Say which model ran once, and again only when it changes: the picker
     // already names the conversation's model.
     const previous = [...items]
       .reverse()
-      .find((item) => item.kind === "note" && item.text.startsWith("Using "));
+      .find(
+        (item) =>
+          item.kind === "note" &&
+          (item.text.startsWith("Using ") ||
+            item.text.startsWith("Plan → Implement → Review · ")),
+      );
     if (warning || previous?.text !== note)
       items = [...items, { kind: "note", taskId, warning, text: note }];
   }

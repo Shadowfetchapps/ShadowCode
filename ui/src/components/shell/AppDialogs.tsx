@@ -112,10 +112,17 @@ export function AppDialogs({
       {consent && (
         <ConsentDialog
           request={consent.request}
-          destination={targets.find((t) => t.id === consent.body.model)?.name}
-          billingWarning={billingWarning(
-            targets.find((t) => t.id === consent.body.model),
-          )}
+          // Cloud roles name their own destinations, not the picker row.
+          destination={
+            consent.request.handoff.roles?.length
+              ? undefined
+              : targets.find((t) => t.id === consent.body.model)?.name
+          }
+          billingWarning={
+            consent.request.handoff.roles?.length
+              ? undefined
+              : billingWarning(targets.find((t) => t.id === consent.body.model))
+          }
           attachments={consent.original.attachments.map((a) => a.name)}
           onCancel={onCancelConsent}
           onSend={onSendConsent}

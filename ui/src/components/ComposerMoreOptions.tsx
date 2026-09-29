@@ -11,9 +11,12 @@ import { SlidersHorizontal } from "lucide-react";
 export function ComposerMoreOptions({
   children,
   indicator,
+  roles,
 }: {
   children: ReactNode;
   indicator?: string;
+  /** Plan → Implement → Review is on for this project. */
+  roles?: boolean;
 }) {
   const root = useRef<HTMLDetailsElement>(null);
   const trigger = useRef<HTMLElement>(null);
@@ -63,13 +66,15 @@ export function ComposerMoreOptions({
     >
       <summary
         className="composer-more-trigger"
-        aria-label={
-          indicator
-            ? `More task options, reasoning effort ${indicator}`
-            : "More task options"
-        }
+        aria-label={[
+          "More task options",
+          indicator ? `reasoning effort ${indicator}` : "",
+          roles ? "Plan → Implement → Review on" : "",
+        ]
+          .filter(Boolean)
+          .join(", ")}
         aria-expanded={open}
-        title="Reasoning effort, parallel runs and other task options"
+        title="Reasoning effort, roles, parallel runs and other task options"
         ref={trigger}
         onClick={(event) => {
           event.preventDefault();
@@ -81,6 +86,7 @@ export function ComposerMoreOptions({
         {indicator && (
           <span className="composer-more-indicator">{indicator}</span>
         )}
+        {roles && <span className="composer-more-indicator">Roles</span>}
       </summary>
       <div className="composer-more-menu" onClick={closeAfterAction}>
         <div className="composer-more-heading">More task options</div>

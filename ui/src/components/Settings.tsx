@@ -9,10 +9,12 @@ import { AppearancePage, PermissionsPage } from "./settings/PreferencePages";
 import { AdvancedPage, type AdvancedTab } from "./settings/AdvancedPage";
 import { RemotePage } from "./settings/RemotePage";
 import { AboutPage } from "./settings/AboutPage";
+import { RolesPage, type RolesPageProps } from "./settings/RolesPage";
 
 export type SettingsSection =
   | "accounts"
   | "local"
+  | "roles"
   | "code"
   | "voice"
   | "permissions"
@@ -25,6 +27,7 @@ export type { AdvancedTab };
 const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: "accounts", label: "Accounts" },
   { id: "local", label: "Local models" },
+  { id: "roles", label: "Roles" },
   { id: "code", label: "Code intelligence" },
   { id: "voice", label: "Voice" },
   { id: "permissions", label: "Permissions & network" },
@@ -57,6 +60,8 @@ export type SettingsProps = {
   onUseSkill: (name: string) => void;
   /** Accounts › "When a plan runs out" (the same control as Allowance). */
   planLimit?: ReactNode;
+  /** Roles › the open project and conversation. */
+  roles?: RolesPageProps;
 };
 
 export function Settings({
@@ -77,6 +82,7 @@ export function Settings({
   onSkillsChanged,
   onUseSkill,
   planLimit,
+  roles,
 }: SettingsProps) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [advanced, setAdvanced] = useState<AdvancedTab>(initialAdvanced);
@@ -115,6 +121,15 @@ export function Settings({
             onToast={onToast}
           />
         )}
+        {section === "roles" &&
+          (roles ? (
+            <RolesPage {...roles} onToast={onToast} />
+          ) : (
+            <section className="settings-page">
+              <h3>Roles</h3>
+              <p className="hint">Open a project to choose its roles.</p>
+            </section>
+          ))}
         {section === "code" && <CodeIntelPage onToast={onToast} />}
         {section === "voice" && <VoicePage onToast={onToast} />}
         {section === "permissions" && (

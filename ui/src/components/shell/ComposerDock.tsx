@@ -11,6 +11,7 @@ import {
   type PermissionMode,
 } from "../ComposerControls";
 import { ComposerMoreOptions } from "../ComposerMoreOptions";
+import { RolesControl } from "../RolesControl";
 import { EffortControl, ModeToggle } from "../ComposerModes";
 import { QueuedTasks } from "../QueuedTasks";
 import type { Effort, TaskMode } from "../../lib/effort";
@@ -77,6 +78,7 @@ export function ComposerDock({
   modes,
   worktree,
   worktreeNote,
+  roles,
 }: {
   hidden: boolean;
   queue: {
@@ -122,6 +124,8 @@ export function ComposerDock({
    * (shown in the More menu; general reasons such as a missing model are
    * already shown under the composer). */
   worktreeNote?: string | null;
+  /** The project's roles (Plan → Implement → Review), in More. */
+  roles?: Omit<ComponentProps<typeof RolesControl>, "mode">;
 }) {
   const effortIndicator =
     modes?.effortShown && modes.effort !== "default"
@@ -170,10 +174,14 @@ export function ComposerDock({
           </>
         }
         more={
-          <ComposerMoreOptions indicator={effortIndicator}>
+          <ComposerMoreOptions
+            indicator={effortIndicator}
+            roles={Boolean(roles?.view?.setup.pipeline)}
+          >
             {modes?.effortShown && (
               <EffortControl effort={modes.effort} onChange={modes.onEffort} />
             )}
+            {roles && <RolesControl {...roles} mode={modes?.mode || "code"} />}
             {needsTask && (
               <p className="composer-more-reason">
                 Type a task first to run it in a new worktree or compare models

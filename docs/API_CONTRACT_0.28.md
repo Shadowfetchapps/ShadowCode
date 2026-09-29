@@ -770,7 +770,11 @@ See [SUBAGENTS.md](SUBAGENTS.md) for behaviour and definition files.
   `{id, agent, description, prompt, mode, model, parent_session, parent_task,
   parent_job, job_id, session_id, status, summary, error, files[{path, status,
   additions, deletions, binary}], files_truncated, binary_files, patch, applied,
-  usage, steps, depth, notes, created_at, finished_at}`.
+  usage, steps, depth, notes, created_at, finished_at, role, model_id, runner,
+  vendor, route, cost, verdict}` (the last seven additive since 1.0: `role` is
+  `""` or `plan|implement|review|explore`, `runner` is `shadowcode|vendor`,
+  `route` is `local|cloud`, `cost` is `local|subscription|api`, `verdict` is
+  `ready|needs_changes|null`).
 - `GET /api/sessions` hides subagent conversations unless
   `include_subagents=true`; rows carry `subagent_parent`.
   `DELETE /api/sessions/{id}` also deletes the conversation's subagent
@@ -779,16 +783,60 @@ See [SUBAGENTS.md](SUBAGENTS.md) for behaviour and definition files.
   (`subagent_parent` becomes the fork's id).
   `GET /api/sessions/{id}` adds `subagent_parent` and `subagent_run`.
 - Events (parent conversation): `subagent.started {run_id, agent, description,
-  prompt, mode, model, job_id, session_id, depth}`, `subagent.finished {run_id,
-  agent, description, mode, model, status, summary, error, job_id, session_id,
-  files, files_truncated, binary_files, patch, usage, steps, notes, duration_s}`,
-  `subagent.applied {run_id, agent, paths}`. `context.attached` gains
-  `origin: "nested_guidance"`. `mcp.warning {server?, text}`.
+  prompt, mode, model, model_id, role, runner, vendor, route, cost, job_id,
+  session_id, depth}`, `subagent.finished {run_id, agent, description, mode,
+  model, model_id, role, runner, vendor, route, cost, status, summary, error,
+  job_id, session_id, files, files_truncated, binary_files, patch, usage,
+  steps, notes, verdict, duration_s}`, `subagent.applied {run_id, agent, role,
+  paths}`. `context.attached` gains `origin: "nested_guidance"`.
+  `mcp.warning {server?, text}`. `usage` gains `cost_estimated` and `source`.
 - Native tools: `spawn_agent {agent?, prompt, description?, model?, write?}` or
   `{tasks: [...]}` (at most 8); `apply_agent_changes {run_id}` (runs as
   `apply_patch`); `load_skill {name}`; approved MCP tools as
   `mcp__<server>__<tool>` (run as `mcp_call`). A subagent's approvals carry the
-  parent's `session_id` and a reason starting `Subagent <name>:`.
+  parent's `session_id` and a reason starting `Subagent <name>:` (a role's:
+  `<Role> role (<model>):`), including a vendor CLI subagent's permission
+  requests. `spawn_agent` results add `model` and, for a role, `role`.
+
+### Roles (since 1.0)
+
+- `GET /api/roles?workspace=&session_id=&model=` → `{workspace, setup,
+  roles, presets, conversation: {id, name, local}, offline, consented}`.
+  `setup` = `{pipeline, plan, implement, review, explore, preset,
+  updated_at}`; each value is `""` (the conversation's model), `"skip"` (plan
+  and review) or a picker id. `roles.<plan|implement|review|explore>` =
+  `{role, label, setting, id, name, provider, local, runner, vendor, cost,
+  skipped, blocked?, needs_consent?}`; `blocked` explains why the role cannot
+  run (offline, vendor turned off, model unavailable) and `needs_consent`
+  marks a cloud role a conversation on this computer has not allowed.
+  `presets[]` = `{id, label, description, roles}`; `consented` lists the
+  providers the conversation allowed.
+- `POST /api/roles {workspace?, session_id?, model?, preset?, pipeline?,
+  plan?, implement?, review?, explore?}` → the same view. Absent fields keep
+  their value; `preset` is applied first; changing a role by hand clears
+  `preset`. Refused: unknown presets or models, skipping implement or
+  explore, a preset needing a local model when none is ready, untrusted
+  projects. Stored per project in ShadowCode's database (`roles:<project>`),
+  never in the repository.
+- `POST /api/jobs` gains `roles: true`: a Code task runs as Plan → Implement
+  → Review, a Plan task as its plan role (other modes are refused). The job's
+  `model` names the roles and `routing` is `{purpose: "roles", provider:
+  "shadowcode:roles", model_id: "roles:<role>=<id>,…", model_name,
+  inference: local|cloud, route: "roles"}`. When a cloud role would receive a
+  local conversation's work, the answer is `needs_consent` with
+  `handoff: {from, to, excerpt_chars, images: 0, reason, roles: [{role, label,
+  name, provider, agent?}]}`; resending with `handoff_consent: true` records
+  the providers in the conversation (`session_meta` `consent:cloud_roles`).
+  A plain turn that starts with an `@agent` whose role or definition model is
+  a cloud one asks the same way. Offline, a cloud role is refused with the
+  reason.
+- Task events: `roles.started {label, stages}`, `plan.updated` (one step per
+  role plus "Apply the changes"), the roles' `subagent.*` events,
+  `tool.started/completed` for `apply_agent_changes`, and `roles.finished
+  {label, stages[{role, label, name, model_id, runner, vendor, route, cost,
+  status, skipped, error, run_id, session_id, usage, files, additions,
+  deletions, verdict, duration_s}], applied: bool|null, apply_note, files,
+  completed}`.
 - Slash commands (`GET /api/commands`) include `.claude/commands/*.md`;
   `arg_spec` is the command's `argument-hint` when set.
 

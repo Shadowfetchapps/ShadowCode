@@ -15,6 +15,7 @@ import type { LineCounts } from "../lib/diffStats";
 import { TaskTimingDetails } from "./TaskTimingDetails";
 import { LocalModelDetails } from "./LocalModelDetails";
 import { RunCheck, type RunCheckAction } from "./RunCheck";
+import { RoleSummary } from "./RoleSummary";
 
 export type DiffStat = LineCounts;
 
@@ -297,6 +298,7 @@ export const TaskSummary = memo(function TaskSummary({
             </span>
           )}
         </header>
+        {activity.roles && <RoleSummary roles={activity.roles} />}
         <TaskTimingDetails timings={activity.timings} />
         <LocalModelDetails receipt={activity.localRuntime} />
         {runCheck && (
@@ -321,6 +323,7 @@ export const TaskSummary = memo(function TaskSummary({
           </span>
         )}
       </header>
+      {activity.roles && <RoleSummary roles={activity.roles} />}
       <div className="task-summary-block">
         <h4>
           <FileDiff size={13} aria-hidden="true" /> Changed files
