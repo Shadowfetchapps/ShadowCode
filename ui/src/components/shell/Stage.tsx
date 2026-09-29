@@ -16,6 +16,10 @@ import { ComposerDock, composerAccess } from "./ComposerDock";
 import { StageBanners } from "./StageBanners";
 import { StatusBar } from "./StatusBar";
 import { TranscriptRows, type RowActions } from "./TranscriptRows";
+import {
+  OpinionContext,
+  type ConversationOpinions,
+} from "../TranscriptOpinions";
 import type { useAttachments } from "../../hooks/useAttachments";
 import type { ComposerExtras } from "../../hooks/useComposerExtras";
 import type { useAllowance } from "../../hooks/useCatalog";
@@ -74,6 +78,7 @@ export function Stage({
   queuedTaskIds,
   fallback,
   rowActions,
+  opinions = null,
   onDecide,
   commandCards,
   approvals,
@@ -127,6 +132,8 @@ export function Stage({
   queuedTaskIds: ReadonlySet<string>;
   fallback: Fallback | null;
   rowActions: RowActions;
+  /** The conversation's second opinions ("Ask another model" and cards). */
+  opinions?: ConversationOpinions | null;
   onDecide: (id: string, answer: ApprovalDecision) => void;
   commandCards: CommandResult[];
   approvals: Approval[];
@@ -291,19 +298,21 @@ export function Stage({
         onChooseModel={() => setPickerOpen(true)}
         modelSetup={modelSetup}
         rows={
-          <TranscriptRows
-            items={transcript.items}
-            activity={transcript.activity}
-            activeTaskId={activeTaskId}
-            liveTaskId={transcript.activeTaskId}
-            queuedTaskIds={queuedTaskIds}
-            fallback={fallback}
-            locked={composerLocked}
-            forkDisabled={busy || submitting || switching || controls.forking}
-            actions={rowActions}
-            scrollRef={scroll.streamRef}
-            resetKey={`${sessionId}:${history.firstCursor}`}
-          />
+          <OpinionContext.Provider value={opinions}>
+            <TranscriptRows
+              items={transcript.items}
+              activity={transcript.activity}
+              activeTaskId={activeTaskId}
+              liveTaskId={transcript.activeTaskId}
+              queuedTaskIds={queuedTaskIds}
+              fallback={fallback}
+              locked={composerLocked}
+              forkDisabled={busy || submitting || switching || controls.forking}
+              actions={rowActions}
+              scrollRef={scroll.streamRef}
+              resetKey={`${sessionId}:${history.firstCursor}`}
+            />
+          </OpinionContext.Provider>
         }
         commandCards={commandCards}
         approvals={approvals}
