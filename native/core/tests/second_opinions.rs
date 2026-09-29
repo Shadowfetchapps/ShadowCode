@@ -667,3 +667,111 @@ async fn offline_mode_accepts_only_reviewers_on_this_computer() {
     assert_eq!(stopped["status"], "completed");
     service.engine.shutdown().await.unwrap();
 }
+
+/// Live: one short read-only review of a tiny staged change by a real model.
+/// With `SHADOWCODE_LIVE_REVIEW_ENDPOINT` (an OpenAI-compatible server on
+/// this computer, such as Ollama's `http://127.0.0.1:11434/v1`) and
+/// `SHADOWCODE_LIVE_REVIEW_MODEL`, the model is registered and the review runs
+/// offline; otherwise `SHADOWCODE_LIVE_REVIEWER` names a picker id (default
+/// `cli:claude:haiku`, the installed Claude Code with its own sign-in). Run by
+/// hand: `cargo test -p shadowcode-core --test second_opinions live_review -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "live: needs a real model (a local server or a signed-in vendor CLI)"]
+async fn live_review_of_a_staged_change_by_a_real_model() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    git(&project, &["init", "-q"]);
+    fs::write(
+        project.join("calc.py"),
+        "def add(a, b):\n    \"\"\"Return the sum of a and b.\"\"\"\n    return a + b\n",
+    )
+    .unwrap();
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-qm", "Base"]);
+    let changed = "def add(a, b):\n    \"\"\"Return the sum of a and b.\"\"\"\n    return a - b\n";
+    fs::write(project.join("calc.py"), changed).unwrap();
+    git(&project, &["add", "calc.py"]);
+    let project = project.canonicalize().unwrap();
+    let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+    let endpoint = std::env::var("SHADOWCODE_LIVE_REVIEW_ENDPOINT").ok();
+    Config::patch(
+        &paths,
+        json!({
+            "trusted_workspaces": [project.clone()],
+            "model": {"provider":"local","endpoint":"http://127.0.0.1:9/v1","name":"unused","context_limit":16384},
+            "agent": {"max_steps": 6},
+            "network": {"mode": if endpoint.is_some() { "offline" } else { "online" }},
+        }),
+    )
+    .unwrap();
+    let service = Service::open(paths, Some(project.clone())).unwrap();
+    let reviewer = match &endpoint {
+        Some(endpoint) => {
+            let name = std::env::var("SHADOWCODE_LIVE_REVIEW_MODEL")
+                .expect("SHADOWCODE_LIVE_REVIEW_MODEL");
+            call(
+                &service,
+                "POST",
+                "/api/models/register",
+                json!({"id":"live-reviewer","name":name,"provider":"ollama","endpoint":endpoint,"context_limit":16384}),
+            )
+            .await;
+            "live-reviewer".to_owned()
+        }
+        None => {
+            std::env::var("SHADOWCODE_LIVE_REVIEWER").unwrap_or_else(|_| "cli:claude:haiku".into())
+        }
+    };
+    let started = Instant::now();
+    let record = call(
+        &service,
+        "POST",
+        "/api/second-opinions",
+        json!({"kind":"review","source":"staged","model":reviewer}),
+    )
+    .await;
+    let id = record["id"].as_str().unwrap().to_owned();
+    let done = loop {
+        let now = call(
+            &service,
+            "GET",
+            &format!("/api/second-opinions/{id}"),
+            Value::Null,
+        )
+        .await;
+        if !matches!(now["status"].as_str(), Some("queued" | "running")) {
+            break now;
+        }
+        assert!(started.elapsed() < Duration::from_secs(600), "{now:#}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!(
+        "{} by {} in {:?}\nsummary: {}\nnote: {}\nfindings: {:#}\nusage: {}",
+        done["status"],
+        done["model_name"],
+        started.elapsed(),
+        done["summary"],
+        done["format_note"],
+        done["findings"],
+        done["usage"]
+    );
+    assert_eq!(done["status"], "completed", "{done:#}");
+    // Read-only: the project is as the user left it.
+    assert_eq!(
+        fs::read_to_string(project.join("calc.py")).unwrap(),
+        changed
+    );
+    assert_eq!(done["reviewer_changed"], json!([]));
+    // The subtraction is the bug a reviewer has to see.
+    assert!(
+        done["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["file"] == "calc.py"),
+        "{done:#}"
+    );
+    assert!(done["usage"]["total_tokens"].as_u64().unwrap_or(0) > 0);
+    service.engine.shutdown().await.unwrap();
+}
