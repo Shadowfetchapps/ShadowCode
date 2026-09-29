@@ -1939,6 +1939,7 @@ mod tests {
                 "Task B without a model turn",
                 &[],
                 "fixture-only",
+                None,
             ),
         )
         .await;
@@ -2138,7 +2139,7 @@ mod tests {
             "model":{"provider":"local","name":"fixture-only","default":"fixture-only","endpoint":"http://127.0.0.1:9/v1","context_limit":16384}})).unwrap();
         let engine = Engine::open(paths.clone()).unwrap();
         let mut task =
-            worktree_tasks::prepare(&engine, &source, "No model turn", &[], "fixture-only")
+            worktree_tasks::prepare(&engine, &source, "No model turn", &[], "fixture-only", None)
                 .await
                 .unwrap();
         task.state = "done".into();

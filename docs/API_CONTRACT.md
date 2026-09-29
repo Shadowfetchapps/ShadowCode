@@ -493,6 +493,7 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `POST` | `/api/remote/pair` | stable | refused | [Remote access](#remote-access) |
 | `GET` | `/api/resolve` | stable | allowed | [Conversations](#conversations) |
 | `GET` | `/api/review/tasks/{task_id}` | stable | allowed | [Review and rewind](#review-and-rewind) |
+| `POST` | `/api/review/tasks/{task_id}/explain` | stable | allowed | [Review and rewind](#review-and-rewind) |
 | `GET` | `/api/review/tasks/{task_id}/file` | stable | allowed | [Review and rewind](#review-and-rewind) |
 | `POST` | `/api/review/tasks/{task_id}/undo` | stable | allowed | [Review and rewind](#review-and-rewind) |
 | `GET` | `/api/roles` | stable | allowed | [Subagents](#subagents) |
@@ -602,6 +603,8 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `POST` | `/api/workspace/understand` | stable | allowed | [Workspace and files](#workspace-and-files) |
 | `GET` | `/api/workspace/why` | stable | allowed | [Workspace and files](#workspace-and-files) |
 | `GET` | `/api/worktree-tasks` | stable | allowed | [Worktrees](#worktrees) |
+| `GET` | `/api/worktree-tasks/setup` | stable | allowed | [Worktrees](#worktrees) |
+| `POST` | `/api/worktree-tasks/setup` | stable | allowed | [Worktrees](#worktrees) |
 | `GET` | `/api/worktree-tasks/{id}` | stable | allowed | [Worktrees](#worktrees) |
 | `POST` | `/api/worktree-tasks/{id}/apply` | stable | allowed | [Worktrees](#worktrees) |
 | `POST` | `/api/worktree-tasks/{id}/discard` | stable | allowed | [Worktrees](#worktrees) |
@@ -773,6 +776,7 @@ in-band consent refusal ([Errors](#errors)). Body:
 | `context` | `[{kind: "element"\|"console", label, text}]`? | from the Preview tab; at most 12 items of 16 000 characters (strict; other fields ignored) |
 | `permission_limit` | `"read_only"\|"workspace"\|"elevated"`? | narrows the project's permission level for this job (strict) |
 | `worktree` | bool? | start a new conversation in a fresh worktree ([Worktree tasks](#worktree-tasks)); `session_id` and `queue` are ignored |
+| `base_branch` | string? | with `worktree`: start from this local branch instead of the current files |
 | `only_change` | bool? | "Only change these": ShadowCode's own agent asks before any file tool changes a path outside `mentions` (even when edits are allowed; approval `reason` "Outside the files you chose for this task: …"); after a subscription turn, changed paths outside them are reported as `scope.outside {job_id, paths}` |
 | `roles` | bool? | run a Code task as Plan → Implement → Review, a Plan task as its plan role ([Roles](#roles)); other modes are refused |
 
@@ -1341,6 +1345,12 @@ history. Vendor CLIs are always started without
   [{kind: "add"|"del"|"ctx", text, eol?: false}]}]`. A secret file (`.env`,
   keys, credential files) answers `secret: true` and no hunks; it can still
   be undone as a whole.
+- `POST /api/review/tasks/{task_id}/explain {path}` → `{ok: true, path, text,
+  model, source: "model"|"local"}` or `{ok: false, path, error}`: the file's
+  change (at most about 24 KB of diff) explained in plain words by the
+  conversation's model, or the model loaded on this computer when the
+  conversation uses a subscription. Only on request; secret and binary files
+  are refused.
 - `POST /api/review/tasks/{task_id}/undo {path, hunk?}` → the file's review
   after putting one hunk (by `id`) or the whole file back as it was before the
   task. Refused while a task runs in the project, outside the open project,
@@ -1655,7 +1665,11 @@ WorktreeTask = {id, workspace /* the project */, session_id, worktree, branch,
                 state: "starting"|"running"|"done"|"applied"|"branch"|"discarded", job_id,
                 status /* the conversation's latest job status */, changed_files, changed_files_truncated,
                 applied_files: string[], conflicts: string[], conflict_detail, kept_branch: string|null,
-                notes: string[], removed}
+                notes: string[], removed, port: number|null,
+                setup: {} | {ok, copied: string[], skipped: [{path, reason}], port,
+                        commands: [{command, ok, exit_code, seconds, output}]}}
+WorktreeSetup = {copy: string[] /* ≤ 20 project files */, setup: string[], teardown: string[]
+                 /* ≤ 10 one-line commands each */, port_start /* ≥ 1024 */, port_end}
 ```
 
 - Start: `POST /api/run` (or `/api/jobs`) with `worktree: true` and the usual
@@ -1669,6 +1683,27 @@ WorktreeTask = {id, workspace /* the project */, session_id, worktree, branch,
   everything is removed. Refused outside a Git repository root, with
   unresolved conflicts or no first commit, or for a local GGUF model while
   another task runs on a different local model.
+- `base_branch` (optional): start from that local branch's last commit
+  instead of the current files (`base.included_uncommitted: false`);
+  refused when it is not a local branch.
+- Setup: each new worktree gets the project's `WorktreeSetup`. Its `copy`
+  files (regular files up to 10 MB, never outside the project or in `.git`)
+  are copied from the project, then its `setup` commands run in the worktree
+  with `sh -c` as the user (`CI=1`, 10 minutes each), stopping at the first
+  failure; the task starts either way and `setup` records what happened. The
+  task gets a port that is free on this computer and not used by another
+  open worktree task of the project; its shells, setup commands and
+  subscription CLIs see it as `PORT` and `SHADOWCODE_PORT` (`session_meta`
+  `task_env`). Before the worktree is removed (apply, keep, discard) its
+  `teardown` commands run (2 minutes each); failures are added to `notes`.
+- `GET /api/worktree-tasks/setup?workspace=` → `{workspace, setup:
+  WorktreeSetup, suggested: WorktreeSetup}`: `suggested` comes from the
+  project's lockfiles (`npm ci`, `pnpm install --frozen-lockfile`,
+  `yarn install --frozen-lockfile`, `bun install --frozen-lockfile`,
+  `uv sync`, `poetry install`) and `.env`, `.env.local`,
+  `.env.development`; nothing runs until the user saves it.
+- `POST /api/worktree-tasks/setup {workspace?, setup: WorktreeSetup}` →
+  `{workspace, setup}`. Storage: `native_meta` `worktree_setup:<project>`.
 - `GET /api/worktree-tasks?workspace=` → `{workspace, tasks}` (newest first,
   at most 30); `GET /api/worktree-tasks/{id}` refreshes one.
 - `POST /api/worktree-tasks/{id}/apply` → `WorktreeTask`: needs no turn
@@ -2609,7 +2644,8 @@ Downloads are refused offline.
    managed: [{id, label, packages: ["name@version"], approx_bytes, installed, installed_bytes: number|null,
               versions: [{name, version}], path, progress: {state: "installing"|"installed"|"error", error, log}|null}],
    managed_dir, npm: {available, path, node},
-   index: {files, symbols, references, chunks, languages: {[lang]: files}, max_files}|null,
+   index: {files, symbols, references, chunks, languages: {[lang]: files}, max_files, total,
+           complete, focus, size_bytes, persistent}|null /* see reindex below */,
    embeddings: {models: EmbeddingModel[], active: string|null, runtime: string|null,
                 server: {model, pid, idle_sec}|null, coverage: {embedded, chunks}|null,
                 backfill: {state: "running"|"done"|"error", embedded, error}|null}}

@@ -429,6 +429,82 @@ async fn review_undoes_one_hunk_and_a_rewind_can_be_undone() {
 }
 
 #[tokio::test]
+async fn explain_this_change_sends_only_that_files_diff_on_request() {
+    let server = support::server(|index, _| match index {
+        0 => reply(
+            "",
+            json!([
+                tool(
+                    "e1",
+                    "edit_file",
+                    json!({"path":"sample.txt","old_string":"line 2\n","new_string":"line two\n"})
+                ),
+                tool(
+                    "w1",
+                    "write_file",
+                    json!({"path":"other.txt","content":"not part of it\n"})
+                )
+            ]),
+        ),
+        1 => reply("Edited.", json!([])),
+        _ => reply(
+            "The second line now spells out its number. Nothing else changed.",
+            json!([]),
+        ),
+    })
+    .await;
+    let (_root, service) = setup(&server.endpoint);
+    Config::patch(
+        service.engine.paths(),
+        json!({"permissions":{"mode":"allow_edits"}}),
+    )
+    .unwrap();
+    let project = service.workspace().unwrap();
+    fs::write(project.join("sample.txt"), "line 1\nline 2\nline 3\n").unwrap();
+    let job = call(&service, "POST", "/api/jobs", json!({"task":"Edit"}))
+        .await
+        .unwrap();
+    let done = finish(&service, &job).await;
+    assert_eq!(done.status, "completed", "{}", done.summary);
+    let task = job["task_id"].as_str().unwrap();
+    // Nothing is sent until asked.
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+    let explained = call(
+        &service,
+        "POST",
+        &format!("/api/review/tasks/{task}/explain"),
+        json!({"path":"sample.txt"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(explained["ok"], true, "{explained}");
+    assert_eq!(explained["source"], "model");
+    assert_eq!(explained["model"], "fixture");
+    assert!(explained["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("The second line now spells out its number."));
+    let requests = server.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3);
+    let sent = requests[2].to_string();
+    assert!(
+        sent.contains("-line 2") && sent.contains("+line two"),
+        "{sent}"
+    );
+    assert!(!sent.contains("not part of it"), "only the chosen file");
+    // A file the task didn't change has nothing to explain.
+    assert!(call(
+        &service,
+        "POST",
+        &format!("/api/review/tasks/{task}/explain"),
+        json!({"path":"untouched.txt"}),
+    )
+    .await
+    .is_err());
+    service.engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn edit_and_resend_forks_just_before_the_message() {
     let server = support::server(|_, _| reply("Done.", json!([]))).await;
     let (_root, service) = setup(&server.endpoint);

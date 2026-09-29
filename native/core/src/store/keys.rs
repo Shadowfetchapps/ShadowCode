@@ -41,6 +41,14 @@ pub fn rewind_undo(id: &str) -> String {
 pub fn worktree_task_record(id: &str) -> String {
     format!("worktree_task:{id}")
 }
+/// `native_meta`: what a project's new task worktrees get (JSON
+/// `worktree_tasks::setup::Setup`).
+pub fn worktree_setup(workspace: &Path) -> String {
+    format!("worktree_setup:{}", workspace.display())
+}
+/// `session_meta`: environment variables a conversation's commands get
+/// (a worktree task's `PORT`), JSON object.
+pub const TASK_ENV: &str = "task_env";
 /// `native_meta`: a project's worktree task ids, newest first (JSON list).
 pub fn worktree_task_index(workspace: &Path) -> String {
     format!("worktree_task_index:{}", workspace.display())

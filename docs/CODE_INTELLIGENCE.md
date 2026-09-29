@@ -104,13 +104,22 @@ file's definitions, how often each name is used in each file, and the file
 cut into chunks for search. Other text files (Markdown, TOML, YAML, JSON,
 shell scripts, SQL and similar) are indexed for search only.
 
-- It is built on first use, from at most 3,000 files; `node_modules`,
-  `target`, `dist`, `build`, `vendor`, hidden folders, ignored files and
-  secret files are skipped, as are files over 512 KB.
-- Unchanged files are not read again. Files the agent edits are re-indexed
-  right away.
-- The index lives in a private temporary folder for this run of ShadowCode,
-  never in the project.
+- It is built on first use. A scan walks every indexable file (up to
+  250,000) but parses at most 2,000 changed files at a time, so a large
+  repository fills in over a few passes while each one stays short.
+  `node_modules`, `target`, `dist`, `build`, `vendor`, hidden folders,
+  ignored files and secret files are skipped, as are files over 512 KB.
+- Unchanged files (same modification time and size) are not read again.
+  Files the agent edits are re-indexed right away.
+- The index is kept between runs in the profile's cache
+  (`$XDG_CACHE_HOME/shadow-agent/index`, or `<profile>/cache/index` for an
+  isolated profile), never in the project. An index from another version of
+  ShadowCode, or a damaged one, is rebuilt.
+- **Settings › Code intelligence** shows the files indexed out of those
+  found, whether the scan is complete, and the index's size. **Reindex this project**
+  continues a large scan (up to 90 seconds per click). A **focus folder**
+  limits the index to one folder of the project, useful in a monorepo.
+  **Clear index** deletes the project's index; it is rebuilt when needed.
 
 Tools that use it: `workspace_symbols`, `goto_definition` and
 `find_references` by name, `get_type_signature`, and the callers list after

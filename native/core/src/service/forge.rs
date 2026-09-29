@@ -277,10 +277,10 @@ fn args(list: &[&str]) -> Vec<String> {
 }
 
 /// A drafted message: the text and where it came from.
-struct Draft {
-    text: String,
-    source: &'static str,
-    model: String,
+pub(super) struct Draft {
+    pub(super) text: String,
+    pub(super) source: &'static str,
+    pub(super) model: String,
     note: String,
 }
 
@@ -910,7 +910,7 @@ impl Service {
 
     /// Ask a model that runs through ShadowCode. `Ok(None)` when none is
     /// available (a subscription conversation with no local model loaded).
-    async fn draft_with_model(
+    pub(super) async fn draft_with_model(
         &self,
         workspace: &Path,
         system: &str,

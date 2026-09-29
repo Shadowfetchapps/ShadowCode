@@ -424,7 +424,12 @@ async fn run_once(
     ensure_ready(vendor, request)?;
     let mut adapter = adapter_for(vendor, codex_exec_fallback);
     let (program, args) = adapter.command(&request.options);
-    let env = adapter.env(&request.options);
+    let mut env = adapter.env(&request.options);
+    // A worktree task's own port (`PORT`) reaches the vendor's commands.
+    env.extend(crate::worktree_tasks::setup::session_env(
+        &request.events.store,
+        &request.session_id,
+    ));
     let (mut child, _run_dir) =
         spawn_vendor(vendor, &program, &args, &env, &request.options.workspace)?;
     let pid = child.id().context("Vendor CLI has no process ID")?;

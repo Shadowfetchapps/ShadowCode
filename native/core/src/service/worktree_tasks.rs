@@ -20,6 +20,28 @@ impl Service {
                     "tasks": records.iter().map(worktree_tasks::Record::to_json).collect::<Vec<_>>()
                 }))
             }
+            ("GET", ["worktree-tasks", "setup"]) => {
+                let workspace = match call.q("workspace") {
+                    "" => self.workspace()?,
+                    path => Workspace::open(&expand_path(path)?)?.path,
+                };
+                Ok(json!({
+                    "workspace": workspace,
+                    "setup": worktree_tasks::setup::load(&engine.store(), &workspace),
+                    "suggested": worktree_tasks::setup::suggest(&workspace),
+                }))
+            }
+            ("POST", ["worktree-tasks", "setup"]) => {
+                let workspace = match call.body["workspace"].as_str().unwrap_or("") {
+                    "" => self.workspace()?,
+                    path => Workspace::open(&expand_path(path)?)?.path,
+                };
+                let wanted: worktree_tasks::setup::Setup =
+                    serde_json::from_value(call.body["setup"].clone())
+                        .context("setup must be {copy, setup, teardown, port_start, port_end}")?;
+                let saved = worktree_tasks::setup::save(&engine.store(), &workspace, wanted)?;
+                Ok(json!({"workspace": workspace, "setup": saved}))
+            }
             ("GET", ["worktree-tasks", id]) => Ok(worktree_tasks::get(engine, id).await?.to_json()),
             ("POST", ["worktree-tasks", id, action]) => {
                 let record = match *action {

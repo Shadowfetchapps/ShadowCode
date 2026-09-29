@@ -316,3 +316,42 @@ test("a staged secret is shown before the commit and the push, and goes only whe
   await push.getByRole("button", { name: "Push anyway" }).click();
   await expect(page.getByText("Pushed main to origin")).toBeVisible();
 });
+
+test("the Worktrees tab saves what each new worktree task gets", async ({
+  page,
+}) => {
+  await start(page);
+  await page.keyboard.press("Control+k");
+  await page.keyboard.type("Worktrees");
+  await page.keyboard.press("Enter");
+  const setup = drawer(page).getByRole("region", {
+    name: "Setup for new worktrees",
+  });
+  await expect(setup).toBeVisible();
+  await setup
+    .getByRole("button", { name: "Use suggestions for this project" })
+    .click();
+  await expect(
+    setup.getByRole("textbox", { name: "Setup commands (one per line)" }),
+  ).toHaveValue("npm ci");
+  await setup
+    .getByRole("textbox", { name: "Teardown commands (one per line)" })
+    .fill("docker compose down");
+  await setup.getByRole("textbox", { name: "Ports" }).fill("4000-4099");
+  await setup.getByRole("button", { name: "Save setup" }).click();
+  await expect(page.getByText("Worktree setup saved")).toBeVisible();
+  const saved = (await fakeLog(page)).find(
+    (r) => r.path === "/api/worktree-tasks/setup" && r.method === "POST",
+  );
+  expect(saved?.body.setup).toEqual({
+    copy: [".env"],
+    setup: ["npm ci"],
+    teardown: ["docker compose down"],
+    port_start: 4000,
+    port_end: 4099,
+  });
+  // Saved: the suggestion is no longer offered over it.
+  await expect(
+    setup.getByRole("button", { name: "Use suggestions for this project" }),
+  ).toHaveCount(0);
+});

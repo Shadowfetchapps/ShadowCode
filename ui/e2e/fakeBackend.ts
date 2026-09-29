@@ -676,6 +676,8 @@ export function installFakeBackend(options: FakeOptions = {}) {
     /** "Run in new worktree" records (native/core/src/worktree_tasks.rs). */
     worktreeTasks: [] as Json[],
     worktreeConflict: Boolean(options.worktreeConflict),
+    /** Branches GET /api/git lists, when a test sets them. */
+    gitBranches: null as null | string[],
     /** GET /api/local-models/downloads (native/core/src/local_downloads.rs). */
     downloads: {
       hardware: {
@@ -3492,6 +3494,15 @@ export function installFakeBackend(options: FakeOptions = {}) {
         state.projects.push(detail.workspace);
       return detail;
     }
+    if (path === "/api/git" && method === "GET" && state.gitBranches)
+      return {
+        branch: "main",
+        branches: state.gitBranches.map((name: string) => ({
+          name,
+          upstream: "",
+          current: name === "main",
+        })),
+      };
     if (path === "/api/worktree-tasks")
       return {
         workspace,

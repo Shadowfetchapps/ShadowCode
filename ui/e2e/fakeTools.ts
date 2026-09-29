@@ -35,6 +35,13 @@ export function installFakeTools(options: FakeToolsOptions = {}) {
   };
   const terminals: Term[] = [];
   let serial = 0;
+  let worktreeSetup = {
+    copy: [] as string[],
+    setup: [] as string[],
+    teardown: [] as string[],
+    port_start: 3100,
+    port_end: 3999,
+  };
   const prompt = "demo$ ";
   const wakeTerminal = (id: string) =>
     setTimeout(
@@ -294,6 +301,20 @@ export function installFakeTools(options: FakeToolsOptions = {}) {
     if (path === "/api/background" && method === "GET") return { tasks: [] };
     if (path === "/api/worktrees" && method === "GET")
       return { workspace: "/work/demo", worktrees: [] };
+    if (path === "/api/worktree-tasks/setup" && method === "GET")
+      return {
+        workspace: "/work/demo",
+        setup: worktreeSetup,
+        suggested: {
+          ...worktreeSetup,
+          copy: [".env"],
+          setup: ["npm ci"],
+        },
+      };
+    if (path === "/api/worktree-tasks/setup" && method === "POST") {
+      worktreeSetup = { ...worktreeSetup, ...(body?.setup || {}) };
+      return { workspace: "/work/demo", setup: worktreeSetup };
+    }
     if (path === "/api/git" && method === "GET") return overview();
     if (path === "/api/git/branch" && method === "POST") {
       const name = String(body?.name || "");

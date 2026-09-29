@@ -93,6 +93,8 @@ pub struct ToolExecutor {
     /// "Only change these": the files and folders edits may touch without
     /// asking; `None` when the task has no such limit.
     scope: Option<Vec<crate::mentions::Mention>>,
+    /// Environment for shell commands (a worktree task's `PORT`).
+    pub(crate) task_env: std::collections::BTreeMap<String, String>,
 }
 impl ToolExecutor {
     pub fn new(
@@ -119,6 +121,7 @@ impl ToolExecutor {
             "Task workspace does not match its session"
         );
         let hooks = hooks::Runner::load(&workspace, &config)?;
+        let task_env = crate::worktree_tasks::setup::session_env(&events.store, &events.session_id);
         #[cfg(unix)]
         let mcp = crate::mcp::runner::Runner::load(workspace.clone(), config.clone())?;
         Ok(Self {
@@ -136,6 +139,7 @@ impl ToolExecutor {
             mcp,
             extensions: Default::default(),
             scope: None,
+            task_env,
         })
     }
     pub fn with_extensions(mut self, extensions: crate::subagents::ToolExtensions) -> Self {

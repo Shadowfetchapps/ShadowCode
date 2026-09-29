@@ -62,7 +62,7 @@ impl ToolExecutor {
             cwd: cwd.clone(),
             timeout: Duration::from_secs(seconds as u64),
             output_limit: self.config.agent.max_output_bytes,
-            env: Default::default(),
+            env: self.task_env.clone(),
             child: prepared.child,
         };
         // Never replay a command after a process failure: it may have changed files.

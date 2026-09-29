@@ -530,6 +530,8 @@ export type StartJobRequest = {
   roles?: boolean;
   /** "Only change these": edits outside `mentions` ask first. */
   only_change?: boolean;
+  /** A worktree task starts from this branch instead of the current files. */
+  base_branch?: string;
 };
 
 /** A conversation run in its own managed worktree ("Run in new worktree"),
@@ -558,6 +560,21 @@ export type WorktreeTask = {
   kept_branch?: string | null;
   notes: string[];
   removed: boolean;
+  /** The task's own port (`PORT`), from the project's worktree setup. */
+  port?: number | null;
+  /** What preparing the worktree did (empty when nothing is set up). */
+  setup?: {
+    ok?: boolean;
+    copied?: string[];
+    skipped?: { path: string; reason: string }[];
+    commands?: {
+      command: string;
+      ok: boolean;
+      exit_code?: number | null;
+      seconds: number;
+      output: string;
+    }[];
+  } | null;
 };
 
 /** The engine's per-task token and cost accounting (API contract "Usage"). */
@@ -811,6 +828,14 @@ export type SecretStorage = {
   keyring: { available: boolean; detail: string | null };
   file: string;
   keys: { name: string; place: "file" | "keyring" }[];
+};
+/** What each new task worktree gets (`/api/worktree-tasks/setup`). */
+export type WorktreeSetup = {
+  copy: string[];
+  setup: string[];
+  teardown: string[];
+  port_start: number;
+  port_end: number;
 };
 /** One "Always allow in this project" command. */
 export type AlwaysAllowed = { command: string; added_at: number };
@@ -2335,6 +2360,16 @@ export const api = {
       ...(options.scope ? { scope: options.scope } : {}),
       ...(options.note ? { note: options.note } : {}),
     }),
+  worktreeSetup: () =>
+    get<{ workspace: string; setup: WorktreeSetup; suggested: WorktreeSetup }>(
+      "/api/worktree-tasks/setup",
+    ),
+  saveWorktreeSetup: (setup: WorktreeSetup) =>
+    send<{ workspace: string; setup: WorktreeSetup }>(
+      "/api/worktree-tasks/setup",
+      "POST",
+      { setup },
+    ),
   /** The project's "Always allow in this project" commands. */
   alwaysAllowed: (workspace?: string) =>
     get<{ workspace: string; commands: AlwaysAllowed[] }>(
@@ -2372,6 +2407,17 @@ export const api = {
     ),
   /** Put one hunk (or, without `hunk`, the whole file) back as it was
    * before the task; answers the file's review after the change. */
+  /** The file's change in plain words, from a model (only on request). */
+  explainChange: (taskId: string, path: string) =>
+    send<{
+      ok: boolean;
+      path: string;
+      text?: string;
+      model?: string;
+      error?: string;
+    }>(`/api/review/tasks/${encodeURIComponent(taskId)}/explain`, "POST", {
+      path,
+    }),
   reviewUndo: (taskId: string, path: string, hunk?: string) =>
     send<ReviewFileDetail>(
       `/api/review/tasks/${encodeURIComponent(taskId)}/undo`,

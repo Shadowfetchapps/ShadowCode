@@ -179,6 +179,30 @@
 .wt-counts {
   color: var(--muted);
 }
+.worktree-port {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.worktree-setup-failed {
+  padding: 6px 10px;
+  border-left: 3px solid var(--warn);
+  border-radius: 4px;
+  color: var(--text);
+}
+.worktree-setup-failed summary {
+  cursor: pointer;
+}
+.worktree-setup-failed pre {
+  max-height: 180px;
+  margin: 6px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
 .worktree-conflicts {
   padding: 8px 10px;
   border-left: 3px solid var(--danger);

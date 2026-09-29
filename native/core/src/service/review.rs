@@ -16,7 +16,66 @@ struct UndoBody {
 
 impl Service {
     pub(super) async fn review_routes(&self, call: &Arc<Call>) -> Result<Value> {
+        let parts = call.parts();
+        if call.method == "POST" && parts.len() == 5 && parts[2] == "tasks" && parts[4] == "explain"
+        {
+            return self.explain_change(parts[3], &call.body).await;
+        }
         self.blocking(call, Self::review_sync).await
+    }
+
+    /// POST /api/review/tasks/{id}/explain `{path}`: the file's change in
+    /// plain words, from the conversation's model (or the model loaded on
+    /// this computer). Only when asked; never for secret files.
+    async fn explain_change(&self, task_id: &str, body: &Value) -> Result<Value> {
+        let path = body["path"].as_str().context("path required")?.to_owned();
+        let (_, ws) = self.task_workspace(task_id)?;
+        let store = self.engine.store();
+        let detail = crate::review::file(&store, &ws, task_id, &path)?;
+        ensure!(
+            detail["secret"] != true,
+            "Secret files aren't sent to a model"
+        );
+        ensure!(
+            detail["binary"] != true,
+            "This is a binary file; there is no text to explain"
+        );
+        let mut diff = String::new();
+        for hunk in detail["hunks"].as_array().into_iter().flatten() {
+            diff.push_str(hunk["header"].as_str().unwrap_or(""));
+            diff.push('\n');
+            for line in hunk["lines"].as_array().into_iter().flatten() {
+                let mark = match line["kind"].as_str() {
+                    Some("add") => '+',
+                    Some("del") => '-',
+                    _ => ' ',
+                };
+                diff.push(mark);
+                diff.push_str(line["text"].as_str().unwrap_or(""));
+                diff.push('\n');
+            }
+            if diff.len() > 24_000 {
+                diff.push_str("[the rest of the change is left out]\n");
+                break;
+            }
+        }
+        ensure!(!diff.trim().is_empty(), "There is no change to explain");
+        let system = "You explain a code change to someone who may not be a programmer. In 3 to 6 short sentences of plain words: what the change does, why it might have been made, and anything that could go wrong or deserves a closer look. No code blocks, no jargon without a short explanation.";
+        let facts = format!("File: {path}\n\nThe change (unified diff):\n{diff}");
+        match self.draft_with_model(&ws.path, system, &facts).await? {
+            Some(draft) => Ok(json!({
+                "ok": true,
+                "path": path,
+                "text": draft.text,
+                "model": draft.model,
+                "source": draft.source,
+            })),
+            None => Ok(json!({
+                "ok": false,
+                "path": path,
+                "error": "No model can explain it here: choose a model that ShadowCode runs itself (a model on this computer or an API key), or load a local model.",
+            })),
+        }
     }
 
     fn review_sync(&self, call: &Call) -> Result<Value> {

@@ -32,6 +32,7 @@ use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 
 mod locks;
+pub mod setup;
 #[cfg(test)]
 pub(crate) fn record_lock_references(store: &Store, id: &str) -> usize {
     locks::record_references(store, id)
@@ -73,6 +74,10 @@ pub struct Record {
     pub notes: Vec<String>,
     /// The worktree was removed.
     pub removed: bool,
+    /// The task's own port (`PORT`), from the project's range.
+    pub port: Option<u16>,
+    /// What preparing the worktree did: `{ok, copied, skipped, commands}`.
+    pub setup: Value,
     /// Job id and finish time the stored diffstat belongs to (internal).
     stats_for: String,
 }
@@ -372,6 +377,7 @@ pub(crate) async fn prepare(
     task: &str,
     images: &[String],
     model: &str,
+    base_branch: Option<&str>,
 ) -> Result<Record> {
     let cancel = CancellationToken::new();
     let source = Workspace::open(source)?.path;
@@ -383,14 +389,46 @@ pub(crate) async fn prepare(
         &cancel,
     )
     .await?;
-    let base = compare::snapshot_for(
-        &engine.paths().data,
-        &source,
-        "running a task in a new worktree",
-        "ShadowCode worktree task base",
-        &cancel,
-    )
-    .await?;
+    let base = match base_branch.map(str::trim).filter(|b| !b.is_empty()) {
+        // Another branch: its last commit, without the project's
+        // uncommitted work.
+        Some(branch) => {
+            ensure!(
+                !branch.starts_with('-') && !branch.contains(char::is_whitespace),
+                "Choose a branch name"
+            );
+            let output = tokio::process::Command::new("git")
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{branch}^{{commit}}"),
+                ])
+                .current_dir(&source)
+                .output()
+                .await?;
+            let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            ensure!(
+                output.status.success() && !commit.is_empty(),
+                "There is no branch named {branch}"
+            );
+            Base {
+                commit: commit.clone(),
+                head: commit,
+                included_uncommitted: false,
+            }
+        }
+        None => {
+            compare::snapshot_for(
+                &engine.paths().data,
+                &source,
+                "running a task in a new worktree",
+                "ShadowCode worktree task base",
+                &cancel,
+            )
+            .await?
+        }
+    };
     let checkout = worktrees::create(engine.paths(), &source, &base.commit, cancel.clone()).await?;
     let mut record = Record {
         id: crate::id(),
@@ -422,6 +460,24 @@ pub(crate) async fn prepare(
             keys::WORKTREE_SOURCE,
             &source.to_string_lossy(),
         )?;
+        // Its own port, its copied files and setup commands.
+        let wanted = setup::load(&store, &source);
+        let taken: Vec<u16> = list(engine, &source)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.open() && r.id != record.id)
+            .filter_map(|r| r.port)
+            .collect();
+        record.port = setup::free_port(&wanted, &taken);
+        store.set_session_meta(
+            &record.session_id,
+            keys::TASK_ENV,
+            &serde_json::to_string(&setup::env_for(record.port))?,
+        )?;
+        if !wanted.copy.is_empty() || !wanted.setup.is_empty() {
+            record.setup = setup::run_setup(&wanted, &source, &record.worktree, record.port).await;
+        }
         save(&store, &record)
     }
     .await;
@@ -793,6 +849,20 @@ async fn close(engine: &Engine, record: &mut Record, state: &str) {
     record.state = state.into();
     record.finished_at.get_or_insert_with(crate::now);
     if !record.removed && !record.worktree_id.is_empty() {
+        // The project's teardown commands (stop services, remove
+        // containers) run in the worktree first, best effort.
+        let wanted = setup::load(&engine.store(), &record.workspace);
+        if !wanted.teardown.is_empty() && record.worktree.is_dir() {
+            for result in setup::run_teardown(&wanted, &record.worktree, record.port).await {
+                if result["ok"] != true {
+                    record.notes.push(format!(
+                        "The teardown command `{}` failed: {}",
+                        result["command"].as_str().unwrap_or(""),
+                        crate::tools::truncate(result["output"].as_str().unwrap_or(""), 300)
+                    ));
+                }
+            }
+        }
         let removed = if state == "branch" {
             worktrees::release(
                 engine.paths(),
@@ -959,6 +1029,7 @@ mod tests {
             "Fixture without a model turn",
             &[],
             "fixture-only",
+            None,
         )
         .await
         .unwrap();
@@ -1076,7 +1147,7 @@ mod tests {
         command(&second, &["commit", "-qm", "Independent"]);
         let prepared = tokio::time::timeout(
             Duration::from_secs(2),
-            prepare(&f.engine, &second, "Independent", &[], "fixture-only"),
+            prepare(&f.engine, &second, "Independent", &[], "fixture-only", None),
         )
         .await
         .expect("Other repository waited for held task repository ownership")
@@ -1505,6 +1576,7 @@ mod tests {
             "Startup failure fixture",
             &[],
             "fixture-only",
+            None,
         )
         .await
         .unwrap();

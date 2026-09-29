@@ -11,6 +11,9 @@ use crate::store::keys;
 struct StartBody {
     /// "Only change these": keep edits to the @-mentioned files and folders.
     only_change: Flag,
+    /// A worktree task starts from this branch instead of the project's
+    /// current state.
+    base_branch: Text,
     workspace: Text,
     task: Text,
     purpose: Text,
@@ -428,6 +431,7 @@ impl Service {
                 model
                     .as_ref()
                     .map_or(cfg.model.default.as_str(), |m| m.default.as_str()),
+                body.base_branch.non_empty(),
             )
             .await?;
             // The worktree's own config never widens the project's authority.

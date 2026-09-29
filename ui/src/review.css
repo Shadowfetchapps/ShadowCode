@@ -532,3 +532,29 @@
   margin: 4px 0;
   padding-left: 18px;
 }
+
+/* ---------- review triage and explanations ---------- */
+.review-group + .review-group {
+  margin-top: 8px;
+}
+.review-group-title {
+  margin: 6px 8px 2px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.review-why {
+  display: block;
+  width: 100%;
+  font-size: 11px;
+  color: var(--muted);
+}
+.explain-change {
+  flex-basis: 100%;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}

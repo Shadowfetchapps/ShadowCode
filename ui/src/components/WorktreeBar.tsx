@@ -22,6 +22,7 @@ export function WorktreeBar({
   const files = task.changed_files.length;
   const busy = Boolean(acting);
   const project = task.workspace.split("/").pop() || task.workspace;
+  const failed = task.setup?.commands?.find((c) => !c.ok);
   return (
     <section
       className="worktree-bar"
@@ -39,7 +40,27 @@ export function WorktreeBar({
               ? `${files}${task.changed_files_truncated ? "+" : ""} file${files === 1 ? "" : "s"} changed in its own copy of ${project}.`
               : `No changes in its own copy of ${project}.`}
         </span>
+        {task.port ? (
+          <span
+            className="worktree-port"
+            title="Dev servers started in this task use this port (PORT)"
+          >
+            Port {task.port}
+          </span>
+        ) : null}
       </div>
+      {failed && (
+        <details className="worktree-setup-failed">
+          <summary>
+            Setup did not finish: <code>{failed.command}</code>{" "}
+            {failed.exit_code != null
+              ? `exited with ${failed.exit_code}`
+              : "did not run"}
+            . The task ran anyway; install steps may be missing.
+          </summary>
+          <pre>{failed.output}</pre>
+        </details>
+      )}
       {files > 0 && (
         <ul className="worktree-files" aria-label="Changed files">
           {task.changed_files.slice(0, 6).map((file) => (

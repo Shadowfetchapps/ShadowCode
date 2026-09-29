@@ -154,6 +154,30 @@ test("runs a second task in a new worktree beside a running one and applies it",
   ).toBeVisible();
 });
 
+test("a new worktree task can start from another branch", async ({ page }) => {
+  await fake(page, () => {
+    (window as any).__SHADOW_FAKE__.state.gitBranches = ["main", "release/2"];
+  });
+  await chooseLocal(page);
+  await prompt(page).fill("Backport the fix");
+  await openMore(page);
+  const base = page.getByRole("combobox", { name: "New worktree starts from" });
+  await expect(base).toHaveValue("");
+  await base.focus();
+  await expect(base.locator("option")).toHaveCount(2);
+  await base.selectOption("release/2");
+  await page.getByRole("button", { name: "Run in a new worktree" }).click();
+  await expect(
+    page.getByRole("region", {
+      name: "This conversation runs in its own worktree",
+    }),
+  ).toBeVisible();
+  const started = (await fakeLog(page)).find(
+    (r) => r.path === "/api/jobs" && r.method === "POST" && r.body?.worktree,
+  );
+  expect(started?.body.base_branch).toBe("release/2");
+});
+
 test("a conflicting apply lists the files and keeps the worktree; discard removes it", async ({
   page,
 }) => {

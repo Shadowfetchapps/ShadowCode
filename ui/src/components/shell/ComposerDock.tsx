@@ -17,6 +17,7 @@ import { QueuedTasks } from "../QueuedTasks";
 import type { Effort, TaskMode } from "../../lib/effort";
 import { UnifiedPicker } from "../UnifiedPicker";
 import { RunInWorktreeButton } from "../RunInWorktreeButton";
+import { WorktreeBaseSelect } from "../WorktreeBaseSelect";
 import { TaskPlan } from "./Chrome";
 import {
   isApiKey,
@@ -78,6 +79,7 @@ export function ComposerDock({
   modes,
   worktree,
   worktreeNote,
+  worktreeBase,
   roles,
 }: {
   hidden: boolean;
@@ -124,6 +126,8 @@ export function ComposerDock({
    * (shown in the More menu; general reasons such as a missing model are
    * already shown under the composer). */
   worktreeNote?: string | null;
+  /** The branch a new worktree task starts from. */
+  worktreeBase?: { value: string; onChange: (branch: string) => void };
   /** The project's roles (Plan → Implement → Review), in More. */
   roles?: Omit<ComponentProps<typeof RolesControl>, "mode">;
 }) {
@@ -189,6 +193,9 @@ export function ComposerDock({
               </p>
             )}
             {worktree && <RunInWorktreeButton {...worktree} />}
+            {worktree && worktreeBase && !worktreeNote && (
+              <WorktreeBaseSelect {...worktreeBase} />
+            )}
             {worktree && worktreeNote && !needsTask && (
               // The button's accessible name already carries the reason.
               <p className="composer-more-reason" aria-hidden="true">

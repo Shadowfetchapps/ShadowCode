@@ -6,6 +6,8 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { DiffHunk, LayoutToggle, type DiffLayout } from "./DiffView";
 import { Empty } from "./cards";
 import { LockfileSummary } from "./LockfileSummary";
+import { ExplainChange } from "./ExplainChange";
+import { triage, whyLine } from "../lib/triage";
 import { hunkKey, useTaskReview } from "../hooks/useReview";
 import type {
   DrawerMemory,
@@ -239,41 +241,54 @@ export function ReviewView({
       ) : (
         <div className="review-body">
           <nav className="review-files" aria-label="Changed files">
-            {files.map((file: ReviewFile) => (
-              <button
-                type="button"
-                key={file.path}
-                className={`review-file ${review.selected === file.path ? "active" : ""}`}
-                aria-current={
-                  review.selected === file.path ? "true" : undefined
-                }
-                onClick={() => review.setSelected(file.path)}
+            {triage(files).map((group) => (
+              <div
+                key={group.group}
+                className="review-group"
+                role="group"
+                aria-label={group.label}
               >
-                <span className={`review-status is-${file.status}`}>
-                  {kept.files.includes(file.path) ? (
-                    <>
-                      <Check size={11} aria-hidden="true" /> Kept
-                    </>
-                  ) : (
-                    STATUS[file.status] || file.status
-                  )}
-                </span>
-                <span className="review-path">{file.path}</span>
-                {second.count(file.path) > 0 && (
-                  <span
-                    className="opinion-count"
-                    aria-label={`${second.count(file.path)} open finding${second.count(file.path) === 1 ? "" : "s"}`}
+                <h5 className="review-group-title">
+                  {group.label} ({group.files.length})
+                </h5>
+                {group.files.map((file: ReviewFile) => (
+                  <button
+                    type="button"
+                    key={file.path}
+                    className={`review-file ${review.selected === file.path ? "active" : ""}`}
+                    aria-current={
+                      review.selected === file.path ? "true" : undefined
+                    }
+                    onClick={() => review.setSelected(file.path)}
                   >
-                    {second.count(file.path)}
-                  </span>
-                )}
-                {!file.binary && (file.added > 0 || file.removed > 0) && (
-                  <span className="diff-stat">
-                    <span className="add">+{file.added}</span>{" "}
-                    <span className="del">−{file.removed}</span>
-                  </span>
-                )}
-              </button>
+                    <span className={`review-status is-${file.status}`}>
+                      {kept.files.includes(file.path) ? (
+                        <>
+                          <Check size={11} aria-hidden="true" /> Kept
+                        </>
+                      ) : (
+                        STATUS[file.status] || file.status
+                      )}
+                    </span>
+                    <span className="review-path">{file.path}</span>
+                    {second.count(file.path) > 0 && (
+                      <span
+                        className="opinion-count"
+                        aria-label={`${second.count(file.path)} open finding${second.count(file.path) === 1 ? "" : "s"}`}
+                      >
+                        {second.count(file.path)}
+                      </span>
+                    )}
+                    {!file.binary && (file.added > 0 || file.removed > 0) && (
+                      <span className="diff-stat">
+                        <span className="add">+{file.added}</span>{" "}
+                        <span className="del">−{file.removed}</span>
+                      </span>
+                    )}
+                    <span className="review-why">{whyLine(file)}</span>
+                  </button>
+                ))}
+              </div>
             ))}
           </nav>
           <div className="review-diff">
@@ -287,6 +302,9 @@ export function ReviewView({
                     </span>
                   )}
                   <span className="grow" />
+                  {!detail.binary && !detail.secret && (
+                    <ExplainChange taskId={taskId} path={detail.path} />
+                  )}
                   <button
                     type="button"
                     className="mini"

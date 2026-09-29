@@ -489,3 +489,92 @@ async fn keep_as_branch_commits_the_result_and_removes_the_checkout() {
         "value = 1\n"
     );
 }
+
+#[tokio::test]
+async fn a_new_worktree_gets_its_files_its_setup_its_own_port_and_a_teardown() {
+    let f = fixture().await;
+    fs::write(f.project.join(".env"), "TOKEN=local-only\n").unwrap();
+    let suggested = call(&f.service, "GET", "/api/worktree-tasks/setup", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(suggested["suggested"]["copy"], json!([".env"]));
+    let marker = f.project.parent().unwrap().join("teardown-ran");
+    call(
+        &f.service,
+        "POST",
+        "/api/worktree-tasks/setup",
+        json!({"setup":{
+            "copy":[".env"],
+            "setup":["printf \"$PORT\" > port.txt"],
+            "teardown":[format!("touch {}", marker.display())],
+            "port_start":41000,
+            "port_end":41999
+        }}),
+    )
+    .await
+    .unwrap();
+    let started = run_in_worktree(&f).await;
+    let record = &started["worktree_task"];
+    let port = record["port"].as_u64().expect("a port");
+    assert!((41000..=41999).contains(&port), "{record}");
+    assert_eq!(record["setup"]["ok"], true, "{record}");
+    let worktree = PathBuf::from(record["worktree"].as_str().unwrap());
+    assert_eq!(
+        fs::read_to_string(worktree.join(".env")).unwrap(),
+        "TOKEN=local-only\n"
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("port.txt")).unwrap(),
+        port.to_string()
+    );
+    finished(&f, started["id"].as_str().unwrap()).await;
+    // A second task gets another port.
+    let second = run_in_worktree(&f).await;
+    assert_ne!(second["worktree_task"]["port"].as_u64(), Some(port));
+    finished(&f, second["id"].as_str().unwrap()).await;
+    // Discarding runs the teardown in the worktree first.
+    let id = record["id"].as_str().unwrap();
+    call(
+        &f.service,
+        "POST",
+        &format!("/api/worktree-tasks/{id}/discard"),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert!(marker.exists());
+}
+
+#[tokio::test]
+async fn a_worktree_task_can_start_from_another_branch() {
+    let f = fixture().await;
+    git(&f.project, &["checkout", "-qb", "feature"]);
+    fs::write(f.project.join("feature.txt"), "feature\n").unwrap();
+    git(&f.project, &["add", "."]);
+    git(&f.project, &["commit", "-qm", "Feature"]);
+    git(&f.project, &["checkout", "-q", "-"]);
+    let started = call(
+        &f.service,
+        "POST",
+        "/api/run",
+        json!({"workspace":f.project,"task":"Set the answer","model":"m-alpha","worktree":true,"base_branch":"feature"}),
+    )
+    .await
+    .unwrap();
+    let worktree = PathBuf::from(started["worktree_task"]["worktree"].as_str().unwrap());
+    assert!(worktree.join("feature.txt").exists());
+    assert_eq!(
+        started["worktree_task"]["base"]["included_uncommitted"],
+        false
+    );
+    finished(&f, started["id"].as_str().unwrap()).await;
+    let missing = call(
+        &f.service,
+        "POST",
+        "/api/run",
+        json!({"workspace":f.project,"task":"x","model":"m-alpha","worktree":true,"base_branch":"no-such-branch"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{missing:#}").contains("no-such-branch"));
+}

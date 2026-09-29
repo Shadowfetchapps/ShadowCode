@@ -475,6 +475,10 @@ export function Stage({
           onRun: () => void actions.submit({ worktree: true }),
         }}
         worktreeNote={actions.worktreeBlocked}
+        worktreeBase={{
+          value: extras.worktreeBase,
+          onChange: extras.setWorktreeBase,
+        }}
         roles={
           roles && {
             view: roles.view,

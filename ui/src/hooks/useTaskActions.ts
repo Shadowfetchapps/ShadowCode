@@ -592,7 +592,12 @@ export function useTaskActions(c: TaskActionContext) {
         images,
         web: c.webAllowed && c.webEnabled,
         ...(opts.worktree
-          ? { worktree: true }
+          ? {
+              worktree: true,
+              ...(extras?.worktreeBase
+                ? { base_branch: extras.worktreeBase }
+                : {}),
+            }
           : { session_id: c.sessionId || undefined, queue: c.queueing }),
         ...(extras?.effortShown && extras.effort !== "default"
           ? { effort: extras.effort }

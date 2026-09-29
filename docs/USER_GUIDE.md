@@ -292,7 +292,13 @@ reply.
   passing exit code confirms that check, not every requirement of the task.
 - **Review changes** appears only when files changed. It opens the task's
   review across the whole window: only the files this task changed, each
-  compared with how it was before the task. Switch between a **Unified** and
+  compared with how it was before the task. Files are grouped riskiest
+  first (config and CI, dependencies, source, tests, generated output,
+  docs), deletions and the biggest changes first, each with a short line
+  such as *new file, 12 lines*. **Explain this change** asks the
+  conversation's model (or, for a subscription conversation, the model
+  loaded on this computer) to describe one file's change in plain words;
+  it runs only when you ask and never for secret files. Switch between a **Unified** and
   a **Split** diff (with code colouring). For each change (hunk) choose
   **Keep** or **Undo**; for a file, **Keep file** or **Undo file**; **Undo
   all** puts back every file you haven't kept. Keep only marks what you have
@@ -663,8 +669,9 @@ worktree** instead of queueing.
 
 The new task gets its own conversation and its own copy of the project,
 starting from your latest commit plus any uncommitted work (your files are
-not touched). It is listed under the project with a branch icon, and a bar
-above the composer shows what it changed. When it is done:
+not touched). To start from another branch instead, pick it under **More ›
+New worktree starts from**. It is listed under the project with a branch
+icon, and a bar above the composer shows what it changed. When it is done:
 
 - **Apply to project** checks that its changes still fit your project, then
   writes them to your files (nothing is committed; review them in
@@ -677,6 +684,20 @@ above the composer shows what it changed. When it is done:
 Either way the copy is removed and the conversation continues in the
 project. A conversation with its own copy can't be deleted until you apply,
 keep or discard it.
+
+**Setup for new worktrees** (drawer › Tools › Worktrees) says what each new
+copy gets before the task starts:
+
+- **Files to copy**, such as `.env`, which Git doesn't carry.
+- **Setup commands**, such as `npm ci`, run in the copy as you. If one
+  fails, the task still runs and the bar says which command failed and why.
+- **Teardown commands**, such as `docker compose down`, run before the copy
+  is removed.
+- **Ports**: each task gets its own free port from this range as `PORT`, so
+  two tasks' dev servers don't collide. The bar shows it.
+
+**Use suggestions for this project** fills in what the project's lockfiles
+and `.env` files suggest. Nothing runs until you save it.
 
 ## Conversations in the sidebar
 
@@ -756,6 +777,11 @@ project (**Settings › Code intelligence**):
   recently edited. Choose its size, or turn it off, in Settings.
 - **Code search.** The agent can search code by keywords. Install a small
   embedding model (35 MB or 139 MB) in Settings to also search by meaning.
+- **Large projects.** The index is kept between runs, so reopening a
+  project is quick. It covers up to 250,000 files and fills in over a few
+  moments for a big repository; Settings shows how far it got and its size.
+  To index only part of a monorepo, set a **focus folder**. **Clear index**
+  deletes it; it is rebuilt when needed.
 
 Details: [code intelligence](CODE_INTELLIGENCE.md).
 

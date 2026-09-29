@@ -1137,6 +1137,31 @@ kbd {
   overflow-wrap: anywhere;
   font-size: 12px;
 }
+.worktree-setup {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 18px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.worktree-setup h4,
+.worktree-setup p {
+  margin: 0;
+}
+.worktree-setup label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+.worktree-setup textarea {
+  font-family: var(--mono);
+  font-size: 12px;
+  resize: vertical;
+}
+.worktree-setup > button {
+  justify-self: start;
+}
 .worktree-review {
   margin-top: 18px;
   background: var(--surface-2);

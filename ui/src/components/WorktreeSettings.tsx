@@ -9,6 +9,7 @@ import {
   type WorktreeRepairReview,
 } from "../api";
 import { sentenceCase } from "../lib/statusLabels";
+import { WorktreeSetupForm } from "./WorktreeSetupForm";
 
 export function WorktreeSettings({
   onOpen,
@@ -95,6 +96,7 @@ export function WorktreeSettings({
         worktrees start from a local commit. You can also review and copy your
         current edits into a new worktree while preserving the originals.
       </p>
+      <WorktreeSetupForm onToast={onToast} />
       <p className="hint">Source project</p>
       <code className="worktree-path">
         {workspace || (loading ? "Loading project…" : "Project unavailable")}

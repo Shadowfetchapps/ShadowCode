@@ -72,6 +72,8 @@ export function useComposerExtras({
   const [mentions, setMentions] = useState<Mention[]>([]);
   // "Only change these": edits outside the mentioned files ask first.
   const [onlyChange, setOnlyChange] = useState(false);
+  // The branch a new worktree task starts from ("" = the current files).
+  const [worktreeBase, setWorktreeBase] = useState("");
   const [mode, setMode] = useState<TaskMode>("code");
   const targetId = target?.id || "";
   const [effortState, setEffortState] = useState<{
@@ -90,6 +92,7 @@ export function useComposerExtras({
     setOnlyChange(false);
     pendingAttachments.clear();
   }, [sessionId, workspace]);
+  useEffect(() => setWorktreeBase(""), [workspace]);
   const addMention = useCallback(
     (m: Mention) =>
       setMentions((list) =>
@@ -122,6 +125,8 @@ export function useComposerExtras({
     setMentions,
     onlyChange: onlyChange && mentions.length > 0,
     setOnlyChange,
+    worktreeBase,
+    setWorktreeBase,
     addMention,
     removeMention,
     history,

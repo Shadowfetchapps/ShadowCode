@@ -369,6 +369,17 @@ button.link {
   justify-content: flex-start;
   border-radius: 8px;
 }
+.composer-more-menu > .worktree-base {
+  display: grid;
+  gap: 3px;
+  padding: 2px 8px 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.composer-more-menu > .worktree-base select {
+  width: 100%;
+  min-width: 0;
+}
 .composer-more-menu > .effort-control {
   width: 100%;
   justify-content: space-between;
