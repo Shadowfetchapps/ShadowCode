@@ -237,7 +237,10 @@ Types, grouped, with the payload fields clients rely on:
   - `verification.receipt`, `verification.retry` `{attempt, reason}`,
     `verification.summary` `{status, commands: [{command, exit_code, success, timed_out}], presented_as, note, vendor_agent, verified}`.
 - **Checkpoints and review**: `checkpoint.updated` `{task_id, workspace,
-  changes, paths, restored, source: "shell"|"vendor", changed}`;
+  changes, paths, restored, source: "shell"|"vendor", changed,
+  ignored_saved}` (`ignored_saved`: small Git-ignored files such as `.env` or
+  a local SQLite database that the step deleted or changed, kept from before
+  it so Rewind brings them back);
   `checkpoint.restored` `{task_id, paths, undo_id?}` (the transcript shows
   *Rewound to here · N files restored* above the task's prompt);
   `checkpoint.rewind_undone` `{task_id, paths, undo_id}`;
@@ -340,6 +343,8 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `GET` | `/api/agents` | stable | allowed | [Subagents](#subagents) |
 | `GET` | `/api/allowance` | stable | allowed | [Accounts and models](#accounts-and-models) |
 | `GET` | `/api/approvals` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
+| `DELETE` | `/api/approvals/always` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
+| `GET` | `/api/approvals/always` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
 | `POST` | `/api/approvals/{id}` | stable | allowed | [Jobs and approvals](#jobs-and-approvals) |
 | `GET` | `/api/automations` | stable | allowed | [Automations](#automations) |
 | `POST` | `/api/automations` | stable | allowed | [Automations](#automations) |
@@ -860,7 +865,11 @@ in-band consent refusal ([Errors](#errors)). Body:
 
 ```
 Approval = {id, session_id, task_id, tool, arguments, command, reason, pending,
-            created_at, expires_at, preview: Preview|null, grant: string, note: boolean}
+            created_at, expires_at, preview: Preview|null, grant: string, note: boolean,
+            assessment: Assessment|null, always: string}
+Assessment = {risk: "read_only"|"changes_files"|"network"|"outside"|"destructive"|"remote_code"|"admin",
+              risk_label, explanation, undo: "nothing"|"yes"|"partly"|"no", undo_label,
+              notes: string[], read: boolean, checks: [{title, level?: "info"|"warn"|"danger", items: string[]}]}
 Preview = {kind: "files", files: [{path, status: "added"|"modified"|"deleted", diff, added, removed, truncated, binary}]}
         | {kind: "command", command, cwd} | {kind: "move", from, to} | {kind: "folder", path}
 ```
@@ -875,6 +884,19 @@ Preview = {kind: "files", files: [{path, status: "added"|"modified"|"deleted", d
   allowed once (chained, redirected, privileged, deleting or
   history-rewriting commands; extra sandbox permissions).
 - `note`: a deny note reaches the agent (native tools and Claude Code).
+- `assessment` (since 1.0) says what the action does in one plain sentence,
+  its risk tag and whether Rewind can undo it, for ShadowCode's own tools and
+  for vendor requests alike. Shell commands are parsed with tree-sitter-bash
+  (pipelines, lists, subshells, substitutions, heredocs, redirects, `sudo` /
+  `env` / `timeout` wrappers and `bash -c` / `eval` text); the riskiest step
+  decides the tag. `read: false` means part of the command could not be read
+  ahead (a syntax error, a path or program from a variable, code built while
+  it runs). `checks` is where other reviews of the same action add a section.
+- `always` (since 1.0) says what "Always allow in this project" would cover
+  ("Always allow `cargo test` in this project"); empty unless the command is
+  one exact, fully read test, build, lint or type-check command with no
+  redirects to files, variables, paths outside the project, installs or
+  network use.
 - `reason` in `ask` mode reads `Write <path>`, `Edit <path>`, `Create
   directory <path>`, `Move <a> to <b>`, `Delete <path>`, `Apply a patch to <files>`.
 - Native approvals expire after 10 minutes; vendor approvals after
@@ -886,7 +908,12 @@ Routes:
 - `GET /api/approvals?session_id=` → `{approvals: Approval[]}` (pending; all
   conversations without `session_id`).
 - `POST /api/approvals/{id} {decision: "approve"|"deny", session_id?, scope?:
-  "once"|"task", note?}` → the answered `Approval`. `session_id` defaults to
+  "once"|"task"|"project", note?}` → the answered `Approval`. `scope:
+  "project"` with `approve` (only when `always` is set) stores the command in
+  the project's rules; later requests of exactly that command, from
+  ShadowCode's own agent or a vendor CLI, run without a prompt and are
+  recorded as `approval.granted {…, scope: "project", command}`. Each rule is
+  checked again before use. `session_id` defaults to
   the selected conversation. `scope: "task"` with `approve` keeps a grant
   until the task ends: later requests of the same task with the same scope
   (tool kind, or the same program and subcommand for commands) are allowed
@@ -896,6 +923,11 @@ Routes:
   allows. `note` (with `deny`, at most 2 000 bytes) becomes the tool error
   the model reads ("The user denied this action and said: …") or Claude's
   denial message; `approval.resolved` carries `scope` and `note`.
+- `GET /api/approvals/always?workspace=` → `{workspace, commands: [{command,
+  added_at}]}`: the project's "Always allow" commands (default: the selected
+  project). Stored in ShadowCode's database (`native_meta`
+  `always_allow:<project>`), never in the repository; at most 100.
+- `DELETE /api/approvals/always {workspace?, command}` → the same, without it.
 
 ### Feed
 
@@ -1262,7 +1294,9 @@ history. Vendor CLIs are always started without
   last commit (`git`). `busy`: a task is queued or running in the project.
 - `GET /api/review/tasks/{task_id}/file?path=` → the row plus `hash` and
   `hunks: [{id, header, old_start, old_len, new_start, new_len, lines:
-  [{kind: "add"|"del"|"ctx", text, eol?: false}]}]`.
+  [{kind: "add"|"del"|"ctx", text, eol?: false}]}]`. A secret file (`.env`,
+  keys, credential files) answers `secret: true` and no hunks; it can still
+  be undone as a whole.
 - `POST /api/review/tasks/{task_id}/undo {path, hunk?}` → the file's review
   after putting one hunk (by `id`) or the whole file back as it was before the
   task. Refused while a task runs in the project, outside the open project,

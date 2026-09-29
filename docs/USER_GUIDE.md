@@ -170,12 +170,33 @@ as it is now (the whole content for a new file), the first lines first with
 runs in. Keyboard shortcuts never approve anything. The card appears in the
 conversation as soon as the agent asks.
 
+Every card also says, in one plain sentence, what the action does
+(*Deletes build and everything in it.*, *Downloads a script from
+get.example.com and runs it.*), with a tag for how much it can affect
+(*Read-only*, *Changes files*, *Uses the network*, *Outside the project*,
+*Deletes or rewrites*, *Runs downloaded code*, *Needs admin*) and whether
+**Rewind** can undo it. ShadowCode reads the whole command first: every step
+of a pipeline or `&&` list, `$(…)` substitutions, heredocs, `sudo` and
+`bash -c '…'`. The riskiest step decides the tag. A command it can't read
+completely (a path or program that comes from a variable, for example) says
+so. Subscriptions' requests (Codex, Claude Code, Cursor, Grok, Antigravity)
+are explained the same way.
+
 - **Allow** / **Deny** answer this one request.
 - **Allow for this task** also allows the same kind of action until the task
   ends: every file edit, or commands with the same program and subcommand
   (for example all `cargo test …` commands). The card says what it covers.
   Commands that chain (`;`, `&&`, `|`), redirect, use `sudo`, delete files or
   rewrite Git history are never covered and always ask.
+- **Always allow here** appears for exact test, build, lint and type-check
+  commands, such as `cargo test`, `npm run build` or `pytest -q`. That exact
+  command then runs in this project without asking, for ShadowCode's own
+  agent and for subscriptions that ask ShadowCode; a different command, or
+  the same one with other arguments, asks again. It is never offered for
+  anything that deletes, installs, uses the network, rewrites history, runs
+  outside the project or uses a variable. **Settings › Permissions &
+  network** lists these commands for the open project, each with
+  **Remove**.
 - **Deny with note…** sends your reason back to the agent, for example
   *use the Makefile instead*. Local and OpenRouter models and Claude Code
   read the note; Codex, Cursor, Grok and Antigravity only receive the denial,
@@ -302,9 +323,14 @@ reply.
   (*Rewound to here · 2 files restored*) and the notification offers
   **Undo**, which puts the files back as they were just before the rewind
   (if you haven't changed them since). Rewind puts back file permissions a
-  command changed (`chmod`). It doesn't restore Git-ignored files, files
-  over 4 MB, symlinks, Git history or branches, or anything outside the
-  project; a file that was ignored before a step and not after it (the step
+  command changed (`chmod`). Small Git-ignored files that are costly to
+  lose, such as `.env` files, local SQLite databases, keys and `*.local`
+  settings (up to 10 MB each, 50 MB in all, outside dependency and build
+  folders), are saved before each step; if the step deletes or changes them,
+  the conversation says so and Rewind brings them back. The review shows
+  that a secret file changed, not its contents. Rewind doesn't restore other
+  Git-ignored files, files over 4 MB, symlinks, Git history or branches, or
+  anything outside the project; a file that was ignored before a step and not after it (the step
   changed `.gitignore`) is listed as not covered and never deleted. It refuses, and changes nothing, if a file was edited
   again after the task. After a rewind (or its undo), the next turn is told
   which files changed on disk. A subscription's own conversation isn't told,
