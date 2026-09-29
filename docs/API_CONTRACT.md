@@ -771,6 +771,7 @@ in-band consent refusal ([Errors](#errors)). Body:
 | `context` | `[{kind: "element"\|"console", label, text}]`? | from the Preview tab; at most 12 items of 16 000 characters (strict; other fields ignored) |
 | `permission_limit` | `"read_only"\|"workspace"\|"elevated"`? | narrows the project's permission level for this job (strict) |
 | `worktree` | bool? | start a new conversation in a fresh worktree ([Worktree tasks](#worktree-tasks)); `session_id` and `queue` are ignored |
+| `only_change` | bool? | "Only change these": ShadowCode's own agent asks before any file tool changes a path outside `mentions` (even when edits are allowed; approval `reason` "Outside the files you chose for this task: …"); after a subscription turn, changed paths outside them are reported as `scope.outside {job_id, paths}` |
 | `roles` | bool? | run a Code task as Plan → Implement → Review, a Plan task as its plan role ([Roles](#roles)); other modes are refused |
 
 - Job records keep the exact picker id in `routing.model_id`. A `local:gguf:`
@@ -1056,7 +1057,14 @@ Usage = {prompt_tokens, completion_tokens, total_tokens,
   usage unless the provider reported tokens.
 - `context.compacted {before_estimated_tokens, after_estimated_tokens,
   omitted_messages, response_token_limit, method, preserved, summary?,
-  summary_model?, summary_ms?, fallback_reason?}`: `method` is
+  summary_model?, summary_ms?, fallback_reason?, pinned, rules_reapplied,
+  requested?, focus?}`: after any compaction, the conversation's pinned
+  answers (`/pin`, word for word, at most 8) and the folder guidance already
+  delivered in the task are sent again in one system note (`pinned`,
+  `rules_reapplied` count them). `/compact [what to keep]` (session meta
+  `compact_request`) shortens the conversation at the start of the next
+  turn whatever its size (`requested: true`, the focus goes to the summary).
+  `method`, `fallback_reason`: `method` is
   `model_summary` (`summary` at most 6 000 bytes) or `bounded_history`.
   `fallback_reason`: `disabled`, `context_too_small` (under 8 192 tokens),
   `offline_demo`, `timeout`, `empty_summary`, `summary_too_large`, or the
@@ -1174,6 +1182,34 @@ arguments or output, or file contents. `logging.level` (`error`, `warn`,
   `open_logs_folder` command calls it and opens that path; the window never
   supplies a path.
 - Remote access refuses `/api/logs…`.
+
+### Agent quality
+
+- **Stuck.** When ShadowCode's own agent runs the same command and it fails
+  the same way three times (same exit code and the same end of its output,
+  numbers ignored), or changes a file back to an earlier version twice, the
+  task records `agent.stuck {job_id, kind: "same_failure"|"edit_loop", text,
+  detail}` and pauses (`agent.stuck_check`, default on). The window offers
+  Keep going (`resume`), Give a hint (`steer` then `resume`), Try another
+  model (`cancel`, then the picker) and Stop. It fires once per loop.
+- **Heads-ups.** A finished Code task (not a subagent) compares each file it
+  changed with the file before the task: skip or focus markers added to
+  tests, deleted test files, fewer tests or assertions, CI and hook files
+  changed, lint and type checks switched off (`eslint-disable`,
+  `@ts-ignore`, `# type: ignore`, `#[allow(…)]` …), loosened strictness and
+  rewritten snapshots. Findings are `result.honesty = {count, text, flags:
+  [{kind, path, line, text}]}` and the event `task.flags` (same payload).
+- **Repaired tool calls.** Arguments that are almost JSON (a code fence,
+  trailing commas, single quotes, raw newlines, JSON encoded twice) are
+  repaired; a model on this computer that writes a call as text
+  (`<tool_call>…</tool_call>`, `<|python_tag|>`, `<function=name>`, or an
+  answer that is one JSON call) has it read as that call when the name is an
+  offered tool. Each records `tool_call.repaired {from: "arguments"|"text",
+  count}`.
+- **Close edits.** `edit_file` with an `old_string` that matches nowhere is
+  applied when it matches exactly one place ignoring line endings, spaces at
+  line ends or indentation (re-indented to the file's); the result carries
+  `note`. Two possible places refuse, as before.
 
 ### Task timings
 
@@ -1780,7 +1816,8 @@ Settings with API-visible meaning:
   `allow_root`; destructive Git commands always ask; network commands are
   denied offline.
 - `agent.model_retries` (0–10, 3), `agent.retry_backoff_sec` (0–30, 1.0),
-  `agent.summary_compaction` (true), `agent.summary_timeout_sec` (5–600, 60).
+  `agent.summary_compaction` (true), `agent.summary_timeout_sec` (5–600, 60),
+  `agent.stuck_check` (true).
 - `network.mode: "online"|"web_off"|"offline"`: `web_off` disables web tools;
   `offline` also suppresses account/usage refresh and helper network use, and
   marks cloud rows unavailable. `network.allow_local_dev: string[]`: exact

@@ -197,6 +197,23 @@ sliding-window layers.
 - **Fit.** The row reports whether the model fits the GPU, fits only in RAM
   (CPU), or doesn't fit at all (*Not enough memory on this computer*).
 
+## Tool calls from smaller models
+
+Smaller models sometimes get a tool call slightly wrong. ShadowCode repairs
+the common slips instead of failing the turn, and notes each repair in the
+conversation:
+
+- arguments wrapped in a code fence, with trailing commas, single quotes,
+  raw line breaks inside strings, or encoded twice;
+- a call written as text instead of a real tool call: Qwen and Hermes
+  `<tool_call>{…}</tool_call>`, Llama `<|python_tag|>{…}` and
+  `<function=name>{…}</function>`, or an answer that is only one JSON call.
+  Only tools offered in that request count, and only for models on this
+  computer;
+- an edit whose "old text" differs from the file only in line endings,
+  spaces at line ends or indentation is applied when it matches exactly one
+  place, re-indented to fit, and the agent is told to check the result.
+
 ## Loading
 
 Choose **Load**, or just start a task on the row. ShadowCode starts one server:
