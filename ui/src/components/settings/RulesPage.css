@@ -1,0 +1,108 @@
+/* Settings › Rules & skills and the Health page's skill checker. */
+.rules-page textarea {
+  width: 100%;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  min-height: 140px;
+}
+.rules-items,
+.rules-starters,
+.rules-imports,
+.rules-issues,
+.skill-findings {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.rules-items > li,
+.rules-imports > li,
+.skill-findings > li {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  min-width: 0;
+}
+.rules-items > li.off {
+  opacity: 0.7;
+}
+.rules-items .check,
+.rules-starters .check {
+  margin: 0;
+  flex-wrap: wrap;
+}
+.rules-items .hint,
+.rules-starters .hint,
+.skill-findings .hint {
+  margin: 4px 0 0;
+}
+.rules-path {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.rules-issues > li {
+  color: var(--text-2);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.rules-imports > li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+.rules-imports > li > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 240px;
+}
+.rules-imports span {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.rules-import input {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.rules-preview .context-inventory.rules-inventory {
+  position: static;
+  width: auto;
+  max-height: none;
+  box-shadow: none;
+  margin-bottom: 12px;
+}
+.rules-inventory > .context-inventory-note:first-child {
+  margin-top: 0;
+}
+.rules-export {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.rules-export ul {
+  margin: 0;
+  padding-inline-start: 18px;
+  font-size: 12px;
+}
+.rules-export code {
+  overflow-wrap: anywhere;
+}
+.rules-export button {
+  justify-self: start;
+}
+.skill-findings strong {
+  overflow-wrap: anywhere;
+}
+.skill-findings .severity-error {
+  color: var(--danger, var(--text));
+}

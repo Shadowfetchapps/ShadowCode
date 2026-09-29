@@ -307,7 +307,7 @@ impl Service {
             }
             ("GET", "/api/workspace/skills") => {
                 let ws = Workspace::open(&self.workspace()?)?;
-                let catalog = crate::workflows::discover(&ws);
+                let catalog = self.workflow_catalog(&ws);
                 let skills: Vec<_> = catalog
                     .definitions
                     .into_iter()

@@ -70,6 +70,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const WIDE = { width: 1360, height: 860 };
 const checks = [];
 const note = (text) => { checks.push(text); console.log(`  ok  ${text}`); };
+const WINDOW_RULE = "Window test profile rule: WINDOW-RULE-7.";
 
 // ---------------------------------------------------------------- fixtures
 const scratch = await mkdtemp(path.join(tmpdir(), "shadowcode-window-"));
@@ -702,6 +703,20 @@ try {
     assert.doesNotMatch(await settingsText(), /ApiError/, `${section} shows no raw error`);
     await accessibility(`settings-${section.toLowerCase().replace(/\W+/g, "-")}`);
   }
+  // Rules & skills: a profile rule written in the window is saved in the
+  // isolated profile folder (nothing outside it) and reaches the next local
+  // task's system prompt (checked in the Stop step below).
+  await clickButton("Rules & skills", "//nav[@aria-label='Settings sections']");
+  await until("Rules & skills page", async () => (await pageSettled()) && /Your rules/i.test(await settingsText()), 20000);
+  await fill("#profile-agents-md", WINDOW_RULE);
+  await clickButton("Save rules");
+  const profileRules = path.join(profile, "config/shadowcode/profile/AGENTS.md");
+  await until("Profile rules saved", () => readFile(profileRules, "utf8").then((text) => text === WINDOW_RULE, () => false));
+  assert.equal((await stat(path.dirname(profileRules))).mode & 0o777, 0o700, "The profile folder is private");
+  await until("What each agent reads", () => execute("return !!document.querySelector('ul[aria-label^=\"What ShadowCode\"]')"), 20000);
+  assert.doesNotMatch(await settingsText(), /ApiError/, "Rules & skills shows no raw error");
+  await screenshot("settings-rules");
+  await accessibility("settings-rules-and-skills");
   await clickButton("Advanced", "//nav[@aria-label='Settings sections']");
   for (const tab of ["Skills", "Health", "MCP", "Plugins", "Hooks", "Guardian", "Vendor tools"]) {
     await clickButton(tab, "//div[@role='tablist']");
@@ -716,6 +731,7 @@ try {
   }
   await closeSettings();
   note("Settings › Accounts, Local models, Permissions & network, Code intelligence, Voice, Appearance, Remote access, About and every Advanced tab render and pass axe (read-only)");
+  note("Settings › Rules & skills saves a profile rule in the isolated profile folder (mode 700) and shows what each agent reads");
 
   // ------------------------------------------------------------ drawer panels
   await clickButton("Review changes");
@@ -792,6 +808,10 @@ try {
   // ------------------------------------------------------------ pause/resume/stop
   await send("stop-probe: look around the project.");
   await until("Local task streaming", async () => (await modelRequests()).some((r) => r.request.includes("stop-probe")), 20000);
+  const probeRequest = (await modelRequests()).find((r) => r.request.includes("stop-probe"));
+  assert.ok(probeRequest.system.includes(WINDOW_RULE), "The profile rule saved in Settings reaches the local model's system prompt");
+  assert.ok(probeRequest.system.includes("User instructions from the user's ShadowCode profile"), "Profile rules are labelled as the user's instructions");
+  note("a profile rule saved in Rules & skills reaches the next local task's system prompt, labelled as the user's");
   await until("Stop button", () => visible('button[aria-label="Stop task"]'));
   await composerControlsFit("Desktop Stop and follow-up controls fit while running");
   await screenshot("running");

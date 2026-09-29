@@ -164,7 +164,11 @@ class Handler(BaseHTTPRequestHandler):
         last_user = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=-1)
         request = text_of(messages[last_user]) if last_user >= 0 else ""
         results = [m for m in messages[last_user + 1:] if m.get("role") == "tool"]
+        system = text_of(messages[0]) if messages and messages[0].get("role") == "system" else ""
         log("requests.jsonl", {"auth": self.authorized(), "request": request[:200],
+                               # The start of the system prompt: identity and
+                               # the user's profile rules come first.
+                               "system": system[:4000],
                                "tool_results": len(results),
                                "tools": [t["function"]["name"] for t in body.get("tools", [])]})
         if not self.authorized():

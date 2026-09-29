@@ -103,8 +103,13 @@ The first definition of a name wins; later ones are listed as shadowed:
 2. `.shadowcode/agents/`
 3. `.claude/agents/`
 4. `.opencode/agent/` and `.opencode/agents/`
-5. `~/.config/shadowcode/agents/` (your own, for every project)
-6. Built-ins: `explore`, `plan`, `review` (read-only) and `general` (write)
+5. `~/.config/shadowcode/profile/agents/` (your profile, for every project;
+   see [rules and skills](RULES_AND_SKILLS.md))
+6. `~/.config/shadowcode/agents/` (the older per-user folder)
+7. `agents/` of profiles imported from Git
+8. Built-ins: `explore`, `plan`, `review` (read-only) and `general` (write)
+
+Profile definitions can be switched off in **Settings › Rules & skills**.
 
 A project file named like a built-in replaces it. Files are limited to 64 KB,
 and at most 128 are read.
@@ -112,7 +117,8 @@ and at most 128 are read.
 ## Project instructions from other tools
 
 These files go into the system prompt, each labelled as project guidance that
-grants no permissions:
+grants no permissions. Your profile's `AGENTS.md` comes before them, labelled
+as your instructions ([rules and skills](RULES_AND_SKILLS.md)):
 
 - `AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`
 - `.cursorrules`, and `.cursor/rules/*.mdc` rules with `alwaysApply: true`

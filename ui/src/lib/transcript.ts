@@ -99,6 +99,25 @@ export function providerLabel(value: unknown): string {
   return VENDOR_LABELS[vendor] || text;
 }
 
+/** One line for `rules.delivered`: what of the user's rulebook reached a
+ * vendor CLI for this run (counts only; the text is never in the event). */
+export function rulesDeliveredNote(p: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const count = (n: unknown, one: string, many: string) => {
+    const value = Number(n) || 0;
+    if (value > 0) parts.push(`${value} ${value === 1 ? one : many}`);
+  };
+  count(p.profile_files, "profile rules file", "profile rules files");
+  count(p.project_files, "project file", "project files");
+  count(p.skills, "skill", "skills");
+  const tokens = Number(p.estimated_tokens) || 0;
+  return `Rules sent to ${providerLabel(p.vendor)}${
+    parts.length ? ` · ${parts.join(" · ")}` : ""
+  }${tokens > 0 ? ` · about ${tokens.toLocaleString()} tokens` : ""}${
+    p.truncated ? " · some left out to stay within limits" : ""
+  }`;
+}
+
 function lastIndex(items: ChatItem[], test: (item: ChatItem) => boolean) {
   for (let index = items.length - 1; index >= 0; index--)
     if (test(items[index])) return index;
@@ -424,6 +443,9 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
         }`,
       },
     ];
+  }
+  if (event.type === "rules.delivered") {
+    items = [...items, { kind: "note", taskId, text: rulesDeliveredNote(p) }];
   }
   if (event.type === "model.switched") {
     items = [

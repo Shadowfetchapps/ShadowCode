@@ -1849,11 +1849,39 @@ impl Engine {
             image_refs.len(),
         )?;
         let images = crate::vision::cli_images(&running.workspace, &image_refs)?;
+        // A skill or command the user picked reaches the vendor as its
+        // expanded instructions (the vendor does not know ShadowCode's
+        // `/name`); anything else is the task as typed.
+        let task = match (&job.workflow, &running.system_context) {
+            (Some(_), Some(guidance)) => guidance.clone(),
+            _ => job.task.clone(),
+        };
         // A provider change hands over the unseen turns explicitly, labelled
         // as prior conversation; same-provider turns resume the native session.
         let prompt = match &running.turn_plan.handoff {
-            Some(handoff) => handoff.prefix(&job.task),
-            None => job.task.clone(),
+            Some(handoff) => handoff.prefix(&task),
+            None => task,
+        };
+        // The rulebook (profile rules, project guidance the vendor does not
+        // read itself, the skill list), through the vendor's own per-run
+        // mechanism. Staged files live until this run ends.
+        let (_rules_staging, rulebook) = match crate::rulebook::delivery::for_vendor(
+            &self.0.paths,
+            &running.workspace,
+            vendor,
+        ) {
+            Ok(Some((staged, rules, summary))) => {
+                events.emit("rules.delivered", summary)?;
+                (staged, Some(rules))
+            }
+            Ok(None) => (None, None),
+            Err(error) => {
+                events.emit(
+                        "agent.warning",
+                        json!({"text":format!("Your rules and skills were not sent to {}: {error:#}", vendor.product_label()),"kind":"rules"}),
+                    )?;
+                (None, None)
+            }
         };
         let binary = if vendor == crate::cli_agent::Vendor::Antigravity {
             crate::cli_agent::antigravity_server::installation(cli.binary(vendor))
@@ -1896,6 +1924,7 @@ impl Engine {
             mcp_servers: crate::mcp::vendor::servers(&running.workspace, &running.config),
             #[cfg(not(unix))]
             mcp_servers: Vec::new(),
+            rulebook,
         };
         // A project checkpoint around the turn: the CLI writes with its own
         // tools, so the changes are recorded afterwards for rewind.
@@ -2291,7 +2320,8 @@ impl Engine {
                 messages.push(json!({"role":"user","content":format!("Earlier session transcript excerpts (historical data):\n{}",text.join("\n"))}));
             }
         }
-        let mut system = context::system(&running.workspace, &job.mode);
+        let book = crate::rulebook::Book::load(&self.0.paths, Some(&running.workspace.path));
+        let mut system = context::system_with_rules(&running.workspace, &job.mode, &book);
         let notes = crate::memory::context(
             &self.0.paths,
             &self.0.store,

@@ -114,6 +114,7 @@ for raw in sys.stdin:
     elif method in ("thread/start", "thread/resume"):
         active_thread = params.get("threadId") or "thr-1"
         mark("threads.log", method + " " + json.dumps(params.get("model")) + " " + json.dumps(params.get("threadId")))
+        mark("developer.log", json.dumps(params.get("developerInstructions")))
         if C.get("block_stdin"):
             import fcntl
             fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETPIPE_SZ, 4096)
