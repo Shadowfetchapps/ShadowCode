@@ -27,6 +27,9 @@ export function ConsentDialog({
   const from = handoff.from ? providerLabel(handoff.from) : null;
   const chars = Number(handoff.excerpt_chars || 0);
   const images = Number(handoff.images || 0);
+  // A second opinion or review sends material, not a new message.
+  const opinion = handoff.purpose === "second_opinion";
+  const files = Number(handoff.files || 0);
   return (
     <Dialog
       label="Send to a cloud provider?"
@@ -35,15 +38,30 @@ export function ConsentDialog({
     >
       <h2>Send to {to}?</h2>
       <p>
-        This message goes to a cloud provider.{" "}
+        {opinion
+          ? "This second opinion goes to a cloud provider."
+          : "This message goes to a cloud provider."}{" "}
         {from
-          ? `The conversation so far ran on ${from}.`
+          ? opinion
+            ? `The work ran on ${from}, on this computer.`
+            : `The conversation so far ran on ${from}.`
           : "It includes content that is only on this computer."}
       </p>
       {billingWarning && <p className="warn-text">{billingWarning}</p>}
       <ul className="consent-list">
-        <li>Your new message</li>
-        {chars > 0 && (
+        {opinion ? (
+          <li>
+            The request for the review
+            {files > 0
+              ? ` with the changes to ${files} file${files === 1 ? "" : "s"}`
+              : ""}{" "}
+            ({chars.toLocaleString()} characters). The reviewer can also read
+            files in the project.
+          </li>
+        ) : (
+          <li>Your new message</li>
+        )}
+        {!opinion && chars > 0 && (
           <li>
             A summary of this conversation ({chars.toLocaleString()} characters)
           </li>

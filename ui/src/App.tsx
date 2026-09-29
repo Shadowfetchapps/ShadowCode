@@ -42,6 +42,9 @@ import { useConversationMenu } from "./hooks/useConversationMenu";
 import { useNotificationLinks } from "./hooks/useNotificationLinks";
 import { useWorktreeTask } from "./hooks/useWorktreeTask";
 import { WorktreeBar } from "./components/WorktreeBar";
+import { OpinionContext } from "./components/TranscriptOpinions";
+import { ConsentDialog } from "./components/ConsentDialog";
+import { useConversationOpinions } from "./hooks/useConversationOpinions";
 import { isLocal, vendorKey, type PickerTarget } from "./lib/picker";
 import { limitsFrom, resolveFallback } from "./lib/allowance";
 import {
@@ -190,7 +193,9 @@ export default function App() {
           (item) =>
             item.workspace === workspace &&
             item.status === "queued" &&
-            item.task_id !== liveTaskId,
+            item.task_id !== liveTaskId &&
+            // A second opinion waiting its turn shows on its own card.
+            !item.second_opinion,
         )
         .slice()
         .reverse(),
@@ -517,6 +522,19 @@ export default function App() {
         }
       : undefined,
   });
+  const secondOpinions = useConversationOpinions({
+    workspace,
+    sessionId,
+    targets: pickerTargets,
+    toast,
+    selectTarget: nav.selectTarget,
+    draft: (text) => {
+      setTask((current) => (current.trim() ? `${current}\n\n${text}` : text));
+      promptRef.current?.focus();
+    },
+    reviewTask: (taskId) => reviewChanges(undefined, taskId),
+    openSession: nav.openSession,
+  });
   const onDecide = useStableCallback(
     (id: string, answer: ApprovalDecision) => void controls.decide(id, answer),
   );
@@ -633,92 +651,103 @@ export default function App() {
         changeCount={git.count}
         onPalette={() => setOverlay("palette")}
       />
-      <Stage
-        conversation={conversation}
-        compare={compare}
-        scroll={scroll}
-        controls={controls}
-        nav={nav}
-        files={files}
-        actions={actions}
-        allowance={allowance}
-        allowanceOpen={overlay === "allowance"}
-        onAllowance={() => {
-          allowanceReturn.current = false;
-          setOverlay("allowance");
-          void allowance.reload();
-        }}
-        health={health}
-        status={status}
-        cfg={cfg}
-        workspace={workspace}
-        gitBranch={git.branch}
-        shutdown={shutdown}
-        sessions={sessions}
-        targets={pickerTargets}
-        pickerLoaded={picker.loaded}
-        onRefreshModels={() => picker.reload(true)}
-        onModelDownloaded={adoptDownload}
-        pickerOpen={pickerOpen}
-        setPickerOpen={setPickerOpen}
-        selectedTarget={selectedTarget}
-        queuedJobs={queuedJobs}
-        queuedTaskIds={queuedTaskIds}
-        fallback={fallback}
-        rowActions={rowActions}
-        onDecide={onDecide}
-        commandCards={commandCards}
-        approvals={approvals}
-        task={task}
-        setTask={setTask}
-        promptRef={promptRef}
-        commands={commands}
-        submitting={submitting}
-        queueing={queueing}
-        commandWaiting={commandWaiting}
-        webEnabled={webEnabled}
-        setWebEnabled={setWebEnabled}
-        openSettings={openSettings}
-        openSetup={openSetup}
-        setPanel={setPanel}
-        reviewChanges={reviewChanges}
-        refresh={refresh}
-        setPermissionMode={(mode) => void setPermissionMode(mode)}
-        toast={toast}
-        issueOffer={issueOffer}
-        extras={extras}
-        reviewPanel={
-          review.target ? (
-            <Suspense fallback={<p role="status">Opening review…</p>}>
-              <ReviewView
-                key={review.target.taskId}
-                taskId={review.target.taskId}
-                initialPath={review.target.path}
-                busy={busy}
-                onClose={review.close}
-                toast={toast}
-                refresh={refreshAfterFiles}
-                onAskAgent={(prompt) => {
-                  setTask(prompt);
-                  review.close();
-                  promptRef.current?.focus();
-                }}
-                memory={memory.memory}
-                onMemory={memory.update}
+      <OpinionContext.Provider value={secondOpinions.context}>
+        <Stage
+          conversation={conversation}
+          compare={compare}
+          scroll={scroll}
+          controls={controls}
+          nav={nav}
+          files={files}
+          actions={actions}
+          allowance={allowance}
+          allowanceOpen={overlay === "allowance"}
+          onAllowance={() => {
+            allowanceReturn.current = false;
+            setOverlay("allowance");
+            void allowance.reload();
+          }}
+          health={health}
+          status={status}
+          cfg={cfg}
+          workspace={workspace}
+          gitBranch={git.branch}
+          shutdown={shutdown}
+          sessions={sessions}
+          targets={pickerTargets}
+          pickerLoaded={picker.loaded}
+          onRefreshModels={() => picker.reload(true)}
+          onModelDownloaded={adoptDownload}
+          pickerOpen={pickerOpen}
+          setPickerOpen={setPickerOpen}
+          selectedTarget={selectedTarget}
+          queuedJobs={queuedJobs}
+          queuedTaskIds={queuedTaskIds}
+          fallback={fallback}
+          rowActions={rowActions}
+          onDecide={onDecide}
+          commandCards={commandCards}
+          approvals={approvals}
+          task={task}
+          setTask={setTask}
+          promptRef={promptRef}
+          commands={commands}
+          submitting={submitting}
+          queueing={queueing}
+          commandWaiting={commandWaiting}
+          webEnabled={webEnabled}
+          setWebEnabled={setWebEnabled}
+          openSettings={openSettings}
+          openSetup={openSetup}
+          setPanel={setPanel}
+          reviewChanges={reviewChanges}
+          refresh={refresh}
+          setPermissionMode={(mode) => void setPermissionMode(mode)}
+          toast={toast}
+          issueOffer={issueOffer}
+          extras={extras}
+          reviewPanel={
+            review.target ? (
+              <Suspense fallback={<p role="status">Opening review…</p>}>
+                <ReviewView
+                  key={review.target.taskId}
+                  taskId={review.target.taskId}
+                  initialPath={review.target.path}
+                  busy={busy}
+                  onClose={review.close}
+                  toast={toast}
+                  refresh={refreshAfterFiles}
+                  onAskAgent={(prompt) => {
+                    setTask(prompt);
+                    review.close();
+                    promptRef.current?.focus();
+                  }}
+                  memory={memory.memory}
+                  onMemory={memory.update}
+                  targets={pickerTargets}
+                />
+              </Suspense>
+            ) : undefined
+          }
+          worktreeBar={
+            worktree.task && (
+              <WorktreeBar
+                task={worktree.task}
+                acting={worktree.acting}
+                onAct={(action) => void worktree.act(action)}
               />
-            </Suspense>
-          ) : undefined
-        }
-        worktreeBar={
-          worktree.task && (
-            <WorktreeBar
-              task={worktree.task}
-              acting={worktree.acting}
-              onAct={(action) => void worktree.act(action)}
-            />
-          )
-        }
-      />
+            )
+          }
+        />
+      </OpinionContext.Provider>
+      {secondOpinions.consent && (
+        <ConsentDialog
+          request={secondOpinions.consent.request}
+          attachments={[]}
+          onSend={secondOpinions.consent.send}
+          onCancel={secondOpinions.consent.cancel}
+        />
+      )}
       {panel && (
         <Drawer
           key={workspace}
@@ -754,6 +783,7 @@ export default function App() {
           onMemory={memory.update}
           onDiscardFileDraft={memory.discardFileDraft}
           onResolveFileDraftConflict={memory.resolveFileDraftConflict}
+          targets={pickerTargets}
         />
       )}
       <Toasts toasts={toasts} onDismiss={dismiss} />
