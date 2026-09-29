@@ -279,6 +279,12 @@ reply.
   again after the task. After a rewind (or its undo), the next turn is told
   which files changed on disk. A subscription's own conversation isn't told,
   so mention it in your next message.
+- **Your edits during a subscription turn.** While Codex, Claude Code and the
+  other subscription CLIs work, you can keep saving files in the Files tab.
+  Rewinding that turn keeps a file you saved as you saved it. A file you and
+  the agent both edited is listed as kept; tick **Also rewind** to undo it
+  too. Files that changed although the agent didn't say it edited them (a
+  command it ran, or another program) are marked in the confirmation.
 
 ## Commit, push and open a pull request
 

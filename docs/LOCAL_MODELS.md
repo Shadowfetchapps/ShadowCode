@@ -218,6 +218,19 @@ llama-server -m <gguf> --host 127.0.0.1 --port <free> --no-webui --jinja \
   row. A server that could not listen because another program took its port
   is not a GPU failure: it is started again on another free port (three tries
   in all) on the same device.
+- **Out of memory.** The estimate uses the whole GPU, so another program that
+  holds graphics memory can still make a load fail. ShadowCode recognises
+  llama.cpp's allocation errors (CUDA, ROCm, Vulkan, Metal, SYCL and system
+  memory, for the weights, the KV cache or the compute buffers) anywhere in
+  the load log. When the GPU runs out on an ordinary task, the model runs on
+  the CPU instead and the conversation says so (*Loaded · CPU fallback (not
+  enough free GPU memory)*). When nothing fits (or in a Compare lane, which
+  never falls back), the task stops before the model sees it, nothing in the
+  project changes, and the conversation says what ran out and what to do:
+  **Use a … -token context and retry** saves half the context as
+  `local_engine.context_size` and sends the message again; **Choose another
+  model** and **Open Local models** are next to it. The server's own output is
+  kept in the task's result.
 - **Cancel.** Loading waits up to 90 seconds for `/health` and can be
   cancelled with **Unload**.
 - **One at a time.** Only one model is loaded. A task holds the loaded model
@@ -274,8 +287,9 @@ See [voice input](VOICE.md).
 These settings are the `local_engine` section of `config.yaml`. **Settings ›
 Local models** writes the lists for you when you add, remove or import models.
 Downloaded models are not listed here; they are found in the downloads folder.
-`llama_binary` and `context_size` can only be set in the file or with
-`shadowcode config`.
+`llama_binary` can only be set in the file or with `shadowcode config`;
+`context_size` also changes when you choose **Use a … -token context and
+retry** after a model ran out of memory.
 
 ```yaml
 local_engine:

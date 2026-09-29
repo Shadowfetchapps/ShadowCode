@@ -444,6 +444,7 @@ VoiceSettings = { engine: "local"|"openrouter", model, language: "auto"|<code>,
   models: GgufEntry[],
   loaded:  { id, name, port, since, context_tokens, backend,
              cpu_fallback: boolean, fallback_reason: string|null,
+             fallback_out_of_memory: boolean,
              vision: boolean, in_use: number }|null,
   ollama_store: { path, available: boolean, models: [{ tag, path, projector, bytes, compatible, reason, already_added }] }
 }
@@ -622,6 +623,16 @@ imports: [{path, mmproj, name, source}], excluded, llama_binary, context_size }`
 - Job status `limit_reached` (terminal): the vendor reported its plan limit;
   the job stopped without retry, `result.limit_reached = {vendor, detail, usage}`.
   ShadowCode never buys credits, redeems resets or enables overages.
+- A vendor turn that fails, reaches the plan limit or is cancelled keeps the
+  tokens and cost the vendor had already reported: they are in `job.usage`,
+  `result.usage` and the session total, with a `usage.updated` event.
+- A managed local model that could not allocate memory while loading ends
+  the job `failed` with a plain summary and
+  `result.local_out_of_memory = {model_id, model, context_tokens,
+  memory: "gpu"|"system", cpu_tried, smaller_context: number|null, detail}`.
+  On an ordinary task a GPU shortage is retried once on the CPU instead
+  (`loaded.fallback_out_of_memory`, plus `agent.warning {kind: "local_memory"}`);
+  Compare lanes never fall back.
 - Events added: `vendor.session {vendor, session_id}`,
   `agent.handoff {from, to, excerpt_chars, turns, files, delivery: "prompt_prefix"|"message_tape", job_id}`,
   `model.switched {provider, from, to, resumed}`,
@@ -873,7 +884,18 @@ engine says something changed, plus a 15 s backstop read.
   computed. The conversation's message tape gets a process note.
 - `POST /api/checkpoints/tasks/{task_id}/restore` → `{ok, restored, undo_id}`:
   before writing, the files are recorded as they are (checkpoint rows of
-  task `rewind:<undo_id>`, `native_meta` `rewind_undo:<undo_id>`).
+  task `rewind:<undo_id>`, `native_meta` `rewind_undo:<undo_id>`). Files you
+  saved in the editor during a subscription turn are kept; body
+  `{include_user_edits: true}` also rewinds the ones the agent edited too.
+- `GET /api/checkpoints/tasks/{task_id}` → `{rewindable, checkpoint}`;
+  `checkpoint` adds `rewind_paths` (what a rewind restores now), `kept:
+  [{path, reason: "saved_by_you"|"edited_by_you_and_agent"}]` and
+  `unreported` (changed during a subscription turn although the agent did
+  not report editing them).
+- `PUT /api/workspace/file` is also accepted while a subscription turn is the
+  project's only unfinished task and runs between its checkpoints; the
+  answer then has `during_turn: true` and the save is noted for that turn
+  (`native_meta` `turn_edits:<task_id>`).
   `POST /api/checkpoints/rewinds/{undo_id}/undo` → `{ok, restored, task_id}`
   puts them back once (refused if they changed since the rewind); the task
   can then be rewound again.
