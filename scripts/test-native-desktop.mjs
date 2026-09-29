@@ -5,7 +5,10 @@
 // they are installed, read-only probes done by the app itself), a local GGUF
 // row served by a test-double llama-server (scripts/fake-llama-server.py, no
 // GPU, no weights), approvals, the activity timeline, the summary card, the
-// Changes drawer and its Tasks/Tools panels, native file editing, reload persistence, every Settings page, the cloud consent dialog
+// Changes drawer and its Tasks/Tools panels, native file editing, reload persistence,
+// a local model that runs out of memory (plain failure, smaller-context retry),
+// reconnecting through dropped/duplicated/stale events and a mid-stream reload
+// with a second conversation queued, every Settings page, the cloud consent dialog
 // (always cancelled: no vendor turn ever runs), Stop, light/dark/compact
 // layouts with axe checks, and process cleanup after quit.
 //
@@ -28,6 +31,7 @@ import { capturePrivateSession, writePrivateSessionReport } from "./native-test-
 import { EDITOR_FILE, OTHER_FILE, seedNativeEditorFixtures, nativeEditorBeforeReload, nativeEditorAfterReload } from "./fixtures/native-editor-smoke.mjs";
 import { nativeRunCheck } from "./fixtures/native-run-check-smoke.mjs";
 import { nativeEndurance } from "./fixtures/native-endurance-smoke.mjs";
+import { nativeLocalMemory, nativeReconnect } from "./fixtures/native-recovery-smoke.mjs";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
@@ -664,6 +668,9 @@ try {
   await nativeRunCheck({ wd, session, execute, until, visible, clickButton, fill, approve, screenshot, note, jobsFor, modelRequests, sessionId, project, artifacts });
   if (process.env.SHADOW_NATIVE_ENDURANCE === "1")
     await nativeEndurance({ wd, session, execute, until, visible, clickButton, fill, screenshot, note, api, jobsFor, modelRequests, sessionId, project, profile, artifacts, appPid, descendants });
+  const recoveryContext = { wd, session, execute, until, visible, click, clickButton, fill, send, approve, screenshot, accessibility, note, api, jobsFor, modelRequests, launches, sessionId, project, runtimeDir };
+  await nativeLocalMemory(recoveryContext);
+  await nativeReconnect(recoveryContext);
 
   // ------------------------------------------------------------ settings
   await openSettings("Accounts");
