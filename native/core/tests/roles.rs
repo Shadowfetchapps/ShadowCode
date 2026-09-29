@@ -950,3 +950,44 @@ async fn declining_the_apply_approval_leaves_the_project_unchanged() {
     assert_eq!(events(service, &sid, "subagent.finished").len(), 1);
     service.engine.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_start_that_cannot_ask_runs_and_the_cloud_role_is_refused() {
+    // Compare lanes, automations and the CLI start without a consent
+    // dialog: an @plan on a cloud role does not stop the start; the
+    // subagent is refused when it runs, and nothing reaches Codex.
+    let setup = setup(json!({"auth":"chatgpt","turn":"ok"}), json!({}), |body| {
+        let message = last(body);
+        if message["role"] == "tool" {
+            let output = tool_output(&message).to_string();
+            assert!(output.contains("without your consent"), "{output}");
+            return answer("Refused as expected.", json!([]));
+        }
+        answer("Done.", json!([]))
+    })
+    .await;
+    let service = &setup.service;
+    call(service, "POST", "/api/roles", json!({"plan":"cli:codex"})).await;
+    let job = service
+        .engine
+        .start(shadowcode_core::engine::StartRequest {
+            workspace: setup.project.clone(),
+            task: "@plan the edit".into(),
+            session_id: None,
+            model: None,
+            mode: "code".into(),
+            queue: false,
+            images: Vec::new(),
+            web: false,
+        })
+        .await
+        .unwrap();
+    let done = finished(service, &job.id).await;
+    assert_eq!(done["status"], "completed", "{}", done["summary"]);
+    assert!(
+        setup.fake.marker("prompts.log").is_none(),
+        "Codex never ran"
+    );
+    assert!(roles::consented(&service.engine.store(), &job.session_id).is_empty());
+    service.engine.shutdown().await.unwrap();
+}
