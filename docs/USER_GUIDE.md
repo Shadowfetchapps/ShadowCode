@@ -87,6 +87,10 @@ A row that isn't ready still opens something useful: *Sign in* opens
 ShadowCode stores the choice for the conversation and uses it as the project's
 default for new conversations.
 
+Until a subscription is connected, **On this computer** comes first, marked
+*Free · your code stays on this computer*, so the first row (and Enter) is a
+free model.
+
 ## Describe the task
 
 Type in the composer and press `Enter`. `Shift+Enter` adds a line.
@@ -986,6 +990,19 @@ Subscription CLIs use their own sandboxes, not this one.
   cheaper and faster. Other providers cache on their own.
 
 ## Troubleshooting
+
+When a task fails for a common reason (the provider didn't accept the key,
+the account is out of credits, the conversation is too long for the model,
+the model doesn't exist, the provider is limiting or having trouble, the
+local model isn't running, or this computer is offline), a **What went
+wrong** box under the error says so in plain words, with buttons for the
+next step: **Try again**, **Continue on another model…**, **Choose a model**
+or **Open Local models**. The provider's own text stays above it.
+
+New to some of the words? **Help** (`?`, or *Help: words you'll see* in the
+command palette) explains them: worktree, checkpoint, rewind, context,
+tokens, hunk and more. Some words in the app, such as *Worktree*, show their
+meaning when you point at them or tab to them.
 
 - **The status bar says Not connected.** The window could not reach
   ShadowCode's engine when it opened. Choose **Reconnect** in the message at

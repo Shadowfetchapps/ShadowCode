@@ -676,6 +676,8 @@ export function installFakeBackend(options: FakeOptions = {}) {
     /** "Run in new worktree" records (native/core/src/worktree_tasks.rs). */
     worktreeTasks: [] as Json[],
     worktreeConflict: Boolean(options.worktreeConflict),
+    /** The next native task fails with this text. */
+    failNext: null as null | string,
     /** Branches GET /api/git lists, when a test sets them. */
     gitBranches: null as null | string[],
     /** GET /api/local-models/downloads (native/core/src/local_downloads.rs). */
@@ -1480,6 +1482,23 @@ export function installFakeBackend(options: FakeOptions = {}) {
         job.event_cursor = state.cursor;
         // A retry waits a moment, as the engine does.
         setTimeout(tick, type === "model.retry" ? Math.max(step, 900) : step);
+        return;
+      }
+      // A test makes the next task fail with the engine's text.
+      if (state.failNext) {
+        job.status = "failed";
+        job.finished_at = now();
+        job.summary = state.failNext;
+        state.failNext = null;
+        job.result = { success: false, summary: job.summary };
+        emit(sid, tid, "agent.completed", {
+          summary: job.summary,
+          success: false,
+          cancelled: false,
+          usage: {},
+          run: runRecord(job, local),
+        });
+        job.event_cursor = state.cursor;
         return;
       }
       const verification = {

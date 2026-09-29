@@ -248,9 +248,9 @@ export function ReviewView({
                 role="group"
                 aria-label={group.label}
               >
-                <h5 className="review-group-title">
+                <h3 className="review-group-title">
                   {group.label} ({group.files.length})
-                </h5>
+                </h3>
                 {group.files.map((file: ReviewFile) => (
                   <button
                     type="button"

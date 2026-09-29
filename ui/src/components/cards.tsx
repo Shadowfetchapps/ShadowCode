@@ -120,6 +120,8 @@ export type ChatItem = (
       kind: "agent";
       text: string;
       who?: string;
+      /** A failed task's request, for "Try again". */
+      request?: string;
       messageId?: string;
       eventId?: number;
       taskId?: string;

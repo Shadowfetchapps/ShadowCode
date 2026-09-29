@@ -2,6 +2,7 @@ import { useState } from "react";
 import { GitBranch, GitMerge, LoaderCircle, Trash2 } from "lucide-react";
 import type { WorktreeTask } from "../api";
 import type { WorktreeAction } from "../hooks/useWorktreeTask";
+import { Term } from "./Term";
 
 const ACTIVE = ["queued", "running", "paused", "cancelling"];
 
@@ -29,11 +30,11 @@ export function WorktreeBar({
       aria-label="This conversation runs in its own worktree"
     >
       <div className="worktree-bar-head">
-        <span className="worktree-badge" title={task.worktree}>
+        <span className="worktree-badge">
           <GitBranch size={13} aria-hidden="true" />
-          Worktree
+          <Term word="worktree">Worktree</Term>
         </span>
-        <span className="worktree-summary">
+        <span className="worktree-summary" title={task.worktree}>
           {working
             ? `Working in its own copy of ${project}; the main checkout is free for other tasks.`
             : files

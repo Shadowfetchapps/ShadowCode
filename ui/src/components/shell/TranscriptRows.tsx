@@ -19,6 +19,7 @@ import { StuckCard, type StuckAction } from "../StuckCard";
 import { Markdown } from "../Markdown";
 import { CopyButton, UserMessage } from "../MessageActions";
 import { SubagentCard } from "../SubagentCard";
+import { FailureHelp } from "../FailureHelp";
 import {
   AskAnotherModelButton,
   AskAnotherModelForm,
@@ -176,6 +177,25 @@ function AgentAnswer({
     <div className="msg-agent">
       {item.who && <div className="who">{item.who}</div>}
       <Markdown>{item.text}</Markdown>
+      {item.who === "Needs attention" && !item.live && (
+        <FailureHelp
+          text={item.text}
+          can={(step) =>
+            step === "retry"
+              ? Boolean(item.request)
+              : step === "try-on"
+                ? Boolean(item.taskId)
+                : true
+          }
+          onStep={(step) => {
+            if (step === "retry" && item.request) actions.onRetry(item.request);
+            else if (step === "try-on" && item.taskId)
+              actions.onTryOn(item.taskId);
+            else if (step === "choose-model") actions.onChooseModel();
+            else if (step === "open-local") actions.onOpenLocal();
+          }}
+        />
+      )}
       {!item.live && (
         <div className="agent-actions" role="group" aria-label="Answer actions">
           <CopyButton

@@ -570,3 +570,36 @@ it("sends an Antigravity row that needs its agent to Accounts with the install h
   );
   expect(onConnect).not.toHaveBeenCalled();
 });
+
+it("puts the free models on this computer first until an account is connected", () => {
+  const groupNames = () =>
+    screen
+      .getAllByRole("group")
+      .map((g) =>
+        document
+          .getElementById(g.getAttribute("aria-labelledby") || "")
+          ?.textContent?.trim(),
+      );
+  render(<Harness targets={[cursor, qwen]} />);
+  fireEvent.click(trigger());
+  expect(groupNames().slice(0, 2)).toEqual([
+    "On this computer",
+    "Subscriptions",
+  ]);
+  expect(
+    screen.getByText("Free · your code stays on this computer"),
+  ).toBeTruthy();
+  // The first row, picked by Enter, is the free local model.
+  expect(activeOption()?.textContent).toMatch(/qwen3:14b/);
+  cleanup();
+  // With a connected account, subscriptions lead as before.
+  render(<Harness targets={[codex, cursor, qwen]} />);
+  fireEvent.click(trigger());
+  expect(groupNames().slice(0, 2)).toEqual([
+    "Subscriptions",
+    "On this computer",
+  ]);
+  expect(
+    screen.queryByText("Free · your code stays on this computer"),
+  ).toBeNull();
+});

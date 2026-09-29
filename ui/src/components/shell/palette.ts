@@ -159,5 +159,6 @@ export function paletteItems(a: PaletteActions): PaletteItem[] {
       run: a.toggleTheme,
     },
     { id: "help", label: "Keyboard shortcuts", hint: "?", run: a.help },
+    { id: "glossary", label: "Help: words you'll see", run: a.help },
   ];
 }

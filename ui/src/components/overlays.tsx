@@ -2,6 +2,7 @@ import { Dialog } from "./Dialog";
 import { useEffect, useState } from "react";
 import type { Project } from "../api";
 import { canPickFiles, pickDirectory } from "../lib/transport";
+import { GLOSSARY, GLOSSARY_WORDS } from "../lib/glossary";
 
 const SHORTCUT_GROUPS: { label: string; rows: [string, string][] }[] = [
   {
@@ -57,6 +58,10 @@ export function Help({
   onClose: () => void;
   version: string;
 }) {
+  const [find, setFind] = useState("");
+  const words = GLOSSARY_WORDS.filter((word) =>
+    `${word} ${GLOSSARY[word]}`.toLowerCase().includes(find.toLowerCase()),
+  );
   return (
     <Dialog
       label="Help & Shortcuts"
@@ -89,6 +94,24 @@ export function Help({
           </li>
         ))}
       </ul>
+      <h2 className="help-section-title">Words you&rsquo;ll see</h2>
+      <input
+        className="help-glossary-find"
+        type="search"
+        value={find}
+        onChange={(e) => setFind(e.target.value)}
+        aria-label="Find a word"
+        placeholder="Find a word…"
+      />
+      <dl className="help-glossary">
+        {words.map((word) => (
+          <div key={word}>
+            <dt>{word[0].toUpperCase() + word.slice(1)}</dt>
+            <dd>{GLOSSARY[word]}</dd>
+          </div>
+        ))}
+      </dl>
+      {!words.length && <p className="hint">No word matches.</p>}
       <p className="hint">ShadowCode {version}</p>
       <div className="row end">
         <button type="button" className="ghost" onClick={onClose}>

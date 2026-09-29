@@ -1101,13 +1101,18 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
         p.success &&
         !p.cancelled
       )
-    )
+    ) {
+      const failed = !p.success && !p.cancelled && !limitReached;
+      const request = failed
+        ? items.find((item) => item.kind === "user" && item.taskId === taskId)
+        : undefined;
       items = [
         ...items,
         {
           kind: "agent",
           taskId,
           text,
+          ...(request?.kind === "user" ? { request: request.text } : {}),
           who: p.cancelled
             ? "Stopped"
             : p.success
@@ -1117,6 +1122,7 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
                 : "Needs attention",
         },
       ];
+    }
     const memory = objectFields(p.local_out_of_memory);
     if (
       memory &&

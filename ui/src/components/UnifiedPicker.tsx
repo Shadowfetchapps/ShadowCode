@@ -138,43 +138,47 @@ export function UnifiedPicker({
     const mixedVendorBilling = all.subscriptions.some(
       (target) => target.billing === "unknown" || target.billing === "api_key",
     );
-    return [
-      {
-        id: "subscriptions",
-        title: mixedVendorBilling ? "Vendor CLIs" : "Subscriptions",
-        items: build(all.subscriptions),
-        empty: query
-          ? mixedVendorBilling
-            ? "No vendor CLI matches"
-            : "No subscription matches"
-          : "No accounts connected yet",
-      },
-      // Free local models come before paid API rows, so a search that
-      // matches both picks the local one on Enter.
-      {
-        id: "local",
-        title: "On this computer",
-        items: build(all.local),
-        empty: query ? "No local model matches" : "No local models added yet",
-      },
-      {
-        id: "api",
-        title: "API keys",
-        note: "Billed per token by the provider",
-        items:
-          noApiRows && !query.trim()
-            ? [
-                {
-                  kind: "add-key",
-                  key: `add-key:${API_VENDOR}`,
-                  vendor: API_VENDOR,
-                  label: "Add an OpenRouter API key…",
-                },
-              ]
-            : build(all.api),
-        empty: "No API-key model matches",
-      },
-    ];
+    const subscriptions = {
+      id: "subscriptions",
+      title: mixedVendorBilling ? "Vendor CLIs" : "Subscriptions",
+      items: build(all.subscriptions),
+      empty: query
+        ? mixedVendorBilling
+          ? "No vendor CLI matches"
+          : "No subscription matches"
+        : "No accounts connected yet",
+    };
+    // With no account connected yet (a first run), the free models on this
+    // computer come first.
+    // (Judged on every row, so the order doesn't change while searching.)
+    const beginner = !groupTargets(targets).subscriptions.some(isReady);
+    // Free local models come before paid API rows, so a search that
+    // matches both picks the local one on Enter.
+    const local = {
+      id: "local",
+      title: "On this computer",
+      ...(beginner ? { note: "Free · your code stays on this computer" } : {}),
+      items: build(all.local),
+      empty: query ? "No local model matches" : "No local models added yet",
+    };
+    const api = {
+      id: "api",
+      title: "API keys",
+      note: "Billed per token by the provider",
+      items:
+        noApiRows && !query.trim()
+          ? [
+              {
+                kind: "add-key" as const,
+                key: `add-key:${API_VENDOR}`,
+                vendor: API_VENDOR,
+                label: "Add an OpenRouter API key…",
+              },
+            ]
+          : build(all.api),
+      empty: "No API-key model matches",
+    };
+    return beginner ? [local, subscriptions, api] : [subscriptions, local, api];
   }, [targets, query, expanded, recent, value]);
   const items = useMemo(() => groups.flatMap((g) => g.items), [groups]);
   const optionId = (item: Item) =>
