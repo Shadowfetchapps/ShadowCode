@@ -326,12 +326,14 @@ pub fn start(paths: &AppPaths, config: &Config) -> Result<Value> {
     ensure!(slot.is_none(), "Already listening");
     let recorder = capture::Recorder::start(voice.max_seconds)?;
     let preview = match (&engine, voice.live_preview) {
-        (Engine::Local { model, language }, true) => Some(start_preview(
+        // Without a preview thread (the system is out of threads) recording
+        // still works; the words just appear when it stops.
+        (Engine::Local { model, language }, true) => start_preview(
             recorder.shared.clone(),
             model.clone(),
             language.clone(),
             voice.voice_commands,
-        )),
+        ),
         _ => None,
     };
     let device = recorder.device.clone();
@@ -426,15 +428,16 @@ fn start_preview(
     model: PathBuf,
     language: String,
     commands: bool,
-) -> Preview {
+) -> Option<Preview> {
     let text = Arc::new(Mutex::new(String::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let (out, flag) = (text.clone(), stop.clone());
     let thread = std::thread::Builder::new()
         .name("shadowcode-voice-preview".into())
         .spawn(move || preview_loop(&shared, &model, &language, commands, &out, &flag))
-        .expect("spawn voice preview thread");
-    Preview { text, stop, thread }
+        .map_err(|error| tracing::warn!("Live voice preview unavailable: {error}"))
+        .ok()?;
+    Some(Preview { text, stop, thread })
 }
 
 fn preview_loop(
