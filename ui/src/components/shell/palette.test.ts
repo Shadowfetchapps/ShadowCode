@@ -8,6 +8,7 @@ const SETTINGS_SECTIONS = [
   "local",
   "roles",
   "code",
+  "rules",
   "voice",
   "permissions",
   "appearance",

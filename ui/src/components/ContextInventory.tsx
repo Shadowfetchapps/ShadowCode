@@ -94,41 +94,10 @@ export function ContextInventory({
         <p>No explicit @-attached files or folders.</p>
       )}
       {preview && preview.items.length > 0 && (
-        <ul aria-label="Included and excluded sources">
-          {preview.items.map((item) => (
-            <li key={`${item.kind}:${item.path}`}>
-              <div>
-                <strong>
-                  {item.included ? "Included" : "Not included"} · {item.path}
-                </strong>
-                <span>{item.reason}</span>
-                {item.kind === "file" && item.included && (
-                  <span>
-                    {item.from_line && item.to_line
-                      ? `Lines ${item.from_line}–${item.to_line} · `
-                      : ""}
-                    {item.bytes.toLocaleString()} of{" "}
-                    {item.total_bytes?.toLocaleString() ?? "unknown"} bytes
-                    {item.truncated ? " · truncated" : ""}
-                  </span>
-                )}
-                {item.kind === "dir" && item.included && (
-                  <details>
-                    <summary>
-                      {item.entries.length} names attached
-                      {item.truncated ? " · list truncated" : ""}
-                    </summary>
-                    <ul>
-                      {item.entries.map((entry) => (
-                        <li key={entry}>{entry}</li>
-                      ))}
-                    </ul>
-                  </details>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
+        <InventoryItems
+          items={preview.items}
+          label="Included and excluded sources"
+        />
       )}
       {preview?.truncated && (
         <p role="status">Some attached context is truncated by size limits.</p>
@@ -146,5 +115,64 @@ export function ContextInventory({
         context. Files are read again when the task starts.
       </p>
     </aside>
+  );
+}
+
+/** The included and excluded rows of a context inventory. Shared by the
+ * attachment inventory and Settings › Rules & skills (what each agent
+ * reads). */
+export function InventoryItems({
+  items,
+  label,
+}: {
+  items: ContextPreview["items"];
+  label: string;
+}) {
+  return (
+    <ul aria-label={label}>
+      {items.map((item) => (
+        <li key={`${item.kind}:${item.path}`}>
+          <div>
+            <strong>
+              {item.included ? "Included" : "Not included"} · {item.path}
+            </strong>
+            <span>{item.reason}</span>
+            {item.kind === "file" && item.included && (
+              <span>
+                {item.from_line && item.to_line
+                  ? `Lines ${item.from_line}–${item.to_line} · `
+                  : ""}
+                {item.bytes.toLocaleString()} of{" "}
+                {item.total_bytes?.toLocaleString() ?? "unknown"} bytes
+                {item.truncated ? " · truncated" : ""}
+              </span>
+            )}
+            {item.kind !== "file" &&
+              item.kind !== "dir" &&
+              item.included &&
+              item.total_bytes != null && (
+                <span>
+                  {item.bytes.toLocaleString()} of{" "}
+                  {item.total_bytes.toLocaleString()} bytes
+                  {item.truncated ? " · truncated" : ""}
+                </span>
+              )}
+            {item.kind === "dir" && item.included && (
+              <details>
+                <summary>
+                  {item.entries.length} names attached
+                  {item.truncated ? " · list truncated" : ""}
+                </summary>
+                <ul>
+                  {item.entries.map((entry) => (
+                    <li key={entry}>{entry}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }

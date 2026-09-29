@@ -266,16 +266,23 @@ impl Engine {
                 .map(Arc::new)
             })
             .flatten();
+        let book = native.then(|| {
+            Arc::new(crate::rulebook::Book::load(
+                &self.0.paths,
+                Some(&running.workspace.path),
+            ))
+        });
         ToolExtensions {
             host,
             filter: running.child.as_ref().and_then(|c| c.filter.clone()),
             approval: running.child.as_ref().map(ChildLink::approval_route),
-            skills: Arc::new(if native {
-                crate::workflows::model_skills(&running.workspace)
-            } else {
-                Vec::new()
-            }),
+            skills: Arc::new(
+                book.as_ref()
+                    .map(|book| book.model_skills(&running.workspace))
+                    .unwrap_or_default(),
+            ),
             guidance: native.then(|| Arc::new(crate::instructions::NestedGuidance::default())),
+            rulebook: book,
         }
     }
 

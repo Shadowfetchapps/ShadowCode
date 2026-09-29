@@ -151,6 +151,8 @@ pub struct ToolExtensions {
     /// `(name, description, path)` of skills the model may load.
     pub skills: Arc<Vec<(String, String, String)>>,
     pub guidance: Option<Arc<NestedGuidance>>,
+    /// The user's profile merged with the project, for `load_skill`.
+    pub rulebook: Option<Arc<crate::rulebook::Book>>,
 }
 
 fn schema(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
@@ -229,17 +231,7 @@ impl ToolExtensions {
             }
         }
         if offered("load_skill") {
-            note.push_str("\n\nProject skills (call load_skill with the name to read one before following it; load only skills that fit the task):");
-            let mut bytes = 0;
-            for (name, description, _) in self.skills.iter().take(48) {
-                let line = format!("\n- {name}: {}", truncate(description, 240));
-                bytes += line.len();
-                if bytes > 6000 {
-                    note.push_str("\n- (more skills omitted)");
-                    break;
-                }
-                note.push_str(&line);
-            }
+            note.push_str(&crate::rulebook::delivery::native_skill_index(&self.skills));
         }
         note
     }
@@ -256,7 +248,10 @@ impl ToolExtensions {
             self.skills.iter().any(|(n, _, _)| n == name),
             "No model-loadable skill named '{name}'"
         );
-        crate::workflows::load_skill(workspace, name, SKILL_BYTES)
+        match &self.rulebook {
+            Some(book) => crate::workflows::load_from(&book.catalog(workspace), name, SKILL_BYTES),
+            None => crate::workflows::load_skill(workspace, name, SKILL_BYTES),
+        }
     }
 }
 
@@ -555,7 +550,7 @@ pub(crate) struct ChildOutcome {
 impl SubagentHost {
     pub fn new(engine: Engine, parent: ParentContext, settings: SubagentsConfig) -> Result<Self> {
         let workspace = Workspace::open(&parent.workspace)?;
-        let catalog = agents::discover(&workspace, Some(&agents::user_dir(engine.paths())));
+        let catalog = agents::discover_for(engine.paths(), &workspace);
         let store = engine.store();
         let project = roles::project_of(&store, &workspace.path, Some(&parent.session_id));
         let roles = roles::load(&store, &project).unwrap_or_default();

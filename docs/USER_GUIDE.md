@@ -589,6 +589,36 @@ project (**Settings › Code intelligence**):
 
 Details: [code intelligence](CODE_INTELLIGENCE.md).
 
+## Rules and skills for every agent
+
+**Settings › Rules & skills** keeps one rulebook for every agent you use:
+ShadowCode's own agent, Claude Code, Codex, Cursor, Grok and Antigravity.
+
+- **Your rules.** Write how you like agents to work in your profile's
+  `AGENTS.md`, right on the page. It applies in every project, before the
+  project's own `AGENTS.md`, `CLAUDE.md` and other rules files. Where a
+  project sets its own convention, the project's wins there.
+- **Skills, commands and agents** in your profile (`skills/`, `commands/`,
+  `agents/`) work in every project. When a project has one with the same
+  name, the project's is used and the page says so.
+- **Switches.** Turn any rule, skill, command or agent off, for your profile
+  or for one project.
+- **What each agent reads.** Pick an agent to see which files and skills it
+  receives, which it reads by itself, what was cut to stay within the limits,
+  and an estimated token count.
+- **Starter skills** (careful review, project triage, CLI design, frontend
+  polish), installed only when you pick them.
+- **Import from Git** a shared profile (`https://` or SSH); **Update** shows
+  the new commit.
+- **Use these rules outside ShadowCode** links your profile into the Claude
+  Code and Codex CLIs, only when you ask, without replacing any file.
+
+Rules and skills shape how agents work; they never grant permissions.
+**Settings › Advanced › Health** has a skill checker that reports problems
+(broken front matter, missing files, duplicate names, long descriptions,
+text that asks to switch off approvals) without changing anything. Details:
+[rules and skills](RULES_AND_SKILLS.md).
+
 ## Voice input
 
 Dictate instead of typing: **hold** the microphone button next to Attach (or

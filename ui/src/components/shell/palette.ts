@@ -73,6 +73,11 @@ export function paletteItems(a: PaletteActions): PaletteItem[] {
       label: "Code intelligence · language servers and search",
       run: () => a.settings("code"),
     },
+    {
+      id: "rules",
+      label: "Rules & skills · your profile for every agent",
+      run: () => a.settings("rules"),
+    },
     { id: "voice", label: "Voice input", run: () => a.settings("voice") },
     {
       id: "permissions",

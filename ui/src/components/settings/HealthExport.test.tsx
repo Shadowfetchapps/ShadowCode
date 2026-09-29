@@ -10,7 +10,9 @@ import { HealthTab } from "./AdvancedPanels";
 import { api } from "../../api";
 import { exportDiagnostics } from "../../lib/transport";
 
-vi.mock("../../api", () => ({ api: { doctor: vi.fn() } }));
+vi.mock("../../api", () => ({
+  api: { doctor: vi.fn(), skillCheck: vi.fn() },
+}));
 vi.mock("../../lib/transport", () => ({
   isNative: vi.fn(() => true),
   exportDiagnostics: vi.fn(),
@@ -41,6 +43,16 @@ const report = () => ({
 
 beforeEach(() => {
   vi.mocked(api.doctor).mockResolvedValue(report());
+  // The Health page also runs the skill checker (report only).
+  vi.mocked(api.skillCheck).mockResolvedValue({
+    ok: true,
+    checked: 0,
+    errors: 0,
+    warnings: 0,
+    infos: 0,
+    findings: [],
+    note: "",
+  });
   vi.mocked(exportDiagnostics).mockResolvedValue("shadowcode-diagnostics.json");
 });
 afterEach(() => {

@@ -74,6 +74,7 @@ mod preview;
 #[cfg(unix)]
 mod remote;
 mod review;
+mod rules;
 mod sandbox;
 mod sessions;
 mod settings;
@@ -312,6 +313,7 @@ impl Service {
             }
             "providers" | "models" | "picker" | "local-models" => self.model_routes(&call).await,
             "plugins" | "mcp" | "hooks" | "sqlite" => self.extension_routes(&call).await,
+            "rules" => self.rules_routes(&call).await,
             "commands" | "memory" => match (call.method.as_str(), call.path.as_str()) {
                 ("GET", "/api/commands") => self.command_catalog(),
                 ("POST", "/api/commands/run") => self.run_command(&call.body).await,

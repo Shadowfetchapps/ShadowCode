@@ -18,6 +18,7 @@ fn launch(root: &Path) -> LaunchOptions {
         effort: None,
         legacy_effort: false,
         mcp_servers: Vec::new(),
+        rulebook: None,
     }
 }
 
@@ -243,6 +244,7 @@ fn grok_acp_permission_round_trip_and_cancel() {
         effort: None,
         legacy_effort: false,
         mcp_servers: Vec::new(),
+        rulebook: None,
     });
     assert_eq!(bin, "grok");
     assert_eq!(args, vec!["agent", "--model", "grok-4", "stdio"]);
@@ -343,6 +345,7 @@ fn claude_stream_json_approval_and_interrupt() {
         effort: None,
         legacy_effort: false,
         mcp_servers: Vec::new(),
+        rulebook: None,
     });
     assert!(args.contains(&"--output-format".into()));
     assert!(args.contains(&"stream-json".into()));
@@ -634,6 +637,7 @@ async fn fake_binary_spawn_approval_and_cancel() {
                 effort: None,
                 legacy_effort: false,
                 mcp_servers: Vec::new(),
+                rulebook: None,
             },
             config: &config,
             prompt: "hello".into(),
@@ -686,6 +690,7 @@ async fn fake_binary_spawn_approval_and_cancel() {
                 effort: None,
                 legacy_effort: false,
                 mcp_servers: Vec::new(),
+                rulebook: None,
             },
             config: &config,
             prompt: "slow".into(),
@@ -770,6 +775,7 @@ fn cursor_acp_command_and_cancel() {
         effort: None,
         legacy_effort: false,
         mcp_servers: Vec::new(),
+        rulebook: None,
     });
     assert_eq!(bin, "cursor-agent");
     assert_eq!(args, vec!["acp"]);
@@ -841,6 +847,7 @@ fn antigravity_runs_through_googles_acp_server() {
         effort: None,
         legacy_effort: false,
         mcp_servers: Vec::new(),
+        rulebook: None,
     };
     let (bin, args) = adapter.command(&options);
     assert_eq!(bin, "/opt/agy/agy_acp_server.par");

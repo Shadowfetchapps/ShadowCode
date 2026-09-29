@@ -111,8 +111,12 @@ fn split(value: &str) -> (&str, &str) {
 }
 
 impl Service {
+    /// Project skills and commands merged with the user's profile.
+    pub(super) fn workflow_catalog(&self, workspace: &Workspace) -> workflows::Catalog {
+        crate::rulebook::Book::load(self.engine.paths(), Some(&workspace.path)).catalog(workspace)
+    }
     pub(super) fn command_catalog(&self) -> Result<Value> {
-        let catalog = workflows::discover(&Workspace::open(&self.workspace()?)?);
+        let catalog = self.workflow_catalog(&Workspace::open(&self.workspace()?)?);
         let mut commands:Vec<Value>=BUILTINS.iter().map(|(name,description,args)|json!({"name":name,"description":description,"arg_spec":args,"alias":"","source":"builtin","kind":"builtin"})).collect();
         let mut issues = catalog.issues.clone();
         for definition in &catalog.definitions {
@@ -583,7 +587,7 @@ impl Service {
             config.is_trusted(&workspace),
             "Trust this project before starting a workflow"
         );
-        let catalog = workflows::discover(&Workspace::open(&workspace)?);
+        let catalog = self.workflow_catalog(&Workspace::open(&workspace)?);
         let invocation = format!("/{name} {args}").trim().to_owned();
         let (definition, args) = if name == "skill" {
             let (skill, args) = split(args);

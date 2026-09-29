@@ -166,7 +166,7 @@ impl Service {
                     Workspace::open(&expand_path(call.q("workspace"))?)?
                 };
                 let user = agents::user_dir(self.engine.paths());
-                let mut value = agents::discover(&workspace, Some(&user)).to_json();
+                let mut value = agents::discover_for(self.engine.paths(), &workspace).to_json();
                 let config = Config::load(self.engine.paths(), Some(&workspace.path))?;
                 value["settings"] = json!(subagents::SubagentsConfig::from_config(&config));
                 value["user_dir"] = json!(user);

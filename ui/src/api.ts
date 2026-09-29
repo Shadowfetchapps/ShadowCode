@@ -1298,6 +1298,107 @@ export type ContextPreview = {
   estimated_tokens: number;
   truncated: boolean;
 };
+/** Settings › Rules & skills (GET /api/rules): the user's profile merged
+ * with the selected project's own files. */
+export type RuleItem = {
+  /** `profile:<path in the profile>` or `project:<path>`. */
+  id: string;
+  scope: "profile" | "project";
+  /** `profile`, `import:<name>` or `project`. */
+  source: string;
+  kind: "rules" | "skill" | "command" | "agent" | string;
+  name: string;
+  path: string;
+  description: string;
+  enabled: boolean;
+  bytes: number;
+  hash: string;
+  /** A more specific item with the same name used instead of this one. */
+  overridden_by: string | null;
+};
+export type RulesCommit = {
+  commit: string | null;
+  short: string | null;
+  subject: string | null;
+  date: string | null;
+};
+export type RulesImport = {
+  name: string;
+  url: string;
+  path: string;
+  added_at?: number;
+  commit: RulesCommit;
+};
+export type StarterSkill = {
+  name: string;
+  title: string;
+  summary: string;
+  installed: boolean;
+  path: string;
+};
+export type RulesOverview = {
+  profile: {
+    path: string;
+    exists: boolean;
+    agents_md: { content: string; hash: string; path: string };
+  };
+  workspace: string | null;
+  share_with_cli_agents: boolean;
+  items: RuleItem[];
+  imports: RulesImport[];
+  issues: string[];
+  starters: StarterSkill[];
+  limits: {
+    profile_file_bytes: number;
+    profile_total_bytes: number;
+    total_bytes: number;
+    skill_index_entries: number;
+    skill_index_bytes: number;
+  };
+};
+/** One agent in GET /api/rules/preview: what it receives, in the same
+ * shape as the attached-context inventory. */
+export type RulesRunner = {
+  id: string;
+  label: string;
+  mechanism: string;
+  delivered: boolean;
+  sharing_off: boolean;
+  preview: ContextPreview;
+  native_files: string[];
+  native_skill_folders: string[];
+};
+export type RulesPreview = { runners: RulesRunner[]; workspace: string };
+export type SkillFinding = {
+  severity: "error" | "warning" | "info";
+  code: string;
+  scope: "profile" | "project" | string;
+  path: string;
+  name: string;
+  message: string;
+  fix: string;
+};
+export type SkillCheck = {
+  ok: boolean;
+  checked: number;
+  errors: number;
+  warnings: number;
+  infos: number;
+  findings: SkillFinding[];
+  note: string;
+};
+export type RulesExportTarget = {
+  id: "claude" | "codex" | string;
+  label: string;
+  home: string;
+  enabled: boolean;
+  links: {
+    link: string;
+    target: string;
+    state: "linked" | "blocked" | "available" | string;
+  }[];
+  created: { link: string; target: string }[];
+};
 export const api = {
   parallelPlan: () => get<{ plan: ParallelPlan | null }>("/api/parallel"),
   prepareParallel: (goal: string) =>
@@ -2037,6 +2138,58 @@ export const api = {
     send<{ ok: boolean }>("/api/workspace/instructions", "PUT", { content }),
   skills: () =>
     get<{ skills: ProjectSkill[]; issues?: string[] }>("/api/workspace/skills"),
+  rules: () => get<RulesOverview>("/api/rules"),
+  saveProfileRules: (content: string, expectedHash: string) =>
+    send<{ ok: boolean; hash: string }>("/api/rules/profile", "PUT", {
+      content,
+      expected_hash: expectedHash,
+    }),
+  setRuleEnabled: (id: string, enabled: boolean, workspace?: string | null) =>
+    send<{ ok: boolean }>("/api/rules/items", "POST", {
+      id,
+      enabled,
+      workspace: workspace || undefined,
+    }),
+  setRulesSharing: (enabled: boolean) =>
+    send<{ ok: boolean }>("/api/rules/sharing", "POST", { enabled }),
+  rulesPreview: () => get<RulesPreview>("/api/rules/preview"),
+  skillCheck: () => get<SkillCheck>("/api/rules/check"),
+  importRules: (url: string) =>
+    send<{ name: string; url: string; commit: RulesCommit }>(
+      "/api/rules/imports",
+      "POST",
+      { url },
+    ),
+  updateRulesImport: (name: string) =>
+    send<{ name: string; changed: boolean; commit: RulesCommit }>(
+      `/api/rules/imports/${encodeURIComponent(name)}/update`,
+      "POST",
+      {},
+    ),
+  removeRulesImport: (name: string) =>
+    send<{ ok: boolean }>(
+      `/api/rules/imports/${encodeURIComponent(name)}`,
+      "DELETE",
+      {},
+    ),
+  rulesExport: () => get<{ targets: RulesExportTarget[] }>("/api/rules/export"),
+  setRulesExport: (target: string, enabled: boolean) =>
+    send<{
+      created?: { link: string }[];
+      skipped?: { link: string; reason: string }[];
+      removed?: string[];
+      kept?: { link: string; reason: string }[];
+    }>(
+      `/api/rules/export/${encodeURIComponent(target)}`,
+      enabled ? "POST" : "DELETE",
+      {},
+    ),
+  installStarters: (names: string[]) =>
+    send<{ installed: string[]; skipped: string[] }>(
+      "/api/rules/starters",
+      "POST",
+      { names },
+    ),
   saveSkill: (name: string, content: string, expectedHash?: string) =>
     send<{ ok: boolean }>("/api/workspace/skills", "PUT", {
       name,

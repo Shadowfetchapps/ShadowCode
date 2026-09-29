@@ -302,8 +302,7 @@ impl Engine {
         if !settings.enabled || settings.max_depth == 0 {
             return Ok(None);
         }
-        let catalog =
-            crate::agents::discover(workspace, Some(&crate::agents::user_dir(&self.0.paths)));
+        let catalog = crate::agents::discover_for(&self.0.paths, workspace);
         let Some((definition, _)) = crate::agents::mention(request.task, &catalog) else {
             return Ok(None);
         };

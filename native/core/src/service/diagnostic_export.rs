@@ -38,6 +38,7 @@ fn label(id: &str) -> Option<&'static str> {
         "model-response" => "Actual model response",
         "history-scale" => "Local history size",
         "autonomy-budget" => "Autonomy budget",
+        "rules-and-skills" => "Rules and skills",
         "provider-profile" => "Provider capability profile",
         "shell-policy" => "Shell policy",
         "bubblewrap" => "Bubblewrap availability",

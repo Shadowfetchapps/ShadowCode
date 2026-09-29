@@ -57,7 +57,10 @@ describe("useMessageActions", () => {
   it("resends as Plan → Implement → Review while roles are on", async () => {
     const plain = setup();
     await act(() => plain.actions.retry("Second"));
-    expect(plain.startTask.mock.calls[0][0]).not.toHaveProperty("roles");
+    expect(plain.startTask).toHaveBeenCalledWith(
+      expect.not.objectContaining({ roles: true }),
+      null,
+    );
     const roles = setup(false, true);
     await act(() => roles.actions.retry("Second"));
     expect(roles.startTask).toHaveBeenCalledWith(
