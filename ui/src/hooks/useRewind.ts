@@ -1,11 +1,15 @@
 import { useCallback, useState } from "react";
-import { api } from "../api";
+import { api, type RewindKept } from "../api";
 import type { ToastAction, ToastKind } from "./useToasts";
 
 export type RewindAsk = {
   taskId: string;
   /** The files that will go back to how they were before the task. */
   paths: string[];
+  /** Files you saved in the editor during a subscription turn: kept. */
+  kept?: RewindKept[];
+  /** Among `paths`: changed during the turn, not reported by the agent. */
+  unreported?: string[];
 };
 
 /** Rewind with a confirmation that lists the files, then a notification
@@ -41,9 +45,14 @@ export function useRewind({
   /** Rewind without asking (the caller already confirmed). Answers the
    * restored paths, or null when it failed (the error was shown). */
   const rewindNow = useCallback(
-    async (taskId: string, { quiet = false } = {}) => {
+    async (
+      taskId: string,
+      { quiet = false, includeUserEdits = false } = {},
+    ) => {
       try {
-        const result = await api.rewindTask(taskId);
+        const result = includeUserEdits
+          ? await api.rewindTask(taskId, true)
+          : await api.rewindTask(taskId);
         const count = result.restored.length;
         if (!quiet)
           toast(
@@ -75,12 +84,23 @@ export function useRewind({
       }
       try {
         const detail = await api.taskCheckpoint(taskId);
-        const paths = detail.checkpoint?.paths || [];
-        if (!detail.rewindable || !paths.length) {
+        const checkpoint = detail.checkpoint;
+        const paths = checkpoint?.rewind_paths || checkpoint?.paths || [];
+        const kept = checkpoint?.kept || [];
+        const optional = kept.some(
+          (file) => file.reason === "edited_by_you_and_agent",
+        );
+        if (!detail.rewindable || (!paths.length && !optional)) {
           toast("This task has no file changes left to rewind.", "info");
           return;
         }
-        setAsking({ taskId, paths });
+        const unreported = checkpoint?.unreported || [];
+        setAsking({
+          taskId,
+          paths,
+          ...(kept.length ? { kept } : {}),
+          ...(unreported.length ? { unreported } : {}),
+        });
       } catch (e) {
         toast(String(e), "err");
       }
@@ -88,11 +108,14 @@ export function useRewind({
     [busy, toast],
   );
 
-  const confirm = useCallback(async () => {
-    if (!asking) return;
-    await rewindNow(asking.taskId);
-    setAsking(null);
-  }, [asking, rewindNow]);
+  const confirm = useCallback(
+    async (includeUserEdits = false) => {
+      if (!asking) return;
+      await rewindNow(asking.taskId, { includeUserEdits });
+      setAsking(null);
+    },
+    [asking, rewindNow],
+  );
 
   return {
     asking,

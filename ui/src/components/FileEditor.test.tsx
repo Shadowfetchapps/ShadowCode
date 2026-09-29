@@ -341,3 +341,60 @@ it("preserves typing made while a save is in flight", async () => {
     ).state.sliceDoc(),
   ).toBe("const value = 3;\n");
 });
+
+it("says a save made while a subscription turn runs is kept by Rewind", async () => {
+  const content = "note\n";
+  vi.mocked(api.files).mockResolvedValue({
+    entries: [{ name: "notes.txt", path: "notes.txt", type: "file" }],
+    workspace: "/turn",
+    path: ".",
+    parent: "",
+  });
+  vi.mocked(api.file).mockResolvedValue({
+    path: "notes.txt",
+    content,
+    hash: "a".repeat(64),
+    bytes: content.length,
+    truncated: false,
+  });
+  vi.mocked(api.fileRevision).mockResolvedValue({
+    path: "notes.txt",
+    hash: "a".repeat(64),
+    bytes: content.length,
+  });
+  vi.mocked(api.saveFile).mockResolvedValue({
+    path: "notes.txt",
+    hash: "b".repeat(64),
+    bytes: 9,
+    during_turn: true,
+  });
+  const toast = vi.fn();
+  function WithToast() {
+    const { memory, update, discardFileDraft, resolveFileDraftConflict } =
+      useDrawerMemory("/turn");
+    return (
+      <FileEditor
+        workspace="/turn"
+        memory={memory}
+        onMemory={update}
+        onDiscardFileDraft={discardFileDraft}
+        onResolveFileDraftConflict={resolveFileDraftConflict}
+        onShowDiff={() => {}}
+        toast={toast}
+      />
+    );
+  }
+  render(<WithToast />);
+  fireEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  const editor = await screen.findByRole("textbox", {
+    name: "Edit notes.txt",
+  });
+  replaceText(editor, "my note\n");
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() =>
+    expect(toast).toHaveBeenCalledWith(
+      "Saved notes.txt. Rewinding the running turn keeps your version.",
+      "ok",
+    ),
+  );
+});

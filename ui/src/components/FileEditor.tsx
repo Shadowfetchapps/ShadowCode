@@ -258,7 +258,12 @@ export function FileEditor({
           disk: undefined,
         };
       });
-      toast(`Saved ${path}`, "ok");
+      toast(
+        result.during_turn
+          ? `Saved ${path}. Rewinding the running turn keeps your version.`
+          : `Saved ${path}`,
+        "ok",
+      );
     } catch (reason) {
       const message = String(reason);
       if (message.includes("File changed")) {

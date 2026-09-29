@@ -1224,6 +1224,14 @@ export type ContextPreview = {
   estimated_tokens: number;
   truncated: boolean;
 };
+/** A file a rewind leaves alone: you saved it in the editor while a
+ * subscription turn ran (`saved_by_you`, never rewound), or you and the agent
+ * both edited it (`edited_by_you_and_agent`, rewound only on request). */
+export type RewindKept = {
+  path: string;
+  reason: "saved_by_you" | "edited_by_you_and_agent";
+};
+
 export const api = {
   parallelPlan: () => get<{ plan: ParallelPlan | null }>("/api/parallel"),
   prepareParallel: (goal: string) =>
@@ -1684,7 +1692,17 @@ export const api = {
   taskCheckpoint: (taskId: string) =>
     get<{
       rewindable: boolean;
-      checkpoint: { changes: number; paths: string[] } | null;
+      checkpoint: {
+        changes: number;
+        paths: string[];
+        /** What a rewind restores now (files you saved during a
+         * subscription turn are left out). */
+        rewind_paths?: string[];
+        /** Files a rewind leaves as they are, and why. */
+        kept?: RewindKept[];
+        /** Changed during the turn but not reported by the agent. */
+        unreported?: string[];
+      } | null;
     }>(`/api/checkpoints/tasks/${taskId}`),
   forkSession: (
     id: string,
@@ -1704,11 +1722,11 @@ export const api = {
       ...(before ? { before: true } : {}),
     }),
   /** Rewind a finished task's files. `undo_id` undoes the rewind. */
-  rewindTask: (taskId: string) =>
+  rewindTask: (taskId: string, includeUserEdits = false) =>
     send<{ ok: boolean; restored: string[]; undo_id?: string | null }>(
       `/api/checkpoints/tasks/${taskId}/restore`,
       "POST",
-      {},
+      includeUserEdits ? { include_user_edits: true } : {},
     ),
   undoRewind: (undoId: string) =>
     send<{ ok: boolean; restored: string[]; task_id: string }>(
@@ -1756,11 +1774,16 @@ export const api = {
       "/api/workspace/file?path=" + encodeURIComponent(path) + "&head=true",
     ),
   saveFile: (path: string, content: string, expectedHash: string) =>
-    send<{ path: string; hash: string; bytes: number }>(
-      "/api/workspace/file?path=" + encodeURIComponent(path),
-      "PUT",
-      { content, expected_hash: expectedHash },
-    ),
+    send<{
+      path: string;
+      hash: string;
+      bytes: number;
+      /** Saved while a subscription turn ran: Rewind keeps this file. */
+      during_turn?: boolean;
+    }>("/api/workspace/file?path=" + encodeURIComponent(path), "PUT", {
+      content,
+      expected_hash: expectedHash,
+    }),
   editorDrafts: (workspace: string) =>
     get<{ workspace: string; drafts: EditorRecoveryDraft[] }>(
       "/api/workspace/editor-drafts?workspace=" + encodeURIComponent(workspace),

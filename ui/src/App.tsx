@@ -760,6 +760,8 @@ export default function App() {
       {rewinding.asking && (
         <RewindDialog
           paths={rewinding.asking.paths}
+          kept={rewinding.asking.kept}
+          unreported={rewinding.asking.unreported}
           onConfirm={rewinding.confirm}
           onCancel={rewinding.cancel}
         />

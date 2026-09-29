@@ -143,6 +143,10 @@ struct Running {
     /// ...and was let through; no other top-level local job starts until it
     /// has finished.
     local_admitted: AtomicBool,
+    /// A subscription turn is running between its project checkpoints: the
+    /// user may save files in ShadowCode's editor, and each save is noted so
+    /// Rewind keeps the user's own edits (`checkpoint::turn_edits`).
+    edit_window: AtomicBool,
 }
 #[derive(Default)]
 struct QueueState {
@@ -398,6 +402,23 @@ impl Engine {
         Ok(true)
     }
     pub fn reserve_workspace(&self, workspace: &Path) -> Result<WorkspaceReservation> {
+        Ok(self.reserve_workspace_with(workspace, false)?.0)
+    }
+    /// A manual file save. Besides an idle project, this is allowed while a
+    /// subscription turn is the project's only unfinished task and is running
+    /// between its checkpoints; its task ID is returned so the save can be
+    /// noted and Rewind keeps it.
+    pub fn reserve_workspace_for_edit(
+        &self,
+        workspace: &Path,
+    ) -> Result<(WorkspaceReservation, Option<String>)> {
+        self.reserve_workspace_with(workspace, true)
+    }
+    fn reserve_workspace_with(
+        &self,
+        workspace: &Path,
+        vendor_turn_edit: bool,
+    ) -> Result<(WorkspaceReservation, Option<String>)> {
         let workspace = crate::workspace::reservation_path(workspace)?;
         let mut queues = self
             .0
@@ -412,21 +433,54 @@ impl Engine {
             !queues.manual.contains_key(&workspace),
             "A manual operation is already using this workspace"
         );
-        ensure!(
-            !queues.jobs.values().any(|job| job.workspace.path == workspace && !job.finished.load(Ordering::Acquire)),
-            "Stop the running task before making manual changes"
-        );
+        let unfinished: Vec<_> = queues
+            .jobs
+            .values()
+            .filter(|job| job.workspace.path == workspace && !job.finished.load(Ordering::Acquire))
+            .collect();
+        let turn = match unfinished.as_slice() {
+            [] => None,
+            [job] if vendor_turn_edit && job.edit_window.load(Ordering::Acquire) => {
+                Some(job.record().task_id.clone())
+            }
+            _ => bail!("Stop the running task before making manual changes"),
+        };
         let state = Arc::new(ManualState {
             cancel: CancellationToken::new(),
             finished: AtomicBool::new(false),
             done: Notify::new(),
         });
         queues.manual.insert(workspace.clone(), state.clone());
-        Ok(WorkspaceReservation {
-            engine: self.clone(),
-            workspace,
-            state,
-        })
+        Ok((
+            WorkspaceReservation {
+                engine: self.clone(),
+                workspace,
+                state,
+            },
+            turn,
+        ))
+    }
+    /// The turn is about to record its changes: stop accepting editor saves,
+    /// and let a save already in progress finish first, so every save is
+    /// either noted for this turn or refused.
+    async fn close_edit_window(&self, running: &Running) {
+        loop {
+            let saving = {
+                let Ok(queues) = self.0.queues.lock() else {
+                    return;
+                };
+                running.edit_window.store(false, Ordering::Release);
+                queues.manual.get(&running.workspace.path).cloned()
+            };
+            let Some(saving) = saving else {
+                return;
+            };
+            let done = saving.done.notified();
+            if saving.finished.load(Ordering::Acquire) {
+                continue;
+            }
+            done.await;
+        }
     }
     /// Reserve admission first, then stop every job in the checkout (including
     /// queued turns and child jobs). The caller retains ownership through removal.
@@ -836,6 +890,7 @@ impl Engine {
             child: None,
             local_waiting: AtomicBool::new(false),
             local_admitted: AtomicBool::new(false),
+            edit_window: AtomicBool::new(false),
         });
         if running.command.is_none() && crate::local_engine::is_managed(&running.config.model) {
             self.0
@@ -1689,7 +1744,31 @@ impl Engine {
         )
         .await;
         match recorded {
-            Ok(outcome) => {
+            Ok(mut outcome) => {
+                // Files you saved in the editor during the turn stay yours.
+                match checkpoint::turn_edits::settle(
+                    &self.0.store,
+                    &running.workspace,
+                    &job.task_id,
+                ) {
+                    Ok(kept) if !kept.is_empty() => {
+                        outcome.paths.retain(|path| !kept.contains(path));
+                        let _ = events.emit(
+                            "agent.warning",
+                            json!({"kind":"checkpoint","paths":kept,"text":format!(
+                                "You saved {} in the editor during this turn. Rewind keeps your version.",
+                                crate::checkpoint::turn_edits::describe(&kept)
+                            )}),
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        let _ = events.emit(
+                            "agent.warning",
+                            json!({"text":format!("Rewind may also undo files you saved during this {label} turn: they could not be set aside ({error:#})."),"kind":"checkpoint"}),
+                        );
+                    }
+                }
                 if !outcome.paths.is_empty() {
                     if let Ok(mut summary) =
                         checkpoint::summary(&self.0.store, &running.workspace, &job.task_id)
@@ -1832,6 +1911,9 @@ impl Engine {
         } else {
             crate::checkpoint::capture::not_needed()
         };
+        // From here until the turn's changes are recorded, the user may save
+        // files in ShadowCode's editor; Rewind keeps those saves.
+        running.edit_window.store(checkpoints, Ordering::Release);
         #[cfg(unix)]
         let (outcome, reported) =
             crate::cli_agent::runner::run_reporting_usage(crate::cli_agent::runner::Request {
@@ -1851,6 +1933,7 @@ impl Engine {
                 catalog: Some(self.0.vendors.clone()),
             })
             .await;
+        self.close_edit_window(running).await;
         #[cfg(unix)]
         self.record_vendor_changes(checkpoint, running, &job, &events, vendor.label())
             .await;

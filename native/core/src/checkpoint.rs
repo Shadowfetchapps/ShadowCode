@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub mod capture;
+pub mod turn_edits;
 
 /// Checkpoints of the whole project around shell commands and vendor CLI
 /// turns (`checkpoints` in the configuration).
@@ -98,12 +99,35 @@ pub fn summary(store: &Store, workspace: &Workspace, task: &str) -> Result<Value
         "SELECT path,restored FROM file_changes WHERE task_id=? AND workspace=? ORDER BY id",
         params![task, workspace.path.to_string_lossy()],
     )?;
+    // What a rewind does now: files it restores, files it keeps because you
+    // saved them during a subscription turn, and changes the agent did not
+    // report (see `turn_edits`).
+    let plan = turn_edits::plan(store, workspace, task)?;
     Ok(
-        json!({"task_id":task,"workspace":workspace.path,"changes":rows.len(),"paths":rows.iter().map(|r|r["path"].clone()).collect::<Vec<_>>(),"restored":!rows.is_empty() && rows.iter().all(|r|r["restored"]==1)}),
+        json!({"task_id":task,"workspace":workspace.path,"changes":rows.len(),"paths":rows.iter().map(|r|r["path"].clone()).collect::<Vec<_>>(),"restored":!rows.is_empty() && rows.iter().all(|r|r["restored"]==1),
+            "rewind_paths":plan.rewind,"kept":plan.kept,"unreported":plan.unreported}),
     )
 }
 
+/// Rewind `task`'s files. Files you saved in the editor during a
+/// subscription turn are kept (see `turn_edits`).
 pub fn restore(store: &Store, workspace: &Workspace, task: &str) -> Result<Vec<String>> {
+    restore_with(store, workspace, task, false)
+}
+
+/// [`restore`]; `include_user_edits` also rewinds files you saved during the
+/// turn that the agent edited too.
+pub fn restore_with(
+    store: &Store,
+    workspace: &Workspace,
+    task: &str,
+    include_user_edits: bool,
+) -> Result<Vec<String>> {
+    let keep = if include_user_edits {
+        Default::default()
+    } else {
+        turn_edits::plan(store, workspace, task)?.keep_set()
+    };
     struct Change {
         id: i64,
         path: String,
@@ -128,6 +152,9 @@ pub fn restore(store: &Store, workspace: &Workspace, task: &str) -> Result<Vec<S
         })?;
         for row in rows {
             let (id, path, before, mode, after, observed) = row?;
+            if keep.contains(&path) {
+                continue;
+            }
             let current = workspace.snapshot(&path)?;
             let before_hash = before
                 .as_deref()

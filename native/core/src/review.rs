@@ -292,6 +292,23 @@ pub struct Rewind {
 /// Rewind a finished task's files, first recording them as they are so the
 /// rewind can be undone (`undo_rewind`).
 pub fn rewind(store: &Store, ws: &Workspace, task: &str, session_id: &str) -> Result<Rewind> {
+    rewind_with(store, ws, task, session_id, false)
+}
+
+/// [`rewind`]; `include_user_edits` also rewinds files you saved during a
+/// subscription turn that the agent edited too (they are kept otherwise).
+pub fn rewind_with(
+    store: &Store,
+    ws: &Workspace,
+    task: &str,
+    session_id: &str,
+    include_user_edits: bool,
+) -> Result<Rewind> {
+    let keep = if include_user_edits {
+        Default::default()
+    } else {
+        checkpoint::turn_edits::plan(store, ws, task)?.keep_set()
+    };
     let undo_task = format!("rewind:{}", crate::id());
     let mut recorded = false;
     {
@@ -308,6 +325,9 @@ pub fn rewind(store: &Store, ws: &Workspace, task: &str, session_id: &str) -> Re
             rows
         };
         for (path, before) in rows {
+            if keep.contains(&path) {
+                continue;
+            }
             let now = ws.snapshot(&path)?;
             if now.bytes == before {
                 continue;
@@ -316,7 +336,7 @@ pub fn rewind(store: &Store, ws: &Workspace, task: &str, session_id: &str) -> Re
             recorded = true;
         }
     }
-    let restored = match checkpoint::restore(store, ws, task) {
+    let restored = match checkpoint::restore_with(store, ws, task, include_user_edits) {
         Ok(paths) => paths,
         Err(error) => {
             forget(store, ws, &undo_task)?;
