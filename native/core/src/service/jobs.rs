@@ -233,7 +233,9 @@ impl Service {
                 "Activate this task's workspace before rewinding"
             );
             // Keeps the files as they are first, so the rewind can be undone.
-            return self.rewind_task(task_id);
+            // Files you saved during a subscription turn are kept unless the
+            // request includes them.
+            return self.rewind_task(task_id, call.body["include_user_edits"] == true);
         }
         Err(call.unavailable())
     }

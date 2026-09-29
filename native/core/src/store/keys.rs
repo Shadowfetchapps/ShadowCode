@@ -27,6 +27,11 @@ pub fn compare_index(workspace: &Path) -> String {
 pub fn compare_scoreboard(workspace: &Path) -> String {
     format!("compare_scoreboard:{}", workspace.display())
 }
+/// `native_meta`: files the user saved in the editor during a subscription
+/// turn (JSON path → hash; `checkpoint::turn_edits`).
+pub fn turn_edits(task: &str) -> String {
+    format!("turn_edits:{task}")
+}
 /// `native_meta`: a rewind that can be undone (JSON `review::Rewind`); the
 /// files as they were before it are checkpoint rows of task `rewind:<id>`.
 pub fn rewind_undo(id: &str) -> String {

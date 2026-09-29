@@ -91,11 +91,7 @@ impl Engine {
             "verification.summary",
             crate::verification::classify("", &receipts, false),
         )?;
-        running
-            .record
-            .lock()
-            .map_err(|_| anyhow!("Job lock poisoned"))?
-            .steps = 1;
+        running.record().steps = 1;
         ensure!(result.success, "{}", result.error);
         Ok((
             format!(

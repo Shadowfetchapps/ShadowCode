@@ -204,12 +204,23 @@ impl Service {
                             && expected.bytes().all(|b| b.is_ascii_hexdigit())),
                     "A valid opened-file revision is required to save"
                 );
-                let workspace = self.mutable_workspace()?;
+                let (workspace, turn) = self.editable_workspace()?;
                 let path = call.q("path");
                 let hash =
                     workspace.write(path, body.content.as_str().as_bytes(), Some(expected))?;
+                let relative = workspace.relative(path)?.to_string_lossy().into_owned();
+                // Saved while a subscription turn runs: Rewind of that turn
+                // keeps this file as you saved it.
+                if let Some(task) = &turn {
+                    crate::checkpoint::turn_edits::note_save(
+                        &self.engine.store(),
+                        task,
+                        &relative,
+                        &hash,
+                    )?;
+                }
                 Ok(
-                    json!({"path":workspace.relative(path)?.to_string_lossy(),"hash":hash,"bytes":body.content.as_str().len()}),
+                    json!({"path":relative,"hash":hash,"bytes":body.content.as_str().len(),"during_turn":turn.is_some()}),
                 )
             }
             ("GET", "/api/workspace/editor-drafts") => {

@@ -428,12 +428,22 @@ impl VendorCatalog {
     /// Called synchronously when the host reads current configuration, before
     /// handing it to async work. Later calls carrying an old Config cannot
     /// reinstall that configuration or publish its outstanding probe.
+    /// The cached state. It is only a cache, so a panic while it was held
+    /// (a bug elsewhere) must not make every later picker read, task start or
+    /// sign-in panic too.
+    fn state(&self) -> std::sync::MutexGuard<'_, CatalogState> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            self.state.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
     pub fn configure(&self, config: &CliAgentsConfig, offline: bool) {
         let identities: Vec<_> = Vendor::ALL
             .into_iter()
             .map(|vendor| (vendor, ProbeIdentity::new(vendor, config)))
             .collect();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         if state.offline != offline {
             for vendor in Vendor::ALL {
                 *state.revisions.entry(vendor).or_default() += 1;
@@ -448,7 +458,7 @@ impl VendorCatalog {
 
     /// Follow the configured network mode (set whenever config is read).
     pub fn set_offline(&self, offline: bool) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         if state.offline != offline {
             for vendor in Vendor::ALL {
                 *state.revisions.entry(vendor).or_default() += 1;
@@ -457,7 +467,7 @@ impl VendorCatalog {
         }
     }
     pub fn is_offline(&self) -> bool {
-        self.state.lock().unwrap().offline
+        self.state().offline
     }
     pub fn logins(&self) -> &auth::Logins {
         &self.logins
@@ -476,7 +486,7 @@ impl VendorCatalog {
     /// Forget the cached status of a vendor so the next refresh re-probes
     /// (after a sign-in). Persisted usage is kept.
     pub async fn clear(&self, vendor: Vendor) {
-        self.state.lock().unwrap().invalidate(vendor);
+        self.state().invalidate(vendor);
     }
     pub async fn forget_status(&self, vendor: Vendor) {
         self.clear(vendor).await;
@@ -484,7 +494,7 @@ impl VendorCatalog {
     /// Forget everything tied to the vendor login (disconnect): cached
     /// status, persisted usage, and native session ids of conversations.
     pub async fn forget(&self, vendor: Vendor) -> anyhow::Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         state.invalidate(vendor);
         state.persisted.remove(&vendor);
         if let Some(store) = &self.store {
@@ -504,7 +514,7 @@ impl VendorCatalog {
         model: &str,
     ) -> UsageSnapshot {
         let now = crate::now();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         let Some(entry) = state.entries.get_mut(&vendor) else {
             return UsageSnapshot::from_vendor(vendor, snapshot, None, model, now);
         };
@@ -514,6 +524,10 @@ impl VendorCatalog {
             snapshot.clone()
         } else {
             let raw = entry.usage_raw.get_or_insert_with(|| json!({}));
+            // What an earlier probe stored may be anything the CLI sent.
+            if !raw.is_object() {
+                *raw = json!({});
+            }
             let limit_id = snapshot["limitId"].as_str().unwrap_or("codex").to_owned();
             let default_id = raw["rateLimits"]["limitId"]
                 .as_str()
@@ -542,7 +556,7 @@ impl VendorCatalog {
     }
     /// Usage to report with `limit.reached`: the cached numbers when known.
     pub async fn limit_usage(&self, vendor: Vendor, model: &str, detail: &str) -> UsageSnapshot {
-        match self.state.lock().unwrap().entries.get(&vendor) {
+        match self.state().entries.get(&vendor) {
             Some(entry) if entry.usage_raw.is_some() => entry
                 .usage_for(model, crate::now())
                 .with_limit_reached(detail),
@@ -572,11 +586,11 @@ impl VendorCatalog {
     /// Accounts JSON from what is already known, without probing: cached
     /// status, or persisted usage marked "Last checked …".
     pub async fn status_cached_json(&self) -> Value {
-        let state = self.state.lock().unwrap();
+        let state = self.state();
         statuses_json(&Vendor::ALL.map(|vendor| state.status(vendor)))
     }
     pub async fn cached(&self, vendor: Vendor) -> Option<VendorStatus> {
-        let state = self.state.lock().unwrap();
+        let state = self.state();
         state
             .entries
             .contains_key(&vendor)
@@ -597,7 +611,7 @@ impl VendorCatalog {
             .map(|vendor| (vendor, ProbeIdentity::new(vendor, config)))
             .collect();
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state();
             identities
                 .into_iter()
                 .map(|(vendor, identity)| {
@@ -648,7 +662,7 @@ impl VendorCatalog {
         let now = crate::now();
         let identity = ProbeIdentity::new(vendor, config);
         let (previous, revision) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state();
             if !state.configured {
                 state.observe(vendor, identity.clone());
             }
@@ -683,7 +697,7 @@ impl VendorCatalog {
         if let Some(signal) = self.publication_signal.lock().unwrap().take() {
             let _ = signal.send(());
         }
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         // Lock order: catalog state -> per-login publication gate. Cancellation
         // uses login registry -> gate; publication never takes the registry.
         // No await occurs under either lock. An already published observation
@@ -1528,5 +1542,40 @@ for line in sys.stdin:
         let about = "About Cursor CLI\n\nCLI Version         2026.09.15\nModel               Auto\nSubscription Tier   Free\nOS                  linux (x64)\n";
         assert_eq!(super::parse_cursor_tier(about).as_deref(), Some("Free"));
         assert_eq!(super::parse_cursor_tier("no tier here"), None);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_push_over_unexpected_stored_usage_does_not_panic() {
+        let catalog = VendorCatalog::new();
+        for stored in [json!("rate limits unavailable"), json!([1, 2]), json!(7)] {
+            let mut status = VendorStatus::unchecked(Vendor::Codex, None);
+            status.usage_raw = Some(stored);
+            catalog.state().entries.insert(Vendor::Codex, status);
+            let snapshot =
+                json!({"limitId":"codex","primary":{"usedPercent":55.0,"windowDurationMins":300}});
+            catalog
+                .apply_rate_limits(Vendor::Codex, &snapshot, "gpt-6-astra")
+                .await;
+            let raw = catalog.state().entries[&Vendor::Codex]
+                .usage_raw
+                .clone()
+                .unwrap();
+            assert_eq!(raw["rateLimits"], snapshot);
+            assert_eq!(raw["rateLimitsByLimitId"]["codex"], snapshot);
+        }
+    }
+
+    #[test]
+    fn a_panic_while_the_catalog_is_held_does_not_disable_it() {
+        let catalog = std::sync::Arc::new(VendorCatalog::new());
+        let held = catalog.clone();
+        let _ = std::thread::spawn(move || {
+            let _state = held.state.lock().unwrap();
+            panic!("a bug while the catalog was held");
+        })
+        .join();
+        assert!(catalog.state.is_poisoned());
+        catalog.configure(&CliAgentsConfig::default(), false);
+        assert!(!catalog.state.is_poisoned());
     }
 }

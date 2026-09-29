@@ -99,6 +99,30 @@ if "gpufail" in name and not cpu:
     sys.stderr.write("ggml_vulkan: fake device lost\n")
     sys.stderr.flush()
     sys.exit(1)
+# llama.cpp's own allocation failures. The allocation line comes well before
+# the last 2000 bytes of output, as in a real load log.
+AFTER = "".join("llama_model_load_from_file_impl: freeing partial model buffers (%03d)\n" % i for i in range(60))
+def out_of_memory(lines):
+    sys.stderr.write("load_tensors: loading model tensors, this can take a while... (mmap = true)\n" + lines + AFTER)
+    sys.stderr.write("common_init_from_params: failed to load model '%s'\nmain: exiting due to model loading error\n" % model)
+    sys.stderr.flush()
+    sys.exit(1)
+if "cudaoom" in name and not cpu:
+    out_of_memory("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 9216.00 MiB on device 0: cudaMalloc failed: out of memory\n"
+                  "alloc_tensor_range: failed to allocate CUDA0 buffer of size 9663676416\n"
+                  "llama_model_load: error loading model: unable to allocate CUDA0 buffer\n")
+if "vkoom" in name:
+    if not cpu:
+        out_of_memory("ggml_vulkan: Device memory allocation of size 4294967296 failed.\n"
+                      "ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory\n"
+                      "alloc_tensor_range: failed to allocate Vulkan0 buffer of size 4294967296\n"
+                      "llama_model_load: error loading model: unable to allocate Vulkan0 buffer\n")
+    out_of_memory("ggml_backend_cpu_buffer_type_alloc_buffer: failed to allocate buffer of size 17179869184\n"
+                  "alloc_tensor_range: failed to allocate CPU buffer of size 17179869184\n"
+                  "llama_model_load: error loading model: unable to allocate CPU buffer\n")
+if "ctxoom" in name and ctx > 8192:
+    out_of_memory("llama_kv_cache_unified: failed to allocate buffer for kv cache\n"
+                  "llama_init_from_model: failed to initialize the context: failed to allocate buffer for kv cache\n")
 if "slow" in name:
     time.sleep(60)
 if "holdload" in name:
@@ -4448,4 +4472,316 @@ async fn active_runtime_exit_preserves_edit_and_failed_task_then_allows_explicit
         }
         Err(panic) => std::panic::resume_unwind(panic),
     }
+}
+
+/// LOC-03: a local model that does not fit in memory. The load fails with
+/// llama.cpp's own allocation errors; the task ends with a plain reason and a
+/// way on, nothing in the project changes, and the engine keeps working.
+fn git_fixture(project: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(project)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// Bytes that must survive a failed load: HEAD, the index and the files.
+fn project_state(project: &Path) -> (String, Vec<u8>, String, String) {
+    (
+        git_fixture(project, &["rev-parse", "HEAD"]),
+        fs::read(project.join(".git/index")).unwrap(),
+        fs::read_to_string(project.join("hello.txt")).unwrap(),
+        git_fixture(
+            project,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        ),
+    )
+}
+
+fn committed_project(f: &Fixture) {
+    fs::write(f.project.join("hello.txt"), "hello from the project\n").unwrap();
+    git_fixture(&f.project, &["init", "-q"]);
+    git_fixture(&f.project, &["add", "."]);
+    git_fixture(&f.project, &["commit", "-qm", "base"]);
+    // An uncommitted user edit that must stay exactly as it is.
+    fs::write(f.project.join("hello.txt"), "hello, edited by the user\n").unwrap();
+}
+
+#[tokio::test]
+async fn gpu_out_of_memory_moves_to_the_cpu_and_says_why() {
+    let f = fixture(GPU);
+    let model = f.models.join("cudaoom.gguf");
+    qwen_like(&model, "qwen3", TOOLS_TEMPLATE);
+    committed_project(&f);
+    Config::patch(&f.paths, json!({"local_engine":{"files":[model]}})).unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let id = local_engine::scan(&cfg.local_engine)[0].id.clone();
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+
+    // Compare lanes never fall back to the CPU: the GPU shortage is reported
+    // as such, with the server's own words kept as detail.
+    let error = local_engine::prepare_with_policy(
+        &cfg.local_engine,
+        &model_for(&id),
+        service.engine.local_runtime(),
+        &CancellationToken::new(),
+        false,
+    )
+    .await
+    .err()
+    .expect("a GPU allocation failure fails the strict load");
+    let memory = error
+        .downcast_ref::<shadowcode_core::local_runtime::OutOfMemory>()
+        .expect("typed memory failure");
+    assert_eq!(memory.memory, shadowcode_core::local_runtime::Memory::Gpu);
+    assert!(!memory.cpu_tried);
+    assert!(memory.detail.contains("cudaMalloc failed: out of memory"));
+    let text = format!("{error:#}");
+    assert!(
+        text.starts_with("Not enough free GPU memory to load")
+            && text.contains("Nothing in your project was changed")
+            && text.contains("close other programs that use the GPU"),
+        "{text}"
+    );
+    assert_eq!(
+        lines(&f.bin.join("launches.jsonl")).len(),
+        1,
+        "no CPU retry"
+    );
+    let rows = local_engine::picker_rows(
+        &local_engine::catalog_with(&cfg.local_engine, Some(service.engine.local_runtime())),
+        "",
+    );
+    let row = rows.iter().find(|r| r["id"] == id).unwrap();
+    assert!(
+        row["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Last load failed: Not enough free GPU memory"),
+        "the picker shows the plain reason, not the start of a load log: {}",
+        row["reason"]
+    );
+
+    // An ordinary task runs on the CPU instead and tells the user why.
+    let started = call(
+        &service,
+        "POST",
+        "/api/jobs",
+        json!({"workspace":f.project,"task":"What does hello.txt say?","model":id,"mode":"code"}),
+    )
+    .await
+    .unwrap();
+    let done = wait_job(&service, started["id"].as_str().unwrap()).await;
+    assert_eq!(done["status"], "completed", "{done}");
+    let loaded = service.engine.local_runtime().loaded_json().unwrap();
+    assert_eq!(loaded["cpu_fallback"], true);
+    assert_eq!(loaded["fallback_out_of_memory"], true);
+    assert!(loaded["fallback_reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("The GPU did not have enough free memory for"));
+    let sid = done["session_id"].as_str().unwrap();
+    let events = service
+        .engine
+        .store()
+        .events_after(sid, 0, None, 1000)
+        .unwrap();
+    let warning = events
+        .iter()
+        .find(|e| e["type"] == "agent.warning" && e["payload"]["kind"] == "local_memory")
+        .expect("the conversation says the model moved to the CPU");
+    assert!(warning["payload"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("running on the CPU and replies will be slower"));
+    let rows = local_engine::picker_rows(
+        &local_engine::catalog_with(&cfg.local_engine, Some(service.engine.local_runtime())),
+        "",
+    );
+    let row = rows.iter().find(|r| r["id"] == id).unwrap();
+    assert!(row["reason"]
+        .as_str()
+        .unwrap()
+        .contains("CPU fallback (not enough free GPU memory)"));
+    let launches = lines(&f.bin.join("launches.jsonl"));
+    assert!(launches.last().unwrap()["argv"]
+        .to_string()
+        .contains("\"--device\",\"none\",\"-ngl\",\"0\""));
+    assert_eq!(
+        fs::read_to_string(f.project.join("hello.txt")).unwrap(),
+        "hello, edited by the user\n"
+    );
+    service.engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn memory_exhaustion_on_gpu_and_cpu_ends_the_task_clearly_and_changes_nothing() {
+    let f = fixture(GPU);
+    let model = f.models.join("vkoom.gguf");
+    qwen_like(&model, "qwen3", TOOLS_TEMPLATE);
+    committed_project(&f);
+    let before = project_state(&f.project);
+    Config::patch(&f.paths, json!({"local_engine":{"files":[model]}})).unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let id = local_engine::scan(&cfg.local_engine)[0].id.clone();
+    let ctx = model_for(&id).context_limit as u64;
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let started = call(&service, "POST", "/api/jobs", json!({"workspace":f.project,"task":"Rewrite hello.txt in French.","model":id,"mode":"code"}))
+        .await
+        .unwrap();
+    let done = wait_job(&service, started["id"].as_str().unwrap()).await;
+    assert_eq!(done["status"], "failed", "{done}");
+    let summary = done["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("did not fit in the GPU's free memory, and running it on the CPU ran out of system memory too")
+            && summary.contains("Nothing in your project was changed")
+            && summary.contains(&format!("Try a smaller context ({} tokens)", group(ctx / 2))),
+        "{summary}"
+    );
+    assert!(
+        !summary.contains("llama_model_load"),
+        "no raw log in the reason: {summary}"
+    );
+    let memory = &done["result"]["local_out_of_memory"];
+    assert_eq!(memory["memory"], "system", "{done}");
+    assert_eq!(memory["cpu_tried"], true);
+    assert_eq!(memory["context_tokens"], ctx);
+    assert_eq!(memory["smaller_context"], ctx / 2);
+    assert_eq!(memory["model_id"], id);
+    let detail = memory["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("unable to allocate CPU buffer")
+            && detail.contains("The GPU attempt failed first")
+    );
+    // One GPU attempt, one CPU attempt, then a clear stop: no model request,
+    // no tool, no checkpoint, and every project byte is as it was.
+    let launches = lines(&f.bin.join("launches.jsonl"));
+    assert_eq!(launches.len(), 2);
+    assert!(lines(&f.bin.join("requests.jsonl")).is_empty());
+    assert_eq!(project_state(&f.project), before);
+    let sid = done["session_id"].as_str().unwrap();
+    let task = done["task_id"].as_str().unwrap();
+    let events = service
+        .engine
+        .store()
+        .events_after(sid, 0, None, 1000)
+        .unwrap();
+    assert!(!events
+        .iter()
+        .any(|e| e["task_id"] == task && e["type"] == "tool.started"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["task_id"] == task && e["type"] == "agent.completed")
+            .count(),
+        1
+    );
+    let checkpoint = call(
+        &service,
+        "GET",
+        &format!("/api/checkpoints/tasks/{task}"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert_eq!(checkpoint["rewindable"], false, "{checkpoint}");
+    // The engine still answers and the runtime slot is free.
+    assert!(service.engine.local_runtime().loaded().is_none());
+    let health = call(&service, "GET", "/api/health", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(health["ok"], true, "{health}");
+    service.engine.shutdown().await.unwrap();
+}
+
+fn group(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+#[tokio::test]
+async fn context_memory_shortage_offers_a_smaller_context_that_then_loads() {
+    let f = fixture(""); // CPU only
+    let model = f.models.join("ctxoom.gguf");
+    qwen_like(&model, "qwen3", TOOLS_TEMPLATE);
+    committed_project(&f);
+    let before = project_state(&f.project);
+    Config::patch(&f.paths, json!({"local_engine":{"files":[model]}})).unwrap();
+    let cfg = Config::load(&f.paths, None).unwrap();
+    let id = local_engine::scan(&cfg.local_engine)[0].id.clone();
+    let service = Service::open(f.paths.clone(), Some(f.project.clone())).unwrap();
+    let started = call(
+        &service,
+        "POST",
+        "/api/jobs",
+        json!({"workspace":f.project,"task":"What does hello.txt say?","model":id,"mode":"code"}),
+    )
+    .await
+    .unwrap();
+    let done = wait_job(&service, started["id"].as_str().unwrap()).await;
+    assert_eq!(done["status"], "failed", "{done}");
+    let memory = &done["result"]["local_out_of_memory"];
+    assert_eq!(memory["memory"], "system", "{done}");
+    assert_eq!(memory["cpu_tried"], false);
+    let ctx = memory["context_tokens"].as_u64().unwrap();
+    assert!(ctx > 8192, "{done}");
+    let smaller = memory["smaller_context"].as_u64().unwrap();
+    assert_eq!(smaller, ctx / 2);
+    assert!(done["summary"]
+        .as_str()
+        .unwrap()
+        .starts_with("Not enough free system memory to load"));
+    assert_eq!(project_state(&f.project), before);
+
+    // What the window's "Use a smaller context and retry" does: save the
+    // suggested context size, then send the same request again.
+    call(
+        &service,
+        "PUT",
+        "/api/config",
+        json!({"values":{"local_engine":{"context_size":smaller}}}),
+    )
+    .await
+    .unwrap();
+    let retried = call(&service, "POST", "/api/jobs", json!({"workspace":f.project,"task":"What does hello.txt say?","model":id,"mode":"code","session_id":done["session_id"]}))
+        .await
+        .unwrap();
+    let retried = wait_job(&service, retried["id"].as_str().unwrap()).await;
+    assert_eq!(retried["status"], "completed", "{retried}");
+    let launches = lines(&f.bin.join("launches.jsonl"));
+    assert!(
+        launches.last().unwrap()["argv"]
+            .to_string()
+            .contains(&format!("\"--ctx-size\",\"{smaller}\"")),
+        "{:?}",
+        launches.last()
+    );
+    assert_eq!(
+        fs::read_to_string(f.project.join("hello.txt")).unwrap(),
+        "hello, edited by the user\n"
+    );
+    service.engine.shutdown().await.unwrap();
 }

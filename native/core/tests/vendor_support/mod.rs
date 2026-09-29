@@ -121,6 +121,10 @@ for raw in sys.stdin:
         if C.get("close_stdin_after_thread"):
             os.close(sys.stdin.fileno())
         send({"jsonrpc":"2.0","id":mid,"result":{"thread":{"id":active_thread}}})
+        if method == "thread/resume" and C.get("resume_replays_usage"):
+            # Codex 0.158 repeats the previous turn's usage (last == total)
+            # right after thread/resume, under that earlier turn's id.
+            send({"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":active_thread,"turnId":"turn-before-resume","tokenUsage":{"last":{"inputTokens":1500,"outputTokens":500,"totalTokens":2000},"total":{"inputTokens":1500,"outputTokens":500,"totalTokens":2000}}}})
         if C.get("close_stdin_after_thread"):
             time.sleep(20)
             sys.exit(0)
@@ -138,6 +142,14 @@ for raw in sys.stdin:
         mark("prompts.log", json.dumps(text))
         send({"jsonrpc":"2.0","id":mid,"result":{"turn":{"id":active_turn}}})
         mode = C.get("turn", "ok")
+        if C.get("usage_first"):
+            # Tokens the vendor reports before its turn fails, hits the plan
+            # limit or is cancelled (they count against the plan all the same).
+            send({"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":active_thread,"turnId":active_turn,"tokenUsage":{"last":{"inputTokens":1200,"cachedInputTokens":1000,"outputTokens":34,"totalTokens":1234},"total":{"inputTokens":1200,"cachedInputTokens":1000,"outputTokens":34,"totalTokens":1234}}}})
+            mark("usage_sent")
+        if mode == "usage_then_wait":
+            send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":active_thread,"turnId":active_turn,"itemId":"m1","delta":"working on it"}})
+            continue
         if mode == "pause_budget" and not os.path.exists(os.path.join(HERE, "interrupted")):
             mark("pause_ready")
             continue
@@ -200,6 +212,24 @@ for raw in sys.stdin:
             mark("transport.pid", str(os.getpid()))
             sys.stdout.write("x" * 4_000_001); sys.stdout.flush()
             time.sleep(120)  # deliberately never terminates the line
+            continue
+        if mode == "edit_wait":
+            # Edit, report some of the edits (fileChange items), then wait for
+            # the test to act while the turn is still running.
+            for name, text in (C.get("edits") or {}).items():
+                with open(os.path.join(os.getcwd(), name), "w") as f:
+                    f.write(text)
+            for name in C.get("reported") or []:
+                send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":active_thread,"turnId":active_turn,"item":{"id":"f-" + name,"type":"fileChange","status":"completed","changes":[{"path":os.path.join(os.getcwd(), name),"kind":{"type":"update"},"diff":""}]}}})
+            mark("turn_editing")
+            until = time.monotonic() + 20
+            while not os.path.exists(os.path.join(HERE, "release_turn")) and time.monotonic() < until:
+                time.sleep(0.01)
+            for name, text in (C.get("late_edits") or {}).items():
+                with open(os.path.join(os.getcwd(), name), "w") as f:
+                    f.write(text)
+            send({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":active_thread,"turnId":active_turn,"itemId":"m1","delta":"edited"}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":active_thread,"turn":{"id":active_turn,"status":"completed"}}})
             continue
         if mode == "edit":
             # Write and delete project files with the CLI's own tools, as a

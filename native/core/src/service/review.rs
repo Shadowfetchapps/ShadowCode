@@ -110,11 +110,17 @@ impl Service {
 
     /// POST /api/checkpoints/tasks/<id>/restore: rewind a finished task's
     /// files, keeping what they were so the rewind can be undone.
-    pub(super) fn rewind_task(&self, task_id: &str) -> Result<Value> {
+    pub(super) fn rewind_task(&self, task_id: &str, include_user_edits: bool) -> Result<Value> {
         let (session_id, ws) = self.task_workspace(task_id)?;
         let reservation = self.review_workspace(&ws)?;
         let store = self.engine.store();
-        let rewind = crate::review::rewind(&store, &reservation, task_id, &session_id)?;
+        let rewind = crate::review::rewind_with(
+            &store,
+            &reservation,
+            task_id,
+            &session_id,
+            include_user_edits,
+        )?;
         if !rewind.restored.is_empty() {
             crate::checkpoint::note_restore_in_tape(&store, &session_id, &rewind.restored)?;
             self.engine.record_event(

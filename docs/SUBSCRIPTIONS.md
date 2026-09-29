@@ -198,10 +198,19 @@ never uses it once a turn has started or when images are attached.
   is recorded in the task's checkpoint, so **Rewind** restores it once the
   turn has ended. The same limits as for shell commands apply: Git-ignored
   files, files over 4 MB, symlinks and Git history aren't restored. A folder
-  without Git that is too large for the copy gets a warning instead. Edits
-  you make yourself in those files during the turn are rewound too. The
-  vendor's own conversation isn't told about a rewind. Set
-  `checkpoints.vendor: false` to turn this off.
+  without Git that is too large for the copy gets a warning instead. While
+  the turn runs you can keep saving files in ShadowCode's editor: a file
+  you saved that the agent didn't touch afterwards stays as you saved it
+  when you rewind; one you both edited is kept unless you tick **Also
+  rewind** in the confirmation. The confirmation also marks files that
+  changed although the agent didn't report editing them (a command it ran,
+  or another program). Changes you make outside ShadowCode's editor during
+  the turn can't be told apart from the agent's and are rewound with them.
+  The vendor's own conversation isn't told about a rewind. Set
+  `checkpoints.vendor: false` to turn this off (the editor then waits for
+  the turn to end).
+- **Usage.** Tokens and cost the CLI reports are counted once per model call,
+  and also when the turn fails, hits the plan limit or is stopped.
 - **Switching providers.** A move between providers hands over at most 12,000
   characters of earlier turns, after you consent. See the
   [user guide](USER_GUIDE.md#switch-models-mid-conversation).

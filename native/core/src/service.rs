@@ -370,6 +370,19 @@ impl Service {
         self.mutable_workspace_at(&self.workspace()?)
     }
     fn mutable_workspace_at(&self, path: &Path) -> Result<ManualWorkspace> {
+        Ok(self.checked_workspace(path, false)?.0)
+    }
+    /// An editor save: allowed in an idle project and while a subscription
+    /// turn runs there (its task ID is returned so the save is noted and
+    /// Rewind keeps it).
+    fn editable_workspace(&self) -> Result<(ManualWorkspace, Option<String>)> {
+        self.checked_workspace(&self.workspace()?, true)
+    }
+    fn checked_workspace(
+        &self,
+        path: &Path,
+        editor_save: bool,
+    ) -> Result<(ManualWorkspace, Option<String>)> {
         let workspace = Workspace::open(path)?;
         let cfg = Config::load(self.engine.paths(), Some(&workspace.path))?;
         ensure!(
@@ -380,11 +393,18 @@ impl Service {
             cfg.is_trusted(&workspace.path),
             "Trust this project before changing files or running commands"
         );
-        let reservation = self.engine.reserve_workspace(&workspace.path)?;
-        Ok(ManualWorkspace {
-            workspace,
-            reservation,
-        })
+        let (reservation, turn) = if editor_save {
+            self.engine.reserve_workspace_for_edit(&workspace.path)?
+        } else {
+            (self.engine.reserve_workspace(&workspace.path)?, None)
+        };
+        Ok((
+            ManualWorkspace {
+                workspace,
+                reservation,
+            },
+            turn,
+        ))
     }
 }
 fn active(job: &Value) -> bool {

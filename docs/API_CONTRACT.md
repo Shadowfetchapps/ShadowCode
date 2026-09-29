@@ -701,6 +701,17 @@ next start). `limit_reached`: a vendor reported its plan limit; the job stopped
 without retry and `result.limit_reached = {vendor, detail, usage}`.
 ShadowCode never buys credits, redeems resets or enables overages.
 
+A vendor turn that fails, reaches the plan limit or is cancelled keeps the
+tokens and cost the vendor had already reported: they are in `job.usage`,
+`result.usage` and the session total, with a `usage.updated` event.
+
+A managed local model that could not allocate memory while loading ends the
+job `failed` with a plain summary and `result.local_out_of_memory =
+{model_id, model, context_tokens, memory: "gpu"|"system", cpu_tried,
+smaller_context: number|null, detail}`. On an ordinary task a GPU shortage is
+retried once on the CPU instead (`loaded.fallback_out_of_memory`, plus
+`agent.warning {kind: "local_memory"}`); Compare lanes never fall back.
+
 ### Starting a task
 
 `POST /api/jobs` (alias `POST /api/run`) → `Job` (+ `worktree_task`), or the
@@ -1083,13 +1094,19 @@ history. Vendor CLIs are always started without
   and when the file changed since the hunk was computed. Adds a process note
   to the message tape and a `review.undone` event.
 - `GET /api/checkpoints/tasks/{task_id}` → `{rewindable, checkpoint: {task_id,
-  workspace, changes, paths, restored}}`.
+  workspace, changes, paths, restored, rewind_paths, kept, unreported}}`:
+  `rewind_paths` is what a rewind restores now, `kept: [{path, reason:
+  "saved_by_you"|"edited_by_you_and_agent"}]` the files it leaves alone, and
+  `unreported` the files that changed during a subscription turn although the
+  agent did not report editing them.
 - `POST /api/checkpoints/tasks/{task_id}/restore` → `{ok, restored: string[],
   undo_id: string|null}`. The task's project must be the selected one, trusted,
   writable, and idle. Before writing, the files are recorded as they are
   (checkpoint rows of task `rewind:<undo_id>`, `native_meta`
   `rewind_undo:<undo_id>`). Writes `checkpoint.restored`. Restores files
-  changed by file tools, shell commands and subscription turns.
+  changed by file tools, shell commands and subscription turns. Files you
+  saved in the editor during a subscription turn are kept; body
+  `{include_user_edits: true}` also rewinds the ones the agent edited too.
 - `POST /api/checkpoints/rewinds/{undo_id}/undo` → `{ok, restored, task_id}`:
   puts them back once (refused if they changed since); the task can then be
   rewound again. Writes `checkpoint.rewind_undone`.
@@ -1717,7 +1734,7 @@ LocalCatalog = {
   hardware: {cpu_cores, ram_bytes, gpu: string|null, vram_bytes: number|null, backend: "vulkan"|"cpu"|"unknown", devices: string[], detail},
   runtime: {state: "ready"|"setup_required"|"unavailable", path, origin: "bundled"|"managed"|"other", version, backend, commit, detail},
   models: GgufEntry[],
-  loaded: {id, name, port, since, context_tokens, backend, cpu_fallback, fallback_reason: string|null, vision, in_use, provenance}|null,
+  loaded: {id, name, port, since, context_tokens, backend, cpu_fallback, fallback_reason: string|null, fallback_out_of_memory, vision, in_use, provenance}|null,
   ollama_store: {path, available, models: [{tag, path, projector, bytes, compatible, reason, already_added}]}
 }
 GgufEntry = {id: "local:gguf:<hash>", name, path, bytes, source: "file"|"directory"|"ollama"|"download",
@@ -1876,7 +1893,10 @@ All routes act on the selected project.
   this project before changing files or running commands") and no running
   task in it ("Stop the running task before making manual changes"); the
   same checks apply to `PUT` instructions and skills, `exec`, and saving the
-  project map below.
+  project map below. One exception: a save is accepted while a subscription
+  turn is the project's only unfinished task and runs between its
+  checkpoints; the answer then has `during_turn: true` and the save is noted
+  for that turn (`native_meta` `turn_edits:<task_id>`), so a rewind keeps it.
 - `GET /api/workspace/instructions` → `{exists, content, path:
   ".shadow/instructions.md"}`; `PUT … {content}` → `{ok: true}`.
 - `GET /api/workspace/skills` → `{skills, issues}`; `PUT … {name, content,

@@ -6,6 +6,8 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { runNativeX11 } from './run-native-x11.mjs';
+import { compositorCommand, runNativeWayland } from './run-native-wayland.mjs';
+import { createServer } from 'node:net';
 import { capturePrivateSession, inspectPrivateActivations } from './native-test-session.mjs';
 const address = 'unix:path=/tmp/private-test-bus,guid=' + 'a'.repeat(32);
 const host = 'unix:path=/run/user/1000/bus,guid=' + 'b'.repeat(32);
@@ -475,3 +477,66 @@ test('concurrent discovery deadline joins eight readers and late IO cannot signa
   assert.equal(deeperReads, 0, 'late UID reads cannot continue to candidate identity checks');
   assert.deepEqual(f.signals, [], 'late results cannot become partial signal authority');
 });
+
+test('private Wayland compositor command: X11 backend inside a private Xvfb, or headless', () => {
+  const x11 = compositorCommand({ weston: '/opt/weston', backend: 'x11', runtime: '/run/private', config: '/run/private/weston.ini' });
+  assert.equal(x11.exe, 'xvfb-run');
+  assert.deepEqual(x11.args.slice(0, 4), ['-a', '-s', '-screen 0 1600x1100x24 -extension GLX', '/opt/weston']);
+  assert(x11.args.includes('--backend=x11') && x11.args.includes('--renderer=pixman') && x11.args.includes('--socket=wayland-shadowcode-test'));
+  const headless = compositorCommand({ weston: '/opt/weston', backend: 'headless', runtime: '/run/private', config: '/run/private/weston.ini' });
+  assert.equal(headless.exe, '/opt/weston');
+  assert(headless.args.includes('--backend=headless'));
+  assert.throws(() => compositorCommand({ weston: 'weston', backend: 'drm', runtime: '/r', config: '/r/w.ini' }), /x11 or headless/);
+});
+
+/** A stand-in compositor: listens on the socket path the runner waits for. */
+function fakeCompositor(scenario) {
+  const calls = { env: null, stopped: false };
+  const launch = ({ env }) => {
+    calls.env = env;
+    const handle = { child: { pid: 2 ** 22 + 17 }, exited: false, code: null, signal: null, output: 'fixture compositor\n' };
+    const socket = path.join(env.XDG_RUNTIME_DIR, 'wayland-shadowcode-test');
+    let server;
+    if (scenario === 'compositor-dies') { handle.exited = true; handle.code = 1; }
+    else server = createServer().listen(socket);
+    handle.stop = async () => { calls.stopped = true; await new Promise(resolve => server ? server.close(resolve) : resolve()); handle.exited = true; return true; };
+    return handle;
+  };
+  return { calls, launch };
+}
+for (const scenario of ['passed', 'compositor-dies', 'failed-inner', 'nonzero']) {
+  test(`private Wayland session ${scenario}`, () => scratch(async parent => {
+    let seen;
+    const fake = fakeCompositor(scenario);
+    const report = await runNativeWayland(['node', 'a probe.mjs'], {
+      artifactParent: parent, weston: '/fixture/weston', backend: 'x11',
+      libraryPath: '/fixture/lib', moduleMap: 'x11-backend.so=/fixture/x11.so',
+      compositor: fake.launch, identity: async () => null, activationInventory: async () => [],
+      execute: async command => {
+        seen = command;
+        const runtime = commandPath(command, 'XDG_RUNTIME_DIR');
+        assert.equal((await stat(runtime)).mode & 0o777, 0o700);
+        const session = passedSession(); if (scenario === 'failed-inner') session.cleanup.ok = false;
+        await writeFile(commandPath(command, 'SHADOW_NATIVE_SESSION_REPORT'), JSON.stringify(session));
+        return scenario === 'nonzero' ? 3 : 0;
+      },
+    });
+    if (scenario === 'compositor-dies') {
+      assert.equal(report.ok, false); assert.equal(seen, undefined, 'the command never runs without a compositor');
+      assert.match(report.failures.join(' '), /compositor exited before its socket appeared/);
+      return report;
+    }
+    // The app reaches only the private compositor: Wayland declared, the
+    // host display and bus removed, the unpacked Weston library path not leaked.
+    for (const want of [/'GDK_BACKEND=wayland'/, /'XDG_SESSION_TYPE=wayland'/, /'WAYLAND_DISPLAY=wayland-shadowcode-test'/, /'SHADOW_NATIVE_DISPLAY=wayland'/, /'-u' 'DISPLAY'/, /'-u' 'DBUS_SESSION_BUS_ADDRESS'/, /'-u' 'LD_LIBRARY_PATH'/, /'dbus-run-session' '--' 'node' 'a probe.mjs'$/])
+      assert.match(seen, want);
+    assert.equal(fake.calls.env.LD_LIBRARY_PATH, '/fixture/lib');
+    assert.equal(fake.calls.env.WESTON_MODULE_MAP, 'x11-backend.so=/fixture/x11.so');
+    assert.equal(fake.calls.env.DISPLAY, undefined, 'Weston gets its X server from xvfb-run, never the host display');
+    assert.equal(fake.calls.stopped, true, 'the compositor is stopped in every outcome');
+    assert.equal(report.ok, scenario === 'passed');
+    if (scenario === 'passed') { assert.equal(report.runtime_removed, true); assert.equal(report.external_boundary.length, 4); }
+    if (scenario === 'nonzero') assert.equal(report.command_exit, 3);
+    return report;
+  }));
+}

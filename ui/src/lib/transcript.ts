@@ -139,6 +139,18 @@ function userItem(
   taskId: string,
   eventId?: number,
 ): { items: ChatItem[]; item: ChatItem } {
+  // A later message answers an out-of-memory card: its actions are done.
+  const memory = lastIndex(
+    items,
+    (item) => item.kind === "memory" && !item.resolved,
+  );
+  if (memory >= 0) {
+    items = [...items];
+    items[memory] = {
+      ...(items[memory] as Extract<ChatItem, { kind: "memory" }>),
+      resolved: true,
+    };
+  }
   if (!CONTINUATION.test(text))
     return { items, item: { kind: "user", text, taskId, eventId } };
   const ask = lastIndex(
@@ -932,6 +944,32 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
                 : "Needs attention",
         },
       ];
+    const memory = objectFields(p.local_out_of_memory);
+    if (
+      memory &&
+      !p.success &&
+      !p.cancelled &&
+      taskId &&
+      !items.some((item) => item.kind === "memory" && item.taskId === taskId)
+    ) {
+      const request = items.find(
+        (item) => item.kind === "user" && item.taskId === taskId,
+      );
+      const smaller = Number(memory.smaller_context);
+      items = [
+        ...items,
+        {
+          kind: "memory",
+          taskId,
+          text,
+          model: String(memory.model || "The local model"),
+          ...(Number.isFinite(smaller) && smaller > 0
+            ? { smallerContext: smaller }
+            : {}),
+          request: request?.text || "",
+        },
+      ];
+    }
     let forkIndex = -1;
     for (let i = items.length - 1; i >= 0; i--) {
       if (items[i].kind === "agent" && items[i].taskId === taskId) {
