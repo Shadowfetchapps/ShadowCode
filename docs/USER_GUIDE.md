@@ -992,12 +992,13 @@ Subscription CLIs use their own sandboxes, not this one.
 ## Troubleshooting
 
 When a task fails for a common reason (the provider didn't accept the key,
-the account is out of credits, the conversation is too long for the model,
-the model doesn't exist, the provider is limiting or having trouble, the
-local model isn't running, or this computer is offline), a **What went
-wrong** box under the error says so in plain words, with buttons for the
-next step: **Try again**, **Continue on another model…**, **Choose a model**
-or **Open Local models**. The provider's own text stays above it.
+the account is out of credits or has used up its allowance, the
+conversation is too long for the model, the model doesn't exist, the
+provider is limiting or having trouble, the local model isn't running or hit
+an error, or this computer is offline), a **What went wrong** box under the
+error says so in plain words, with buttons for the next step: **Try
+again**, **Continue on another model…**, **Choose a model** or **Open Local
+models**. The provider's own text stays above it.
 
 New to some of the words? **Help** (`?`, or *Help: words you'll see* in the
 command palette) explains them: worktree, checkpoint, rewind, context,

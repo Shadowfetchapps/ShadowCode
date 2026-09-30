@@ -745,7 +745,11 @@ async fn status_fixture(status: u16, body: &str) -> (String, tokio::task::JoinHa
 async fn provider_http_429_and_500_do_not_execute_tools() {
     let root = tempfile::tempdir().unwrap();
     let paths = AppPaths::isolated(root.path()).unwrap();
-    for (status, needle) in [(429, "rate limit"), (500, "HTTP 500")] {
+    // The fixture listens on 127.0.0.1, so its 500 is a local server's.
+    for (status, needle) in [
+        (429, "rate limit"),
+        (500, "HTTP 500; the model server on this computer failed"),
+    ] {
         let (endpoint, task) = status_fixture(status, "{\"error\":\"nope\"}").await;
         let client = ModelClient::new(
             ModelConfig {

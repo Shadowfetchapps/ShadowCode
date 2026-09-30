@@ -336,6 +336,20 @@ const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Longest wait for a local runtime's first byte after its headers: prompt
 /// processing on a CPU-only machine can take several minutes.
 const LOCAL_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(900);
+/// What follows "Model provider returned HTTP <code>" in a failed request.
+fn http_hint(code: u16, local: bool) -> &'static str {
+    match code {
+        401 | 403 => "; check the API key",
+        402 => "; the provider account needs credits or a payment method",
+        404 => "; check the endpoint and model name",
+        429 => "; provider rate limit reached",
+        503 | 529 => "; provider overloaded",
+        // Not retried (`crate::retry`): the same request fails the same way,
+        // so the window does not say it will pass on its own.
+        500..=599 if local => "; the model server on this computer failed",
+        _ => "",
+    }
+}
 pub fn is_loopback_endpoint(endpoint: &str) -> bool {
     reqwest::Url::parse(endpoint)
         .ok()
@@ -673,17 +687,10 @@ impl ModelClient {
                 return Err(anyhow::Error::new(crate::retry::ModelFailure::Http {
                     status: code,
                     retry_after,
-                    local: is_loopback_endpoint(&url),
+                    local,
                     message: format!(
                         "Model provider returned HTTP {code}{}{detail}",
-                        match code {
-                            401 | 403 => "; check the API key",
-                            402 => "; the provider account needs credits or a payment method",
-                            404 => "; check the endpoint and model name",
-                            429 => "; provider rate limit reached",
-                            503 | 529 => "; provider overloaded",
-                            _ => "",
-                        }
+                        http_hint(code, local)
                     ),
                 }));
             }
@@ -1359,6 +1366,24 @@ mod tests {
         assert!(!provider_error_detail(leaked.as_bytes(), false)
             .unwrap_or_default()
             .contains(&key));
+    }
+
+    #[test]
+    fn a_local_server_error_is_named_as_one() {
+        // A local runtime's 500 (a template or tool-call exception) is not
+        // retried; a remote 500 is, and 503 is a local model still loading.
+        assert_eq!(
+            http_hint(500, true),
+            "; the model server on this computer failed"
+        );
+        assert_eq!(
+            http_hint(501, true),
+            "; the model server on this computer failed"
+        );
+        assert_eq!(http_hint(500, false), "");
+        assert_eq!(http_hint(503, true), "; provider overloaded");
+        assert_eq!(http_hint(429, true), "; provider rate limit reached");
+        assert_eq!(http_hint(400, true), "");
     }
 
     #[test]

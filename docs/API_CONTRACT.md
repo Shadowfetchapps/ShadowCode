@@ -1057,10 +1057,11 @@ Usage = {prompt_tokens, completion_tokens, total_tokens,
   over 120 s is not waited for. Tools run only after a complete response, so
   a retry never repeats a tool. A request that is not retried fails the task
   with `Model provider returned HTTP <status>; <hint>: <message>` (hints for
-  401/403, 402, 404, 429, 503/529) or `Provider reported an error while
-  generating: <message>`; a remote provider's message comes from its JSON
-  error body only, redacted and at most 300 bytes. A refused request adds no
-  usage unless the provider reported tokens.
+  401/403, 402, 404, 429, 503/529, and `the model server on this computer
+  failed` for another 5xx from a local runtime) or `Provider reported an
+  error while generating: <message>`; a remote provider's message comes from
+  its JSON error body only, redacted and at most 300 bytes. A refused request
+  adds no usage unless the provider reported tokens.
 - `context.compacted {before_estimated_tokens, after_estimated_tokens,
   omitted_messages, response_token_limit, method, preserved, summary?,
   summary_model?, summary_ms?, fallback_reason?, pinned, rules_reapplied,

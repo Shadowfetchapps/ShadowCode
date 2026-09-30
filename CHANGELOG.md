@@ -7,10 +7,10 @@ For people starting out:
   the free models on this computer first (*Free · your code stays on this
   computer*).
 - **What went wrong, in plain words.** A task that fails for a common reason
-  (key refused, out of credits, conversation too long, unknown model, rate
-  limit, provider trouble, local model not running, offline) explains it and
-  offers the next step: **Try again**, **Continue on another model…**,
-  **Choose a model** or **Open Local models**.
+  (key refused, out of credits or allowance, conversation too long, unknown
+  model, rate limit, provider trouble, local model not running or failing,
+  offline) explains it and offers the next step: **Try again**, **Continue on
+  another model…**, **Choose a model** or **Open Local models**.
 - **Words you'll see.** Help (`?`) explains worktree, checkpoint, rewind,
   context, tokens, hunk and more; some words in the app show their meaning
   when you point at them.
