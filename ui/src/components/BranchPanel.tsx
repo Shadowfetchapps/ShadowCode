@@ -24,6 +24,7 @@ import {
   type PrCreated,
   type PrStatus,
   type PullRequest,
+  type PushRefusal,
   type Suggestion,
 } from "../lib/forge";
 import { openExternal } from "../lib/transport";
@@ -105,12 +106,27 @@ export function BranchPanel({
   const [created, setCreated] = useState<PullRequest | null>(null);
   const guard = useCommitGuard(toast);
   /** A push or pull request refused because its commits may contain a
-   * secret: what was found, and how to go on anyway. */
+   * secret (or could not all be checked): what was found, and how to go
+   * on anyway with exactly the commits that were checked. */
   const [pushSecrets, setPushSecrets] = useState<{
     findings: SecretFinding[];
     truncated: boolean;
+    unchecked: string | null;
     retry: () => Promise<void>;
   } | null>(null);
+  const refused = (
+    answer: PushRefusal,
+    retry: (scanned: string) => Promise<void>,
+  ) => {
+    if (!answer.secrets?.length && !answer.secrets_unchecked) return false;
+    setPushSecrets({
+      findings: answer.secrets || [],
+      truncated: Boolean(answer.secrets_truncated),
+      unchecked: answer.secrets_unchecked || null,
+      retry: () => retry(answer.scanned ?? ""),
+    });
+    return true;
+  };
   const review = useStagedReview({
     workspace,
     sessionId,
@@ -441,22 +457,15 @@ export function BranchPanel({
               }
               onClick={() =>
                 void run("push", async () => {
-                  const push = async (allow: boolean) => {
-                    const done = await forgeApi.push("", allow);
-                    if (!done.ok && done.secrets?.length) {
-                      setPushSecrets({
-                        findings: done.secrets,
-                        truncated: Boolean(done.secrets_truncated),
-                        retry: () => push(true),
-                      });
-                      return;
-                    }
+                  const push = async (scanned?: string) => {
+                    const done = await forgeApi.push("", scanned);
+                    if (!done.ok && refused(done, push)) return;
                     if (!done.ok) throw new Error(done.error || "Not pushed");
                     setPushSecrets(null);
                     toast(`Pushed ${done.branch} to ${done.remote}`, "ok");
                     await load();
                   };
-                  await push(false);
+                  await push();
                 })
               }
             >
@@ -664,28 +673,25 @@ export function BranchPanel({
                           );
                           await load();
                         };
-                        const open = async (allow: boolean): Promise<void> => {
+                        const open = async (
+                          scanned?: string,
+                        ): Promise<void> => {
                           const made = await forgeApi.createPr({
                             title: pr.title.trim(),
                             body: pr.body,
                             base,
                             draft: pr.draft,
-                            ...(allow ? { allow_secrets: true } : {}),
+                            ...(scanned !== undefined
+                              ? { allow_secrets: true, scanned }
+                              : {}),
                           });
-                          if (!made.ok && made.secrets?.length) {
-                            setPushSecrets({
-                              findings: made.secrets,
-                              truncated: Boolean(made.secrets_truncated),
-                              retry: () => open(true),
-                            });
-                            return;
-                          }
+                          if (!made.ok && refused(made, open)) return;
                           if (!made.ok)
                             throw new Error(made.error || "Not opened");
                           setPushSecrets(null);
                           await finish(made);
                         };
-                        await open(false);
+                        await open();
                       })
                     }
                   >
@@ -754,7 +760,11 @@ export function BranchPanel({
       {guard.dialog}
       {pushSecrets && (
         <ConfirmDialog
-          title="These commits may contain a secret"
+          title={
+            pushSecrets.findings.length
+              ? "These commits may contain a secret"
+              : "These commits weren’t all checked"
+          }
           confirmLabel="Push anyway"
           danger
           onCancel={() => setPushSecrets(null)}
@@ -764,15 +774,29 @@ export function BranchPanel({
             })
           }
         >
-          <p>
-            Nothing was pushed. Once a secret is on the remote, anyone with the
-            repository can read it, so remove it from these commits first if it
-            is real.
+          {pushSecrets.findings.length ? (
+            <>
+              <p>
+                Nothing was pushed. Once a secret is on the remote, anyone with
+                the repository can read it, so remove it from these commits
+                first if it is real.
+              </p>
+              <SecretFindings
+                findings={pushSecrets.findings}
+                truncated={pushSecrets.truncated}
+                unchecked={pushSecrets.unchecked}
+              />
+            </>
+          ) : (
+            <p>
+              Nothing was pushed. {pushSecrets.unchecked} Push anyway only if
+              you know these commits hold no secrets.
+            </p>
+          )}
+          <p className="hint">
+            Push anyway sends the commits checked here. Commits made since then
+            stay on this computer until you push again.
           </p>
-          <SecretFindings
-            findings={pushSecrets.findings}
-            truncated={pushSecrets.truncated}
-          />
         </ConfirmDialog>
       )}
     </div>

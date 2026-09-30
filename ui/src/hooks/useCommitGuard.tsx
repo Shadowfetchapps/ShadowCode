@@ -1,26 +1,36 @@
 import { useState } from "react";
-import { api, type GitHook, type SecretFinding } from "../api";
+import {
+  api,
+  type CommitOptions,
+  type GitHook,
+  type SecretFinding,
+} from "../api";
 import { Dialog } from "../components/Dialog";
 import { SecretFindings } from "../components/SecretFindings";
 
-type Options = { allow_secrets?: boolean; hooks?: "run" | "skip" };
 type Pending = {
   message: string;
-  options: Options;
+  options: CommitOptions;
   done: () => void | Promise<void>;
 };
 type Guard =
-  | (Pending & { kind: "hooks"; hooks: GitHook[] })
+  | (Pending & {
+      kind: "hooks";
+      hooks: GitHook[];
+      fingerprint?: string;
+      changed: boolean;
+    })
   | (Pending & {
       kind: "secrets";
       findings: SecretFinding[];
       truncated: boolean;
+      unchecked: string | null;
     });
 
 /** Commits from the Git tab: the engine may answer that the staged changes
- * look like they contain a secret, or ask once whether to run the
- * project's own Git hooks. This shows those questions and commits when
- * they are answered. */
+ * look like they contain a secret (or could not all be checked), or ask
+ * whether to run the project's own Git hooks. This shows those questions
+ * and commits when they are answered. */
 export function useCommitGuard(
   toast: (text: string, kind?: "ok" | "err" | "info") => void,
 ) {
@@ -29,7 +39,7 @@ export function useCommitGuard(
 
   async function attempt(
     message: string,
-    options: Options,
+    options: CommitOptions,
     done: Pending["done"],
   ): Promise<boolean> {
     const result = await api.gitCommit(message, options);
@@ -42,17 +52,20 @@ export function useCommitGuard(
       setGuard({
         kind: "hooks",
         hooks: result.hooks || [],
+        fingerprint: result.hooks_fingerprint,
+        changed: Boolean(result.hooks_changed),
         message,
         options,
         done,
       });
       return false;
     }
-    if (result.secrets?.length) {
+    if (result.secrets?.length || result.secrets_unchecked) {
       setGuard({
         kind: "secrets",
-        findings: result.secrets,
+        findings: result.secrets || [],
         truncated: Boolean(result.secrets_truncated),
+        unchecked: result.secrets_unchecked || null,
         message,
         options,
         done,
@@ -80,6 +93,19 @@ export function useCommitGuard(
         : g,
     );
 
+  const secretsTitle =
+    guard?.kind !== "secrets"
+      ? ""
+      : guard.findings.length
+        ? "This commit may contain a secret"
+        : guard.unchecked
+          ? "These changes weren’t all checked"
+          : "Ready to commit";
+  // A retry would only be refused again: the user decides.
+  const blocked =
+    guard?.kind === "secrets" &&
+    (guard.findings.length > 0 || Boolean(guard.unchecked));
+
   const dialog = guard ? (
     guard.kind === "hooks" ? (
       <Dialog
@@ -89,8 +115,9 @@ export function useCommitGuard(
         <div className="confirm-dialog">
           <h2>Run this project’s Git hooks?</h2>
           <p>
-            This project has its own Git hooks. ShadowCode doesn’t run them
-            unless you say so, because they are programs from the repository.
+            {guard.changed
+              ? "The hooks changed since you chose to run them, so ShadowCode asks again."
+              : "This project has its own Git hooks. ShadowCode doesn’t run them unless you say so, because they are programs from the repository."}
           </p>
           <ul className="hook-list" aria-label="Git hooks">
             {guard.hooks.map((hook) => (
@@ -100,8 +127,8 @@ export function useCommitGuard(
             ))}
           </ul>
           <p className="hint">
-            Your answer is kept for this project. Change it in Settings ›
-            Permissions & network.
+            Your answer is kept for this project until the hooks change. Change
+            it in Settings › Permissions & network.
           </p>
           <div className="row confirm-actions">
             <button
@@ -135,7 +162,13 @@ export function useCommitGuard(
                 void act(() =>
                   attempt(
                     guard.message,
-                    { ...guard.options, hooks: "run" },
+                    {
+                      ...guard.options,
+                      hooks: "run",
+                      ...(guard.fingerprint
+                        ? { hooks_fingerprint: guard.fingerprint }
+                        : {}),
+                    },
                     guard.done,
                   ),
                 )
@@ -147,16 +180,9 @@ export function useCommitGuard(
         </div>
       </Dialog>
     ) : (
-      <Dialog
-        label="This commit may contain a secret"
-        onClose={() => setGuard(null)}
-      >
+      <Dialog label={secretsTitle} onClose={() => setGuard(null)}>
         <div className="confirm-dialog">
-          <h2>
-            {guard.findings.length
-              ? "This commit may contain a secret"
-              : "Ready to commit"}
-          </h2>
+          <h2>{secretsTitle}</h2>
           {guard.findings.length > 0 ? (
             <>
               <p>
@@ -166,6 +192,7 @@ export function useCommitGuard(
               <SecretFindings
                 findings={guard.findings}
                 truncated={guard.truncated}
+                unchecked={guard.unchecked}
                 actions={(path) => (
                   <>
                     <button
@@ -187,8 +214,13 @@ export function useCommitGuard(
                       disabled={working}
                       onClick={() =>
                         void act(async () => {
-                          await api.gitIgnore(path);
+                          const ignored = await api.gitIgnore(path);
                           drop(path);
+                          if (ignored.tracked)
+                            toast(
+                              `${path} is already in the repository, so .gitignore doesn’t apply to it. Its changes are out of this commit.`,
+                              "info",
+                            );
                         })
                       }
                     >
@@ -198,6 +230,11 @@ export function useCommitGuard(
                 )}
               />
             </>
+          ) : guard.unchecked ? (
+            <p>
+              Nothing was committed. {guard.unchecked} Commit anyway only if you
+              know these changes hold no secrets.
+            </p>
           ) : (
             <p>The files with possible secrets are out of this commit.</p>
           )}
@@ -209,7 +246,7 @@ export function useCommitGuard(
             >
               Cancel
             </button>
-            {guard.findings.length > 0 ? (
+            {blocked ? (
               <button
                 type="button"
                 className="primary danger"

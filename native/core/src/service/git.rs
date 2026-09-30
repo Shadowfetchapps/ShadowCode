@@ -9,15 +9,16 @@ impl Service {
         args: Vec<String>,
         cancel: CancellationToken,
     ) -> Result<Value> {
-        Self::git_with_hooks(workspace, args, cancel, false).await
+        Self::git_with_hooks(workspace, args, cancel, None).await
     }
-    /// `git_in`, running the repository's own hooks when `hooks` is set
-    /// (a commit the user chose to run them for).
+    /// `git_in`, running the repository's own hooks when `hooks` names a
+    /// file for Git's trace events (a commit the user chose to run them
+    /// for); the events tell whether a hook failed.
     async fn git_with_hooks(
         workspace: &Path,
         args: Vec<String>,
         cancel: CancellationToken,
-        hooks: bool,
+        hooks: Option<&Path>,
     ) -> Result<Value> {
         let mut base: Vec<String> = vec![
             "--no-pager".into(),
@@ -26,7 +27,7 @@ impl Service {
             "-c".into(),
             "core.fsmonitor=false".into(),
         ];
-        if !hooks {
+        if hooks.is_none() {
             base.extend(["-c".into(), "core.hooksPath=/dev/null".into()]);
         }
         base.extend([
@@ -48,14 +49,14 @@ impl Service {
             base.extend(crate::git_guard::harden(&words));
         }
         let refs: Vec<_> = base.iter().map(String::as_str).collect();
-        Ok(json!(
-            process::run(
-                ProcessSpec::command("git", &refs, workspace.to_owned()),
-                cancel,
-                None
-            )
-            .await?
-        ))
+        let mut spec = ProcessSpec::command("git", &refs, workspace.to_owned());
+        if let Some(trace) = hooks {
+            spec.env.insert(
+                "GIT_TRACE2_EVENT".into(),
+                trace.to_string_lossy().into_owned(),
+            );
+        }
+        Ok(json!(process::run(spec, cancel, None).await?))
     }
     pub(super) async fn git_status(&self) -> Result<Value> {
         let workspace = self.workspace()?;
@@ -273,10 +274,11 @@ impl Service {
         Ok(json!({"ok":true}))
     }
     /// POST /api/workspace/git/commit `{message, allow_secrets?, hooks?:
-    /// "run"|"skip"}`: commit what is staged (never signed). The staged
-    /// changes are checked for secrets first, and a project with its own
-    /// Git hooks is asked once whether to run them; both answer in band
-    /// (`ok: false, status: 409`) and nothing is committed.
+    /// "run"|"skip", hooks_fingerprint?}`: commit what is staged (never
+    /// signed). The staged changes are checked for secrets first, and a
+    /// project with its own Git hooks is asked whether to run them (once,
+    /// and again when hooks the user chose to run change); both answer in
+    /// band (`ok: false, status: 409`) and nothing is committed.
     pub(super) async fn git_commit(&self, body: &Value) -> Result<Value> {
         let ws = self.mutable_workspace()?;
         let message = body["message"].as_str().unwrap_or("");
@@ -289,23 +291,39 @@ impl Service {
         let run_hooks = if hooks.is_empty() {
             false
         } else {
+            let fingerprint = crate::git_hooks::fingerprint(&ws.path).await;
+            let ask = |changed: bool| {
+                json!({
+                    "ok": false,
+                    "status": 409,
+                    "needs_hooks_choice": true,
+                    "hooks": hooks,
+                    "hooks_fingerprint": fingerprint,
+                    "hooks_changed": changed,
+                    "error": if changed {
+                        "This project's Git hooks changed since you chose to run them. Choose again whether commits from ShadowCode run them."
+                    } else {
+                        "This project has its own Git hooks. Choose whether commits from ShadowCode run them."
+                    },
+                })
+            };
             match body["hooks"].as_str() {
                 Some(choice @ ("run" | "skip")) => {
                     let run = choice == "run";
-                    crate::git_hooks::set_preference(&store, &ws.path, Some(run))?;
+                    // "Run them" holds for the hooks the question showed.
+                    if run
+                        && body["hooks_fingerprint"]
+                            .as_str()
+                            .is_some_and(|seen| seen != fingerprint)
+                    {
+                        return Ok(ask(true));
+                    }
+                    crate::git_hooks::set_preference(&store, &ws.path, Some(run), &fingerprint)?;
                     run
                 }
-                _ => match crate::git_hooks::preference(&store, &ws.path)? {
-                    Some(run) => run,
-                    None => {
-                        return Ok(json!({
-                            "ok": false,
-                            "status": 409,
-                            "needs_hooks_choice": true,
-                            "hooks": hooks,
-                            "error": "This project has its own Git hooks. Choose whether commits from ShadowCode run them.",
-                        }))
-                    }
+                _ => match crate::git_hooks::choice(&store, &ws.path, &fingerprint)? {
+                    crate::git_hooks::Choice { run: Some(run), .. } => run,
+                    crate::git_hooks::Choice { run: None, changed } => return Ok(ask(changed)),
                 },
             }
         };
@@ -315,6 +333,7 @@ impl Service {
                 return Ok(scan.refusal("committed"));
             }
         }
+        let trace = run_hooks.then(tempfile::NamedTempFile::new).transpose()?;
         let result = Self::git_with_hooks(
             &ws.path,
             vec![
@@ -325,25 +344,32 @@ impl Service {
                 message.into(),
             ],
             ws.reservation.cancellation(),
-            run_hooks,
+            trace.as_ref().map(|file| file.path()),
         )
         .await?;
-        if result["ok"] != true && run_hooks {
-            bail!(
-                "The project's Git hooks stopped the commit; nothing was committed.\n{}",
-                crate::tools::truncate(
-                    &format!(
-                        "{}\n{}",
-                        result["stderr"].as_str().unwrap_or(""),
-                        result["stdout"].as_str().unwrap_or("")
-                    ),
-                    4000
-                )
-                .trim()
-            );
+        if result["ok"] != true {
+            let output = crate::tools::truncate(
+                &format!(
+                    "{}\n{}",
+                    result["stderr"].as_str().unwrap_or(""),
+                    result["stdout"].as_str().unwrap_or("")
+                ),
+                4000,
+            )
+            .trim()
+            .to_owned();
+            // Only a hook that failed is blamed; Git's own reasons (nothing
+            // staged, no name and email set) are shown as they are.
+            if let Some(hook) = trace
+                .as_ref()
+                .and_then(|file| std::fs::read_to_string(file.path()).ok())
+                .and_then(|events| crate::git_hooks::failed_hook(&events))
+            {
+                bail!("The project's {hook} hook stopped the commit; nothing was committed.\n{output}");
+            }
+            bail!("Git could not commit; nothing was committed.\n{output}");
         }
-        ensure!(result["ok"] == true, "{}", result["stderr"]);
-        Ok(json!({"ok":true,"hooks_ran":run_hooks && !hooks.is_empty()}))
+        Ok(json!({"ok":true,"hooks_ran":run_hooks}))
     }
     /// POST /api/workspace/git/unstage `{paths}`: take files out of the next
     /// commit (the working tree is unchanged).
@@ -366,8 +392,12 @@ impl Service {
         ensure!(result["ok"] == true, "{}", result["stderr"]);
         Ok(json!({"ok":true}))
     }
-    /// POST /api/workspace/git/ignore `{path}`: add a file to the project's
-    /// `.gitignore` and take it out of the next commit.
+    /// POST /api/workspace/git/ignore `{path}`: add a new file to the
+    /// project's `.gitignore` and take it out of the next commit. A file
+    /// already in the last commit stays in the repository (`.gitignore`
+    /// does not apply to it, and removing it would delete it for everyone
+    /// who pulls): its staged changes are taken out of the commit instead,
+    /// and the answer says `tracked: true`.
     pub(super) async fn git_ignore(&self, body: &Value) -> Result<Value> {
         let ws = self.mutable_workspace()?;
         let path = ws
@@ -378,6 +408,29 @@ impl Service {
             !path.is_empty() && !path.contains('\n') && !path.starts_with(".git/"),
             "Choose a file in the project"
         );
+        let committed = Self::git_in(
+            &ws.path,
+            vec![
+                "ls-tree".into(),
+                "-z".into(),
+                "--name-only".into(),
+                "HEAD".into(),
+                "--".into(),
+                path.clone(),
+            ],
+            ws.reservation.cancellation(),
+        )
+        .await?;
+        if committed["ok"] == true && !committed["stdout"].as_str().unwrap_or("").is_empty() {
+            let result = Self::git_in(
+                &ws.path,
+                vec!["reset".into(), "-q".into(), "--".into(), path.clone()],
+                ws.reservation.cancellation(),
+            )
+            .await?;
+            ensure!(result["ok"] == true, "{}", result["stderr"]);
+            return Ok(json!({"ok":true,"path":path,"tracked":true}));
+        }
         let ignore = ws.path.join(".gitignore");
         let mut text = std::fs::read_to_string(&ignore).unwrap_or_default();
         let line = format!("/{}", path.replace('\\', "\\\\"));
@@ -403,25 +456,38 @@ impl Service {
         )
         .await?;
         ensure!(result["ok"] == true, "{}", result["stderr"]);
-        Ok(json!({"ok":true,"path":path}))
+        Ok(json!({"ok":true,"path":path,"tracked":false}))
     }
     /// GET/POST /api/workspace/git/hooks: the project's commit hooks and
-    /// whether commits from ShadowCode run them (`run: null` asks next time).
+    /// whether commits from ShadowCode run them (`run: null` asks next
+    /// time). A POST of `run: true` holds for the hooks as they are; with
+    /// `fingerprint` (from the GET) it is refused when they changed since.
     pub(super) async fn git_hooks(&self, body: Option<&Value>) -> Result<Value> {
         let workspace = self.workspace()?;
         let store = self.engine.store();
+        let fingerprint = crate::git_hooks::fingerprint(&workspace).await;
         if let Some(body) = body {
             let run = match &body["run"] {
                 Value::Bool(run) => Some(*run),
                 Value::Null => None,
                 _ => bail!("run must be true, false or null"),
             };
-            crate::git_hooks::set_preference(&store, &workspace, run)?;
+            ensure!(
+                run != Some(true)
+                    || body["fingerprint"]
+                        .as_str()
+                        .is_none_or(|seen| seen == fingerprint),
+                "This project's Git hooks changed. Look at them again, then choose."
+            );
+            crate::git_hooks::set_preference(&store, &workspace, run, &fingerprint)?;
         }
+        let choice = crate::git_hooks::choice(&store, &workspace, &fingerprint)?;
         Ok(json!({
             "workspace": workspace,
             "hooks": crate::git_hooks::found(&workspace, crate::git_hooks::COMMIT_HOOKS).await,
-            "run": crate::git_hooks::preference(&store, &workspace)?,
+            "run": choice.run,
+            "changed": choice.changed,
+            "fingerprint": fingerprint,
         }))
     }
 }

@@ -819,10 +819,32 @@ export type CommitResult = {
   status?: number;
   error?: string;
   secrets?: SecretFinding[];
+  /** More findings than are listed. */
   secrets_truncated?: boolean;
+  /** What the secret check could not read, in a sentence. */
+  secrets_unchecked?: string | null;
   needs_hooks_choice?: boolean;
   hooks?: GitHook[];
+  /** The hooks the question shows; send it back with `hooks: "run"`. */
+  hooks_fingerprint?: string;
+  /** The hooks changed since the user chose to run them. */
+  hooks_changed?: boolean;
   hooks_ran?: boolean;
+};
+/** Commit options: overrides and the answer to the hooks question. */
+export type CommitOptions = {
+  allow_secrets?: boolean;
+  hooks?: "run" | "skip";
+  hooks_fingerprint?: string;
+};
+/** The project's hooks and the saved answer (Settings). */
+export type GitHooksState = {
+  workspace: string;
+  hooks: GitHook[];
+  run: boolean | null;
+  /** Hooks the user chose to run changed; the next commit asks again. */
+  changed: boolean;
+  fingerprint: string;
 };
 export type SecretStorage = {
   keyring: { available: boolean; detail: string | null };
@@ -2232,30 +2254,27 @@ export const api = {
       message: "",
       paths,
     }),
-  gitCommit: (
-    message: string,
-    options: { allow_secrets?: boolean; hooks?: "run" | "skip" } = {},
-  ) =>
+  gitCommit: (message: string, options: CommitOptions = {}) =>
     send<CommitResult>("/api/workspace/git/commit", "POST", {
       message,
       ...options,
     }),
   gitUnstage: (paths: string[]) =>
     send<{ ok: boolean }>("/api/workspace/git/unstage", "POST", { paths }),
+  /** `tracked`: the file is already in the repository, so it stays there
+   * and only its change left the commit. */
   gitIgnore: (path: string) =>
-    send<{ ok: boolean; path: string }>("/api/workspace/git/ignore", "POST", {
-      path,
-    }),
-  gitHooks: () =>
-    get<{ workspace: string; hooks: GitHook[]; run: boolean | null }>(
-      "/api/workspace/git/hooks",
-    ),
-  setGitHooks: (run: boolean | null) =>
-    send<{ workspace: string; hooks: GitHook[]; run: boolean | null }>(
-      "/api/workspace/git/hooks",
+    send<{ ok: boolean; path: string; tracked: boolean }>(
+      "/api/workspace/git/ignore",
       "POST",
-      { run },
+      { path },
     ),
+  gitHooks: () => get<GitHooksState>("/api/workspace/git/hooks"),
+  setGitHooks: (run: boolean | null, fingerprint?: string) =>
+    send<GitHooksState>("/api/workspace/git/hooks", "POST", {
+      run,
+      ...(fingerprint ? { fingerprint } : {}),
+    }),
   /** Where saved API keys live (never their values). */
   secretStorage: () => get<SecretStorage>("/api/secrets"),
   moveSecret: (name: string, to: "keyring" | "file") =>

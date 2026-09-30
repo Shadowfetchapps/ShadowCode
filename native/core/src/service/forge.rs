@@ -30,6 +30,8 @@ struct GitFlowBody {
     draft: Flag,
     /// Push even though the commits look like they contain a secret.
     allow_secrets: Flag,
+    /// With `allow_secrets`: the commit the refusal was for (`scanned`).
+    scanned: Text,
 }
 
 /// A remote in words the UI can use: where it lives and its web page.
@@ -298,8 +300,12 @@ impl Service {
                     .await
             }
             ("POST", "/api/git/push") => {
-                self.git_push(body.remote.as_str(), body.allow_secrets.is_true())
-                    .await
+                self.git_push(
+                    body.remote.as_str(),
+                    body.allow_secrets.is_true(),
+                    body.scanned.as_str(),
+                )
+                .await
             }
             ("GET", "/api/git/pr") => self.pr_status(call.q("remote"), call.q("base")).await,
             ("POST", "/api/git/pr") => self.pr_create(&body).await,
@@ -587,36 +593,109 @@ impl Service {
         Ok(json!({"ok": true, "branch": name, "created": create}))
     }
 
-    /// The in-band refusal when the commits a push would send look like
-    /// they contain a secret (`secret_scan`), unless the user allowed it.
-    async fn push_secret_check(
+    /// The full id of a commit.
+    async fn commit_id(&self, workspace: &Path, name: &str) -> Result<String> {
+        let found = self
+            .git_read(
+                workspace,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{name}^{{commit}}"),
+                ],
+            )
+            .await?;
+        let id = out(&found);
+        ensure!(
+            ok(&found) && !id.is_empty(),
+            "Git could not find the commit to push"
+        );
+        Ok(id)
+    }
+
+    /// The commit a push sends, checked for secrets first (`secret_scan`):
+    /// the branch's commit now, or, when the user pushes anyway, the commit
+    /// the findings were for (`scanned`), so a commit made while the
+    /// question was open is never sent unchecked. `Err` is the in-band
+    /// refusal, with the commit it was for in `scanned`.
+    async fn push_target(
+        &self,
+        workspace: &Path,
+        remote: &str,
+        branch: &str,
+        allow: bool,
+        scanned: &str,
+    ) -> Result<std::result::Result<String, Value>> {
+        let tip = self
+            .commit_id(workspace, &format!("refs/heads/{branch}"))
+            .await?;
+        if allow && !scanned.is_empty() {
+            ensure!(
+                (40..=64).contains(&scanned.len())
+                    && scanned.bytes().all(|b| b.is_ascii_hexdigit()),
+                "scanned must be a full commit id"
+            );
+            let scanned = self.commit_id(workspace, scanned).await?;
+            let contained = self
+                .git_read(workspace, &["merge-base", "--is-ancestor", &scanned, &tip])
+                .await?;
+            ensure!(
+                ok(&contained),
+                "The branch changed since it was checked. Push again to check it."
+            );
+            return Ok(Ok(scanned));
+        }
+        if allow {
+            return Ok(Ok(tip));
+        }
+        let scan = crate::secret_scan::unpushed(workspace, &tip, remote).await?;
+        if scan.is_clean() {
+            return Ok(Ok(tip));
+        }
+        let mut refusal = scan.refusal("pushed");
+        refusal["scanned"] = json!(tip);
+        Ok(Err(refusal))
+    }
+
+    /// The current branch and the remote a push goes to.
+    async fn push_destination(
         &self,
         workspace: &Path,
         requested_remote: &str,
-        allow: bool,
-    ) -> Result<Option<Value>> {
-        if allow {
-            return Ok(None);
-        }
-        let Some((remote, _)) = self.chosen_remote(workspace, requested_remote).await? else {
-            return Ok(None);
+    ) -> Result<(String, String)> {
+        let branch = self
+            .current_branch(workspace)
+            .await?
+            .context("Switch to a branch before pushing (the project is on a detached commit)")?;
+        let remote = match self.chosen_remote(workspace, requested_remote).await? {
+            Some((name, _)) => name,
+            None => bail!("This repository has no remote to push to. Add one with git remote add."),
         };
-        let scan = crate::secret_scan::unpushed(workspace, &remote).await?;
-        Ok((!scan.is_clean()).then(|| scan.refusal("pushed")))
+        Ok((remote, branch))
     }
 
-    /// POST /api/git/push `{remote?, allow_secrets?}`: push the current
-    /// branch and set its upstream. Commits that look like they contain a
-    /// secret are refused in band first.
-    async fn git_push(&self, requested_remote: &str, allow_secrets: bool) -> Result<Value> {
+    /// POST /api/git/push `{remote?, allow_secrets?, scanned?}`: push the
+    /// current branch and set its upstream. Commits that look like they
+    /// contain a secret are refused in band first.
+    async fn git_push(
+        &self,
+        requested_remote: &str,
+        allow_secrets: bool,
+        scanned: &str,
+    ) -> Result<Value> {
         let workspace = self.workspace()?;
-        if let Some(refusal) = self
-            .push_secret_check(&workspace, requested_remote, allow_secrets)
+        let (remote, branch) = self.push_destination(&workspace, requested_remote).await?;
+        let commit = match self
+            .push_target(&workspace, &remote, &branch, allow_secrets, scanned)
             .await?
         {
-            return Ok(refusal);
-        }
-        let (remote, branch, output) = self.push_current(&workspace, requested_remote).await?;
+            Ok(commit) => commit,
+            Err(refusal) => return Ok(refusal),
+        };
+        let output = self
+            .push_current(&workspace, &remote, &branch, &commit)
+            .await?;
         let info = self
             .remotes(&workspace)
             .await?
@@ -632,29 +711,24 @@ impl Service {
         }))
     }
 
+    /// Push `commit` (a checked commit of `branch`) to the same-named branch
+    /// of `remote`, never forced, and make that the branch's upstream.
     async fn push_current(
         &self,
         workspace: &Path,
-        requested_remote: &str,
-    ) -> Result<(String, String, String)> {
-        let branch = self
-            .current_branch(workspace)
-            .await?
-            .context("Switch to a branch before pushing (the project is on a detached commit)")?;
-        let remote = match self.chosen_remote(workspace, requested_remote).await? {
-            Some((name, _)) => name,
-            None => bail!("This repository has no remote to push to. Add one with git remote add."),
-        };
-        // Always to the same-named branch; never forced.
+        remote: &str,
+        branch: &str,
+        commit: &str,
+    ) -> Result<String> {
+        // By id, so a commit made after the check stays here.
         let result = git_user(
             workspace,
             vec![
                 "push".into(),
-                "--set-upstream".into(),
                 "--porcelain".into(),
                 "--".into(),
-                remote.clone(),
-                format!("refs/heads/{branch}:refs/heads/{branch}"),
+                remote.into(),
+                format!("{commit}:refs/heads/{branch}"),
             ],
             PUSH_TIMEOUT,
         )
@@ -676,11 +750,24 @@ impl Service {
             };
             bail!("Push failed.{hint}\n{detail}");
         }
-        Ok((
-            remote,
-            branch,
-            clean(&format!("{}{}", result.stdout, result.stderr)),
-        ))
+        // What `--set-upstream` does; Git skips it for a push by commit id.
+        for (key, value) in [
+            ("remote", remote.to_owned()),
+            ("merge", format!("refs/heads/{branch}")),
+        ] {
+            let set = Self::git_in(
+                workspace,
+                args(&["config", &format!("branch.{branch}.{key}"), &value]),
+                CancellationToken::new(),
+            )
+            .await?;
+            ensure!(
+                ok(&set),
+                "Pushed, but Git could not make {remote}/{branch} this branch's upstream: {}",
+                clean(set["stderr"].as_str().unwrap_or(""))
+            );
+        }
+        Ok(clean(&format!("{}{}", result.stdout, result.stderr)))
     }
 
     // --- Suggested text ------------------------------------------------------
@@ -1203,12 +1290,19 @@ impl Service {
             "Create a branch for this work first: you are on {base}"
         );
         let (remote, info) = self.forge_remote(&workspace, body.remote.as_str()).await?;
-        if let Some(refusal) = self
-            .push_secret_check(&workspace, &remote, body.allow_secrets.is_true())
+        let commit = match self
+            .push_target(
+                &workspace,
+                &remote,
+                &branch,
+                body.allow_secrets.is_true(),
+                body.scanned.as_str(),
+            )
             .await?
         {
-            return Ok(refusal);
-        }
+            Ok(commit) => commit,
+            Err(refusal) => return Ok(refusal),
+        };
         let cli = self.forge_cli(&workspace, &info).await;
         ensure!(
             cli["installed"] == true && cli["authenticated"] == true,
@@ -1216,18 +1310,18 @@ impl Service {
             cli["name"].as_str().unwrap_or("The forge CLI"),
             cli["login_command"].as_str().unwrap_or("")
         );
-        // Push when the branch has no upstream or has commits the remote lacks.
-        let needs_push = match self.upstream(&workspace).await? {
-            None => true,
-            Some(_) => {
-                let ahead = self
-                    .git_read(&workspace, &["rev-list", "--count", "@{upstream}..HEAD"])
-                    .await?;
-                out(&ahead) != "0"
-            }
-        };
+        // Push when the remote's copy of the branch lacks the commit.
+        let tracked = format!("refs/remotes/{remote}/{branch}");
+        let pushed = self
+            .git_read(
+                &workspace,
+                &["merge-base", "--is-ancestor", &commit, &tracked],
+            )
+            .await?;
+        let needs_push = !ok(&pushed);
         if needs_push {
-            self.push_current(&workspace, &remote).await?;
+            self.push_current(&workspace, &remote, &branch, &commit)
+                .await?;
         }
         let repo = Self::repo_arg(&info);
         let (program, command) = match info.kind {
