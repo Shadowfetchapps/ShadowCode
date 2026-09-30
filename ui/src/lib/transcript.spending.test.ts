@@ -79,6 +79,42 @@ describe("spending limits in the transcript", () => {
       }),
     ]);
     expect(of(lifted.items, "spend")[0].resolved).toBe("lifted");
+    expect(of(lifted.items, "spend")[0].outcome).toBe(
+      "The limit no longer applies, so the task went on.",
+    );
+    // Replaced by the card for the limit that blocks now: the task did not
+    // go on, and the old card does not say it did.
+    const replaced = replay([
+      ...start,
+      event(6, "spend.limit_resolved", {
+        prompt_id: "p1",
+        action: "continue",
+        reason: "replaced",
+        text: "Today's spending limit now stops this task instead.",
+      }),
+      event(7, "spend.limit_reached", {
+        ...card,
+        id: "p2",
+        kind: "daily",
+      }),
+    ]);
+    const [old, next] = of(replaced.items, "spend");
+    expect(old.outcome).toBe(
+      "Today's spending limit now stops this task instead.",
+    );
+    expect(old.outcome).not.toContain("went on");
+    expect(next.resolved).toBeUndefined();
+    const untold = replay([
+      ...start,
+      event(6, "spend.limit_resolved", {
+        prompt_id: "p1",
+        action: "continue",
+        reason: "replaced",
+      }),
+    ]);
+    expect(of(untold.items, "spend")[0].outcome).toBe(
+      "Another spending limit now stops this task.",
+    );
     // A task that ends while the card waits closes it.
     const ended = replay([
       ...start,
@@ -143,6 +179,69 @@ describe("provider retries", () => {
       event(4, "model.retry", { attempt: 1, max_attempts: 3, delay_ms: 1000 }),
     ]);
     expect(of(again.items, "note").filter((n) => n.retry)).toHaveLength(2);
+  });
+
+  it("throws away a reply cut off by a dropped connection", () => {
+    const state = replay([
+      event(1, "agent.started", { job_id: "j" }),
+      event(2, "model.stream", { text: "Half an ans", message_id: "m1" }),
+      event(3, "model.stream_end", { message_id: "m1", complete: false }),
+      event(4, "model.retry", {
+        attempt: 1,
+        max_attempts: 3,
+        reason: "disconnected",
+        delay_ms: 500,
+        discard_message_id: "m1",
+      }),
+      event(5, "model.stream", { text: "The whole answer.", message_id: "m2" }),
+      event(6, "model.delta", {
+        text: "The whole answer.",
+        message_id: "m2",
+        complete: true,
+      }),
+    ]);
+    const replies = of(state.items, "agent");
+    expect(replies.map((r) => r.text)).toEqual(["The whole answer."]);
+  });
+
+  it("closes the retry line when the retries run out or the answer has no text", () => {
+    const retrying = [
+      event(1, "agent.started", { job_id: "j" }),
+      event(2, "model.retry", {
+        attempt: 3,
+        max_attempts: 3,
+        reason: "overloaded",
+        delay_ms: 4000,
+      }),
+    ];
+    const failed = replay([
+      ...retrying,
+      event(3, "model.request_timing", { success: false }),
+      event(4, "agent.completed", {
+        success: false,
+        summary: "Model provider returned HTTP 503",
+      }),
+    ]);
+    const [gaveUp] = of(failed.items, "note").filter((n) => n.retry);
+    expect(gaveUp.text).toBe(
+      "The provider still didn't answer after 3 retries.",
+    );
+    expect(gaveUp.retry?.done).toBe(true);
+    const stopped = replay([
+      ...retrying,
+      event(3, "agent.completed", { success: false, cancelled: true }),
+    ]);
+    expect(of(stopped.items, "note").filter((n) => n.retry)[0].text).toBe(
+      "Stopped before the provider answered.",
+    );
+    // A retried request that answered with tool calls only streams no text.
+    const toolsOnly = replay([
+      ...retrying,
+      event(3, "model.request_timing", { success: true }),
+    ]);
+    expect(of(toolsOnly.items, "note").filter((n) => n.retry)[0].text).toBe(
+      "The provider was busy; it answered after 3 retries.",
+    );
   });
 });
 
@@ -211,7 +310,7 @@ describe("plan limits, resumes and Try on", () => {
     const [resume] = of(waiting.items, "resume");
     expect(resume.state).toBe("scheduled");
     expect(resume.text).toMatch(
-      /^Will resume on Codex at .+, when its plan limit resets\.$/,
+      /^Will resume on Codex (?:tomorrow )?at .+, when its plan limit resets\.$/,
     );
     expect(of(waiting.items, "limit")[0].resumeScheduled).toBe(true);
     const started = replay([
@@ -245,5 +344,39 @@ describe("plan limits, resumes and Try on", () => {
       state: "needs_consent",
       target: "cli:codex",
     });
+  });
+
+  it("keeps the limited task's mode and web access on the resume card", () => {
+    const [ask] = of(
+      replay([
+        ...limited,
+        event(6, "resume.needs_consent", {
+          resume_id: "r1",
+          label: "Codex",
+          target: "cli:codex",
+          mode: "review",
+          web: true,
+          task: "Continue where Codex stopped.",
+        }),
+      ]).items,
+      "resume",
+    );
+    expect(ask).toMatchObject({ mode: "ask", web: true });
+    const [plan] = of(
+      replay([
+        ...limited,
+        event(6, "resume.scheduled", {
+          resume_id: "r1",
+          at: 1_790_010_000,
+          label: "Codex",
+          target: "cli:codex",
+          mode: "plan",
+          web: false,
+        }),
+      ]).items,
+      "resume",
+    );
+    expect(plan).toMatchObject({ mode: "plan", web: false });
+    expect(plan.text).not.toContain("at tomorrow");
   });
 });

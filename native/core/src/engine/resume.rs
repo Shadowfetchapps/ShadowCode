@@ -10,6 +10,10 @@ impl Engine {
         payload["at"] = json!(resume.at);
         payload["target"] = json!(resume.target);
         payload["label"] = json!(resume.label);
+        // A continuation started from the window keeps the task's mode (a
+        // Plan or Ask task stays read-only) and web access.
+        payload["mode"] = json!(resume.mode);
+        payload["web"] = json!(resume.web);
         payload["job_id"] = payload
             .get("job_id")
             .cloned()

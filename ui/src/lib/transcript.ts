@@ -29,8 +29,11 @@ import {
   money,
   parseRunRecord,
   retriedText,
+  retryEndedText,
   retryText,
+  scheduledResumeText,
 } from "./spending";
+import { modeOfJob } from "./effort";
 
 const ROUTE_PRODUCTS: Record<string, string> = {
   "cli:codex": "Codex",
@@ -134,6 +137,37 @@ function lastIndex(items: ChatItem[], test: (item: ChatItem) => boolean) {
   for (let index = items.length - 1; index >= 0; index--)
     if (test(items[index])) return index;
   return -1;
+}
+
+/** The task's retry line that still says "retrying…", if any. */
+function openRetry(items: ChatItem[], taskId: string | undefined) {
+  return lastIndex(
+    items,
+    (item) =>
+      item.kind === "note" &&
+      item.taskId === taskId &&
+      Boolean(item.retry) &&
+      !item.retry?.done,
+  );
+}
+
+/** Close the task's open retry line with what happened in the end. */
+function finishRetry(
+  items: ChatItem[],
+  taskId: string | undefined,
+  text: (attempts: number) => string,
+): ChatItem[] {
+  const index = openRetry(items, taskId);
+  if (index < 0) return items;
+  const note = items[index] as Extract<ChatItem, { kind: "note" }>;
+  const attempts = note.retry?.attempt || 1;
+  const next = [...items];
+  next[index] = {
+    ...note,
+    text: text(attempts),
+    retry: { attempt: attempts, done: true },
+  };
+  return next;
 }
 
 function objectFields(value: unknown): Record<string, unknown> | undefined {
@@ -728,14 +762,19 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
   items = applySpendAndResume(items, event, taskId);
   if (event.type === "model.retry") {
     const attempt = Number(p.attempt) || 1;
-    const index = lastIndex(
-      items,
-      (item) =>
-        item.kind === "note" &&
-        item.taskId === taskId &&
-        Boolean(item.retry) &&
-        !item.retry?.done,
-    );
+    // The failed attempt's partial reply is thrown away; the retry streams
+    // the answer again.
+    const discard = String(p.discard_message_id || "");
+    if (discard)
+      items = items.filter(
+        (item) =>
+          !(
+            item.kind === "agent" &&
+            item.taskId === taskId &&
+            item.messageId === discard
+          ),
+      );
+    const index = openRetry(items, taskId);
     const note: ChatItem = {
       kind: "note",
       taskId,
@@ -746,29 +785,14 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     if (index < 0) items.push(note);
     else items[index] = { ...note, key: items[index].key };
   }
+  // The provider answered: streamed text, or a finished request (an answer
+  // with only tool calls streams no text).
   if (
-    (event.type === "model.stream" || event.type === "model.delta") &&
-    (p.text || p.message_id)
-  ) {
-    const index = lastIndex(
-      items,
-      (item) =>
-        item.kind === "note" &&
-        item.taskId === taskId &&
-        Boolean(item.retry) &&
-        !item.retry?.done,
-    );
-    if (index >= 0) {
-      const note = items[index] as Extract<ChatItem, { kind: "note" }>;
-      const attempts = note.retry?.attempt || 1;
-      items = [...items];
-      items[index] = {
-        ...note,
-        text: retriedText(attempts),
-        retry: { attempt: attempts, done: true },
-      };
-    }
-  }
+    ((event.type === "model.stream" || event.type === "model.delta") &&
+      (p.text || p.message_id)) ||
+    (event.type === "model.request_timing" && p.success === true)
+  )
+    items = finishRetry(items, taskId, retriedText);
   // Vendor account pushes carry `vendor`; per-task token/cost updates
   // (`turn`/`job`/`session`) do not change the picker's rows.
   if (event.type === "usage.updated" && p.vendor) usageVersion += 1;
@@ -1228,6 +1252,12 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
         : item,
     );
     if (taskId) items = resolveStuck(items, taskId, "ended");
+    // A retry line never keeps saying "retrying…" after the task ended.
+    items = finishRetry(items, taskId, (attempts) =>
+      p.success
+        ? retriedText(attempts)
+        : retryEndedText(attempts, Boolean(p.cancelled)),
+    );
     touch((a) => ({
       ...a,
       ...(run ? { run } : {}),
@@ -1329,11 +1359,15 @@ function applySpendAndResume(
                   : p.action === "stop"
                     ? "stop"
                     : "continue",
+              // "replaced": another limit, or a changed amount, still
+              // stops the task; its new card follows.
               outcome: String(
                 p.text ||
                   (p.action === "stop"
                     ? "Stopped at your spending limit."
-                    : "The limit no longer applies, so the task went on."),
+                    : p.reason === "replaced"
+                      ? "Another spending limit now stops this task."
+                      : "The limit no longer applies, so the task went on."),
               ),
             }
           : item,
@@ -1358,13 +1392,13 @@ function applySpendAndResume(
   const when = clockTime(at, event.ts || undefined);
   const text =
     state === "scheduled"
-      ? `Will resume on ${label} at ${when}, when its plan limit resets.`
+      ? scheduledResumeText(label, at, event.ts || undefined)
       : state === "cancelled"
         ? `The resume on ${label} was cancelled.`
         : state === "started"
           ? `Resumed on ${label} as scheduled.`
           : state === "missed"
-            ? `ShadowCode wasn't open at ${when}, so this conversation didn't resume on ${label}. Continue it yourself when you're ready.`
+            ? `ShadowCode wasn't open ${when}, so this conversation didn't resume on ${label}. Continue it yourself when you're ready.`
             : state === "needs_consent"
               ? `${label}'s limit has reset. Continuing there sends this conversation's newer turns to ${label}; review what is sent first.`
               : `The resume on ${label} didn't start: ${String(p.reason || "unknown error")}`;
@@ -1378,6 +1412,8 @@ function applySpendAndResume(
     target: String(p.target || ""),
     text,
     task: p.task ? String(p.task) : undefined,
+    mode: modeOfJob(p.mode),
+    web: p.web === true,
   };
   // One row per scheduled resume, updated as it runs or is cancelled; the
   // plan-limit card knows whether a resume is waiting.

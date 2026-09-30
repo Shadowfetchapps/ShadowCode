@@ -52,6 +52,9 @@ impl Engine {
             if meter.stopped().is_some() {
                 bail!("{}", crate::spending::stopped_summary(kind));
             }
+            if meter.is_unattended() {
+                bail!("{}", crate::spending::unattended_summary(kind, limit));
+            }
             meter.ask(&self.0.store, &config, kind, limit, now)?;
             tokio::select! {
                 _ = answered => {}

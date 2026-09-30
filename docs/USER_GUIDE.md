@@ -482,7 +482,9 @@ the project, after any task that is already running there.
 
 Each second opinion is a task of its own and counts toward usage like any
 other: a subscription uses its plan's allowance, an API key is billed per
-token, and a model on this computer costs nothing. At most 60 kB of changes
+token, and a model on this computer costs nothing. A second opinion on a paid
+model that reaches a spending limit stops and says so instead of waiting;
+raise the limit or pick another model and ask again. At most 60 kB of changes
 are sent; the rest of a large change is named, and the reviewer can read it
 from the files. Secret files (`.env`, keys) are never sent, and values that
 look like passwords or keys inside other files are hidden. In offline mode
@@ -648,7 +650,9 @@ task keeps going. When it reaches a limit, it pauses between steps (never in
 the middle of a command or an edit) and shows a card: **Continue (limit raised
 to $2.00)** raises the limit by one more step and carries on; **Stop** ends
 the task, keeping the changes made so far. A raised daily limit lasts until
-midnight.
+midnight. A conversation with a card waiting is marked in the sidebar with a
+dollar sign. A second opinion's review does not wait: it stops and says which
+limit it reached.
 
 Costs that ShadowCode works out from the model's listed prices count too and
 are labelled, for example *about $0.80 (estimated)*. If a model's price isn't
@@ -660,6 +664,10 @@ paid model, for example *Next message: about $0.01–$0.05*. It comes from the
 conversation so far and the model's listed prices; a task that uses many
 tools can cost more. It is hidden for subscriptions, models on this computer,
 and models without listed prices.
+
+Commit and pull request drafts and **Explain this change** on a paid model
+count toward the daily total too. Once today's limit is reached they are not
+sent: a draft falls back to a plain summary of the changes.
 
 Change or turn off the limits in **Settings › Accounts › Spending limits**,
 which also shows what paid models have cost today. From the command line,
@@ -732,8 +740,9 @@ and `.env` files suggest. Nothing runs until you save it.
 ## Conversations in the sidebar
 
 - **Badges**: a pulsing dot while a task runs, a clock while it is queued, a
-  hand when it **needs your approval**, a warning sign when it **failed**, and
-  a dot when it **finished** while you were elsewhere (until you open it).
+  hand when it **needs your approval**, a dollar sign when it **waits at a
+  spending limit**, a warning sign when it **failed**, and a dot when it
+  **finished** while you were elsewhere (until you open it).
 - **Right-click** a conversation (or press the menu key) to **Rename**,
   **Pin**, **Fork**, **Export** or **Delete** it. Deleting a conversation
   also deletes its subagents' conversations, unless a fork of it still
@@ -748,7 +757,7 @@ and `.env` files suggest. Nothing runs until you save it.
 When the window is in the background, or the task is in another
 conversation, ShadowCode notifies you when a task needs approval, fails,
 reaches a plan limit (saying whether it continued on a model on this
-computer) or finishes. An unanswered approval is denied after 10 minutes; you
+computer), waits at a spending limit, or finishes. An unanswered approval is denied after 10 minutes; you
 are warned 2 minutes before. Click a notification to open its conversation.
 Choose which ones you get, and whether they play a sound, in **Settings ›
 Appearance**.
@@ -1013,8 +1022,8 @@ Subscription CLIs use their own sandboxes, not this one.
   was busy; it answered after 2 retries.* A reply that was cut off is thrown
   away and replaced; tools only run after a complete reply, so nothing runs
   twice. Errors such as a wrong key or an unknown model are shown at once. If
-  the retries run out, **Try on…** continues the task on another model you
-  pick.
+  the retries run out, the line says *The provider still didn't answer after
+  3 retries.* and **Try on…** continues the task on another model you pick.
 - **Tokens and cost.** Every job and conversation records input, output and
   cached tokens and a cost in US dollars: what OpenRouter charged, zero for a
   model on this computer, and what a subscription CLI reports (Claude Code

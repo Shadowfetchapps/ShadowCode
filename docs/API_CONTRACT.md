@@ -158,8 +158,8 @@ treat broadcasts as **wake-ups** and read committed rows by cursor
   Events (see [Remote access](#remote-access)); `view.*` types are dropped.
 - **Attached views** receive `{type, session_id, payload?, terminal_id?}`
   where `payload` is a bounded notification hint (`notify::hint`: summary at
-  most 180 characters, success, cancelled, limit, command, tool), never
-  transcript content.
+  most 180 characters, success, cancelled, limit, command, tool, a spending
+  card's title), never transcript content.
 
 The window's feed re-reads `GET /api/feed` for the types listed in its
 `events` field, for `view.*` hints and for untyped wake-ups, at most once per
@@ -302,15 +302,19 @@ conversation other than the one on screen (`shadowcode_core::notify`:
 
 - `approval.requested` ("Waiting for you: <command or tool>"), `approval.expiring`,
   `agent.completed` with `success: false` and no plan limit ("task failed"),
-  `limit.fallback` (and whether the task continued on a local model), and a
-  successful `agent.completed`. Cancelled tasks never notify.
+  `limit.fallback` (and whether the task continued on a local model),
+  `spend.limit_reached` ("ShadowCode · spending limit reached": the card's
+  title, then "Continue or stop it in its conversation."; phone notices
+  through ntfy too), and a successful `agent.completed`. Cancelled tasks
+  never notify.
 - Automation runs notify through `automation.finished` instead of their
   task's `agent.completed` (runs are recognized from `automation.started`),
   only when the automation's `notify` option is on: "ShadowCode · <name>"
   with the summary, or why it stopped (approval needed, time limit,
   failure). A run stopped by the user does not notify.
 - Settings (`ui` group): `notify` (all), `notify_approval`, `notify_failed`,
-  `notify_limit`, `notify_finished` (default on), `notify_sound` (default off).
+  `notify_limit` (plan and spending limits), `notify_finished` (default on),
+  `notify_sound` (default off).
 - Tauri command `set_visible_session {sessionId}` tells the shell which
   conversation the window shows.
 
@@ -951,13 +955,15 @@ Routes:
 ### Feed
 
 - `GET /api/feed?session_id=&limit=` → `{approvals: Approval[], jobs:
-  JobSummary[], events: string[], waiting: string[]}`. `approvals` are the
-  pending approvals of that conversation (all without `session_id`); `jobs`
-  are the rows of `GET /api/jobs?view=summary`; `waiting` lists every
-  conversation with a pending approval (sidebar badges); `events` lists the
-  broadcast types after which the feed may have changed: `approval.requested`,
-  `approval.resolved`, `job.changed`, `agent.started`, `agent.completed`,
-  `agent.paused`, `agent.resumed`, `limit.fallback`. The window reads the feed
+  JobSummary[], events: string[], waiting: string[], spending: string[]}`.
+  `approvals` are the pending approvals of that conversation (all without
+  `session_id`); `jobs` are the rows of `GET /api/jobs?view=summary`;
+  `waiting` lists every conversation with a pending approval or a waiting
+  spending card, and `spending` those of them whose only wait is a spending
+  card (sidebar badges); `events` lists the broadcast types after which the
+  feed may have changed: `approval.requested`, `approval.resolved`, `job.changed`,
+  `agent.started`, `agent.completed`, `agent.paused`, `agent.resumed`,
+  `limit.fallback`, `spend.limit_reached`, `spend.limit_resolved`. The window reads the feed
   on those wake-ups plus a 15 s backstop.
 
 ### Plan limits
@@ -1012,13 +1018,14 @@ serve`; one-shot CLI commands never run it).
   `execution_target` to `target`. It never switches to another model: when
   `target` cannot be resolved or started, nothing runs and the conversation
   says why.
-- Events on the limited task (`resume_id, at, target, label, job_id` in each):
+- Events on the limited task (`resume_id, at, target, label, mode, web,
+  job_id` in each; `mode` and `web` are the limited task's):
   `resume.scheduled {scheduler}`, `resume.cancelled`, `resume.started`
   (`job_id` is the new job), `resume.missed` (ShadowCode was not running and
   the time is more than 12 hours past), `resume.failed {reason, task}`, and
   `resume.needs_consent {reason, task}` (continuing would hand newer turns to
-  a cloud route; the window starts `task` on `target` through the usual
-  consent dialog).
+  a cloud route; the window starts `task` on `target`, in the same `mode`
+  and with the same `web`, through the usual consent dialog).
 
 ### Usage, cost, retries and compaction
 
@@ -1120,16 +1127,28 @@ models on this computer and the offline preview are never limited.
   - Event `spend.limit_reached {id, job_id, kind, limit, spent, estimated,
     raise_to, resets_at, title, text, continue_label}` at 100%: the task waits
     (status stays `running`) until the card is answered, the limit no longer
-    applies, or the task is cancelled. A subagent at the limit shows the card
-    in the task that started it (`job_id` is that task's job).
+    applies, or the task is cancelled. A subagent or a Plan → Implement →
+    Review role at the limit shows the card in the task that started it
+    (`job_id` is that task's job), also when that task's own model is a
+    subscription. A second opinion's review task (hidden conversation) does
+    not wait: it ends `failed` with the summary "Stopped at the per-task
+    spending limit for paid models ($…)…" or "Today's spending limit for paid
+    models ($…) is reached…", which the second opinion shows as its `error`.
+    A later turn the user starts in that conversation waits like any other.
   - Event `spend.limit_resolved {prompt_id, job_id, kind, action, limit?,
     reason?, text?}`: `action` `continue` (the per-task limit, or today's
     limit, is raised to `raise_to`: the limit plus one more step of the
     setting, past what is already spent) or `stop`. `reason` is set when
-    no one answered but the limit stopped applying (a setting changed, or
-    the day's total reset).
+    no one answered: `limit_changed` when the limit stopped applying (a
+    setting changed, or the day's total reset) and the task goes on;
+    `replaced` (with `text`) when the other limit, or a changed amount, is
+    what blocks now: the task still waits, and a new `spend.limit_reached`
+    card follows.
   - Event `spend.unknown {job_id, model, text}` once per task when a paid
     request has no known price; it is not counted as $0.
+- Requests on a paid model outside any task (commit and pull request drafts,
+  **Explain this change**) count toward the day's total and are not sent
+  once today's limit is reached; there is no card to answer.
 - `POST /api/jobs/{id}/spending {prompt_id, action: "continue"|"stop"}`
   answers the waiting card of job `{id}` (the task's own job) → the
   `spend.limit_resolved` payload. `stop` cancels the task (and its
@@ -1377,7 +1396,8 @@ history. Vendor CLIs are always started without
   change (at most about 24 KB of diff) explained in plain words by the
   conversation's model, or the model loaded on this computer when the
   conversation uses a subscription. Only on request; secret and binary files
-  are refused.
+  are refused. On a paid model the request counts toward today's spending
+  and is refused (an error) once today's limit is reached.
 - `POST /api/review/tasks/{task_id}/undo {path, hunk?}` → the file's review
   after putting one hunk (by `id`) or the whole file back as it was before the
   task. Refused while a task runs in the project, outside the open project,
@@ -1970,8 +1990,9 @@ command runs without bubblewrap.
   [Run record](#run-record); model ids other than `api:openrouter:…` and
   `cli:…` are hidden because they can name local files or private hosts) and
   `log: {note, lines}`, the app log's last lines (at most 96 KiB; see
-  [App log](#app-log)) with secrets redacted again and every file path
-  replaced by `<path>`.
+  [App log](#app-log)) with secrets redacted again, every file path
+  replaced by `<path>`, and `model`, `model_id` and `target` values other
+  than those public ids or a subscription's name written as `"(hidden)"`.
 - `GET /api/diagnostic-exports/{id}` → the same snapshot, for 10 minutes; at
   most four are retained per engine. Unknown or expired ids fail ("Diagnostic
   snapshot expired; run Doctor again"); Doctor is not rerun. The desktop
@@ -2555,7 +2576,9 @@ user-info; tool errors are redacted.
   (local GGUF, API, OpenRouter; not subscriptions; only loopback models
   offline), `local` the loaded local model, `summary` a deterministic text.
   Secret-looking paths are listed without contents; text is redacted before
-  it leaves; 60 s limit; failures fall back to `summary` with a `note`.
+  it leaves; 60 s limit; failures fall back to `summary` with a `note`. On a
+  paid model the draft counts toward today's spending; once today's limit is
+  reached none is sent and the `note` says so.
 - `POST /api/git/push` and `POST /api/git/pr` accept `allow_secrets` and
   `scanned`: without them, the commits the push would send (every commit of
   the branch that no branch of that remote has, as last fetched; a merge

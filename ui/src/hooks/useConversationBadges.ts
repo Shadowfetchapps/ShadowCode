@@ -11,6 +11,7 @@ import {
 import { readStore, writeStore } from "../lib/storage";
 
 const UNREAD_KEY = "shadow:unread";
+const NONE: string[] = [];
 
 function readUnread(): Unread {
   try {
@@ -23,17 +24,21 @@ function readUnread(): Unread {
   }
 }
 
-/** Sidebar badges (running, needs approval, failed, finished-unread) and the
+/** Sidebar badges (running, needs approval, waiting at a spending limit,
+ * failed, finished-unread) and the
  * most recently opened conversations (Ctrl+Tab). Unread state survives a
  * restart. */
 export function useConversationBadges({
   jobs,
   waiting,
+  spending = NONE,
   sessionId,
   sessions,
 }: {
   jobs: Job[];
   waiting: string[];
+  /** The conversations of `waiting` whose only wait is a spending card. */
+  spending?: string[];
   sessionId: string;
   sessions: Session[];
 }) {
@@ -67,6 +72,7 @@ export function useConversationBadges({
   }, [unread]);
 
   const waitingSet = useMemo(() => new Set(waiting), [waiting]);
+  const spendingSet = useMemo(() => new Set(spending), [spending]);
   const badges = useMemo(() => {
     const result: Record<string, Badge> = {};
     const ids = new Set([
@@ -75,11 +81,11 @@ export function useConversationBadges({
       ...waiting,
     ]);
     for (const id of ids) {
-      const badge = sessionBadge(id, jobs, waitingSet, unread);
+      const badge = sessionBadge(id, jobs, waitingSet, unread, spendingSet);
       if (badge) result[id] = badge;
     }
     return result;
-  }, [sessions, jobs, waiting, waitingSet, unread]);
+  }, [sessions, jobs, waiting, waitingSet, spendingSet, unread]);
 
   /** The conversation opened before the current one (Ctrl+Tab). */
   const mostRecent = useCallback(

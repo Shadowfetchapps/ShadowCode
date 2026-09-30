@@ -325,3 +325,66 @@ fn a_waiting_card_is_lifted_when_the_limit_no_longer_applies() {
     f.meter.lift("setting_changed").unwrap();
     assert_eq!(events(&f, "spend.limit_resolved").len(), 1);
 }
+
+#[test]
+fn a_card_for_a_limit_that_no_longer_blocks_is_replaced() {
+    let f = fixture(None);
+    let config = SpendingConfig {
+        task_usd: Some(1.0),
+        daily_usd: Some(1.0),
+    };
+    let now = crate::now();
+    f.meter
+        .record(&f.store, &paid(), &turn(Some(1.5), false))
+        .unwrap();
+    let task = f
+        .meter
+        .ask(&f.store, &config, Kind::Task, 1.0, now)
+        .unwrap();
+    // The per-task limit was raised in Settings; today's limit still blocks.
+    let daily = f
+        .meter
+        .ask(&f.store, &config, Kind::Daily, 1.0, now)
+        .unwrap();
+    assert_eq!(daily.kind, Kind::Daily);
+    assert_ne!(daily.id, task.id);
+    let resolved = events(&f, "spend.limit_resolved");
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0]["prompt_id"], task.id.as_str());
+    // Not the lift of a limit that cleared: the task did not go on.
+    assert_eq!(resolved[0]["reason"], "replaced");
+    assert_eq!(
+        resolved[0]["text"],
+        "Today's spending limit now stops this task instead."
+    );
+    assert_eq!(events(&f, "spend.limit_reached").len(), 2);
+    // Only the card for the limit that blocks can be answered, and it raises
+    // that limit alone.
+    assert!(f.meter.decide(&f.store, &task.id, "continue").is_err());
+    f.meter.decide(&f.store, &daily.id, "continue").unwrap();
+    assert_eq!(f.meter.task_limit(&config), Some(1.0));
+    assert_eq!(today(&f.store, now).unwrap().raised_to, Some(2.0));
+    // A changed setting for the same limit gets a card with the new amount.
+    let raised = SpendingConfig {
+        task_usd: Some(1.2),
+        daily_usd: None,
+    };
+    let first = f
+        .meter
+        .ask(&f.store, &config, Kind::Task, 1.0, now)
+        .unwrap();
+    let second = f
+        .meter
+        .ask(&f.store, &raised, Kind::Task, 1.2, now)
+        .unwrap();
+    assert_ne!(first.id, second.id);
+    assert_eq!(second.limit, 1.2);
+    assert_eq!(f.meter.pending(), Some(second));
+    let replaced = events(&f, "spend.limit_resolved").pop().unwrap();
+    assert_eq!(replaced["prompt_id"], first.id.as_str());
+    assert_eq!(replaced["reason"], "replaced");
+    assert_eq!(
+        replaced["text"],
+        "The limit changed, but this task is still over it."
+    );
+}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Job, Session } from "../api";
 import {
+  BADGE_LABELS,
   markRead,
   nextUnread,
   pruneUnread,
@@ -49,6 +50,16 @@ describe("conversation badges", () => {
     expect(sessionBadge("d", jobs, waiting, unread)).toBe("unread");
     // Finished and already seen: no badge.
     expect(sessionBadge("e", jobs, waiting, unread)).toBeNull();
+  });
+
+  it("says a conversation waits at a spending limit, not for an approval", () => {
+    const jobs = [job("1", "a", "running"), job("2", "b", "running")];
+    // `b` has only a spending card; `a` an approval.
+    const waiting = new Set(["a", "b"]);
+    const spending = new Set(["b"]);
+    expect(sessionBadge("a", jobs, waiting, {}, spending)).toBe("approval");
+    expect(sessionBadge("b", jobs, waiting, {}, spending)).toBe("spending");
+    expect(BADGE_LABELS.spending).toBe("Waiting at a spending limit");
   });
 
   it("marks conversations unread when their task finishes out of view", () => {

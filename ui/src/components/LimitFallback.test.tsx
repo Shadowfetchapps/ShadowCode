@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { LimitFallbackItem } from "./LimitFallback";
 import type { ChatItem } from "./cards";
@@ -6,6 +12,7 @@ import type { ChatItem } from "./cards";
 afterEach(() => cleanup());
 
 const NOW = 1_790_000_000;
+const RESUME_ON_CODEX = /^Resume on Codex (?:tomorrow )?at /;
 
 const ask: Extract<ChatItem, { kind: "limit" }> = {
   kind: "limit",
@@ -98,8 +105,10 @@ it("offers Resume at the reset time only when the vendor said it", () => {
     resetsAt: at,
   };
   const props = show(item);
-  const button = screen.getByRole("button", { name: /^Resume on Codex at / });
-  expect(button.textContent).not.toContain("tomorrow");
+  // Two hours on can be tomorrow in some time zones; either way the phrase
+  // carries a single "at".
+  const button = screen.getByRole("button", { name: RESUME_ON_CODEX });
+  expect(button.textContent).not.toContain("at tomorrow");
   fireEvent.click(button);
   expect(props.onScheduleResume).toHaveBeenCalledWith(item);
   cleanup();
@@ -120,7 +129,34 @@ it("offers Resume at the reset time only when the vendor said it", () => {
     to: "qwen3:14b",
     text: "Codex reached its plan limit. Continuing on qwen3:14b on this computer.",
   });
-  expect(
-    screen.getByRole("button", { name: /^Resume on Codex at / }),
-  ).toBeTruthy();
+  expect(screen.getByRole("button", { name: RESUME_ON_CODEX })).toBeTruthy();
+});
+
+it("rewords Resume at midnight and drops it once the reset has passed", () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date(2026, 8, 29, 23, 0));
+    const at = new Date(2026, 8, 30, 3, 40).getTime() / 1000;
+    render(
+      <LimitFallbackItem
+        item={{ ...ask, jobId: "job-1", resetsAt: at }}
+        fallback={null}
+        onContinue={vi.fn()}
+        onChoose={vi.fn()}
+        onOpenLocal={vi.fn()}
+        onScheduleResume={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /^Resume on Codex tomorrow at / }),
+    ).toBeTruthy();
+    act(() => vi.advanceTimersByTime(61 * 60 * 1000));
+    const button = screen.getByRole("button", { name: RESUME_ON_CODEX });
+    expect(button.textContent).not.toContain("tomorrow");
+    // 3:40 passes with the window open: the offer is gone.
+    act(() => vi.advanceTimersByTime(3 * 3600 * 1000 + 40 * 60 * 1000));
+    expect(screen.queryByRole("button", { name: /^Resume on/ })).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
 });

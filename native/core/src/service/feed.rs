@@ -24,6 +24,8 @@ pub const FEED_EVENTS: &[&str] = &[
     "agent.paused",
     "agent.resumed",
     "limit.fallback",
+    "spend.limit_reached",
+    "spend.limit_resolved",
 ];
 
 /// Paths per diff-count request; a task summary lists at most 20.
@@ -44,18 +46,30 @@ impl Service {
 
     fn feed(&self, call: &Call) -> Result<Value> {
         let session = Some(call.q("session_id")).filter(|id| !id.is_empty());
-        // Every conversation with a pending approval, for sidebar badges.
-        let mut waiting: Vec<String> = self
+        // For sidebar badges: every conversation with a pending approval or
+        // a spending card, and those whose only wait is a spending card.
+        let approvals: Vec<String> = self
             .engine
             .approvals()
             .list(None)
             .into_iter()
             .map(|approval| approval.session_id)
             .collect();
+        let mut spending: Vec<String> = self
+            .engine
+            .spending_waiting()?
+            .iter()
+            .filter_map(|card| card["session_id"].as_str().map(str::to_owned))
+            .filter(|id| !approvals.contains(id))
+            .collect();
+        spending.sort();
+        spending.dedup();
+        let mut waiting: Vec<String> = approvals.into_iter().chain(spending.clone()).collect();
         waiting.sort();
         waiting.dedup();
         Ok(json!({
             "waiting": waiting,
+            "spending": spending,
             "approvals": self.engine.approvals().list(session),
             "jobs": self.engine.store().job_summaries(call.limit(100, 100))?,
             "events": FEED_EVENTS,

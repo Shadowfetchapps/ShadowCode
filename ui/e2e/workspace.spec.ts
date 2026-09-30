@@ -1097,7 +1097,7 @@ test("Allowance shows what is left; in Ask mode a plan limit offers to continue 
   await expect(resume).toBeVisible();
   await expect(card.getByRole("button", { name: "Try on…" })).toBeVisible();
   await expect(
-    card.getByRole("button", { name: /^Resume on Codex at / }),
+    card.getByRole("button", { name: /^Resume on Codex (?:tomorrow )?at / }),
   ).toBeVisible();
   for (const theme of ["light", "dark"]) {
     await page.evaluate(

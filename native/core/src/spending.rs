@@ -180,6 +180,56 @@ fn update_day<R>(store: &Store, now: f64, change: impl FnOnce(&mut Day) -> R) ->
     })
 }
 
+/// A turn's cost when it is known.
+fn cost_of(turn: &Usage) -> Option<f64> {
+    turn.cost_usd
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+}
+
+/// Add one priced request to today's total, or count it as a turn whose
+/// price is not known.
+fn add_to_day(store: &Store, now: f64, turn: &Usage) -> Result<()> {
+    match cost_of(turn) {
+        Some(cost) => update_day(store, now, |day| {
+            day.usd += cost;
+            day.estimated |= turn.cost_estimated;
+        }),
+        None => update_day(store, now, |day| day.unknown_turns += 1),
+    }
+}
+
+/// Before a paid request made outside any task (a commit message draft,
+/// "Explain this change"): refused once today's limit is reached, since
+/// there is no task to pause and ask in. Nothing to check for other models.
+pub fn check_outside_task(
+    store: &Store,
+    config: &SpendingConfig,
+    model: &ModelConfig,
+    now: f64,
+) -> Result<()> {
+    if !is_paid(model) {
+        return Ok(());
+    }
+    let day = today(store, now)?;
+    if let Some(limit) = daily_limit(config, &day) {
+        ensure!(
+            day.usd < limit,
+            "Today's spending limit for paid models ({}) is reached. Raise it in Settings › Accounts › Spending limits, or choose a subscription or a model on this computer.",
+            money(limit)
+        );
+    }
+    Ok(())
+}
+
+/// Count a priced request made outside any task toward today's total (a
+/// no-op for models that are not paid).
+pub fn record_outside_task(store: &Store, model: &ModelConfig, turn: &Usage) -> Result<()> {
+    if !is_paid(model) || (turn.turns == 0 && turn.total_tokens == 0) {
+        return Ok(());
+    }
+    add_to_day(store, crate::now(), turn)
+}
+
 /// The daily limit in force today: the setting, or what "Continue" raised
 /// it to.
 pub fn daily_limit(config: &SpendingConfig, day: &Day) -> Option<f64> {
@@ -267,6 +317,9 @@ pub struct Meter {
     events: TaskEvents,
     /// `--max-cost` for this task: replaces the per-task setting.
     max_cost: Option<f64>,
+    /// No one sees this task's conversation (a second opinion's hidden
+    /// review): at a limit it stops instead of waiting for an answer.
+    unattended: bool,
     state: Mutex<State>,
     changed: Notify,
 }
@@ -277,9 +330,18 @@ impl Meter {
             job_id: job_id.to_owned(),
             events,
             max_cost,
+            unattended: false,
             state: Mutex::default(),
             changed: Notify::new(),
         }
+    }
+    /// A meter whose task stops at a limit instead of showing a card.
+    pub fn unattended(mut self) -> Self {
+        self.unattended = true;
+        self
+    }
+    pub fn is_unattended(&self) -> bool {
+        self.unattended
     }
     pub fn job_id(&self) -> &str {
         &self.job_id
@@ -324,20 +386,17 @@ impl Meter {
             return Ok(());
         }
         let now = crate::now();
-        match turn.cost_usd {
-            Some(cost) if cost.is_finite() && cost >= 0.0 => {
+        match cost_of(turn) {
+            Some(cost) => {
                 {
                     let mut state = self.state();
                     state.spent += cost;
                     state.estimated |= turn.cost_estimated;
                 }
-                update_day(store, now, |day| {
-                    day.usd += cost;
-                    day.estimated |= turn.cost_estimated;
-                })?;
+                add_to_day(store, now, turn)?;
             }
-            _ => {
-                update_day(store, now, |day| day.unknown_turns += 1)?;
+            None => {
+                add_to_day(store, now, turn)?;
                 let first = !std::mem::replace(&mut self.state().unknown_noted, true);
                 if first {
                     self.events.emit(
@@ -420,8 +479,10 @@ impl Meter {
         Ok(Check::Clear)
     }
 
-    /// The card for a reached limit: the one already waiting, or a new one
-    /// (announced with `spend.limit_reached`).
+    /// The card for a reached limit: the one already waiting for this
+    /// limit, or a new one (announced with `spend.limit_reached`). A card
+    /// waiting for another limit, or for this one before a setting changed,
+    /// is lifted first.
     pub fn ask(
         &self,
         store: &Store,
@@ -431,7 +492,16 @@ impl Meter {
         now: f64,
     ) -> Result<Prompt> {
         if let Some(prompt) = self.pending() {
-            return Ok(prompt);
+            if prompt.kind == kind && prompt.limit == limit {
+                return Ok(prompt);
+            }
+            // The task still waits: the old card says why it closed.
+            let text = match (prompt.kind == kind, kind) {
+                (true, _) => "The limit changed, but this task is still over it.",
+                (false, Kind::Daily) => "Today's spending limit now stops this task instead.",
+                (false, Kind::Task) => "This task's own spending limit now stops it instead.",
+            };
+            self.resolve_unanswered("replaced", Some(text))?;
         }
         let (spent, estimated, step) = match kind {
             Kind::Task => {
@@ -475,13 +545,20 @@ impl Meter {
     /// Clear a waiting card whose limit no longer applies (the setting was
     /// raised or turned off, or a new day began).
     pub fn lift(&self, reason: &str) -> Result<()> {
+        self.resolve_unanswered(reason, None)
+    }
+
+    /// Close the waiting card without an answer: `reason` says why, and
+    /// `text` when the task did not go on (`replaced`).
+    fn resolve_unanswered(&self, reason: &str, text: Option<&str>) -> Result<()> {
         let Some(prompt) = self.state().prompt.take() else {
             return Ok(());
         };
-        self.events.emit(
-            "spend.limit_resolved",
-            json!({"prompt_id": prompt.id, "job_id": self.job_id, "kind": prompt.kind, "action": "continue", "reason": reason}),
-        )?;
+        let mut payload = json!({"prompt_id": prompt.id, "job_id": self.job_id, "kind": prompt.kind, "action": "continue", "reason": reason});
+        if let Some(text) = text {
+            payload["text"] = json!(text);
+        }
+        self.events.emit("spend.limit_resolved", payload)?;
         self.changed.notify_waiters();
         Ok(())
     }
@@ -560,6 +637,24 @@ pub fn stopped_summary(kind: Kind) -> String {
         match kind {
             Kind::Task => "per-task",
             Kind::Daily => "daily",
+        }
+    )
+}
+
+/// The finished task's summary when it could not wait for an answer at a
+/// limit (see [`Meter::unattended`]).
+pub fn unattended_summary(kind: Kind, limit: f64) -> String {
+    format!(
+        "{} Raise it in Settings › Accounts › Spending limits, or choose a subscription or a model on this computer.",
+        match kind {
+            Kind::Task => format!(
+                "Stopped at the per-task spending limit for paid models ({}).",
+                money(limit)
+            ),
+            Kind::Daily => format!(
+                "Today's spending limit for paid models ({}) is reached.",
+                money(limit)
+            ),
         }
     )
 }

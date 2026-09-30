@@ -64,9 +64,11 @@ struct LaunchContext<'a> {
     /// composer): an `@agent` on a cloud role asks first instead of being
     /// refused when it runs.
     interactive: bool,
-    /// Nobody watches this task in the window (an automation run), so it
-    /// never pauses to ask. Jobs a connection owns (an editor, the terminal
-    /// UI, an MCP client) are unattended too.
+    /// Nobody watches this task in the window: an automation run, a second
+    /// opinion's review in its hidden conversation, or a job a connection
+    /// owns (an editor, the terminal UI, an MCP client). It never pauses to
+    /// ask when stuck, and at a spending limit it stops instead of waiting
+    /// for an answer.
     unattended: bool,
     turn: TurnOptions,
 }
@@ -745,6 +747,26 @@ impl Engine {
         )
         .await
     }
+    /// `start_consented_owned` for a task no one watches (see
+    /// `LaunchContext::unattended`). Later turns in the same conversation are
+    /// ordinary ones.
+    pub(crate) async fn start_unattended_owned(
+        &self,
+        request: StartRequest,
+        purpose: &str,
+        owner: Option<&JobOwner>,
+    ) -> Result<Job> {
+        self.start_with_context(
+            request,
+            LaunchContext {
+                purpose,
+                owner,
+                unattended: true,
+                ..Default::default()
+            },
+        )
+        .await
+    }
     /// `start_consented_owned` with the composer's per-turn choices (effort,
     /// @-mentions).
     pub(crate) async fn start_turn_owned(
@@ -1030,20 +1052,29 @@ impl Engine {
         if !consented.is_empty() {
             crate::roles::record_consent(&self.0.store, &job.session_id, &consented)?;
         }
-        let spend = (context.command.is_none()
-            && crate::runtime::Runtime::for_model(&config.model) == crate::runtime::Runtime::Local)
-            .then(|| {
-                Arc::new(crate::spending::Meter::new(
-                    &job.id,
-                    TaskEvents {
-                        store: self.0.store.clone(),
-                        session_id: job.session_id.clone(),
-                        task_id: job.task_id.clone(),
-                        sender: self.0.sender.clone(),
-                    },
-                    context.turn.max_cost_usd,
-                ))
-            });
+        // Every task gets a meter, even on a subscription: its roles and
+        // subagents may run on paid models, and they count toward it. Turns
+        // on models that are not paid are never counted or limited.
+        let spend = context.command.is_none().then(|| {
+            let meter = crate::spending::Meter::new(
+                &job.id,
+                TaskEvents {
+                    store: self.0.store.clone(),
+                    session_id: job.session_id.clone(),
+                    task_id: job.task_id.clone(),
+                    sender: self.0.sender.clone(),
+                },
+                context.turn.max_cost_usd,
+            );
+            // A second opinion's review runs in a hidden conversation, where
+            // a spending card would wait unseen and hold up the project's
+            // queue.
+            Arc::new(if context.unattended {
+                meter.unattended()
+            } else {
+                meter
+            })
+        });
         let running = Arc::new(Running {
             clock,
             record: Mutex::new(job.clone()),

@@ -991,3 +991,87 @@ async fn a_start_that_cannot_ask_runs_and_the_cloud_role_is_refused() {
     assert!(roles::consented(&service.engine.store(), &job.session_id).is_empty());
     service.engine.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_paid_role_on_a_subscription_conversation_counts_toward_the_task() {
+    // The conversation runs on Codex (a subscription); the implement role
+    // runs on a model billed per token, which is limited like any paid task.
+    let setup = setup(
+        json!({"auth":"chatgpt","turn":"ok"}),
+        json!({"spending":{"task_usd":0.05,"daily_usd":null}}),
+        |body| {
+            let first = !body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["role"] == "tool");
+            let (text, calls, cost) = if first {
+                (
+                    "Looking.",
+                    json!([tool("list_files", json!({"path":"."}))]),
+                    0.06,
+                )
+            } else {
+                ("Done.", json!([]), 0.01)
+            };
+            let mut reply = answer(text, calls);
+            reply["usage"]["cost"] = json!(cost);
+            reply
+        },
+    )
+    .await;
+    let service = &setup.service;
+    service
+        .engine
+        .store()
+        .upsert_model(&json!({
+            "id":"paid-coder","name":"acme/coder","provider":"openrouter",
+            "endpoint":setup._model.endpoint,"context_limit":32768,
+            "metadata":{"api_key_env":"SHADOWCODE_TEST_UNUSED_API_KEY"},
+        }))
+        .unwrap();
+    call(
+        service,
+        "POST",
+        "/api/roles",
+        json!({"plan":roles::SKIP,"implement":"paid-coder","review":roles::SKIP,"pipeline":true}),
+    )
+    .await;
+    let job = call(
+        service,
+        "POST",
+        "/api/jobs",
+        json!({"task":"Tidy the note","model":"cli:codex","roles":true}),
+    )
+    .await;
+    let sid = job["session_id"].as_str().unwrap().to_owned();
+    let job_id = job["id"].as_str().unwrap().to_owned();
+    // The card shows in the conversation the user started, and the role
+    // waits before its next paid request.
+    let card = eventually(
+        || events(service, &sid, "spend.limit_reached").pop(),
+        "the limit card",
+    )
+    .await;
+    assert_eq!(card["payload"]["kind"], "task");
+    assert_eq!(card["payload"]["job_id"], job_id.as_str());
+    assert!((card["payload"]["spent"].as_f64().unwrap() - 0.06).abs() < 1e-9);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(setup.requests.lock().unwrap().len(), 1);
+    // The role's cost is in today's total too.
+    let day =
+        shadowcode_core::spending::today(&service.engine.store(), shadowcode_core::now()).unwrap();
+    assert!((day.usd - 0.06).abs() < 1e-9, "{day:?}");
+    service
+        .engine
+        .decide_spending(&job_id, card["payload"]["id"].as_str().unwrap(), "stop")
+        .unwrap();
+    let done = finished(service, &job_id).await;
+    assert_eq!(done["status"], "cancelled", "{}", done["summary"]);
+    assert_eq!(setup.requests.lock().unwrap().len(), 1);
+    assert!(
+        setup.fake.marker("prompts.log").is_none(),
+        "Codex never ran"
+    );
+    service.engine.shutdown().await.unwrap();
+}

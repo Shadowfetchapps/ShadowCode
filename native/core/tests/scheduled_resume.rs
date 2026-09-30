@@ -100,10 +100,11 @@ async fn a_scheduled_resume_survives_a_restart_and_runs_on_the_same_model() {
     let resume = engine.schedule_resume(&job.id, false).unwrap();
     assert_eq!(resume.at, at);
     assert_eq!(resume.target, "fixture-model");
-    assert_eq!(
-        events(&engine, &job.session_id, "resume.scheduled")[0]["at"],
-        at
-    );
+    let scheduled = &events(&engine, &job.session_id, "resume.scheduled")[0];
+    assert_eq!(scheduled["at"], at);
+    // The window's "Review and resume" keeps the task's mode and web access.
+    assert_eq!(scheduled["mode"], "code");
+    assert_eq!(scheduled["web"], false);
     // Before its time, a tick starts nothing.
     engine.automation_tick(at - 60.0).await.unwrap();
     assert!(events(&engine, &job.session_id, "resume.started").is_empty());

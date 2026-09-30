@@ -93,6 +93,25 @@ export function tryOnRequest(
   };
 }
 
+/** The job "Review and resume" starts: the scheduled continuation on the
+ * same model, in the limited task's mode (a Plan or Ask task stays
+ * read-only) and with its web access, as the scheduler would run it. */
+export function resumeRequest(
+  item: Extract<ChatItem, { kind: "resume" }>,
+  where: { workspace: string; sessionId: string; queueing: boolean },
+): StartJobRequest {
+  return {
+    task: item.task || "",
+    workspace: where.workspace || undefined,
+    session_id: where.sessionId || undefined,
+    model: item.target,
+    purpose: purposeFor(item.mode || "code"),
+    queue: where.queueing,
+    images: [],
+    web: item.web === true,
+  };
+}
+
 /** A cloud route asked for consent before the conversation leaves this
  * computer; `original` restores the composer on Cancel. */
 export type Consent = {
@@ -428,8 +447,8 @@ export function useTaskActions(c: TaskActionContext) {
       );
       c.toast(
         scheduler
-          ? `Will resume on ${resume.label} at ${clockTime(resume.at)}.`
-          : `Will resume on ${resume.label} at ${clockTime(resume.at)} if ShadowCode is open then.`,
+          ? `Will resume on ${resume.label} ${clockTime(resume.at)}.`
+          : `Will resume on ${resume.label} ${clockTime(resume.at)} if ShadowCode is open then.`,
         "ok",
       );
       await c.refresh().catch(() => undefined);
@@ -456,19 +475,7 @@ export function useTaskActions(c: TaskActionContext) {
     if (c.composerLocked || c.submittingRef.current || !item.task) return;
     await c.selectTarget(item.target);
     c.pin();
-    await startTask(
-      {
-        task: item.task,
-        workspace: c.workspace || undefined,
-        session_id: c.sessionId || undefined,
-        model: item.target,
-        purpose: "coder",
-        queue: c.queueing,
-        images: [],
-        web: false,
-      },
-      null,
-    );
+    await startTask(resumeRequest(item, c), null);
   }
 
   /** Answer a spending limit card. */

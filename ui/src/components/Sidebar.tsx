@@ -3,6 +3,7 @@ import {
   ArrowUpRight,
   ChevronDown,
   CircleAlert,
+  CircleDollarSign,
   Clock3,
   FolderOpen,
   GitBranch,
@@ -185,6 +186,12 @@ export function Sidebar({
               size={14}
               className="badge-approval-icon"
               aria-label={BADGE_LABELS.approval}
+            />
+          ) : badge === "spending" ? (
+            <CircleDollarSign
+              size={14}
+              className="badge-approval-icon"
+              aria-label={BADGE_LABELS.spending}
             />
           ) : badge === "failed" ? (
             <CircleAlert

@@ -422,6 +422,20 @@ async fn headless_clients_see_the_card_answer_it_and_get_an_estimate() {
     };
     assert_eq!(waiting["session_id"], session.as_str());
     assert_eq!(waiting["limit"], 0.1);
+    // The sidebar marks the conversation as waiting, and the card's events
+    // wake the window's feed.
+    let feed = call(&service, "GET", "/api/feed", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(feed["waiting"], json!([session]), "{feed}");
+    // ...as waiting at a spending limit, not for an approval.
+    assert_eq!(feed["spending"], json!([session]), "{feed}");
+    for kind in ["spend.limit_reached", "spend.limit_resolved"] {
+        assert!(
+            feed["events"].as_array().unwrap().contains(&json!(kind)),
+            "{kind}"
+        );
+    }
     let answer = call(
         &service,
         "POST",

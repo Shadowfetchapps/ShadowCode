@@ -100,7 +100,7 @@ pub fn message(
         ),
         Kind::Finished => (["white_check_mark"], 3, "A task finished."),
         Kind::Failed => (["x"], 4, "A task stopped with an error."),
-        Kind::Limit => (["hourglass"], 4, "A subscription reached its plan limit."),
+        Kind::Limit => (["hourglass"], 4, "A task reached a plan or spending limit."),
     };
     let title = match project.filter(|p| !p.is_empty()) {
         Some(project) => format!("{} · {project}", notice.title),

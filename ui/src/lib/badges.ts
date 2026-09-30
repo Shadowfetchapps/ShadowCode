@@ -1,24 +1,28 @@
 import type { Job, Session } from "../api";
 
 /** What the sidebar shows next to a conversation. */
-export type Badge = "approval" | "running" | "queued" | "failed" | "unread";
+export type Badge =
+  "approval" | "spending" | "running" | "queued" | "failed" | "unread";
 
 /** Finished-but-not-yet-seen conversations: session id → finish time. */
 export type Unread = Record<string, number>;
 
 const RUNNING = new Set(["running", "paused", "cancelling"]);
+const NO_IDS: ReadonlySet<string> = new Set();
 const FAILED = new Set(["failed", "interrupted", "limit_reached"]);
 const isActive = (status: string) => RUNNING.has(status) || status === "queued";
 
-/** The badge for one conversation: a waiting approval wins, then running,
+/** The badge for one conversation: one waiting for an answer wins (an
+ * approval, or a spending card for those in `spending`), then running,
  * queued, and a finished result not yet looked at (failed or not). */
 export function sessionBadge(
   id: string,
   jobs: Job[],
   waiting: ReadonlySet<string>,
   unread: Unread,
+  spending: ReadonlySet<string> = NO_IDS,
 ): Badge | null {
-  if (waiting.has(id)) return "approval";
+  if (waiting.has(id)) return spending.has(id) ? "spending" : "approval";
   const own = jobs.filter((job) => job.session_id === id);
   if (own.some((job) => RUNNING.has(job.status))) return "running";
   if (own.some((job) => job.status === "queued")) return "queued";
@@ -32,6 +36,7 @@ export function sessionBadge(
 /** Plain words for a badge (screen readers and tooltips). */
 export const BADGE_LABELS: Record<Badge, string> = {
   approval: "Needs your approval",
+  spending: "Waiting at a spending limit",
   running: "Task running",
   queued: "Task queued",
   failed: "Task failed; not opened yet",
