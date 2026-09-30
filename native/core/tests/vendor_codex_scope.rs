@@ -323,6 +323,39 @@ fn legacy_approvals_require_matching_conversation_and_bound_active_turn() {
 }
 
 #[test]
+fn legacy_command_arrays_are_explained_as_the_shell_runs_them() {
+    use shadowcode_core::approvals::assess::{self, Risk};
+    let mut a = bound(true);
+    let mut f = frame(
+        "execCommandApproval",
+        json!({"conversationId":"owned-thread","callId":"push","command":["bash","-lc","git push --force origin main"],"cwd":"/tmp"}),
+    );
+    f["id"] = json!(7);
+    let prompt = feed(&mut *a, f)
+        .updates
+        .into_iter()
+        .find_map(|u| match u {
+            Update::Approval(p) => Some(p),
+            _ => None,
+        })
+        .expect("the legacy request asks");
+    assert_eq!(prompt.command, "bash -lc 'git push --force origin main'");
+    // The card reads what the adapter passes on, as the runner does.
+    let assessment = assess::vendor(
+        &prompt.kind,
+        &prompt.tool,
+        &prompt.command,
+        &prompt.arguments,
+        Path::new("/tmp"),
+    );
+    assert_eq!(assessment.risk, Risk::Destructive, "{assessment:?}");
+    assert_eq!(
+        assessment.explanation,
+        "Overwrites or deletes history on origin."
+    );
+}
+
+#[test]
 fn foreign_duplicate_request_ids_retire_bound_and_early_approval_authority() {
     for turn_bound in [false, true] {
         let mut a = bound(turn_bound);

@@ -22,8 +22,9 @@ For people starting out:
 
 Safety and trust:
 - **Always allow here** for exact test, build and lint commands, per project
-  and revocable; never for anything that deletes, installs, uses the network
-  or rewrites history.
+  and revocable; never for anything that deletes, installs, uses the network,
+  rewrites history or runs outside the project, and never for Codex, which
+  asks only to leave its sandbox.
 - **Secret checks** before every commit, push and pull request from
   ShadowCode (**Remove from commit**, **Add to .gitignore**, **Commit
   anyway**); the agent's own commits never include a staged secret.

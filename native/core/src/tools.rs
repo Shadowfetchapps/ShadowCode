@@ -586,7 +586,12 @@ impl ToolExecutor {
         }
         let background_prompt = self.background_prompt(call)?;
         self.preflight_paths(call)?;
-        let decision = permissions::check(&self.config.permissions, &call.name, &call.arguments);
+        let decision = permissions::check_in(
+            &self.config.permissions,
+            &call.name,
+            &call.arguments,
+            Some(&self.workspace.path),
+        );
         // "Only change these": an edit elsewhere asks first, even when edits
         // are allowed.
         let outside = self.outside_scope(call);
@@ -619,10 +624,10 @@ impl ToolExecutor {
                 let rule = self
                     .always_rule(call.arguments["command"].as_str().unwrap_or(""))?
                     .unwrap_or_default();
-                self.events.emit(
-                    "approval.granted",
-                    json!({"tool":call.name,"call_id":call.id,"grant":"always allowed in this project","scope":"project","command":rule}),
-                )?;
+                let mut granted = json!({"tool":call.name,"grant":"always allowed in this project","scope":"project","command":rule});
+                crate::redaction::redact_value(&mut granted);
+                granted["call_id"] = json!(call.id);
+                self.events.emit("approval.granted", granted)?;
             }
             Decision::Ask(reason) => {
                 let assessment = crate::approvals::assess::native_tool(
@@ -735,11 +740,11 @@ impl ToolExecutor {
                     if let Some(note) = &answer.note {
                         resolved["note"] = json!(note);
                     }
-                    crate::redaction::redact_value(&mut resolved);
-                    resolved["call_id"] = json!(call.id);
                     if answer.for_project {
                         resolved["command"] = json!(always_form);
                     }
+                    crate::redaction::redact_value(&mut resolved);
+                    resolved["call_id"] = json!(call.id);
                     self.events.emit("approval.resolved", resolved)?;
                 }
                 ensure!(answer.allow, "{}", answer.denial());

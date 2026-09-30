@@ -156,7 +156,20 @@ pub fn edit_summary(tool: &str, args: &Value) -> String {
     }
 }
 
+/// The decision for a tool call whose project folder is not known here:
+/// relative paths in a command count as inside the project.
 pub fn check(config: &PermissionsConfig, tool: &str, args: &Value) -> Decision {
+    check_in(config, tool, args, None)
+}
+
+/// The decision for a tool call in the project at `workspace`, so a
+/// command's absolute `cwd` and paths are placed inside or outside it.
+pub fn check_in(
+    config: &PermissionsConfig,
+    tool: &str,
+    args: &Value,
+    workspace: Option<&std::path::Path>,
+) -> Decision {
     use Decision::*;
     if web_tool(tool) {
         return if config.web {
@@ -236,10 +249,14 @@ pub fn check(config: &PermissionsConfig, tool: &str, args: &Value) -> Decision {
             // The parsed command: a step that deletes, reaches outside the
             // project, runs downloaded code or needs admin rights still asks,
             // and so does a command with a syntax ShadowCode cannot read.
-            // Relative paths count as inside the project; this only adds
+            // Without the project's folder, relative paths count as inside
+            // it (and an absolute `cwd` is not placed); this only adds
             // prompts.
-            let root = std::path::Path::new("/.shadowcode-project");
-            let cwd = args["cwd"].as_str().map(|cwd| root.join(cwd));
+            let root = workspace.unwrap_or(std::path::Path::new("/.shadowcode-project"));
+            let cwd = args["cwd"]
+                .as_str()
+                .filter(|cwd| workspace.is_some() || !std::path::Path::new(cwd).is_absolute())
+                .map(|cwd| root.join(cwd));
             let assessment = crate::approvals::assess::command(command, root, cwd.as_deref());
             let risky = assessment.risk >= crate::approvals::assess::Risk::Destructive
                 || assessment.known_outside

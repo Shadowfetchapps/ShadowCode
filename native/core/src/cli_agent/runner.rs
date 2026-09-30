@@ -1327,10 +1327,10 @@ async fn request_approval(
         .is_some()
         {
             // "Always allow in this project" covers this exact command.
-            request.events.emit(
-                "approval.granted",
-                json!({"tool":prompt.tool,"job_id":request.job_id,"grant":"always allowed in this project","scope":"project","command":form}),
-            )?;
+            let mut granted = json!({"tool":prompt.tool,"grant":"always allowed in this project","scope":"project","command":form});
+            crate::redaction::redact_value(&mut granted);
+            granted["job_id"] = json!(request.job_id);
+            request.events.emit("approval.granted", granted)?;
             return Ok(Answer {
                 allow: true,
                 automatic: true,
