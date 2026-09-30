@@ -111,14 +111,14 @@ export async function capturePrivateSession({ address = process.env.DBUS_SESSION
   }
   await anchored();
   const activated = env => env?.DBUS_SESSION_BUS_ADDRESS === address && env.DBUS_STARTER_ADDRESS === address && env.DBUS_STARTER_BUS_TYPE === 'session';
-  async function inventory(client = io) {
+  async function inventory(client = io, ignored = []) {
     await anchored(client);
-    return inspectPrivateActivations({ address, self, launcher, daemon }, { io: client });
+    return inspectPrivateActivations({ address, self, launcher, daemon }, { io: client, ignored });
   }
   return {
     identity: { address, self, launcher, daemon },
     async cleanup() {
-      const services = [], failures = [];
+      const services = [], failures = [], ignored = [];
       const deadline = io.now() + 5000;
       const withinDeadline = () => assert(io.now() < deadline, 'Private service cleanup exceeded its fixed deadline');
       const client = { ...io };
@@ -138,7 +138,7 @@ export async function capturePrivateSession({ address = process.env.DBUS_SESSION
         };
       }
       try {
-        const owned = await inventory(client);
+        const owned = await inventory(client, ignored);
         for (const identity of owned) {
           const record = { ...identity, signals: [] }; services.push(record);
           for (const signal of ['SIGTERM', 'SIGKILL']) {
@@ -166,20 +166,74 @@ export async function capturePrivateSession({ address = process.env.DBUS_SESSION
         // No repeating kill scan: activation churn is an incomplete cleanup,
         // not authority for an unbounded stream of newly discovered signals.
         withinDeadline();
-        assert.equal((await inventory(client)).length, 0, 'New private-session services appeared during cleanup');
+        assert.equal((await inventory(client, ignored)).length, 0, 'New private-session services appeared during cleanup');
       } catch (error) { failures.push(error.message); }
-      return { ok: failures.length === 0, services, failures };
+      // One entry per process, although both inventories may see it.
+      const unrelated = [...new Map(ignored.map(entry => [`${entry.pid}:${entry.start}`, entry])).values()];
+      return { ok: failures.length === 0, services, failures, ignored: unrelated };
     },
   };
 }
 
+// A process whose environment cannot be read (non-dumpable: setuid, file
+// capabilities, prctl) can still be proven unrelated by where it hangs in the
+// process tree. Everything the private daemon starts, including orphans the
+// kernel re-parents to init or a subreaper, starts after the daemon and sits
+// below a process of the daemon's own ancestor chain. So walk the candidate's
+// parents up to the first shared ancestor: the candidate is unrelated only if
+// the branch below that point started before the daemon. Passing through the
+// daemon, a vanished or changed parent, or a too-deep chain proves nothing.
+const MAX_DEPTH = 64;
+// The daemon's live ancestor chain up to the root, or null when it cannot be
+// read whole (after the bus and its launcher exited, for example): without
+// it an orphan re-parented to init would look like an old branch.
+async function daemonAncestors(io, daemon) {
+  const basic = pid => io.basic ? io.basic(pid) : io.identity(pid);
+  const daemonNow = await basic(daemon.pid);
+  if (!alive(daemonNow) || daemonNow.start !== daemon.start) return null;
+  const ancestors = new Map([[0, null]]);
+  let pid = daemonNow.parent;
+  for (let depth = 0; pid > 0; depth++) {
+    if (depth >= MAX_DEPTH) return null;
+    const info = await basic(pid);
+    if (!alive(info)) return null;
+    ancestors.set(pid, info.start);
+    pid = info.parent;
+  }
+  return ancestors;
+}
+async function unrelatedBranch(io, candidate, daemon, ancestors) {
+  if (!ancestors) return false;
+  const basic = pid => io.basic ? io.basic(pid) : io.identity(pid);
+  let node = candidate;
+  for (let depth = 0; depth < MAX_DEPTH; depth++) {
+    const parent = node.parent;
+    if (parent === daemon.pid) return false;
+    if (ancestors.has(parent)) {
+      const start = ancestors.get(parent);
+      if (start !== null) {
+        const current = await basic(parent);
+        if (!alive(current) || current.start !== start) return false;
+      }
+      return BigInt(node.start) < BigInt(daemon.start);
+    }
+    const next = await basic(parent);
+    if (!alive(next)) return false;
+    node = next;
+  }
+  return false;
+}
+
 // Read-only after the bus exits too: late activated writers may have closed
 // their output but still be alive. Detection is never permission to signal.
-export async function inspectPrivateActivations(session, { io = linuxProc } = {}) {
+// `ignored` collects live processes whose environment could not be read but
+// that are proven unrelated to the private bus (see `unrelatedBranch`).
+export async function inspectPrivateActivations(session, { io = linuxProc, ignored = [] } = {}) {
   const { address, self, launcher, daemon } = session;
   addressPath(address);
   const excluded = new Set([self.pid, launcher.pid, daemon.pid]);
   let matched = 0;
+  let ancestors;
   return discoverProcesses(await io.pids(), async pid => {
     if (excluded.has(pid) || await io.uid(pid) !== self.uid) return;
     const info = await (io.basic ? io.basic(pid) : io.identity(pid));
@@ -193,6 +247,19 @@ export async function inspectPrivateActivations(session, { io = linuxProc } = {}
       const current = await (io.basic ? io.basic(pid) : io.identity(pid));
       if (!current || (current.pid === info.pid && current.start === info.start
         && current.uid === info.uid && ['Z', 'X'].includes(current.state))) return;
+      // Live and unreadable: skip it only when its branch of the process tree
+      // is proven older than the private daemon, and it is still the same
+      // process afterwards.
+      if (current.pid === info.pid && current.start === info.start && current.uid === info.uid) {
+        ancestors ??= await daemonAncestors(io, daemon);
+        if (await unrelatedBranch(io, current, daemon, ancestors)) {
+          const again = await (io.basic ? io.basic(pid) : io.identity(pid));
+          if (again && again.pid === info.pid && again.start === info.start && again.uid === info.uid) {
+            ignored.push({ pid, start: info.start, reason: `environment unreadable (${error.code}); its process branch predates the private bus` });
+            return;
+          }
+        }
+      }
       throw error;
     }
     if (!(env?.DBUS_SESSION_BUS_ADDRESS === address && env.DBUS_STARTER_ADDRESS === address && env.DBUS_STARTER_BUS_TYPE === 'session')) return;

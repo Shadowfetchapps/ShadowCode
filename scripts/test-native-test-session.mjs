@@ -152,6 +152,76 @@ for (const code of ['EACCES', 'EPERM']) {
     });
   }
 }
+// A live, non-dumpable process of the same user (a hosted CI runner starts
+// such helpers) cannot have its environment read. It is skipped only when its
+// branch of the process tree predates the private daemon (start 11 here).
+function unreadable(f, pid) {
+  const activation = f.io.activation;
+  f.io.activation = async id => {
+    if (id !== pid) return activation(id);
+    throw Object.assign(new Error('fixture environment denied'), { code: 'EACCES' });
+  };
+}
+test('an unreadable live process in an older, unrelated branch is ignored and reported', async () => {
+  const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
+  f.rows.set(20, f.proc(20, 0, 5, '/runner/worker'));
+  f.rows.set(21, f.proc(21, 20, 13, '/runner/helper'));
+  f.rows.set(22, f.proc(22, 21, 14, '/runner/non-dumpable'));
+  unreadable(f, 22);
+  const result = await session.cleanup();
+  assert.equal(result.ok, true, JSON.stringify(result.failures));
+  assert.deepEqual(result.services.map(service => service.pid), [4]);
+  assert.deepEqual(f.signals, [{ pid: 4, signal: 'SIGTERM' }], 'the unrelated process is never signaled');
+  assert.deepEqual(result.ignored.map(entry => entry.pid), [22], 'reported once although both inventories saw it');
+  assert.match(result.ignored[0].reason, /predates the private bus/);
+});
+for (const [name, setup] of [
+  ['a child of the private daemon', f => f.rows.set(22, f.proc(22, 2, 14, '/fixture/hidden-service'))],
+  ['a grandchild of the private daemon', f => { f.rows.set(21, f.proc(21, 2, 13, '/fixture/service')); f.rows.set(22, f.proc(22, 21, 14, '/fixture/hidden-helper')); }],
+  ['an orphan re-parented to the launcher', f => f.rows.set(22, f.proc(22, 1, 14, '/fixture/orphan'))],
+  ['an orphan re-parented to the root', f => f.rows.set(22, f.proc(22, 0, 14, '/fixture/orphan'))],
+  ['a branch started after the daemon', f => { f.rows.set(21, f.proc(21, 0, 12, '/fixture/new-root')); f.rows.set(22, f.proc(22, 21, 14, '/fixture/child')); }],
+  ['a branch whose parent is gone', f => f.rows.set(22, f.proc(22, 30, 14, '/fixture/lost-parent'))],
+  ['a branch whose parent is exiting', f => { f.rows.set(20, { ...f.proc(20, 0, 5, '/runner/worker'), state: 'Z' }); f.rows.set(22, f.proc(22, 20, 14, '/fixture/child')); }],
+]) {
+  test(`an unreadable live process in ${name} still fails before any signal`, async () => {
+    const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
+    setup(f);
+    unreadable(f, 22);
+    const result = await session.cleanup();
+    assert.equal(result.ok, false);
+    assert.match(result.failures.join(' '), /fixture environment denied/);
+    assert.deepEqual(f.signals, []);
+    assert.deepEqual(result.ignored, []);
+  });
+}
+test('after the private bus exits, an unreadable live process is never proven unrelated', async () => {
+  const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
+  // The daemon and its launcher are gone: a hidden service re-parented to
+  // the root would otherwise look like part of an old branch.
+  f.rows.delete(2); f.rows.delete(1);
+  f.rows.set(20, f.proc(20, 0, 5, '/sbin/init'));
+  f.rows.set(22, f.proc(22, 20, 14, '/fixture/orphaned-service'));
+  unreadable(f, 22);
+  await assert.rejects(inspectPrivateActivations(session.identity, { io: f.io }), /fixture environment denied/);
+});
+test('an unrelated branch is not accepted when the process changes during the proof', async () => {
+  const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
+  f.rows.set(20, f.proc(20, 0, 5, '/runner/worker'));
+  f.rows.set(22, f.proc(22, 20, 14, '/runner/non-dumpable'));
+  unreadable(f, 22);
+  let reads = 0;
+  f.io.basic = async pid => {
+    // The third read of 22 is the recheck after the branch proof: by then its
+    // PID belongs to a new process.
+    if (pid === 22 && ++reads === 3) f.rows.set(22, f.proc(22, 2, 15, '/fixture/reused-pid'));
+    return f.io.identity(pid);
+  };
+  const result = await session.cleanup();
+  assert.equal(result.ok, false);
+  assert.deepEqual(f.signals, []);
+});
+
 test('activation errors other than permission denial remain fatal even if the candidate exits', async () => {
   const f = fixture(); const session = await capturePrivateSession({ address, io: f.io });
   f.rows.set(5, f.proc(5, 0, 14, '/fixture/unrelated'));

@@ -291,8 +291,12 @@ revalidation. Cleanup is bounded and fails closed. The outer wrapper then
 requires command/output closure, disappearance of recorded session processes,
 and no surviving late activation before removing its runtime directory. It
 never performs a general process kill. Incomplete output, unknown ownership,
-a residual process or missing cleanup report fails the gate. Identity checks
-are not atomic pidfd protection against a hostile PID-reuse race.
+a residual process or missing cleanup report fails the gate. A live process
+of the same user whose environment cannot be read (a non-dumpable helper, as
+hosted CI runners start) counts as unknown ownership unless its branch of the
+process tree started before the private daemon; such a process is listed under
+`ignored` in the cleanup report instead. Identity checks are not atomic pidfd
+protection against a hostile PID-reuse race.
 
 Session diagnostics are retained under `artifacts/native-x11/run-*` (override
 `SHADOW_X11_ARTIFACTS`). The generated private-bus fixture exercises lifecycle
