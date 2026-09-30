@@ -1402,6 +1402,8 @@ function applySpendAndResume(
             : state === "needs_consent"
               ? `${label}'s limit has reset. Continuing there sends this conversation's newer turns to ${label}; review what is sent first.`
               : `The resume on ${label} didn't start: ${String(p.reason || "unknown error")}`;
+  // The continuation keeps the task's files and "Only change these".
+  const mentions = mentionsFrom(p.mentions);
   const card: ChatItem = {
     kind: "resume",
     taskId: taskId || undefined,
@@ -1414,6 +1416,9 @@ function applySpendAndResume(
     task: p.task ? String(p.task) : undefined,
     mode: modeOfJob(p.mode),
     web: p.web === true,
+    ...(mentions.length
+      ? { mentions, onlyChange: p.only_change === true }
+      : {}),
   };
   // One row per scheduled resume, updated as it runs or is cancelled; the
   // plan-limit card knows whether a resume is waiting.

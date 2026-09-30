@@ -379,4 +379,46 @@ describe("plan limits, resumes and Try on", () => {
     expect(plan).toMatchObject({ mode: "plan", web: false });
     expect(plan.text).not.toContain("at tomorrow");
   });
+
+  it("keeps the limited task's files and Only change these on the resume card", () => {
+    const [card] = of(
+      replay([
+        ...limited,
+        event(6, "resume.needs_consent", {
+          resume_id: "r1",
+          label: "Codex",
+          target: "cli:codex",
+          mode: "code",
+          mentions: [
+            { path: "src/a.ts", kind: "file" },
+            { path: "src/lib", kind: "dir" },
+          ],
+          only_change: true,
+          task: "Continue where Codex stopped.",
+        }),
+      ]).items,
+      "resume",
+    );
+    expect(card).toMatchObject({
+      mentions: [
+        { path: "src/a.ts", kind: "file" },
+        { path: "src/lib", kind: "dir" },
+      ],
+      onlyChange: true,
+    });
+    const [plain] = of(
+      replay([
+        ...limited,
+        event(6, "resume.scheduled", {
+          resume_id: "r1",
+          at: 1_790_010_000,
+          label: "Codex",
+          target: "cli:codex",
+        }),
+      ]).items,
+      "resume",
+    );
+    expect(plain.mentions).toBeUndefined();
+    expect(plain.onlyChange).toBeUndefined();
+  });
 });

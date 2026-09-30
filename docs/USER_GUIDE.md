@@ -617,14 +617,16 @@ models** and **Try on…**.
 When the vendor says when your plan resets (from its usage windows or its
 message, such as "try again at 3:40 PM"), the card also offers **Resume on
 Codex at 3:40 PM**. At that time ShadowCode continues the same conversation
-on the same model, with "Continue where Codex stopped…". It is saved, so it
-still happens after ShadowCode restarts, and **Cancel resume** in the
-conversation stops it. It needs ShadowCode open at that time (the window or
-`shadowcode serve`); if it was closed for more than 12 hours past the time,
-the conversation says the resume was missed instead. It never moves to
-another model: if that model can't run then, the conversation says why. If
-continuing would send newer turns from this computer to the cloud, it waits
-for you to choose **Review and resume**, which shows what is sent first.
+on the same model, with "Continue where Codex stopped…", in the same mode
+and with the same web access, @-mentioned files and **Only change these**.
+It is saved, so it still happens after ShadowCode restarts, and **Cancel
+resume** in the conversation stops it. It needs ShadowCode open at that time
+(the window or `shadowcode serve`); if it was closed for more than 12 hours
+past the time, the conversation says the resume was missed instead. It never
+moves to another model: if that model can't run then, the conversation says
+why. If continuing would send newer turns from this computer to the cloud,
+it waits for you to choose **Review and resume**, which shows what is sent
+first.
 
 ## Allowance
 
