@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, type RefObject } from "react";
 import { api, type StartJobRequest } from "../api";
 import type { ChatItem } from "../components/cards";
 import type { Attachment } from "../lib/attachments";
@@ -17,6 +17,7 @@ export function useMessageActions({
   roles,
   busy,
   queueing,
+  submittingRef,
   openSession,
   startTask,
   rewindNow,
@@ -31,6 +32,8 @@ export function useMessageActions({
   roles?: boolean;
   busy: boolean;
   queueing: boolean;
+  /** A request is being sent: a second Retry would send it twice. */
+  submittingRef: RefObject<boolean>;
   openSession: (id: string) => Promise<void>;
   startTask: (
     body: StartJobRequest,
@@ -127,13 +130,14 @@ export function useMessageActions({
 
   const retry = useCallback(
     async (text: string) => {
+      if (submittingRef.current) return;
       if (!model) {
         toast("Choose a model to send.", "err");
         return;
       }
       await startTask(request(text, sessionId, queueing), null);
     },
-    [model, sessionId, queueing, startTask, request, toast],
+    [model, sessionId, queueing, submittingRef, startTask, request, toast],
   );
 
   const copy = useCallback(

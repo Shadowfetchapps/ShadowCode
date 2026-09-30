@@ -49,6 +49,14 @@ inputs:
       the job. Actions the project's permissions deny stay denied.
     required: false
     default: cancel
+  max-cost:
+    description: >-
+      Most the task may spend on a paid API model, in US dollars (for example
+      2.50; from 0.01 to 100000). Empty keeps ShadowCode's limit of $1 per
+      task. At the limit the task stops (exit code 2). Subscriptions and local
+      models are never limited.
+    required: false
+    default: ""
   output:
     description: >-
       `pull-request` pushes a new branch and opens a pull request when files
@@ -87,10 +95,10 @@ inputs:
 
 outputs:
   exit-code:
-    description: "ShadowCode's exit code: 0 done, 1 failed, 2 stopped for approval."
+    description: "ShadowCode's exit code: 0 done, 1 failed, 2 stopped for approval or at the spending limit."
     value: ${{ steps.run.outputs.exit-code }}
   status:
-    description: The task's final status (completed, failed, needs_approval, …).
+    description: The task's final status (completed, failed, needs_approval, spending_limit, …).
     value: ${{ steps.run.outputs.status }}
   changed:
     description: "`true` when the task changed files."
@@ -113,6 +121,7 @@ runs:
         OUTPUT: ${{ inputs.output }}
         VERSION: ${{ inputs.version }}
         PIN: ${{ inputs.appimage-sha256 }}
+        MAX_COST: ${{ inputs.max-cost }}
       run: |
         set -euo pipefail
         fail() { echo "::error title=ShadowCode::$*"; exit 1; }
@@ -122,6 +131,11 @@ runs:
         [[ "$OUTPUT" =~ ^(pull-request|comment|none)$ ]] || fail "output must be pull-request, comment or none."
         [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "version must look like 0.31.1."
         [[ -z "$PIN" || "$PIN" =~ ^[0-9a-fA-F]{64}$ ]] || fail "appimage-sha256 must be 64 hex characters."
+        if [[ -n "$MAX_COST" ]]; then
+          # The same range ShadowCode accepts for --max-cost and spending.daily_usd.
+          [[ "$MAX_COST" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v usd="$MAX_COST" 'BEGIN { exit !(usd + 0 >= 0.01 && usd + 0 <= 100000) }' ||
+            fail "max-cost must be an amount in US dollars from 0.01 to 100000, such as 2.50."
+        fi
 
     - name: Download and verify ShadowCode
       id: install
@@ -165,11 +179,15 @@ runs:
         ENDPOINT: ${{ inputs.endpoint }}
         MODE: ${{ inputs.mode }}
         APPROVAL: ${{ inputs.approval }}
+        MAX_COST: ${{ inputs.max-cost }}
         SHADOWCODE_API_KEY: ${{ inputs.api-key }}
       run: |
         set -uo pipefail
-        profile="$RUNNER_TEMP/shadowcode-profile"
-        result="$RUNNER_TEMP/shadowcode-result.json"
+        # A new folder for each use of the action: a job that uses it twice
+        # must not carry the first task's spending or settings into the second.
+        run_dir="$(mktemp -d "$RUNNER_TEMP/shadowcode-run.XXXXXX")" || exit 1
+        profile="$run_dir/profile"
+        result="$run_dir/result.json"
         mkdir -p "$profile"
         sc() { "$SHADOWCODE" --profile "$profile" --workspace "$PWD" "$@"; }
         task="$TASK"
@@ -187,9 +205,19 @@ runs:
           echo "::error title=ShadowCode::approval: approve needs a newer ShadowCode; raise the version input."
           exit 1
         fi
+        if [[ -n "$MAX_COST" ]] && ! sc run --help | grep -q -- "--max-cost"; then
+          echo "::error title=ShadowCode::max-cost needs ShadowCode 1.0.0 or later; raise the version input."
+          exit 1
+        fi
         sc trust >/dev/null
         sc config permissions.mode allow_edits >/dev/null
         args=()
+        if [[ -n "$MAX_COST" ]]; then
+          args+=(--max-cost "$MAX_COST")
+          # The profile is new for each use, so today's total is this task's:
+          # the daily limit follows max-cost so it never stops the task first.
+          sc config spending.daily_usd "$MAX_COST" >/dev/null
+        fi
         if [[ -n "$ENDPOINT" ]]; then
           sc models --use "$MODEL" --provider openai_compatible --endpoint "$ENDPOINT" --api-key-env SHADOWCODE_API_KEY >/dev/null
         else
@@ -247,6 +275,23 @@ runs:
           [[ -n "$NUMBER" ]] || { echo "No issue or pull request to comment on."; return 0; }
           gh issue comment "$NUMBER" --repo "$REPO" --body-file "$body"
         }
+        if [[ "$STATUS" == "spending_limit" ]]; then
+          # The CLI's advice (--max-cost, --interactive) is for a terminal.
+          kind="$(jq -r '.limit.kind // empty' "$RESULT" 2>/dev/null || true)"
+          spent="$(jq -r '.limit.spent // empty' "$RESULT" 2>/dev/null || true)"
+          limit="$(jq -r '.limit.limit // empty' "$RESULT" 2>/dev/null || true)"
+          about="$(jq -r 'if .limit.estimated then "about " else "" end' "$RESULT" 2>/dev/null || true)"
+          if [[ "$kind" == "daily" ]]; then
+            summary="It reached the daily spending limit."
+            format='Paid models have cost %s$%.2f today; the daily limit is $%.2f.'
+          else
+            summary="It reached the limit for one task."
+            format='It spent %s$%.2f on paid models; the limit for one task is $%.2f.'
+          fi
+          if [[ "$spent" =~ ^[0-9.e+-]+$ && "$limit" =~ ^[0-9.e+-]+$ ]]; then
+            printf -v summary "$format" "$about" "$spent" "$limit"
+          fi
+        fi
         pr_url=""
         if [[ "$OUTPUT" == "pull-request" && "$CHANGED" == "true" && "$CODE" == "0" ]]; then
           branch="shadowcode/run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -274,11 +319,14 @@ runs:
           case "$STATUS" in
             completed) printf '**ShadowCode finished.**\n\n' ;;
             needs_approval) printf '**ShadowCode stopped: the task asked for approval** (for example to run a command). Set `approval: approve` on a GitHub-hosted runner to allow it.\n\n' ;;
+            spending_limit) printf '**ShadowCode stopped at its spending limit.** Set the `max-cost` input to a higher amount in US dollars to allow more.\n\n' ;;
             *) printf '**ShadowCode did not finish** (%s, exit code %s).\n\n' "$STATUS" "$CODE" ;;
           esac
           printf '%s\n\n' "$summary"
           if [[ "$OUTPUT" == "pull-request" && "$CHANGED" != "true" && "$CODE" == "0" ]]; then
             printf 'No files changed, so no pull request was opened.\n\n'
+          elif [[ "$OUTPUT" == "pull-request" && "$CHANGED" == "true" && "$CODE" != "0" ]]; then
+            printf 'The task changed files but did not finish, so no pull request was opened.\n\n'
           fi
           printf -- '---\n[Run details](%s)\n' "$RUN_URL"
         } > "$body"
@@ -291,6 +339,10 @@ runs:
         CODE: ${{ steps.run.outputs.exit-code }}
         STATUS: ${{ steps.run.outputs.status }}
       run: |
+        if [[ "$STATUS" == "spending_limit" ]]; then
+          echo "::error title=ShadowCode::The task stopped at its spending limit (exit code $CODE). Raise the max-cost input to allow more."
+          exit 1
+        fi
         if [[ "$CODE" != "0" ]]; then
           echo "::error title=ShadowCode::The task did not finish ($STATUS, exit code $CODE)."
           exit 1

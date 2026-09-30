@@ -67,7 +67,7 @@ const notes = (count: number): ChatItem[] =>
     key: `e:${i + 1}:0`,
   }));
 
-function rows(items: ChatItem[], resetKey = "s1:0") {
+function rows(items: ChatItem[], resetKey = "s1:0", forkDisabled = false) {
   const scrollRef = createRef<HTMLDivElement>();
   return (
     <div ref={scrollRef}>
@@ -78,7 +78,7 @@ function rows(items: ChatItem[], resetKey = "s1:0") {
         queuedTaskIds={new Set()}
         fallback={null}
         locked={false}
-        forkDisabled={false}
+        forkDisabled={forkDisabled}
         actions={actions}
         scrollRef={scrollRef}
         resetKey={resetKey}
@@ -101,6 +101,23 @@ it("renders the latest rows of a long transcript and reveals earlier ones", () =
   // Another conversation starts from its latest rows again.
   rerender(rows(items, "s2:0"));
   expect(screen.queryByText("Note 1")).toBeNull();
+});
+
+it("a failed task's Try again waits while a request is being sent", () => {
+  const failed: ChatItem = {
+    kind: "agent",
+    who: "Needs attention",
+    text: "Model provider returned HTTP 529; provider overloaded",
+    request: "Fix the add function",
+    key: "m:f",
+  };
+  const { rerender } = render(rows([failed], "s1:0", true));
+  const retry = () =>
+    screen.getByRole("button", { name: "Try again" }) as HTMLButtonElement;
+  expect(retry().disabled).toBe(true);
+  rerender(rows([failed], "s1:0", false));
+  fireEvent.click(retry());
+  expect(actions.onRetry).toHaveBeenCalledWith("Fix the add function");
 });
 
 it("short transcripts render every row without paging", () => {

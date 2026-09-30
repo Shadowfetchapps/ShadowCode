@@ -41,3 +41,23 @@ it("hides steps the row can't take and stays out of the way otherwise", () => {
   );
   expect(container.textContent).toBe("");
 });
+
+it("keeps Try again unavailable while a request is being sent", () => {
+  const onStep = vi.fn();
+  render(
+    <FailureHelp
+      text="Model provider returned HTTP 529; provider overloaded"
+      can={() => true}
+      retryDisabled
+      onStep={onStep}
+    />,
+  );
+  const retry = screen.getByRole("button", { name: "Try again" });
+  expect((retry as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(retry);
+  expect(onStep).not.toHaveBeenCalled();
+  const other = screen.getByRole("button", {
+    name: "Continue on another model…",
+  });
+  expect((other as HTMLButtonElement).disabled).toBe(false);
+});

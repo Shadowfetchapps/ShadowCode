@@ -51,6 +51,62 @@ describe("what went wrong", () => {
     ).toBe("offline");
   });
 
+  it("doesn't offer waiting for a used-up daily limit or quota", () => {
+    for (const text of [
+      "Model provider returned HTTP 429; provider rate limit reached: Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day",
+      "Model provider returned HTTP 429; provider rate limit reached: You exceeded your current quota, please check your plan and billing details",
+    ]) {
+      const diagnosis = whatWentWrong(text);
+      expect(diagnosis?.kind).toBe("quota");
+      expect(diagnosis?.steps).not.toContain("retry");
+    }
+    // A per-minute limit still passes on its own.
+    expect(
+      kind(
+        "Model provider returned HTTP 429; provider rate limit reached: Rate limit exceeded: free-models-per-min.",
+      ),
+    ).toBe("rate");
+  });
+
+  it("blames a provider's internal error on the provider", () => {
+    const stream = whatWentWrong(
+      "Provider reported an error while generating: Internal error encountered.",
+    );
+    expect(stream?.kind).toBe("provider-error");
+    expect(stream?.steps).toEqual(["retry", "try-on"]);
+    expect(kind("Model provider returned HTTP 500: Internal error")).toBe(
+      "overloaded",
+    );
+    expect(kind("codex exited: internal error")).toBeNull();
+  });
+
+  it("points an internal failure at a control that exists", () => {
+    const internal = whatWentWrong(
+      "ShadowCode hit an internal error and stopped this task. Your files and this conversation were kept; you can send the message again.",
+    );
+    expect(internal?.plain).toContain(
+      "Save diagnostics… in Settings › Advanced › Health",
+    );
+    expect(internal?.plain).not.toContain("Export a health report");
+  });
+
+  it("doesn't promise a local server error passes on its own", () => {
+    const local = whatWentWrong(
+      "Model provider returned HTTP 500; the model server on this computer failed: Value is not callable: null at row 1, column 72",
+    );
+    expect(local?.kind).toBe("local-error");
+    expect(local?.steps).toEqual(["open-local", "try-on"]);
+    expect(local?.plain).not.toContain("passes on its own");
+    // A local model still loading (503) is temporary.
+    expect(
+      kind(
+        "Model provider returned HTTP 503; provider overloaded: Loading model",
+      ),
+    ).toBe("overloaded");
+    // 501 is never temporary.
+    expect(kind("Model provider returned HTTP 501")).toBeNull();
+  });
+
   it("leaves anything else to the text itself", () => {
     expect(kind("The tests still fail: expected 3, received 4.")).toBeNull();
     expect(kind("")).toBeNull();

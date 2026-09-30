@@ -45,6 +45,17 @@ const RULES: Rule[] = [
     steps: ["try-on", "open-local"],
   },
   {
+    // A daily or billing cap arrives as HTTP 429 too, but waiting a minute
+    // can't help, and the engine has already retried it.
+    kind: "quota",
+    match:
+      /exceeded your (current )?quota|free-models-per-day|requests per day|add \d+ credits/i,
+    title: "The provider's allowance is used up",
+    plain:
+      "This key has used up what the provider allows: a daily limit on free models, or the account's quota. Trying again won't help until it resets or you add credits or billing on the provider's website. Continue on another model, or on a free model on this computer.",
+    steps: ["try-on", "open-local"],
+  },
+  {
     kind: "context",
     match:
       /context (length|window|size)|maximum context|too many tokens|prompt is too long|exceeds the (model'?s )?(context|maximum)|n_ctx|input is too long/i,
@@ -71,12 +82,35 @@ const RULES: Rule[] = [
     steps: ["retry", "try-on"],
   },
   {
+    // The engine marks a 5xx from a model server on this computer (other
+    // than 503, a model still loading). It isn't retried: the same request
+    // fails the same way.
+    kind: "local-error",
+    match: /model server on this computer failed/i,
+    title: "The model on this computer hit an error",
+    plain:
+      "The model server on this computer couldn't handle this request, and sending it again usually fails the same way. Pick another model in Settings › Local models, or continue on another model.",
+    steps: ["open-local", "try-on"],
+  },
+  {
+    // The statuses the engine retries as temporary; 501, 505 and the like
+    // won't pass on their own.
     kind: "overloaded",
     match:
-      /HTTP (5\d\d)\b|overloaded|provider (is )?unavailable|service unavailable|bad gateway|internal server error/i,
+      /HTTP (500|502|503|504|52\d)\b|overloaded|provider (is )?unavailable|service unavailable|bad gateway|internal server error/i,
     title: "The provider is having trouble",
     plain:
       "The provider's servers had a problem answering. It usually passes on its own: try again in a moment, or continue on another model.",
+    steps: ["retry", "try-on"],
+  },
+  {
+    // An error in the provider's stream, such as "Internal error
+    // encountered."
+    kind: "provider-error",
+    match: /provider reported an error/i,
+    title: "The provider stopped with an error",
+    plain:
+      "The provider sent an error instead of finishing its answer. Nothing half-finished was applied. Try again, or continue on another model.",
     steps: ["retry", "try-on"],
   },
   {
@@ -108,11 +142,13 @@ const RULES: Rule[] = [
     steps: ["retry", "try-on"],
   },
   {
+    // The engine's own text when a task's worker stops unexpectedly. A
+    // provider's "internal error" is the provider's problem, not ours.
     kind: "internal",
-    match: /internal error/i,
+    match: /ShadowCode hit an internal error/i,
     title: "ShadowCode hit a problem",
     plain:
-      "Something went wrong inside ShadowCode, not with your project. Your files and this conversation were kept. Try again; if it keeps happening, Settings › About › Export a health report helps us fix it.",
+      "Something went wrong inside ShadowCode, not with your project. Your files and this conversation were kept. Try again. If it keeps happening, Save diagnostics… in Settings › Advanced › Health helps us fix it.",
     steps: ["retry"],
   },
 ];

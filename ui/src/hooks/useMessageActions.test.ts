@@ -18,9 +18,13 @@ const items: ChatItem[] = [
 ];
 
 function setup(busy = false, roles = false) {
+  const submittingRef = { current: false };
   const deps = {
     openSession: vi.fn(async () => {}),
-    startTask: vi.fn(async () => {}),
+    // Like the real one: sending starts at once, before the engine answers.
+    startTask: vi.fn(async () => {
+      submittingRef.current = true;
+    }),
     rewindNow: vi.fn(async (task: string) => [`${task}.txt`]),
     toast: vi.fn(),
   };
@@ -33,10 +37,11 @@ function setup(busy = false, roles = false) {
       roles,
       busy,
       queueing: false,
+      submittingRef,
       ...deps,
     }),
   );
-  return { actions: result.current, ...deps };
+  return { actions: result.current, submittingRef, ...deps };
 }
 
 beforeEach(() => {
@@ -134,5 +139,13 @@ describe("useMessageActions", () => {
       expect.objectContaining({ task: "Second", session_id: "s1" }),
       null,
     );
+  });
+
+  it("sends a retry once when it is clicked twice", async () => {
+    const { actions, startTask } = setup();
+    await act(() =>
+      Promise.all([actions.retry("Second"), actions.retry("Second")]),
+    );
+    expect(startTask).toHaveBeenCalledTimes(1);
   });
 });

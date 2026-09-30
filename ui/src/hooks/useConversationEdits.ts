@@ -64,6 +64,7 @@ export function useConversationEdits({
     roles,
     busy,
     queueing,
+    submittingRef,
     openSession,
     startTask,
     rewindNow: rewinding.rewindNow,

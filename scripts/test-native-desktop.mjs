@@ -479,7 +479,8 @@ try {
   });
   assert.ok(suggestions.length <= 3, `At most three suggestions (${suggestions})`);
   assert.equal(await execute("return document.querySelectorAll('.unified-picker-trigger').length"), 1, "Exactly one model picker");
-  assert.equal(await execute("return document.querySelectorAll('select').length"), 0, "No select-based model controls in the workspace");
+  // More's "New worktree starts from" branch list is the one select allowed.
+  assert.equal(await execute("return [...document.querySelectorAll('select')].filter(s=>!s.closest('.worktree-base')).length"), 0, "No select-based model controls in the workspace");
   assert.ok(await visible('button[aria-label^="Attach"]'), "Attachment button");
   await screenshot("welcome-light");
   await accessibility("welcome-light");

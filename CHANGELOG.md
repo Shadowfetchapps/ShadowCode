@@ -7,10 +7,10 @@ For people starting out:
   the free models on this computer first (*Free · your code stays on this
   computer*).
 - **What went wrong, in plain words.** A task that fails for a common reason
-  (key refused, out of credits, conversation too long, unknown model, rate
-  limit, provider trouble, local model not running, offline) explains it and
-  offers the next step: **Try again**, **Continue on another model…**,
-  **Choose a model** or **Open Local models**.
+  (key refused, out of credits or allowance, conversation too long, unknown
+  model, rate limit, provider trouble, local model not running or failing,
+  offline) explains it and offers the next step: **Try again**, **Continue on
+  another model…**, **Choose a model** or **Open Local models**.
 - **Words you'll see.** Help (`?`) explains worktree, checkpoint, rewind,
   context, tokens, hunk and more; some words in the app show their meaning
   when you point at them.
@@ -58,9 +58,10 @@ Real work:
 - **Roles.** A model or subscription per step: plan, implement, review
   (**Settings › Roles**, **More › Roles**).
 - **Spending limits** for paid models (ask at $1 a task and $10 a day by
-  default), a price estimate before sending, *Provider busy, retrying (2 of
-  5)*, **Resume at** a plan's reset time, **Try on…** another model, and
-  **Run details** for every task.
+  default; the GitHub Action's `max-cost` input sets its limit), a price
+  estimate before sending, *Provider busy, retrying (2 of 5)*, **Resume at**
+  a plan's reset time, **Try on…** another model, and **Run details** for
+  every task.
 - **Stuck detection** pauses a task that fails the same way three times or
   edits a file back and forth (**Keep going**, **Give a hint**, **Try
   another model**, **Stop**); automations and editor tasks are told to
@@ -79,9 +80,9 @@ Real work:
 
 Reliability:
 - **Your data.** Settings › Your data (and `shadowcode backup`, `restore`,
-  `repair`, `reset`) backs up, restores, repairs and starts over; upgrades
-  from every release since 0.28 are tested against saved profiles, and a
-  newer profile is never opened by an older version.
+  `doctor --repair`, `reset`) backs up, restores, repairs and starts over;
+  upgrades from every release since 0.28 are tested against saved profiles,
+  and a newer profile is never opened by an older version.
 - A stable, checked API contract (`docs/API_CONTRACT.md`) for 1.x.
 - A local model that runs out of GPU memory offers a smaller context or
   another model; a task that fails before any output ends cleanly with its
