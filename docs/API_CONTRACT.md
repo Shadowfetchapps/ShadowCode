@@ -2124,7 +2124,9 @@ one to the desktop keyring (the freedesktop Secret Service: GNOME Keyring,
 KWallet, KeePassXC). `config/keyring.json` lists the moved names; reads try
 the environment, then the keyring for those names, then the file. ShadowCode
 never unlocks the keyring itself: a locked keyring makes the key unavailable
-until it is unlocked.
+until it is unlocked. Saving or removing a listed key where no keyring can be
+reached (SSH, `shadowcode serve`) writes `secrets.env` instead and drops the
+name from `keyring.json`; a locked keyring still refuses.
 
 - `GET /api/secrets` → `{keyring: {available, detail: string|null}, file,
   keys: [{name, place: "file"|"keyring"}]}`. No values.
@@ -2449,29 +2451,49 @@ user-info; tool errors are redacted.
   changed…"); new, binary or truncated files are staged as a whole.
 - `POST /api/workspace/git/add {paths}` (1–200) → `{ok: true}`.
 - `POST /api/workspace/git/commit {message, allow_secrets?, hooks?:
-  "run"|"skip"}` (1–32 000 bytes) → `{ok: true, hooks_ran}`; never signed.
-  Before committing, and without `allow_secrets: true`, the staged changes
-  are checked for secrets (provider keys, private key blocks, `.env` and
-  other secret files, long random values assigned to names like `API_KEY` or
-  `PASSWORD`); findings answer in band with `{ok: false, status: 409,
-  secrets: [{path, line|null, kind, preview}], secrets_truncated, error}`
-  and nothing is committed. `preview` is the first characters and the
-  length, never the value. A line containing `shadowcode:allow-secret`, and
-  paths matching a glob in `.shadowcode/secret-scan-ignore`, are skipped.
-  When the project has its own commit hooks (`pre-commit`,
-  `prepare-commit-msg`, `commit-msg`, `post-commit`, including a
-  `core.hooksPath` such as `.husky`) and no choice was saved, the answer is
-  `{ok: false, status: 409, needs_hooks_choice: true, hooks: [{name, path,
-  preview}], error}`; `hooks` saves the choice for the project (`native_meta`
-  `git_hooks:<project>`). Hooks never run otherwise; a hook that fails stops
-  the commit with its output.
+  "run"|"skip", hooks_fingerprint?}` (1–32 000 bytes) → `{ok: true,
+  hooks_ran}`; never signed. Before committing, and without `allow_secrets:
+  true`, the staged changes are checked for secrets (provider keys, private
+  key blocks in PEM, OpenSSH and PGP armor, also a changed body between
+  unchanged markers, `.env`, `.p12`/`.pfx`/`.jks`/`.keystore` and other
+  secret files, long random values assigned to names like `API_KEY` or
+  `PASSWORD`). Files Git shows as binary (content or a `-diff`/`binary`
+  attribute) are checked by name, and by content when it is text. Findings,
+  or a check that could not read everything (over 32 MB), answer in band
+  with `{ok: false, status: 409, secrets: [{path, line|null, kind,
+  preview}], secrets_truncated /* more findings than listed */,
+  secrets_unchecked: string|null /* what was not checked */, error}` and
+  nothing is committed. `preview` is the first characters and the length,
+  never the value. A line containing `shadowcode:allow-secret`, and paths
+  matching a glob in `.shadowcode/secret-scan-ignore`, are skipped. The
+  check's Git commands ignore the repository's hooks, fsmonitor, signature
+  programs and filter drivers. When the project has hooks a commit can run
+  (`pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`,
+  `reference-transaction`, `post-index-change`, `pre-auto-gc`, including a
+  `core.hooksPath` such as `.husky/_` or `~/.githooks`) and no choice holds,
+  the answer is `{ok: false, status: 409, needs_hooks_choice: true, hooks:
+  [{name, path, preview}], hooks_fingerprint, hooks_changed, error}`;
+  `hooks` saves the choice for the project (`native_meta`
+  `git_hooks:<project>`). A `run` choice holds for the hooks as they are (a
+  SHA-256 over the hooks folder's files, and for husky the scripts its stubs
+  run): once they change, `hooks_changed: true` asks again, and `run` with a
+  `hooks_fingerprint` other than the current one asks again instead of
+  running. Hooks never run otherwise. A hook that fails stops the commit
+  with an error naming it and its output (from Git's trace events); other
+  failures report Git's own output.
 - `POST /api/workspace/git/unstage {paths}` (1–200) → `{ok: true}`: out of the
   next commit, working tree unchanged.
-- `POST /api/workspace/git/ignore {path}` → `{ok: true, path}`: adds `/<path>`
-  to the project's `.gitignore` and takes the file out of the index.
-- `GET /api/workspace/git/hooks` → `{workspace, hooks, run: bool|null}`;
-  `POST /api/workspace/git/hooks {run: bool|null}` saves (`null` asks again
-  at the next commit).
+- `POST /api/workspace/git/ignore {path}` → `{ok: true, path, tracked}`: a
+  file not in the last commit gets `/<path>` added to the project's
+  `.gitignore` and is taken out of the index (`tracked: false`). A file in
+  the last commit stays in the repository, since removing it would delete
+  it for everyone who pulls: its staged change is unstaged and `.gitignore`
+  is left alone (`tracked: true`).
+- `GET /api/workspace/git/hooks` → `{workspace, hooks, run: bool|null,
+  changed, fingerprint}` (`run` is `null` again once hooks the user chose to
+  run changed, with `changed: true`); `POST /api/workspace/git/hooks {run:
+  bool|null, fingerprint?}` saves (`null` asks again at the next commit;
+  `run: true` with a `fingerprint` other than the current one is refused).
 
 ### Git panel
 
@@ -2497,13 +2519,22 @@ user-info; tool errors are redacted.
   offline), `local` the loaded local model, `summary` a deterministic text.
   Secret-looking paths are listed without contents; text is redacted before
   it leaves; 60 s limit; failures fall back to `summary` with a `note`.
-- `POST /api/git/push` and `POST /api/git/pr` accept `allow_secrets`: without
-  it, the commits the push would send (after the upstream, or on no branch
-  of the remote) are checked for secrets first and findings answer in band as
-  for commits (each with its `commit`); nothing is pushed.
-- `POST /api/git/push {remote?, allow_secrets?}` → `{ok, remote, branch, output, remote_info}`:
-  pushes `refs/heads/<branch>` to the same name with `--set-upstream`, never
-  forced; 180 s limit. Sign-in and rejection failures explain the next step.
+- `POST /api/git/push` and `POST /api/git/pr` accept `allow_secrets` and
+  `scanned`: without them, the commits the push would send (every commit of
+  the branch that no branch of that remote has, as last fetched; a merge
+  commit with the changes made in the merge itself) are checked for secrets
+  first. Findings, or a check that could not read everything (over 32 MB,
+  or more than 500 commits), answer in band as for commits (each finding
+  with its `commit`), plus `scanned`: the full id of the commit checked;
+  nothing is pushed. `allow_secrets: true` with that `scanned` pushes
+  exactly that commit, so commits made since stay local (refused when the
+  branch no longer contains it); `allow_secrets` alone pushes the branch as
+  it is, unchecked.
+- `POST /api/git/push {remote?, allow_secrets?, scanned?}` → `{ok, remote,
+  branch, output, remote_info}`: pushes the checked commit to
+  `refs/heads/<branch>` of the remote, never forced, and makes that the
+  branch's upstream; 180 s limit. Sign-in and rejection failures explain the
+  next step.
 - `GET /api/git/pr?remote=&base=` → `{remote, provider, remote_info, cli:
   {name: "gh"|"glab"|null, installed, version, authenticated, detail,
   install_url, login_command}, base, compare_url, pr: {number, url, state,
@@ -2512,9 +2543,10 @@ user-info; tool errors are redacted.
   `gh|glab auth status --hostname <host>`.
 - `POST /api/git/pr {title, body, base, draft?, remote?}` → `{ok, url,
   number, provider, pushed, branch, base, draft}`. `title` 1–256 characters,
-  `body` at most 60 000 bytes. Pushes first when the branch has no upstream
-  or unpushed commits, then runs `gh pr create` (`glab mr create` for
-  GitLab). Refused on the base branch and when the CLI is missing or signed out.
+  `body` at most 60 000 bytes. Pushes the checked commit first when the
+  remote's copy of the branch does not have it, then runs `gh pr create`
+  (`glab mr create` for GitLab). Refused on the base branch and when the CLI
+  is missing or signed out.
 - `GET /api/git/pr/checks?number=&remote=` → `{supported: true, checks:
   [{name, workflow, state, bucket: "pass"|"fail"|"pending"|"skipping", link,
   description}], summary: {[bucket]: count}, overall:
@@ -2935,7 +2967,7 @@ view.
 manifest.json
 state/shadow-agent.db          // consistent copy (VACUUM INTO), user_version kept
 config/config.yaml             // when present
-config/secrets.env             // only with include_secrets
+config/secrets.env             // only with include_secrets; keyring keys written in
 config/remote.json             // only with include_secrets
 agents/...                     // your agent definitions (~/.config/shadowcode/agents)
 state/native-plugins/...       // plugin install records
@@ -2952,7 +2984,8 @@ state/native-plugins/...       // plugin install records
   includes_secrets: boolean,
   reason: "manual"|"before-restore"|"before-repair"|"upgrade-copy",
   files: [{path: string, bytes: number, sha256: string}],
-  raw_copy: boolean             // a damaged database copied as it was (not restorable)
+  raw_copy: boolean,            // a damaged database copied as it was (not restorable)
+  keys_left_out?: string[]      // keyring keys that could not be read (locked, out of reach)
 }
 ```
 
@@ -3014,7 +3047,9 @@ not know are reported in `ignored` and not restored.
   settings (and API keys when they are replaced) into a `before-restore`
   backup, and swaps the files in; the old write-ahead log is removed with
   the old database. API keys are restored only with `include_secrets` and
-  when the backup has them. An older database is then upgraded as usual.
+  when the backup has them; the restored keys are read from `secrets.env`
+  (their names leave `keyring.json`). An older database is then upgraded as
+  usual.
 - `POST /api/data/reset {confirm: "reset"}` → `{scheduled: true, pending,
   message}`. At the next start everything in the three profile folders moves
   into sibling folders `<folder>.reset-<YYYYMMDD-HHMMSS>` — except

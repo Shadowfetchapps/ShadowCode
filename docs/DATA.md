@@ -54,8 +54,10 @@ drive. It holds:
 
 API keys (`secrets.env`) and remote-access pairing (`remote.json`) are left
 out unless you tick **Include API keys and remote-access pairing** (or pass
-`--include-secrets`). Anyone who gets such a backup can use your keys: keep it
-private. Only your account can open the backup folder. Downloaded models,
+`--include-secrets`). Keys you moved to the system keyring are written into
+the backup's `secrets.env` too; if the keyring is locked or out of reach,
+the backup says which keys it left out. Anyone who gets such a backup can use
+your keys: keep it private. Only your account can open the backup folder. Downloaded models,
 worktrees and your project files are not included.
 
 ## Restore
@@ -75,7 +77,9 @@ cancel it. When it runs, ShadowCode:
 1. checks the copied files again;
 2. backs up what it is about to replace (`…-before-restore`);
 3. puts the backup's database and settings in place, and your API keys only
-   if you ticked **Also restore the API keys in this backup**;
+   if you ticked **Also restore the API keys in this backup** (they go back
+   into `secrets.env`, keys that were in the keyring too; move them to the
+   keyring again in **Settings › Accounts** if you like);
 4. upgrades the database if the backup came from an older version.
 
 `shadowcode restore FOLDER --yes` restores right away when ShadowCode is not

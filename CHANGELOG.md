@@ -26,13 +26,18 @@ Safety and trust:
   or rewrites history.
 - **Secret checks** before every commit, push and pull request from
   ShadowCode (**Remove from commit**, **Add to .gitignore**, **Commit
-  anyway**); the agent's own commits never include a staged secret.
-- **Project Git hooks** are asked about once per project; **new packages**
-  are looked up on npm, PyPI and crates.io (does it exist, how new is it, is
-  it one typo from a popular name); **lockfiles** are summarized.
+  anyway**); binary key files, PEM/OpenSSH/PGP private keys and merge
+  resolutions are covered, a check that can't read everything says so, and
+  **Push anyway** sends only the commits that were checked. The agent's own
+  commits never include a staged secret.
+- **Project Git hooks** are asked about once per project, and again when a
+  hook changes; **new packages** are looked up on npm, PyPI and crates.io
+  (does it exist, how new is it, is it one typo from a popular name);
+  **lockfiles** are summarized.
 - **Keys in the system keyring.** **Settings › Accounts › Where your keys
   are kept** moves API keys into the Secret Service keyring (GNOME Keyring,
-  KWallet, KeePassXC) and back; the private file stays the default.
+  KWallet, KeePassXC) and back; the private file stays the default. Backups
+  with API keys include the keyring's keys.
 - Small Git-ignored files that are costly to lose (`.env`, local databases,
   keys) are saved before each step and restored by Rewind.
 - **Heads-ups** when a task skipped or deleted tests, removed assertions,
