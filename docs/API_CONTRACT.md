@@ -908,8 +908,10 @@ Preview = {kind: "files", files: [{path, status: "added"|"modified"|"deleted", d
 - `always` (since 1.0) says what "Always allow in this project" would cover
   ("Always allow `cargo test` in this project"); empty unless the command is
   one exact, fully read test, build, lint or type-check command with no
-  redirects to files, variables, paths outside the project, installs or
-  network use.
+  redirects to files, variables, paths outside the project, installs,
+  network use or text the redaction rules would hide. Always empty for a
+  vendor request whose `cwd` is outside the project, and for Codex, which
+  asks only to run a command outside its sandbox.
 - `reason` in `ask` mode reads `Write <path>`, `Edit <path>`, `Create
   directory <path>`, `Move <a> to <b>`, `Delete <path>`, `Apply a patch to <files>`.
 - Native approvals expire after 10 minutes; vendor approvals after
@@ -924,9 +926,10 @@ Routes:
   "once"|"task"|"project", note?}` → the answered `Approval`. `scope:
   "project"` with `approve` (only when `always` is set) stores the command in
   the project's rules; later requests of exactly that command, from
-  ShadowCode's own agent or a vendor CLI, run without a prompt and are
-  recorded as `approval.granted {…, scope: "project", command}`. Each rule is
-  checked again before use. `session_id` defaults to
+  ShadowCode's own agent or a vendor CLI (Codex excepted; a vendor's only in
+  the project folder), run without a prompt and are recorded as
+  `approval.granted {…, scope: "project", command}`. Each rule is checked
+  again before use. `session_id` defaults to
   the selected conversation. `scope: "task"` with `approve` keeps a grant
   until the task ends: later requests of the same task with the same scope
   (tool kind, or the same program and subcommand for commands) are allowed
