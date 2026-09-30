@@ -266,6 +266,67 @@ fn permission_mode_matrix() {
     assert!(permissions::parallel_safe("web_fetch", &json!({})));
 }
 
+#[test]
+fn shell_paths_are_placed_in_the_real_project() {
+    let mut legacy = perms(PermissionMode::AllowEdits);
+    legacy.approve_shell = false;
+    let project = std::path::Path::new("/home/u/proj");
+    let in_sub = json!({"command":"touch notes.md","cwd":"/home/u/proj/sub"});
+    assert_eq!(
+        permissions::check_in(&legacy, "exec", &in_sub, Some(project)),
+        Decision::Allow
+    );
+    assert_eq!(
+        permissions::check_in(
+            &legacy,
+            "exec",
+            &json!({"command":"touch /home/u/proj/x"}),
+            Some(project)
+        ),
+        Decision::Allow
+    );
+    for args in [
+        json!({"command":"touch ../../x","cwd":"/home/u/proj/sub"}),
+        json!({"command":"touch /home/u/other/x"}),
+    ] {
+        let decision = permissions::check_in(&legacy, "exec", &args, Some(project));
+        assert!(
+            matches!(&decision, Decision::Ask(reason) if reason.contains("Outside the project")),
+            "{args}: {decision:?}"
+        );
+    }
+    // Without the project's folder an absolute `cwd` is not placed, rather
+    // than read as outside a made-up folder.
+    assert_eq!(
+        permissions::check(&legacy, "exec", &in_sub),
+        Decision::Allow
+    );
+}
+
+#[tokio::test]
+async fn a_command_run_in_a_project_subfolder_by_absolute_path_does_not_ask() {
+    let mut config = Config::default();
+    config.permissions.mode = PermissionMode::AllowEdits;
+    config.permissions.approve_shell = false;
+    let (root, tools) = executor(config);
+    let sub = root.path().join("project").join("sub");
+    fs::create_dir(&sub).unwrap();
+    let cwd = sub.canonicalize().unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        run(
+            &tools,
+            "exec",
+            json!({"command":"touch notes.md","cwd":cwd.display().to_string()}),
+        ),
+    )
+    .await
+    .expect("runs without asking");
+    assert!(result.success, "{}", result.error);
+    assert!(cwd.join("notes.md").exists());
+    assert!(tools.approvals.list(None).is_empty());
+}
+
 fn write_config(paths: &AppPaths, yaml: &str) {
     fs::write(paths.config_file(), yaml).unwrap();
 }
