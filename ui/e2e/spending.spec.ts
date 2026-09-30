@@ -34,6 +34,9 @@ const fakeLog = (page: Page) =>
   );
 const posts = async (page: Page, path: string) =>
   (await fakeLog(page)).filter((r) => r.path === path && r.method === "POST");
+/** The fake Codex plan resets two hours from now: "tomorrow at …" when the
+ * suite runs late in the evening. */
+const RESUME_ON_CODEX = /^Resume on Codex (?:tomorrow )?at /;
 
 async function chooseBySearch(page: Page, text: string) {
   await trigger(page).click();
@@ -174,11 +177,11 @@ test("after a plan limit, Resume at the reset time can be scheduled and cancelle
     timeout: 15000,
   });
   await expect(card.getByRole("button", { name: "Try on…" })).toBeVisible();
-  const resume = card.getByRole("button", { name: /^Resume on Codex at / });
+  const resume = card.getByRole("button", { name: RESUME_ON_CODEX });
   await resume.click();
   const note = page.getByRole("status", { name: "Scheduled resume" });
   await expect(note).toContainText(
-    /Will resume on Codex at .+, when its plan limit resets\./,
+    /Will resume on Codex (?:tomorrow )?at .+, when its plan limit resets\./,
   );
   await expect(resume).toHaveCount(0);
   const [scheduled] = await posts(
@@ -190,7 +193,7 @@ test("after a plan limit, Resume at the reset time can be scheduled and cancelle
   await note.getByRole("button", { name: "Cancel resume" }).click();
   await expect(note).toContainText("The resume on Codex was cancelled.");
   await expect(
-    card.getByRole("button", { name: /^Resume on Codex at / }),
+    card.getByRole("button", { name: RESUME_ON_CODEX }),
   ).toBeVisible();
 });
 

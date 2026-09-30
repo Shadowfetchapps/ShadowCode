@@ -1,6 +1,7 @@
 import type { ChatItem } from "./cards";
 import type { Fallback } from "../lib/allowance";
 import { clockTime } from "../lib/spending";
+import { useWallClock } from "../hooks/useWallClock";
 
 type LimitItem = Extract<ChatItem, { kind: "limit" }>;
 
@@ -17,7 +18,8 @@ function ResumeButton({
   onSchedule?: (item: LimitItem) => void;
   now?: number;
 }) {
-  const current = now ?? Date.now() / 1000;
+  // Worded again at midnight, and gone once the reset has passed.
+  const current = useWallClock(now, item.resetsAt);
   if (
     !onSchedule ||
     !item.jobId ||

@@ -1,5 +1,6 @@
 import type { ChatItem } from "./cards";
 import { scheduledResumeText } from "../lib/spending";
+import { useWallClock } from "../hooks/useWallClock";
 
 type ResumeItem = Extract<ChatItem, { kind: "resume" }>;
 
@@ -20,10 +21,12 @@ export function ResumeCard({
   now?: number;
 }) {
   const warning = item.state === "failed" || item.state === "missed";
-  // "tomorrow" is true only until midnight: a waiting resume is worded now.
+  // "tomorrow" is true only until midnight: a waiting resume is worded now,
+  // and again at midnight in a window left open.
+  const current = useWallClock(now);
   const text =
     item.state === "scheduled" && item.at
-      ? scheduledResumeText(item.label, item.at, now)
+      ? scheduledResumeText(item.label, item.at, current)
       : item.text;
   return (
     <div

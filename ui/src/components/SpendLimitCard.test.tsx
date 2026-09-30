@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { SpendLimitCard } from "./SpendLimitCard";
 import { ResumeCard } from "./ResumeCard";
@@ -109,6 +115,34 @@ it("words a waiting resume from the time it is shown", () => {
   const card = screen.getByRole("status", { name: "Scheduled resume" });
   expect(card.textContent).toMatch(/^Will resume on Codex at /);
   expect(card.textContent).not.toContain("tomorrow");
+});
+
+it("words a waiting resume again at midnight in a window left open", () => {
+  vi.useFakeTimers();
+  try {
+    // Scheduled at 23:00 for 3:40, and the window stays open.
+    vi.setSystemTime(new Date(2026, 8, 29, 23, 0));
+    const resume: Extract<ChatItem, { kind: "resume" }> = {
+      kind: "resume",
+      resumeId: "r1",
+      state: "scheduled",
+      at: new Date(2026, 8, 30, 3, 40).getTime() / 1000,
+      label: "Codex",
+      target: "cli:codex",
+      text: "Will resume on Codex tomorrow at 3:40 AM, when its plan limit resets.",
+    };
+    render(
+      <ResumeCard item={resume} onCancel={vi.fn()} onResumeNow={vi.fn()} />,
+    );
+    const card = screen.getByRole("status", { name: "Scheduled resume" });
+    expect(card.textContent).toMatch(/^Will resume on Codex tomorrow at /);
+    // Nothing else renders the row again; midnight alone rewords it.
+    act(() => vi.advanceTimersByTime(61 * 60 * 1000));
+    expect(card.textContent).toMatch(/^Will resume on Codex at /);
+    expect(card.textContent).not.toContain("tomorrow");
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("lists what ran under Run details", () => {
