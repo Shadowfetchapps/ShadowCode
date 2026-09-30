@@ -878,6 +878,60 @@ async fn a_second_opinion_that_hits_a_plan_limit_stays_on_its_model() {
     service.engine.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn a_paid_reviewer_at_a_spending_limit_stops_instead_of_waiting() {
+    let f = fixture(json!({"spending":{"task_usd":null,"daily_usd":0.5}})).await;
+    let service = &f.service;
+    let store = service.engine.store();
+    // A reviewer billed per token, on the fake server.
+    store
+        .upsert_model(&json!({
+            "id":"paid","name":"beta","provider":"openrouter","endpoint":f.server.endpoint,
+            "context_limit":16384,"metadata":{"api_key_env":"SHADOWCODE_TEST_UNUSED_API_KEY"},
+        }))
+        .unwrap();
+    // Paid models already cost more than today's limit.
+    let today = shadowcode_core::spending::day_of(shadowcode_core::now());
+    store
+        .set_native_meta(
+            shadowcode_core::spending::DAY_KEY,
+            &json!({"day": today, "usd": 0.6}).to_string(),
+        )
+        .unwrap();
+    fs::write(f.project.join("lib.txt"), "value = 3\n").unwrap();
+    git(&f.project, &["add", "lib.txt"]);
+    let record = call(
+        service,
+        "POST",
+        "/api/second-opinions",
+        json!({"kind":"review","source":"staged","workspace":f.project,"model":"paid"}),
+    )
+    .await;
+    let done = finished(service, record["id"].as_str().unwrap()).await;
+    assert_eq!(done["status"], "failed", "{done:#}");
+    assert!(
+        done["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Today's spending limit for paid models ($0.50) is reached."),
+        "{done:#}"
+    );
+    assert!(
+        requests_for(&f.server, "beta").is_empty(),
+        "nothing was sent"
+    );
+    // No card waits unseen in the hidden conversation, so nothing holds up
+    // the project's queue.
+    let hidden = done["review_session"].as_str().unwrap();
+    assert!(store
+        .events_after(hidden, 0, None, 10_000)
+        .unwrap()
+        .iter()
+        .all(|e| e["type"] != "spend.limit_reached"));
+    assert!(service.engine.spending_waiting().unwrap().is_empty());
+    service.engine.shutdown().await.unwrap();
+}
+
 /// A GitHub-token-shaped placeholder, built at runtime so the repository's
 /// secret scanner never sees a token-shaped literal.
 fn fake_token() -> String {

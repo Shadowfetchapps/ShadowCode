@@ -403,9 +403,10 @@ export function RemotePage({ onToast }: { onToast: Toast }) {
         <a href="https://ntfy.sh" target="_blank" rel="noreferrer">
           ntfy
         </a>{" "}
-        when a task needs approval, finishes, fails or reaches a plan limit.
-        Install the ntfy app, subscribe to the same topic, and enter the server
-        here (ntfy.sh or your own). Nothing is sent until you do.
+        when a task needs approval, finishes, fails or reaches a plan or
+        spending limit. Install the ntfy app, subscribe to the same topic, and
+        enter the server here (ntfy.sh or your own). Nothing is sent until you
+        do.
       </p>
       <div className="field">
         <label htmlFor="ntfy-server">Server</label>
@@ -521,7 +522,7 @@ export function RemotePage({ onToast }: { onToast: Toast }) {
             ["approval", "A task needs my approval"],
             ["finished", "A task finishes"],
             ["failed", "A task fails"],
-            ["limit", "A subscription reaches its plan limit"],
+            ["limit", "A task reaches a plan or spending limit"],
           ] as const
         ).map(([key, label]) => (
           <label className="check" key={key}>

@@ -158,8 +158,8 @@ treat broadcasts as **wake-ups** and read committed rows by cursor
   Events (see [Remote access](#remote-access)); `view.*` types are dropped.
 - **Attached views** receive `{type, session_id, payload?, terminal_id?}`
   where `payload` is a bounded notification hint (`notify::hint`: summary at
-  most 180 characters, success, cancelled, limit, command, tool), never
-  transcript content.
+  most 180 characters, success, cancelled, limit, command, tool, a spending
+  card's title), never transcript content.
 
 The window's feed re-reads `GET /api/feed` for the types listed in its
 `events` field, for `view.*` hints and for untyped wake-ups, at most once per
@@ -948,10 +948,11 @@ Routes:
   JobSummary[], events: string[], waiting: string[]}`. `approvals` are the
   pending approvals of that conversation (all without `session_id`); `jobs`
   are the rows of `GET /api/jobs?view=summary`; `waiting` lists every
-  conversation with a pending approval (sidebar badges); `events` lists the
-  broadcast types after which the feed may have changed: `approval.requested`,
-  `approval.resolved`, `job.changed`, `agent.started`, `agent.completed`,
-  `agent.paused`, `agent.resumed`, `limit.fallback`. The window reads the feed
+  conversation with a pending approval or a waiting spending card (sidebar
+  badges); `events` lists the broadcast types after which the feed may have
+  changed: `approval.requested`, `approval.resolved`, `job.changed`,
+  `agent.started`, `agent.completed`, `agent.paused`, `agent.resumed`,
+  `limit.fallback`, `spend.limit_reached`, `spend.limit_resolved`. The window reads the feed
   on those wake-ups plus a 15 s backstop.
 
 ### Plan limits
@@ -1109,8 +1110,13 @@ models on this computer and the offline preview are never limited.
   - Event `spend.limit_reached {id, job_id, kind, limit, spent, estimated,
     raise_to, resets_at, title, text, continue_label}` at 100%: the task waits
     (status stays `running`) until the card is answered, the limit no longer
-    applies, or the task is cancelled. A subagent at the limit shows the card
-    in the task that started it (`job_id` is that task's job).
+    applies, or the task is cancelled. A subagent or a Plan → Implement →
+    Review role at the limit shows the card in the task that started it
+    (`job_id` is that task's job), also when that task's own model is a
+    subscription. A second opinion's review task (hidden conversation) does
+    not wait: it ends `failed` with the summary "Stopped at the per-task
+    spending limit for paid models ($…)…" or "Today's spending limit for paid
+    models ($…) is reached…", which the second opinion shows as its `error`.
   - Event `spend.limit_resolved {prompt_id, job_id, kind, action, limit?,
     reason?, text?}`: `action` `continue` (the per-task limit, or today's
     limit, is raised to `raise_to`: the limit plus one more step of the

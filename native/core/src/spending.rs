@@ -267,6 +267,9 @@ pub struct Meter {
     events: TaskEvents,
     /// `--max-cost` for this task: replaces the per-task setting.
     max_cost: Option<f64>,
+    /// No one sees this task's conversation (a second opinion's hidden
+    /// review): at a limit it stops instead of waiting for an answer.
+    unattended: bool,
     state: Mutex<State>,
     changed: Notify,
 }
@@ -277,9 +280,18 @@ impl Meter {
             job_id: job_id.to_owned(),
             events,
             max_cost,
+            unattended: false,
             state: Mutex::default(),
             changed: Notify::new(),
         }
+    }
+    /// A meter whose task stops at a limit instead of showing a card.
+    pub fn unattended(mut self) -> Self {
+        self.unattended = true;
+        self
+    }
+    pub fn is_unattended(&self) -> bool {
+        self.unattended
     }
     pub fn job_id(&self) -> &str {
         &self.job_id
@@ -560,6 +572,24 @@ pub fn stopped_summary(kind: Kind) -> String {
         match kind {
             Kind::Task => "per-task",
             Kind::Daily => "daily",
+        }
+    )
+}
+
+/// The finished task's summary when it could not wait for an answer at a
+/// limit (see [`Meter::unattended`]).
+pub fn unattended_summary(kind: Kind, limit: f64) -> String {
+    format!(
+        "{} Raise it in Settings › Accounts › Spending limits, or choose a subscription or a model on this computer.",
+        match kind {
+            Kind::Task => format!(
+                "Stopped at the per-task spending limit for paid models ({}).",
+                money(limit)
+            ),
+            Kind::Daily => format!(
+                "Today's spending limit for paid models ({}) is reached.",
+                money(limit)
+            ),
         }
     )
 }

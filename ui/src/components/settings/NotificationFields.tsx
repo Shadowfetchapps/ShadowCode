@@ -18,7 +18,7 @@ const KINDS: [keyof NotifyPrefs, string][] = [
   ["notify_failed", "A task failed"],
   [
     "notify_limit",
-    "A plan limit was reached (and whether the task continued on a local model)",
+    "A plan or spending limit was reached (and whether the task continued on a local model)",
   ],
   ["notify_finished", "A task finished"],
 ];

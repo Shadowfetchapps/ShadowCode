@@ -456,7 +456,9 @@ the project, after any task that is already running there.
 
 Each second opinion is a task of its own and counts toward usage like any
 other: a subscription uses its plan's allowance, an API key is billed per
-token, and a model on this computer costs nothing. At most 60 kB of changes
+token, and a model on this computer costs nothing. A second opinion on a paid
+model that reaches a spending limit stops and says so instead of waiting;
+raise the limit or pick another model and ask again. At most 60 kB of changes
 are sent; the rest of a large change is named, and the reviewer can read it
 from the files. Secret files (`.env`, keys) are never sent, and values that
 look like passwords or keys inside other files are hidden. In offline mode
@@ -622,7 +624,9 @@ task keeps going. When it reaches a limit, it pauses between steps (never in
 the middle of a command or an edit) and shows a card: **Continue (limit raised
 to $2.00)** raises the limit by one more step and carries on; **Stop** ends
 the task, keeping the changes made so far. A raised daily limit lasts until
-midnight.
+midnight. A conversation with a card waiting is marked in the sidebar, as it
+is for an approval. A second opinion does not wait: it stops and says which
+limit it reached.
 
 Costs that ShadowCode works out from the model's listed prices count too and
 are labelled, for example *about $0.80 (estimated)*. If a model's price isn't
@@ -722,7 +726,7 @@ and `.env` files suggest. Nothing runs until you save it.
 When the window is in the background, or the task is in another
 conversation, ShadowCode notifies you when a task needs approval, fails,
 reaches a plan limit (saying whether it continued on a model on this
-computer) or finishes. An unanswered approval is denied after 10 minutes; you
+computer), waits at a spending limit, or finishes. An unanswered approval is denied after 10 minutes; you
 are warned 2 minutes before. Click a notification to open its conversation.
 Choose which ones you get, and whether they play a sound, in **Settings ›
 Appearance**.

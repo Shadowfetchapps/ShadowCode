@@ -114,7 +114,7 @@ apps. ShadowCode sends nothing until you enter a server and a topic.
    your server needs one (it is stored with your other secrets and never
    shown again). **Save**, then **Send a test**.
 3. Choose which events notify you: *needs my approval*, *finishes*, *fails*,
-   *reaches a plan limit*. These follow the same rules as desktop
+   *reaches a plan or spending limit*. These follow the same rules as desktop
    notifications (cancelled tasks never notify).
 
 Messages name the project and what happened. The approval request or task

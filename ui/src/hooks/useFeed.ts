@@ -6,7 +6,8 @@ export type FeedPage = {
   approvals: Approval[];
   jobs: Job[];
   events?: string[];
-  /** Every conversation with a pending approval (sidebar badges). */
+  /** Every conversation with a pending approval or spending card (sidebar
+   * badges). */
   waiting?: string[];
 };
 export type FeedDependencies = {
@@ -27,6 +28,8 @@ export const FEED_EVENTS = [
   "agent.paused",
   "agent.resumed",
   "limit.fallback",
+  "spend.limit_reached",
+  "spend.limit_resolved",
 ];
 /** Wake-ups are the signal; this slow timer only covers a missed one. */
 export const FEED_BACKSTOP_MS = 15000;

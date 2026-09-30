@@ -15,7 +15,8 @@ pub enum Kind {
     /// A pending approval will be denied soon (`approval.expiring`).
     ApprovalExpiring,
     Failed,
-    /// A subscription reached its plan limit (and maybe continued locally).
+    /// A subscription reached its plan limit (and maybe continued locally),
+    /// or a task waits at a spending limit for paid models.
     Limit,
     Finished,
 }
@@ -149,6 +150,21 @@ pub fn select(event: &Value, prefs: &Prefs) -> Option<Notice> {
                 )
             }
         }
+        "spend.limit_reached" => {
+            // The task waits between steps until the card is answered.
+            let title = payload["title"]
+                .as_str()
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or("A task reached a spending limit");
+            (
+                Kind::Limit,
+                "ShadowCode · spending limit reached".to_owned(),
+                format!(
+                    "{}. Continue or stop it in its conversation.",
+                    clip(title, 120)
+                ),
+            )
+        }
         "agent.completed" => {
             if payload["cancelled"] == true {
                 return None;
@@ -271,6 +287,7 @@ pub fn hint(event: &Value) -> Value {
             "tool": text("tool", 80),
             "seconds_left": payload["seconds_left"],
         }),
+        "spend.limit_reached" => json!({"title": text("title", 120)}),
         "limit.fallback" => json!({
             "ok": payload["ok"],
             "from": text("from", 80),
@@ -386,6 +403,29 @@ mod tests {
         .unwrap();
         assert!(stopped.body.contains("Choose another model"));
         assert!(select(&event("agent.message", json!({})), &prefs).is_none());
+    }
+
+    #[test]
+    fn a_task_waiting_at_a_spending_limit_is_announced() {
+        let reached = event(
+            "spend.limit_reached",
+            json!({"title":"This task reached its spending limit","text":"It has spent $1.02 on paid models.","kind":"task"}),
+        );
+        let notice = select(&reached, &Prefs::default()).unwrap();
+        assert_eq!(notice.kind, Kind::Limit);
+        assert_eq!(notice.title, "ShadowCode · spending limit reached");
+        assert_eq!(
+            notice.body,
+            "This task reached its spending limit. Continue or stop it in its conversation."
+        );
+        assert_eq!(notice.session_id, "s1");
+        // Attached windows get enough to say the same.
+        let hinted =
+            json!({"type":"spend.limit_reached","session_id":"s1","payload":hint(&reached)});
+        assert_eq!(select(&hinted, &Prefs::default()), Some(notice));
+        assert!(hinted["payload"]["text"].is_null());
+        let off = Prefs::from_ui(&json!({"notify_limit": false}));
+        assert!(select(&reached, &off).is_none());
     }
 
     #[test]

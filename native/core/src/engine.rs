@@ -927,6 +927,13 @@ impl Engine {
                 .to_owned()
         };
         let event_cursor = self.0.store.event_cursor(&sid)?;
+        // A second opinion runs in a hidden conversation, where a spending
+        // card would wait unseen and hold up the project's queue.
+        let unattended = self
+            .0
+            .store
+            .session_meta(&sid, keys::SECOND_OPINION)?
+            .is_some();
         let clock = crate::timing::Clock::default();
         let job = Job {
             id: crate::id(),
@@ -998,20 +1005,26 @@ impl Engine {
         if !consented.is_empty() {
             crate::roles::record_consent(&self.0.store, &job.session_id, &consented)?;
         }
-        let spend = (context.command.is_none()
-            && crate::runtime::Runtime::for_model(&config.model) == crate::runtime::Runtime::Local)
-            .then(|| {
-                Arc::new(crate::spending::Meter::new(
-                    &job.id,
-                    TaskEvents {
-                        store: self.0.store.clone(),
-                        session_id: job.session_id.clone(),
-                        task_id: job.task_id.clone(),
-                        sender: self.0.sender.clone(),
-                    },
-                    context.turn.max_cost_usd,
-                ))
-            });
+        // Every task gets a meter, even on a subscription: its roles and
+        // subagents may run on paid models, and they count toward it. Turns
+        // on models that are not paid are never counted or limited.
+        let spend = context.command.is_none().then(|| {
+            let meter = crate::spending::Meter::new(
+                &job.id,
+                TaskEvents {
+                    store: self.0.store.clone(),
+                    session_id: job.session_id.clone(),
+                    task_id: job.task_id.clone(),
+                    sender: self.0.sender.clone(),
+                },
+                context.turn.max_cost_usd,
+            );
+            Arc::new(if unattended {
+                meter.unattended()
+            } else {
+                meter
+            })
+        });
         let running = Arc::new(Running {
             clock,
             record: Mutex::new(job.clone()),
