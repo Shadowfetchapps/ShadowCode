@@ -805,7 +805,8 @@ ShadowCode's own agent, Claude Code, Codex, Cursor, Grok and Antigravity.
   `agents/`) work in every project. When a project has one with the same
   name, the project's is used and the page says so.
 - **Switches.** Turn any rule, skill, command or agent off, for your profile
-  or for one project.
+  or for one project. A project's switches also hold in the copies of it
+  that subagents, roles and worktree tasks work in.
 - **What each agent reads.** Pick an agent to see which files and skills it
   receives, which it reads by itself, what was cut to stay within the limits,
   and an estimated token count.
@@ -814,7 +815,8 @@ ShadowCode's own agent, Claude Code, Codex, Cursor, Grok and Antigravity.
 - **Import from Git** a shared profile (`https://` or SSH); **Update** shows
   the new commit.
 - **Use these rules outside ShadowCode** links your profile into the Claude
-  Code and Codex CLIs, only when you ask, without replacing any file.
+  Code and Codex CLIs, only when you ask, without replacing any file. The
+  links follow your switches, and what the links share is not sent twice.
 
 Rules and skills shape how agents work; they never grant permissions.
 **Settings › Advanced › Health** has a skill checker that reports problems
