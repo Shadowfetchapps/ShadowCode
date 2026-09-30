@@ -223,6 +223,23 @@ pub async fn job(
                             );
                         }
                         "model.retry" => errln!("{}", plain(&retry_line(payload))),
+                        "agent.stuck" => {
+                            if text_open {
+                                outln!();
+                                text_open = false;
+                            }
+                            errln!(
+                                "{}{}",
+                                plain(payload["text"].as_str().unwrap_or("")),
+                                if payload["paused"] == false {
+                                    String::new()
+                                } else if backend.persistent {
+                                    format!(" The task is paused: answer in the ShadowCode window, or stop it with `shadowcode jobs {} --cancel`.", plain(&id))
+                                } else {
+                                    " The task is paused, and it ends with this command. Run it again with a hint, or from the ShadowCode window.".to_owned()
+                                }
+                            )
+                        }
                         "spend.notice" | "spend.unknown" | "spend.limit_resolved" => {
                             if text_open {
                                 outln!();

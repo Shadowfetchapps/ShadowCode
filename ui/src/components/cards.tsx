@@ -7,8 +7,17 @@ import { Markdown } from "./Markdown";
 /** Every row carries a React `key` that survives updates (lib/rowKeys). */
 export type ChatItem = (
   | { kind: "command"; card: CommandResult; text: string; taskId?: string }
-  /** The agent seems stuck; its task is paused (agent.stuck). */
-  | { kind: "stuck"; jobId: string; text: string; taskId?: string }
+  /** The agent seems stuck (agent.stuck). `paused`: the task waits for the
+   * user; otherwise it went on (a subagent, or a task nobody could answer
+   * for). `resolved`: the task went on or ended since. */
+  | {
+      kind: "stuck";
+      jobId: string;
+      text: string;
+      taskId?: string;
+      paused: boolean;
+      resolved?: "continued" | "ended";
+    }
   | {
       kind: "user";
       text: string;

@@ -255,3 +255,72 @@ async fn only_change_these_asks_before_editing_other_files() {
         "# Demo\n"
     );
 }
+
+#[tokio::test]
+async fn allowing_edits_for_the_task_never_covers_files_outside_the_scope() {
+    use shadowcode_core::mentions::Mention;
+    let f = fixture();
+    fs::create_dir_all(f.project.join("src/ui")).unwrap();
+    let tools = Arc::new(
+        ToolExecutor::new(
+            Arc::new(Workspace::open(&f.project).unwrap()),
+            f.tools.config.clone(),
+            ApprovalHub::default(),
+            f.tools.events.clone(),
+            CancellationToken::new(),
+        )
+        .unwrap()
+        .with_scope(Some(vec![Mention {
+            path: "src/ui".into(),
+            kind: "dir".into(),
+        }])),
+    );
+    let write = |path: &str| {
+        let tools = tools.clone();
+        let path = path.to_owned();
+        tokio::spawn(async move {
+            tools
+                .execute(ToolCall {
+                    id: shadowcode_core::id(),
+                    name: "write_file".into(),
+                    arguments: json!({"path":path,"content":"changed\n"}),
+                })
+                .await
+                .unwrap()
+        })
+    };
+    // Ask mode: the edit inside the scope asks, and the user allows file
+    // edits for the rest of the task.
+    let inside = write("src/ui/a.ts");
+    let card = pending(&tools).await.expect("asks");
+    assert_eq!(card.grant, "file edits");
+    tools
+        .approvals
+        .answer(
+            &card.id,
+            &f.session,
+            Answer {
+                allow: true,
+                for_task: true,
+                ..Answer::default()
+            },
+        )
+        .unwrap();
+    assert!(inside.await.unwrap().success);
+    // Covered inside the scope from now on...
+    assert!(write("src/ui/b.ts").await.unwrap().success);
+    // ...but a file outside it still asks, with a grant of its own.
+    let outside = write("src/other.ts");
+    let card = pending(&tools).await.expect("asks again outside the scope");
+    assert_eq!(
+        card.reason,
+        "Outside the files you chose for this task: src/other.ts"
+    );
+    assert_eq!(card.grant, "file edits outside the files you chose");
+    tools
+        .approvals
+        .answer(&card.id, &f.session, Answer::deny())
+        .unwrap();
+    assert!(!outside.await.unwrap().success);
+    assert!(!f.project.join("src/other.ts").exists());
+}

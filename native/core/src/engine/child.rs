@@ -173,6 +173,7 @@ impl Engine {
                 local_waiting: AtomicBool::new(false),
                 local_admitted: AtomicBool::new(false),
                 edit_window: AtomicBool::new(false),
+                unattended: true,
             });
             queues.jobs.insert(job.id.clone(), running.clone());
             (job, running)

@@ -48,11 +48,49 @@ const DRAWERS: Record<string, DrawerTab> = {
 };
 
 /** The task "Try on…" continues: who stopped and what was asked. */
-export type TryOn = { taskId: string; from: string; request: string };
+export type TryOn = {
+  taskId: string;
+  from: string;
+  request: string;
+  /** The stopped task's @-mentions, "Only change these" and mode. */
+  mentions?: { path: string; kind: "file" | "dir" }[];
+  onlyChange?: boolean;
+  mode?: string;
+};
 
 /** The follow-up "Try on…" sends. */
 export function tryOnTask(from: string, request: string): string {
   return `Continue where ${from} stopped. The request was:\n\n${request}`;
+}
+
+/** The request "Try on…" sends: the same files, "Only change these" and
+ * mode (the engine's `plan` and `review` tasks are read-only). */
+export function tryOnRequest(
+  tryOn: TryOn,
+  model: string,
+  at: { workspace?: string | null; sessionId?: string | null; queue: boolean },
+): StartJobRequest {
+  return {
+    task: tryOnTask(tryOn.from, tryOn.request),
+    workspace: at.workspace || undefined,
+    session_id: at.sessionId || undefined,
+    model,
+    purpose:
+      tryOn.mode === "plan"
+        ? "planner"
+        : tryOn.mode === "review"
+          ? "reviewer"
+          : "coder",
+    queue: at.queue,
+    images: [],
+    web: false,
+    ...(tryOn.mentions?.length
+      ? {
+          mentions: tryOn.mentions,
+          ...(tryOn.onlyChange ? { only_change: true } : {}),
+        }
+      : {}),
+  };
 }
 
 /** A cloud route asked for consent before the conversation leaves this
@@ -354,22 +392,18 @@ export function useTaskActions(c: TaskActionContext) {
   }
 
   /** "Try on…": the same conversation continues the stopped task on the
-   * model the user picked. Nothing falls back on its own. */
+   * model the user picked, with the same files, scope and mode. Nothing
+   * falls back on its own. */
   async function tryOnModel(targetId: string, tryOn: TryOn) {
     if (c.composerLocked || c.submittingRef.current) return;
     await c.selectTarget(targetId);
     c.pin();
     await startTask(
-      {
-        task: tryOnTask(tryOn.from, tryOn.request),
-        workspace: c.workspace || undefined,
-        session_id: c.sessionId || undefined,
-        model: targetId,
-        purpose: "coder",
+      tryOnRequest(tryOn, targetId, {
+        workspace: c.workspace,
+        sessionId: c.sessionId,
         queue: c.queueing,
-        images: [],
-        web: false,
-      },
+      }),
       null,
     );
   }

@@ -32,10 +32,13 @@ fn setup(endpoint: &str) -> (tempfile::TempDir, Engine) {
     (root, Engine::open(paths).unwrap())
 }
 fn request(root: &Path, task: &str) -> StartRequest {
+    follow_up(root, task, None)
+}
+fn follow_up(root: &Path, task: &str, session_id: Option<String>) -> StartRequest {
     StartRequest {
         workspace: root.join("project"),
         task: task.into(),
-        session_id: None,
+        session_id,
         model: None,
         mode: "code".into(),
         queue: false,
@@ -163,5 +166,98 @@ async fn a_tool_call_written_as_text_by_a_local_model_still_runs() {
         .collect();
     assert_eq!(repaired.len(), 1);
     assert_eq!(repaired[0]["payload"]["from"], "text");
+    engine.shutdown().await.ok();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn compact_shortens_a_conversation_that_fits_and_pins_stay_in_later_turns() {
+    use shadowcode_core::store::keys::COMPACT_REQUEST;
+    let server = support::server(|index, _| answer(&format!("Answer {index}."))).await;
+    let (root, engine) = setup(&server.endpoint);
+    Config::patch(
+        engine.paths(),
+        json!({"agent":{"summary_compaction":false}}),
+    )
+    .unwrap();
+    let run = |task: &str, session: Option<String>| {
+        let request = follow_up(root.path(), task, session);
+        let engine = &engine;
+        async move {
+            let job = engine.start(request).await.unwrap();
+            let done = tokio::time::timeout(Duration::from_secs(30), engine.wait(&job.id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(done.status, "completed", "{done:?}");
+            done.session_id
+        }
+    };
+    let sid = run("Which database should we use?", None).await;
+    let store = engine.store();
+    store
+        .add_pin(&sid, "Decision", "Use PostgreSQL 16 for storage.")
+        .unwrap();
+    // `/compact` on a conversation far below the model's context.
+    store
+        .set_session_meta(&sid, COMPACT_REQUEST, "keep the database choice")
+        .unwrap();
+    run("Now add a users table.", Some(sid.clone())).await;
+    let compacted: Vec<Value> = store
+        .recent_events(&sid, 300)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e["type"] == "context.compacted")
+        .collect();
+    assert_eq!(compacted.len(), 1, "shortened although it fit");
+    let payload = &compacted[0]["payload"];
+    assert_eq!(payload["requested"], true);
+    assert_eq!(payload["pinned"], 1);
+    assert!(
+        payload["omitted_messages"].as_u64().unwrap() >= 1,
+        "{payload}"
+    );
+    assert!(store.session_meta(&sid, COMPACT_REQUEST).unwrap().is_none());
+    run("And an index on email.", Some(sid.clone())).await;
+    let requests = server.requests.lock().unwrap().clone();
+    for task in ["Now add a users table.", "And an index on email."] {
+        // The turn's first request.
+        let request = requests
+            .iter()
+            .find(|r| r["messages"].to_string().contains(task))
+            .unwrap();
+        let messages = request["messages"].as_array().unwrap();
+        // The first question is summarized, not sent again...
+        assert!(!messages
+            .iter()
+            .any(|m| m["role"] == "user" && m["content"] == "Which database should we use?"));
+        // ...and the pinned answer is sent word for word, exactly once.
+        let sent = request["messages"].to_string();
+        assert_eq!(
+            sent.matches("Use PostgreSQL 16 for storage.").count(),
+            1,
+            "{task}: {sent}"
+        );
+    }
+    // A second `/compact`, now with the pins note before the request, still
+    // keeps the latest answer (each request is answered "Answer {index}.").
+    let latest = requests
+        .iter()
+        .rposition(|r| r["messages"].to_string().contains("And an index on email."))
+        .unwrap();
+    let before = requests.len();
+    store.set_session_meta(&sid, COMPACT_REQUEST, "").unwrap();
+    run("Then a migration.", Some(sid.clone())).await;
+    let requests = server.requests.lock().unwrap().clone();
+    let messages = requests[before]["messages"].as_array().unwrap();
+    let kept = format!("Answer {latest}.");
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["role"] == "assistant" && m["content"] == kept.as_str()),
+        "{kept}: {messages:?}"
+    );
+    assert!(!messages
+        .iter()
+        .any(|m| m["role"] == "user" && m["content"] == "Now add a users table."));
     engine.shutdown().await.ok();
 }

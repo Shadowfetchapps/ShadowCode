@@ -321,6 +321,8 @@ const TranscriptRow = memo(function TranscriptRow({
     node = (
       <StuckCard
         text={item.text}
+        paused={item.paused}
+        resolved={item.resolved}
         onAction={(action, hint) =>
           actions.onStuck
             ? actions.onStuck(item.jobId, item.taskId, action, hint)

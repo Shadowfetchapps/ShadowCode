@@ -63,9 +63,10 @@ Real work:
   **Run details** for every task.
 - **Stuck detection** pauses a task that fails the same way three times or
   edits a file back and forth (**Keep going**, **Give a hint**, **Try
-  another model**, **Stop**). `/compact [what to keep]` and `/pin` keep what
-  matters through shortening; local models' malformed tool calls are
-  repaired.
+  another model**, **Stop**); automations and editor tasks are told to
+  change course instead. `/compact [what to keep]` shortens the
+  conversation whatever its size, and `/pin` keeps what matters through
+  shortening; local models' malformed tool calls are repaired.
 - **Large projects.** The code index is kept between runs, covers up to
   250,000 files, fills in progressively and can focus on one folder.
 - **Review by risk.** Changed files are grouped (config and CI,

@@ -48,3 +48,19 @@ it("shows an error and keeps the buttons when an action fails", async () => {
   expect(await screen.findByText(/Task already finished/)).toBeTruthy();
   expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
 });
+
+it("offers no choices when the task was not paused or has gone on", () => {
+  const onAction = vi.fn(async () => {});
+  const { rerender } = render(
+    <StuckCard text="Stuck." paused={false} onAction={onAction} />,
+  );
+  expect(
+    screen.getByText(
+      "The task went on; the agent was asked to try another way.",
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Keep going" })).toBeNull();
+  rerender(<StuckCard text="Stuck." resolved="ended" onAction={onAction} />);
+  expect(screen.getByText("The task has ended.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+});

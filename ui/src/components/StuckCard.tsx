@@ -3,12 +3,18 @@ import { useId, useState } from "react";
 export type StuckAction = "resume" | "hint" | "other" | "stop";
 
 /** The agent seems stuck (the same failure again and again, or a file
- * changed back and forth): the task is paused and the user decides. */
+ * changed back and forth): the task is paused and the user decides. A task
+ * that was not paused (a subagent, or one nobody could answer for), or that
+ * went on or ended since, shows what happened instead of the choices. */
 export function StuckCard({
   text,
+  paused = true,
+  resolved,
   onAction,
 }: {
   text: string;
+  paused?: boolean;
+  resolved?: "continued" | "ended";
   onAction: (action: StuckAction, hint?: string) => Promise<void>;
 }) {
   const uid = useId();
@@ -45,6 +51,14 @@ export function StuckCard({
       </p>
       {done ? (
         <p className="hint">{outcome[done]}</p>
+      ) : !paused ? (
+        <p className="hint">
+          The task went on; the agent was asked to try another way.
+        </p>
+      ) : resolved ? (
+        <p className="hint">
+          {resolved === "ended" ? "The task has ended." : "The task went on."}
+        </p>
       ) : hinting ? (
         <form
           className="approval-note"

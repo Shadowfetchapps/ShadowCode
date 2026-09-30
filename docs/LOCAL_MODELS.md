@@ -209,13 +209,16 @@ conversation:
   `<tool_call>{…}</tool_call>`, Llama `<|python_tag|>{…}` and
   `<function=name>{…}</function>`, or an answer that is only one JSON call.
   Only tools offered in that request count, and only for models served by
-  another program on this computer (Ollama, LM Studio, vLLM …). The bundled
-  runtime already reads each model's own call format through its template,
-  so from it, text that looks like a call (a quoted file, for example) never
-  runs;
+  another program on this computer (Ollama, LM Studio, vLLM …). Only calls
+  that end the answer run: a call shown in a code fence or followed by more
+  text was only quoted. The bundled runtime already reads each model's own
+  call format through its template, so from it, text that looks like a
+  call (a quoted file, for example) never runs;
 - an edit whose "old text" differs from the file only in line endings,
   spaces at line ends or indentation is applied when it matches exactly one
-  place, re-indented to fit, and the agent is told to check the result.
+  place, re-indented to fit, and the agent is told to check the result. Its
+  lines must keep the file's block structure: an edit that would move a
+  line into or out of a block is refused.
 
 ## Loading
 
