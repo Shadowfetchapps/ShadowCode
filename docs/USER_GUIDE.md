@@ -388,36 +388,42 @@ requests do not.
 - **A secret check before every commit and push.** When you commit, push or
   open a pull request from ShadowCode, it looks for secrets in what would
   leave your computer: provider keys (OpenAI, Anthropic, OpenRouter, GitHub,
-  AWS, Google, Stripe …), private keys (PEM, OpenSSH and PGP, also when only
-  the lines inside a key changed), `.env` files, key files such as `.p12` and
-  `.jks`, and long random values assigned to names like `API_KEY` or
-  `PASSWORD`. Files Git treats as binary are checked by name, and by content
-  when they are really text. A push checks every commit the remote doesn't
-  have yet, including what you changed while resolving a merge. If it finds
-  one, nothing is committed or pushed; a dialog names the file, the line and
-  what it looks like (never the value), with **Remove from commit**, **Add to
-  .gitignore** and **Commit anyway** (for a push, **Push anyway**, which
-  sends only the commits that were checked; commits made while the dialog
-  was open stay on your computer until you push again). **Add to .gitignore**
-  on a file that is already in the repository only takes its change out of
-  the commit: `.gitignore` doesn't apply to it, and removing it from the
-  repository would delete it for everyone who pulls. When the check can't
-  read everything (more than 32 MB of changes, or more than 500 commits to
-  push), it says so and asks as well. A harmless example value can be marked
-  with `shadowcode:allow-secret` on its line, or its file listed in
-  `.shadowcode/secret-scan-ignore` (one glob per line). The agent's own
-  commits are never made with a secret staged: it is told to remove it and
-  to tell you. Subscriptions that commit by themselves can't be stopped, but
-  their commits are checked when you push from ShadowCode.
+  AWS, Google, Stripe …), private keys (PEM, OpenSSH and PGP, also written
+  as strings in code, and when only the lines inside a key changed), `.env`
+  files, key files such as `.p12` and `.jks`, and long random values
+  assigned to names like `API_KEY` or `PASSWORD`. Files Git treats as binary
+  are checked by name, and by content when they are really text. A push
+  checks every commit the remote doesn't have yet, including what you
+  changed while resolving a merge. If it finds one, nothing is committed or
+  pushed; a dialog names the file, the line and what it looks like (never
+  the value), with **Remove from commit**, **Add to .gitignore** and
+  **Commit anyway** (for a push, **Push anyway**, which sends only the
+  commits that were checked; commits made while the dialog was open stay on
+  your computer until you push again). **Add to .gitignore** on a file that
+  is already in the repository only takes its change out of the commit:
+  `.gitignore` doesn't apply to it, and removing it from the repository
+  would delete it for everyone who pulls. When the check can't read
+  everything (more than 32 MB of changes, more than 500 commits to push, or
+  more than a minute of reading), it says so and asks as well. A harmless
+  example value can be marked with `shadowcode:allow-secret` on its line, or
+  its file listed in `.shadowcode/secret-scan-ignore` (one glob per line).
+  The agent's own commits are never made with a secret staged: it is told to
+  remove it and to tell you. Subscriptions that commit by themselves can't
+  be stopped, but their commits are checked when you push from ShadowCode.
 - **The project's own Git hooks.** ShadowCode's Git commands don't run a
   repository's hooks (`pre-commit`, `commit-msg` …), because a hook is a
   program from the repository. When a project has hooks, the first commit
   from the Git tab asks whether to run them; the answer is kept for the
   project and can be changed in **Settings › Permissions & network**. **Run
   them** holds for the hooks as they were shown: when a hook is edited or
-  added (including the scripts husky runs), the next commit asks again. A
-  hook that fails stops the commit, and the message names the hook and shows
-  its output; a commit that fails for another reason shows Git's own message.
+  added (including the scripts husky runs), or the settings of a hook tool
+  change (`package.json`, `.pre-commit-config.yaml`, `lefthook.yml`,
+  lint-staged and commitlint settings), the next commit asks again. What the
+  hooks start in turn, such as the project's tests behind `npm test`, isn't
+  watched: hooks run with your full access, so choose **Run them** only for
+  a project whose code you trust. A hook that fails stops the commit, and
+  the message names the hook and shows its output; a commit that fails for
+  another reason shows Git's own message.
 - **New packages are looked up first.** When the agent wants to install a
   package (`npm install`, `pip install`, `cargo add`, `go get` …) or adds one
   to `package.json`, `requirements.txt`, `pyproject.toml`, `Cargo.toml` or

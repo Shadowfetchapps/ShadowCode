@@ -31,9 +31,10 @@ Safety and trust:
   **Push anyway** sends only the commits that were checked. The agent's own
   commits never include a staged secret.
 - **Project Git hooks** are asked about once per project, and again when a
-  hook changes; **new packages** are looked up on npm, PyPI and crates.io
-  (does it exist, how new is it, is it one typo from a popular name);
-  **lockfiles** are summarized.
+  hook or a hook tool's settings (`package.json`, `.pre-commit-config.yaml`,
+  `lefthook.yml` …) change; **new packages** are looked up on npm, PyPI and
+  crates.io (does it exist, how new is it, is it one typo from a popular
+  name); **lockfiles** are summarized.
 - **Keys in the system keyring.** **Settings › Accounts › Where your keys
   are kept** moves API keys into the Secret Service keyring (GNOME Keyring,
   KWallet, KeePassXC) and back; the private file stays the default. Backups

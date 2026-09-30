@@ -2454,20 +2454,23 @@ user-info; tool errors are redacted.
   "run"|"skip", hooks_fingerprint?}` (1–32 000 bytes) → `{ok: true,
   hooks_ran}`; never signed. Before committing, and without `allow_secrets:
   true`, the staged changes are checked for secrets (provider keys, private
-  key blocks in PEM, OpenSSH and PGP armor, also a changed body between
-  unchanged markers, `.env`, `.p12`/`.pfx`/`.jks`/`.keystore` and other
-  secret files, long random values assigned to names like `API_KEY` or
-  `PASSWORD`). Files Git shows as binary (content or a `-diff`/`binary`
-  attribute) are checked by name, and by content when it is text. Findings,
-  or a check that could not read everything (over 32 MB), answer in band
-  with `{ok: false, status: 409, secrets: [{path, line|null, kind,
-  preview}], secrets_truncated /* more findings than listed */,
-  secrets_unchecked: string|null /* what was not checked */, error}` and
-  nothing is committed. `preview` is the first characters and the length,
-  never the value. A line containing `shadowcode:allow-secret`, and paths
-  matching a glob in `.shadowcode/secret-scan-ignore`, are skipped. The
-  check's Git commands ignore the repository's hooks, fsmonitor, signature
-  programs and filter drivers. When the project has hooks a commit can run
+  key blocks in PEM, OpenSSH and PGP armor, also one string literal per line
+  in code and a changed body between unchanged markers, `.env`,
+  `.p12`/`.pfx`/`.jks`/`.keystore` and other secret files, long random
+  values assigned to names like `API_KEY` or `PASSWORD`). Files Git shows as
+  binary (content or a `-diff`/`binary` attribute) are checked by name, and
+  by content when it is text. Findings, or a check that could not read
+  everything (over 32 MB, or over a minute of reading), answer in band with
+  `{ok: false, status: 409, secrets: [{path, line|null, kind, preview}],
+  secrets_truncated /* more findings than listed */, secrets_unchecked:
+  string|null /* what was not checked */, error}` and nothing is committed.
+  `preview` is the first characters and the length, never the value. A line
+  containing `shadowcode:allow-secret`, and paths matching a glob in
+  `.shadowcode/secret-scan-ignore`, are skipped. The check's Git commands
+  ignore the repository's hooks, fsmonitor, signature programs and filter
+  drivers, and its settings that change how a patch names files or which
+  changes it shows (`diff.noprefix`, `diff.mnemonicPrefix`, `diff.relative`,
+  `log.showRoot` …). When the project has hooks a commit can run
   (`pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`,
   `reference-transaction`, `post-index-change`, `pre-auto-gc`, including a
   `core.hooksPath` such as `.husky/_` or `~/.githooks`) and no choice holds,
@@ -2475,12 +2478,18 @@ user-info; tool errors are redacted.
   [{name, path, preview}], hooks_fingerprint, hooks_changed, error}`;
   `hooks` saves the choice for the project (`native_meta`
   `git_hooks:<project>`). A `run` choice holds for the hooks as they are (a
-  SHA-256 over the hooks folder's files, and for husky the scripts its stubs
-  run): once they change, `hooks_changed: true` asks again, and `run` with a
+  SHA-256 over the hooks folder's files, for husky the scripts its stubs
+  run, and the hook tools' settings files at the top of the working tree:
+  `package.json`, `.pre-commit-config.*`, `lefthook*`, `.lintstagedrc*`,
+  `lint-staged.config.*`, `.huskyrc*`, `simple-git-hooks` and commitlint
+  settings; files past the first 500 count by inode and change time): once
+  they change, `hooks_changed: true` asks again, and `run` with a
   `hooks_fingerprint` other than the current one asks again instead of
-  running. Hooks never run otherwise. A hook that fails stops the commit
-  with an error naming it and its output (from Git's trace events); other
-  failures report Git's own output.
+  running. The fingerprint is taken again after the secret check, right
+  before Git runs the hooks. What the hooks start in turn (for example the
+  tests behind `npm test`) is not covered. Hooks never run otherwise. A hook
+  that fails stops the commit with an error naming it and its output (from
+  Git's trace events); other failures report Git's own output.
 - `POST /api/workspace/git/unstage {paths}` (1–200) → `{ok: true}`: out of the
   next commit, working tree unchanged.
 - `POST /api/workspace/git/ignore {path}` → `{ok: true, path, tracked}`: a
@@ -2524,12 +2533,12 @@ user-info; tool errors are redacted.
   the branch that no branch of that remote has, as last fetched; a merge
   commit with the changes made in the merge itself) are checked for secrets
   first. Findings, or a check that could not read everything (over 32 MB,
-  or more than 500 commits), answer in band as for commits (each finding
-  with its `commit`), plus `scanned`: the full id of the commit checked;
-  nothing is pushed. `allow_secrets: true` with that `scanned` pushes
-  exactly that commit, so commits made since stay local (refused when the
-  branch no longer contains it); `allow_secrets` alone pushes the branch as
-  it is, unchecked.
+  more than 500 commits, or over a minute of reading), answer in band as for
+  commits (each finding with its `commit`), plus `scanned`: the full id of
+  the commit checked; nothing is pushed. `allow_secrets: true` with that
+  `scanned` pushes exactly that commit, so commits made since stay local
+  (refused when the branch no longer contains it); `allow_secrets` alone
+  pushes the branch as it is, unchecked.
 - `POST /api/git/push {remote?, allow_secrets?, scanned?}` → `{ok, remote,
   branch, output, remote_info}`: pushes the checked commit to
   `refs/heads/<branch>` of the remote, never forced, and makes that the
