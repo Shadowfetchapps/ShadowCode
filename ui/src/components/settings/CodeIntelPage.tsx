@@ -293,8 +293,9 @@ export function CodeIntelPage({
           <div>
             <span>Progress</span>
             <code>
-              Indexed {index.files.toLocaleString()} of{" "}
-              {index.total.toLocaleString()} files; Reindex continues
+              {index.capped
+                ? `Indexed ${index.files.toLocaleString()} files; the project has more than a scan covers. Set a focus folder to index the part you work on`
+                : `Indexed ${index.files.toLocaleString()} of ${index.total.toLocaleString()} files; Reindex continues`}
             </code>
           </div>
         ) : null}

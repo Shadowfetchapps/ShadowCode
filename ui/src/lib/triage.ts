@@ -46,6 +46,27 @@ const MANIFESTS = new Set([
   "Pipfile",
 ]);
 
+/** Folders build tools write into. */
+const BUILD_FOLDERS = new Set(["dist", "build", "out", "coverage"]);
+/** Folders of hand-written code: a `build/` inside one is code too
+ * (`src/commands/build/index.ts`). */
+const SOURCE_FOLDERS = new Set(["src", "source", "lib", "app"]);
+/** Files people write, which build tools do not produce. */
+const HAND_WRITTEN =
+  /\.(ts|tsx|jsx|go|rs|py|java|kt|swift|c|cc|cpp|h|hpp|cs|rb|php|vue|svelte|sh)$/;
+
+/** Output of a build: in a build folder that is not inside a source folder,
+ * and not a file people write (a `.d.ts` is generated). */
+function buildOutput(lower: string, lowerName: string): boolean {
+  const folders = lower.split("/").slice(0, -1);
+  const build = folders.findIndex((folder) => BUILD_FOLDERS.has(folder));
+  return (
+    build >= 0 &&
+    !folders.slice(0, build).some((folder) => SOURCE_FOLDERS.has(folder)) &&
+    (lowerName.endsWith(".d.ts") || !HAND_WRITTEN.test(lowerName))
+  );
+}
+
 /** Which group a changed file belongs to, by its path. */
 export function groupOf(path: string): TriageGroup {
   const lower = path.toLowerCase();
@@ -58,7 +79,7 @@ export function groupOf(path: string): TriageGroup {
   )
     return "dependencies";
   if (
-    /(^|\/)(dist|build|out|generated|__generated__|coverage)\//.test(lower) ||
+    /(^|\/)(generated|__generated__)\//.test(lower) ||
     /\.(min\.js|min\.css|map|pb\.go|g\.dart|snap)$/.test(lower) ||
     lower.includes("__snapshots__/")
   )
@@ -76,6 +97,8 @@ export function groupOf(path: string): TriageGroup {
     )
   )
     return "config";
+  // After config and CI: `.github/actions/build/action.yml` is CI.
+  if (buildOutput(lower, lowerName)) return "generated";
   if (
     /(^|\/)(tests?|__tests__|spec|e2e)\//.test(lower) ||
     /(^test_|_test\.|\.test\.|\.spec\.)/.test(lowerName)

@@ -27,6 +27,19 @@ it("groups files by what they are", () => {
   expect(groupOf("docs/guide/setup.txt")).toBe("docs");
 });
 
+it("files only build output as generated, not code in a folder named build", () => {
+  expect(groupOf("packages/web/dist/index.js")).toBe("generated");
+  expect(groupOf("build/app.js")).toBe("generated");
+  expect(groupOf("dist/index.d.ts")).toBe("generated");
+  expect(groupOf("coverage/lcov-report/index.html")).toBe("generated");
+  expect(groupOf("src/generated/client.ts")).toBe("generated");
+  expect(groupOf("src/build/sign.ts")).toBe("source");
+  expect(groupOf("src/build/helpers.js")).toBe("source");
+  expect(groupOf("packages/cli/src/commands/build/index.ts")).toBe("source");
+  expect(groupOf("tools/out/x.go")).toBe("source");
+  expect(groupOf(".github/actions/build/action.yml")).toBe("config");
+});
+
 it("orders groups by risk and files by deletions then size", () => {
   const groups = triage([
     file("README.md"),

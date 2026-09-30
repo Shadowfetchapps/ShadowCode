@@ -144,3 +144,31 @@ it("disables downloads offline and saves settings", async () => {
     expect(save).toHaveBeenCalledWith({ diagnostics_on_edit: false }),
   );
 });
+
+it("points a project over the file limit to a focus folder", async () => {
+  const index = { symbols: 80, chunks: 30, languages: { rust: 12 } };
+  vi.spyOn(api, "codeIntelStatus").mockResolvedValue(
+    status({
+      index: {
+        ...index,
+        files: 250_000,
+        total: 250_000,
+        complete: false,
+        capped: true,
+      },
+    }),
+  );
+  render(<CodeIntelPage onToast={vi.fn()} />);
+  const progress = await screen.findByText(/Set a focus folder/);
+  expect(progress.textContent).not.toContain("Reindex continues");
+  cleanup();
+  vi.spyOn(api, "codeIntelStatus").mockResolvedValue(
+    status({
+      index: { ...index, files: 2_000, total: 2_500, complete: false },
+    }),
+  );
+  render(<CodeIntelPage onToast={vi.fn()} />);
+  expect(
+    await screen.findByText("Indexed 2,000 of 2,500 files; Reindex continues"),
+  ).toBeTruthy();
+});

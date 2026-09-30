@@ -30,6 +30,11 @@ impl Service {
     async fn explain_change(&self, task_id: &str, body: &Value) -> Result<Value> {
         let path = body["path"].as_str().context("path required")?.to_owned();
         let (_, ws) = self.task_workspace(task_id)?;
+        // By name and by what a link points to (`notes.txt -> .env`).
+        ensure!(
+            !ws.is_secret_target(&path),
+            "Secret files aren't sent to a model"
+        );
         let store = self.engine.store();
         let detail = crate::review::file(&store, &ws, task_id, &path)?;
         ensure!(

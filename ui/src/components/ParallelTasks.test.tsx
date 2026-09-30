@@ -153,3 +153,31 @@ it("offers apply, keep and discard for a finished worktree task", () => {
   expect(screen.queryByRole("button", { name: /Apply/ })).toBeNull();
   expect(screen.getByText(/main checkout is free/)).toBeTruthy();
 });
+
+it("says why a setup command failed, not that it did not run", () => {
+  const setup = (command: object) => ({
+    ok: false,
+    commands: [
+      { command: "npm ci", ok: false, seconds: 600, output: "", ...command },
+    ],
+  });
+  const cases: [object, string][] = [
+    [{ exit_code: 1 }, "exited with 1"],
+    [{ stopped: "timeout" }, "took too long and was stopped"],
+    [{ stopped: "signal", signal: 9 }, "was stopped (signal 9)"],
+    [{ stopped: "not_started" }, "could not start"],
+  ];
+  for (const [command, words] of cases) {
+    render(
+      <WorktreeBar
+        task={{ ...task, conflicts: [], setup: setup(command) }}
+        acting=""
+        onAct={vi.fn()}
+      />,
+    );
+    const summary = screen.getByText(/Setup did not finish/);
+    expect(summary.textContent).toContain(words);
+    expect(summary.textContent).not.toContain("did not run");
+    cleanup();
+  }
+});

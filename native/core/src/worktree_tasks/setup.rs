@@ -14,15 +14,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
-    path::Path,
+    fs,
+    path::{Component, Path},
+    process::Stdio,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Longest a setup command may run, and a teardown command.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(600);
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(120);
 /// Largest file copied into a worktree.
 const MAX_COPY_BYTES: u64 = 10 * 1024 * 1024;
+/// Output kept from each stream of a command.
+const OUTPUT_KEPT: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -143,6 +149,54 @@ pub fn session_env(store: &Store, session_id: &str) -> BTreeMap<String, String> 
         .unwrap_or_default()
 }
 
+/// What a command's output keeps while it runs (its end is what matters).
+struct Tail {
+    text: Arc<Mutex<Vec<u8>>>,
+    reader: Option<tokio::task::JoinHandle<()>>,
+}
+impl Tail {
+    fn read(stream: Option<impl AsyncRead + Unpin + Send + 'static>) -> Self {
+        let text = Arc::new(Mutex::new(Vec::new()));
+        let reader = stream.map(|mut stream| {
+            let text = text.clone();
+            tokio::spawn(async move {
+                let mut chunk = [0_u8; 8192];
+                loop {
+                    let count = match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => count,
+                    };
+                    if let Ok(mut text) = text.lock() {
+                        text.extend_from_slice(&chunk[..count]);
+                        if text.len() > 2 * OUTPUT_KEPT {
+                            let cut = text.len() - OUTPUT_KEPT;
+                            text.drain(..cut);
+                        }
+                    }
+                }
+            })
+        });
+        Self { text, reader }
+    }
+    /// What arrived by `until`. A process the command left running in the
+    /// background may hold the output open: its reader keeps draining it, so
+    /// that process is not stopped by a closed pipe.
+    async fn until(mut self, until: tokio::time::Instant) -> Vec<u8> {
+        if let Some(reader) = self.reader.as_mut() {
+            let _ = tokio::time::timeout_at(until, reader).await;
+        }
+        self.text
+            .lock()
+            .map(|text| text.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// Run one command with `sh -c` in its own process group. It is over when
+/// the shell exits, even if something it started in the background still
+/// runs; after `timeout` the whole group is killed. `{command, ok,
+/// exit_code, seconds, output}`, plus `stopped` ("timeout", "signal" with
+/// `signal`, or "not_started") when it did not exit by itself.
 async fn run_command(
     dir: &Path,
     command: &str,
@@ -150,46 +204,128 @@ async fn run_command(
     timeout: Duration,
 ) -> Value {
     let started = Instant::now();
+    let seconds = || (started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
     let mut process = tokio::process::Command::new("sh");
     process
         .args(["-c", command])
         .current_dir(dir)
         .envs(env)
         .env("CI", "1")
-        .stdin(std::process::Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let result = tokio::time::timeout(timeout, process.output()).await;
-    let seconds = (started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
-    match result {
-        Ok(Ok(output)) => {
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let tail: String = text
-                .chars()
-                .rev()
-                .take(2000)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            json!({
-                "command": command,
-                "ok": output.status.success(),
-                "exit_code": output.status.code(),
-                "seconds": seconds,
-                "output": crate::redaction::redact_text(&tail).text,
-            })
+    #[cfg(unix)]
+    process.process_group(0);
+    let mut child = match process.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return json!({"command": command, "ok": false, "stopped": "not_started", "seconds": seconds(), "output": format!("Could not start: {error}")})
         }
-        Ok(Err(error)) => {
-            json!({"command": command, "ok": false, "seconds": seconds, "output": format!("Could not start: {error}")})
+    };
+    let stdout = Tail::read(child.stdout.take());
+    let stderr = Tail::read(child.stderr.take());
+    let waited = tokio::time::timeout(timeout, child.wait()).await;
+    if waited.is_err() {
+        #[cfg(unix)]
+        if let Some(pid) = child.id() {
+            // The command leads its own group: this stops what it started too.
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
         }
+        let _ = child.kill().await;
+    }
+    let grace = tokio::time::Instant::now() + Duration::from_secs(1);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&stdout.until(grace).await),
+        String::from_utf8_lossy(&stderr.until(grace).await)
+    );
+    let mut tail: String = text
+        .chars()
+        .rev()
+        .take(2000)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let mut result = json!({"command": command, "ok": false, "seconds": seconds()});
+    match waited {
+        Ok(Ok(status)) => {
+            result["ok"] = json!(status.success());
+            result["exit_code"] = json!(status.code());
+            #[cfg(unix)]
+            if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+                result["stopped"] = json!("signal");
+                result["signal"] = json!(signal);
+            }
+        }
+        Ok(Err(error)) => tail.push_str(&format!("\nCould not wait for it: {error}")),
         Err(_) => {
-            json!({"command": command, "ok": false, "seconds": seconds, "output": format!("Stopped after {} seconds", timeout.as_secs())})
+            result["stopped"] = json!("timeout");
+            tail.push_str(&format!("\nStopped after {} seconds", timeout.as_secs()));
         }
     }
+    result["output"] = json!(crate::redaction::redact_text(tail.trim_start()).text);
+    result
+}
+
+/// Copy one project file into the worktree. Neither side may lead out of its
+/// folder: the project file must resolve inside the project (and not in
+/// `.git`), and the worktree's folders on the way must be real folders, not
+/// symlinks, since the branch it starts from may commit any. The copy is
+/// written beside its place and renamed over it, never through a symlink.
+fn copy_file(source: &Path, worktree: &Path, path: &str) -> std::result::Result<(), String> {
+    let refused = || "outside the project, in .git or through a symlink".to_owned();
+    let from = source.join(path);
+    let copyable =
+        fs::symlink_metadata(&from).is_ok_and(|m| m.is_file() && m.len() <= MAX_COPY_BYTES);
+    if !copyable {
+        return Err("missing, not a regular file, or over 10 MB".into());
+    }
+    let (Ok(source), Ok(worktree), Ok(real)) = (
+        source.canonicalize(),
+        worktree.canonicalize(),
+        from.canonicalize(),
+    ) else {
+        return Err(refused());
+    };
+    match real.strip_prefix(&source) {
+        Ok(inside) if !inside.components().any(|part| part.as_os_str() == ".git") => {}
+        _ => return Err(refused()),
+    }
+    let relative = Path::new(path);
+    let name = relative.file_name().ok_or_else(refused)?;
+    let mut folder = worktree;
+    for part in relative.parent().into_iter().flat_map(Path::components) {
+        match part {
+            Component::CurDir => continue,
+            Component::Normal(part) => folder.push(part),
+            _ => return Err(refused()),
+        }
+        match fs::symlink_metadata(&folder) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Err(refused()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&folder).map_err(|error| error.to_string())?
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let to = folder.join(name);
+    if fs::symlink_metadata(&to).is_ok_and(|meta| !meta.is_file()) {
+        return Err(refused());
+    }
+    let written = (|| -> std::io::Result<()> {
+        let mut copy = tempfile::NamedTempFile::new_in(&folder)?;
+        std::io::copy(&mut fs::File::open(&real)?, copy.as_file_mut())?;
+        copy.as_file()
+            .set_permissions(fs::metadata(&real)?.permissions())?;
+        copy.persist(&to).map_err(|error| error.error)?;
+        Ok(())
+    })();
+    written.map_err(|error| error.to_string())
 }
 
 /// Prepare a new worktree: copy the chosen files, then run the setup
@@ -199,22 +335,9 @@ pub async fn run_setup(setup: &Setup, source: &Path, worktree: &Path, port: Opti
     let mut copied = Vec::new();
     let mut skipped = Vec::new();
     for path in &setup.copy {
-        let from = source.join(path);
-        let to = worktree.join(path);
-        let copyable = std::fs::symlink_metadata(&from)
-            .is_ok_and(|m| m.is_file() && m.len() <= MAX_COPY_BYTES);
-        if !copyable {
-            skipped.push(
-                json!({"path": path, "reason": "missing, not a regular file, or over 10 MB"}),
-            );
-            continue;
-        }
-        if let Some(parent) = to.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match std::fs::copy(&from, &to) {
-            Ok(_) => copied.push(path.clone()),
-            Err(error) => skipped.push(json!({"path": path, "reason": error.to_string()})),
+        match copy_file(source, worktree, path) {
+            Ok(()) => copied.push(path.clone()),
+            Err(reason) => skipped.push(json!({"path": path, "reason": reason})),
         }
     }
     let env = env_for(port);
@@ -298,5 +421,115 @@ mod tests {
             "TOKEN=local"
         );
         assert!(!worktree.path().join("never").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copies_never_follow_a_symlink_out_of_the_project_or_the_worktree() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let (source, worktree, outside) = (
+            root.path().join("s"),
+            root.path().join("w"),
+            root.path().join("outside"),
+        );
+        for dir in [&source, &worktree, &outside] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(source.join(".env"), "TOKEN=local").unwrap();
+        fs::create_dir_all(source.join("apps/web")).unwrap();
+        fs::write(source.join("apps/web/.env"), "WEB=1").unwrap();
+        fs::write(outside.join("keys"), "outside bytes").unwrap();
+        fs::write(outside.join(".env"), "OUTSIDE=1").unwrap();
+        // The branch the worktree starts from committed `.env` as a symlink
+        // to a file outside, and `apps` as a symlink to a folder outside.
+        symlink(outside.join("keys"), worktree.join(".env")).unwrap();
+        symlink(&outside, worktree.join("apps")).unwrap();
+        // The project reaches outside through a symlinked folder.
+        symlink(&outside, source.join("shared")).unwrap();
+        let setup = Setup {
+            copy: vec![".env".into(), "apps/web/.env".into(), "shared/.env".into()],
+            ..Setup::default()
+        };
+        let outcome = run_setup(&setup, &source, &worktree, None).await;
+        assert_eq!(outcome["copied"], json!([]), "{outcome}");
+        assert_eq!(outcome["skipped"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            fs::read_to_string(outside.join("keys")).unwrap(),
+            "outside bytes"
+        );
+        assert!(!outside.join("web").exists());
+        assert!(fs::symlink_metadata(worktree.join(".env"))
+            .unwrap()
+            .is_symlink());
+        // A real folder in a fresh worktree is created and copied into.
+        let fresh = root.path().join("fresh");
+        fs::create_dir(&fresh).unwrap();
+        let outcome = run_setup(&setup, &source, &fresh, None).await;
+        assert_eq!(
+            outcome["copied"],
+            json!([".env", "apps/web/.env"]),
+            "{outcome}"
+        );
+        assert_eq!(
+            fs::read_to_string(fresh.join("apps/web/.env")).unwrap(),
+            "WEB=1"
+        );
+        assert!(!fresh.join("shared").exists());
+    }
+
+    #[tokio::test]
+    async fn a_command_that_leaves_a_process_running_is_done_when_its_shell_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let setup = Setup {
+            setup: vec!["sleep 8 &".into(), "echo second".into()],
+            ..Setup::default()
+        };
+        let outcome = run_setup(&setup, dir.path(), dir.path(), None).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(outcome["ok"], true, "{outcome}");
+        assert_eq!(outcome["commands"][1]["output"], "second\n");
+    }
+
+    #[tokio::test]
+    async fn a_timeout_stops_everything_the_command_started_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = BTreeMap::new();
+        let late = dir.path().join("late");
+        let result = run_command(
+            dir.path(),
+            "echo begun; (sleep 2; touch late) & sleep 30",
+            &env,
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["stopped"], "timeout");
+        assert!(result["exit_code"].is_null());
+        let output = result["output"].as_str().unwrap();
+        assert!(
+            output.starts_with("begun") && output.ends_with("Stopped after 1 seconds"),
+            "{output}"
+        );
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(!late.exists(), "the background part outlived the timeout");
+
+        let killed = run_command(dir.path(), "kill -9 $$", &env, Duration::from_secs(10)).await;
+        assert_eq!(killed["stopped"], "signal");
+        assert_eq!(killed["signal"], 9);
+        assert!(killed["exit_code"].is_null());
+        let missing = run_command(
+            &dir.path().join("gone"),
+            "true",
+            &env,
+            Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(missing["stopped"], "not_started");
     }
 }

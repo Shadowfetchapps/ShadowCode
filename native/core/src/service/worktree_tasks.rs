@@ -21,10 +21,7 @@ impl Service {
                 }))
             }
             ("GET", ["worktree-tasks", "setup"]) => {
-                let workspace = match call.q("workspace") {
-                    "" => self.workspace()?,
-                    path => Workspace::open(&expand_path(path)?)?.path,
-                };
+                let workspace = self.setup_project(call.q("workspace"))?;
                 Ok(json!({
                     "workspace": workspace,
                     "setup": worktree_tasks::setup::load(&engine.store(), &workspace),
@@ -32,10 +29,8 @@ impl Service {
                 }))
             }
             ("POST", ["worktree-tasks", "setup"]) => {
-                let workspace = match call.body["workspace"].as_str().unwrap_or("") {
-                    "" => self.workspace()?,
-                    path => Workspace::open(&expand_path(path)?)?.path,
-                };
+                let workspace =
+                    self.setup_project(call.body["workspace"].as_str().unwrap_or(""))?;
                 let wanted: worktree_tasks::setup::Setup =
                     serde_json::from_value(call.body["setup"].clone())
                         .context("setup must be {copy, setup, teardown, port_start, port_end}")?;
@@ -72,5 +67,19 @@ impl Service {
             }
             _ => Err(call.unavailable()),
         }
+    }
+
+    /// The project whose worktree setup is read or saved: the one asked for,
+    /// else the open one. A worktree's own folder (the open conversation runs
+    /// in a worktree task) stands for its project, which new tasks start from.
+    fn setup_project(&self, requested: &str) -> Result<PathBuf> {
+        let workspace = match requested {
+            "" => self.workspace()?,
+            path => Workspace::open(&expand_path(path)?)?.path,
+        };
+        Ok(
+            crate::worktrees::source_of_checkout(self.engine.paths(), &workspace)
+                .unwrap_or(workspace),
+        )
     }
 }

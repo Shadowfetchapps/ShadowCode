@@ -213,9 +213,9 @@ pub fn file(store: &Store, ws: &Workspace, task: &str, path: &str) -> Result<Val
     let base = baseline(store, ws, task, &path)?;
     let now = current(ws, &path)?;
     let mut out = summary(&path, &base, &now);
-    if crate::redaction::is_secret_path(&path) {
-        // A secret file (`.env`, keys) can still be undone as a whole, but
-        // its contents are not shown.
+    if ws.is_secret_target(&path) {
+        // A secret file (`.env`, keys), or a link to one, can still be undone
+        // as a whole, but its contents are not shown.
         out["secret"] = json!(true);
         out["hunks"] = json!([]);
         out["hash"] = json!(now.hash.as_deref().unwrap_or("missing"));
@@ -508,6 +508,20 @@ mod tests {
         let detail = file(&store, &ws, &task, "keep.txt").unwrap();
         assert_eq!(detail["hunks"].as_array().unwrap().len(), 2);
         assert!(file(&store, &ws, &task, "untouched.txt").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_secret_file_is_kept_secret() {
+        let (_root, store, ws, _session, task) = setup();
+        fs::write(ws.path.join(".env"), "TOKEN=hidden\n").unwrap();
+        // The task made `notes.txt`, then turned it into a link to `.env`.
+        change(&store, &ws, &task, "notes.txt", Some("plain\n"));
+        fs::remove_file(ws.path.join("notes.txt")).unwrap();
+        std::os::unix::fs::symlink(".env", ws.path.join("notes.txt")).unwrap();
+        let detail = file(&store, &ws, &task, "notes.txt").unwrap();
+        assert_eq!(detail["secret"], true, "{detail}");
+        assert_eq!(detail["hunks"], json!([]));
     }
 
     #[test]

@@ -390,11 +390,17 @@ pub(crate) async fn prepare(
     )
     .await?;
     let base = match base_branch.map(str::trim).filter(|b| !b.is_empty()) {
-        // Another branch: its last commit, without the project's
-        // uncommitted work.
+        // Another local branch: its last commit, without the project's
+        // uncommitted work. Only `refs/heads/…`: never a tag, remote branch,
+        // commit ID or expression, even one that shares the branch's name.
         Some(branch) => {
+            let reference = format!("refs/heads/{branch}");
+            let named = tokio::process::Command::new("git")
+                .args(["check-ref-format", &reference])
+                .output()
+                .await?;
             ensure!(
-                !branch.starts_with('-') && !branch.contains(char::is_whitespace),
+                named.status.success() && !branch.starts_with('-'),
                 "Choose a branch name"
             );
             let output = tokio::process::Command::new("git")
@@ -402,7 +408,7 @@ pub(crate) async fn prepare(
                     "rev-parse",
                     "--verify",
                     "--quiet",
-                    &format!("{branch}^{{commit}}"),
+                    &format!("{reference}^{{commit}}"),
                 ])
                 .current_dir(&source)
                 .output()
@@ -410,7 +416,7 @@ pub(crate) async fn prepare(
             let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
             ensure!(
                 output.status.success() && !commit.is_empty(),
-                "There is no branch named {branch}"
+                "There is no local branch named {branch}"
             );
             Base {
                 commit: commit.clone(),
@@ -444,7 +450,7 @@ pub(crate) async fn prepare(
         ..Default::default()
     };
     let record_guard = locks::record(&engine.store(), &record.id, &cancel).await?;
-    let prepared: Result<()> = async {
+    let prepared: Result<setup::Setup> = async {
         record.worktree = checkout.path.canonicalize()?;
         compare::set_trust(engine, std::slice::from_ref(&record.worktree), true)?;
         copy_attachments(&source, &record.worktree, task, images)?;
@@ -460,7 +466,8 @@ pub(crate) async fn prepare(
             keys::WORKTREE_SOURCE,
             &source.to_string_lossy(),
         )?;
-        // Its own port, its copied files and setup commands.
+        // Its own port; saved with the record, so the next task started
+        // while this one's setup runs picks another.
         let wanted = setup::load(&store, &source);
         let taken: Vec<u16> = list(engine, &source)
             .await
@@ -475,19 +482,53 @@ pub(crate) async fn prepare(
             keys::TASK_ENV,
             &serde_json::to_string(&setup::env_for(record.port))?,
         )?;
-        if !wanted.copy.is_empty() || !wanted.setup.is_empty() {
-            record.setup = setup::run_setup(&wanted, &source, &record.worktree, record.port).await;
-        }
-        save(&store, &record)
+        save(&store, &record)?;
+        Ok(wanted)
     }
     .await;
-    if let Err(error) = prepared {
-        drop(record_guard);
-        drop(repository);
-        abandon(engine, record).await;
-        return Err(error);
+    let wanted = match prepared {
+        Ok(wanted) => wanted,
+        Err(error) => {
+            drop(record_guard);
+            drop(repository);
+            abandon(engine, record).await;
+            return Err(error);
+        }
+    };
+    if wanted.copy.is_empty() && wanted.setup.is_empty() {
+        return Ok(record);
     }
-    Ok(record)
+    // Copied files and setup commands can take minutes: they run without
+    // holding the project's repository or this record, so other tasks of the
+    // project can start, apply, keep or discard meanwhile. The worktree stays
+    // reserved, so no turn starts in it and it cannot be removed until setup
+    // is over.
+    let reservation = engine.reserve_workspace(&record.worktree);
+    drop(record_guard);
+    drop(repository);
+    let finished: Result<Record> = async {
+        let _reservation = reservation?;
+        record.setup = setup::run_setup(&wanted, &source, &record.worktree, record.port).await;
+        let store = engine.store();
+        let _guard = locks::record(&store, &record.id, &cancel).await?;
+        let mut current = load(&store, &record.id)?;
+        same_identity(&record, &current)?;
+        ensure!(
+            current.state == "starting",
+            "Worktree task changed while its setup ran"
+        );
+        current.setup = record.setup.clone();
+        save(&store, &current)?;
+        Ok(current)
+    }
+    .await;
+    match finished {
+        Ok(record) => Ok(record),
+        Err(error) => {
+            abandon(engine, record).await;
+            Err(error)
+        }
+    }
 }
 
 /// The first turn started in the worktree.
@@ -518,6 +559,12 @@ pub(crate) async fn abandon(engine: &Engine, supplied: Record) {
     let Ok(_record) = locks::record(&store, &supplied.id, &cancel).await else {
         return;
     };
+    let setup_ran = |record: &Record| {
+        record.setup["commands"]
+            .as_array()
+            .is_some_and(|commands| !commands.is_empty())
+    };
+    let supplied_setup_ran = setup_ran(&supplied);
     let mut record = match store.native_meta(&keys::worktree_task_record(&supplied.id)) {
         Ok(Some(text)) if text == "null" => return, // already forgotten by another caller
         Ok(Some(_)) => match load(&store, &supplied.id) {
@@ -537,6 +584,11 @@ pub(crate) async fn abandon(engine: &Engine, supplied: Record) {
             .background()
             .reserve_idle_workspace(&record.worktree)?;
         if !record.removed {
+            // Setup may have started services for this worktree (a consent
+            // question, say, stopped the first turn): stop them first.
+            if supplied_setup_ran || setup_ran(&record) {
+                teardown(engine, &mut record).await;
+            }
             worktrees::dispose(
                 engine.paths(),
                 &record.workspace,
@@ -843,26 +895,31 @@ pub async fn discard(engine: &Engine, id: &str) -> Result<Record> {
     load(&store, id)
 }
 
+/// The project's teardown commands (stop services, remove containers), run
+/// in the worktree before it is removed, best effort; failures become notes.
+async fn teardown(engine: &Engine, record: &mut Record) {
+    let wanted = setup::load(&engine.store(), &record.workspace);
+    if wanted.teardown.is_empty() || !record.worktree.is_dir() {
+        return;
+    }
+    for result in setup::run_teardown(&wanted, &record.worktree, record.port).await {
+        if result["ok"] != true {
+            record.notes.push(format!(
+                "The teardown command `{}` failed: {}",
+                result["command"].as_str().unwrap_or(""),
+                crate::tools::truncate(result["output"].as_str().unwrap_or(""), 300)
+            ));
+        }
+    }
+}
+
 /// Remove the worktree (keeping its branch for `branch`), stop trusting its
 /// folder and move the conversation back to the project.
 async fn close(engine: &Engine, record: &mut Record, state: &str) {
     record.state = state.into();
     record.finished_at.get_or_insert_with(crate::now);
     if !record.removed && !record.worktree_id.is_empty() {
-        // The project's teardown commands (stop services, remove
-        // containers) run in the worktree first, best effort.
-        let wanted = setup::load(&engine.store(), &record.workspace);
-        if !wanted.teardown.is_empty() && record.worktree.is_dir() {
-            for result in setup::run_teardown(&wanted, &record.worktree, record.port).await {
-                if result["ok"] != true {
-                    record.notes.push(format!(
-                        "The teardown command `{}` failed: {}",
-                        result["command"].as_str().unwrap_or(""),
-                        crate::tools::truncate(result["output"].as_str().unwrap_or(""), 300)
-                    ));
-                }
-            }
-        }
+        teardown(engine, record).await;
         let removed = if state == "branch" {
             worktrees::release(
                 engine.paths(),
@@ -898,12 +955,14 @@ async fn close(engine: &Engine, record: &mut Record, state: &str) {
                 .push(format!("Could not update trusted projects: {error:#}"));
         }
     }
+    // Back in the project, its turns no longer get the task's own port.
     let store = engine.store();
     let moved = store
         .move_session(&record.session_id, &record.workspace)
         .and_then(|()| {
             store.delete_session_meta(&record.session_id, keys::WORKTREE_TASK)?;
-            store.delete_session_meta(&record.session_id, keys::WORKTREE_SOURCE)
+            store.delete_session_meta(&record.session_id, keys::WORKTREE_SOURCE)?;
+            store.delete_session_meta(&record.session_id, keys::TASK_ENV)
         });
     if let Err(error) = moved {
         record.notes.push(format!(
@@ -1625,6 +1684,107 @@ mod tests {
         assert!(retried.removed && !prepared.worktree.exists());
         assert!(!f.source.join("must-not-run.txt").exists());
         assert!(discard(&f.engine, &f.record.id).await.unwrap().removed);
+        f.engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closing_a_task_takes_back_its_port_and_its_code_index() {
+        let f = fixture().await;
+        let store = f.engine.store();
+        assert!(!setup::session_env(&store, &f.record.session_id).is_empty());
+        crate::symbol_index::ensure_index(&f.record.worktree, &[], true).unwrap();
+        let index = crate::symbol_index::index_path(&f.record.worktree);
+        assert!(index.exists());
+        assert!(discard(&f.engine, &f.record.id).await.unwrap().removed);
+        // Back in the project, its turns no longer get the task's port.
+        assert!(store
+            .session_meta(&f.record.session_id, keys::TASK_ENV)
+            .unwrap()
+            .is_none());
+        assert!(!index.exists(), "the removed worktree's index was kept");
+        f.engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abandoning_a_task_after_its_setup_ran_runs_the_teardown() {
+        let f = fixture().await;
+        let source = f.source.canonicalize().unwrap();
+        let marker = f.root.path().join("teardown-ran");
+        setup::save(
+            &f.engine.store(),
+            &source,
+            setup::Setup {
+                setup: vec!["printf \"$PORT\" > port.txt".into()],
+                teardown: vec![format!("touch {}", marker.display())],
+                ..setup::Setup::default()
+            },
+        )
+        .unwrap();
+        let prepared = prepare(
+            &f.engine,
+            &source,
+            "Consent asked",
+            &[],
+            "fixture-only",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.setup["ok"], true, "{}", prepared.setup);
+        assert_eq!(
+            load(&f.engine.store(), &prepared.id).unwrap().setup["ok"],
+            true
+        );
+        // The first turn could not start (a consent question, say).
+        abandon(&f.engine, prepared.clone()).await;
+        assert!(marker.exists(), "services setup started were left running");
+        assert!(!prepared.worktree.exists());
+        assert!(discard(&f.engine, &f.record.id).await.unwrap().removed);
+        f.engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_runs_without_holding_up_the_projects_other_tasks() {
+        let f = fixture().await;
+        let source = f.source.canonicalize().unwrap();
+        let (entered, gate) = (f.root.path().join("entered"), f.root.path().join("gate"));
+        setup::save(
+            &f.engine.store(),
+            &source,
+            setup::Setup {
+                setup: vec![format!(
+                    "touch {}; while [ ! -e {} ]; do sleep 0.05; done",
+                    entered.display(),
+                    gate.display()
+                )],
+                ..setup::Setup::default()
+            },
+        )
+        .unwrap();
+        let engine = f.engine.clone();
+        let preparing = tokio::spawn(async move {
+            prepare(&engine, &source, "Slow setup", &[], "fixture-only", None).await
+        });
+        until(|| entered.exists(), "Setup never started").await;
+        // Another task of the project closes while this one's setup runs.
+        let closed = tokio::time::timeout(Duration::from_secs(5), discard(&f.engine, &f.record.id))
+            .await
+            .expect("Discard waited for another task's setup")
+            .unwrap();
+        assert!(closed.removed);
+        fs::write(&gate, "").unwrap();
+        let prepared = tokio::time::timeout(Duration::from_secs(10), preparing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.state, "starting");
+        assert_eq!(
+            load(&f.engine.store(), &prepared.id).unwrap().setup["ok"],
+            true
+        );
+        abandon(&f.engine, prepared.clone()).await;
+        assert!(!prepared.worktree.exists());
         f.engine.shutdown().await.unwrap();
     }
 }
