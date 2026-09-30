@@ -185,6 +185,42 @@ function userItem(
   };
 }
 
+/** The task's stuck cards that still wait for an answer stop waiting. */
+function resolveStuck(
+  items: ChatItem[],
+  taskId: string,
+  resolved: "continued" | "ended",
+): ChatItem[] {
+  if (
+    !items.some(
+      (item) =>
+        item.kind === "stuck" &&
+        item.taskId === taskId &&
+        item.paused &&
+        !item.resolved,
+    )
+  )
+    return items;
+  return items.map((item) =>
+    item.kind === "stuck" &&
+    item.taskId === taskId &&
+    item.paused &&
+    !item.resolved
+      ? { ...item, resolved }
+      : item,
+  );
+}
+
+/** A prompt's @-mentions as user.message records them. */
+function mentionsFrom(value: unknown): NonNullable<TaskActivity["mentions"]> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((m) =>
+    m && typeof m.path === "string" && m.path
+      ? [{ path: m.path as string, kind: m.kind === "dir" ? "dir" : "file" }]
+      : [],
+  ) as NonNullable<TaskActivity["mentions"]>;
+}
+
 function sourcesFrom(value: unknown): WebSource[] {
   const list = Array.isArray(value) ? value : value ? [value] : [];
   return list
@@ -444,9 +480,24 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
   if (event.type === "agent.stuck" && typeof p.text === "string") {
     items = [
       ...items,
-      { kind: "stuck", jobId: String(p.job_id || ""), text: p.text, taskId },
+      {
+        kind: "stuck",
+        jobId: String(p.job_id || ""),
+        text: p.text,
+        taskId,
+        paused: p.paused !== false,
+      },
     ];
   }
+  // A paused task that runs again (resumed here or elsewhere) no longer
+  // waits on its stuck card.
+  if (
+    taskId &&
+    (event.type === "agent.resumed" ||
+      event.type === "agent.steered" ||
+      event.type === "tool.started")
+  )
+    items = resolveStuck(items, taskId, "continued");
   if (event.type === "task.flags" && typeof p.text === "string") {
     items = [...items, { kind: "note", taskId, text: p.text, warning: true }];
   }
@@ -754,6 +805,9 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     const next = userItem(items, text, taskId, event.id);
     items = [...next.items, next.item];
     if (!activeTaskId) stage = "QUEUED";
+    const mentions = mentionsFrom(p.mentions);
+    if (mentions.length)
+      touch((a) => ({ ...a, mentions, onlyChange: p.only_change === true }));
   }
   if (event.type === "agent.started") {
     const pending = taskId
@@ -782,7 +836,11 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     usage = {};
     routing = undefined;
     limit = undefined;
-    touch((a) => ({ ...a, startedAt: a.startedAt ?? event.ts }));
+    touch((a) => ({
+      ...a,
+      startedAt: a.startedAt ?? event.ts,
+      ...(typeof p.mode === "string" ? { mode: p.mode } : {}),
+    }));
   }
   if (
     event.type === "local.runtime_progress" ||
@@ -1169,6 +1227,7 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
         ? { ...item, resolved: "ended" as const }
         : item,
     );
+    if (taskId) items = resolveStuck(items, taskId, "ended");
     touch((a) => ({
       ...a,
       ...(run ? { run } : {}),
@@ -1351,7 +1410,14 @@ export function tryOnFor(
   taskId: string,
   /** The picker's name for a model id, when it has one. */
   nameOf: (id: string) => string | undefined = () => undefined,
-): { taskId: string; from: string; request: string } {
+): {
+  taskId: string;
+  from: string;
+  request: string;
+  mentions?: TaskActivity["mentions"];
+  onlyChange?: boolean;
+  mode?: string;
+} {
   const request =
     transcript.items.find(
       (item) =>
@@ -1369,7 +1435,16 @@ export function tryOnFor(
     run?.vendor ||
     run?.model ||
     "the previous model";
-  return { taskId, from, request };
+  // The continuation keeps the task's files, scope and mode.
+  return {
+    taskId,
+    from,
+    request,
+    ...(activity?.mentions?.length
+      ? { mentions: activity.mentions, onlyChange: activity.onlyChange }
+      : {}),
+    ...(activity?.mode ? { mode: activity.mode } : {}),
+  };
 }
 
 export function replay(events: EventRow[]): Transcript {

@@ -159,7 +159,7 @@ pub fn compact(
     context_limit: usize,
     ratio: f64,
 ) -> Result<Option<Value>> {
-    Ok(compact_detailed(messages, schemas, context_limit, ratio)?.map(|c| c.details))
+    Ok(compact_detailed(messages, schemas, context_limit, ratio, false)?.map(|c| c.details))
 }
 
 /// A compaction that happened: the `context.compacted` payload, the complete
@@ -202,11 +202,14 @@ pub fn compaction_note(
     }
 }
 
+/// `forced` (`/compact`): shorten now even when the conversation fits,
+/// removing every old group that may go instead of stopping at `ratio`.
 pub fn compact_detailed(
     messages: &mut Vec<Value>,
     schemas: &[Value],
     context_limit: usize,
     ratio: f64,
+    forced: bool,
 ) -> Result<Option<Compacted>> {
     let reserved = (context_limit / 4).min(8192) + estimate_tokens(&json!(schemas)) + 256;
     ensure!(
@@ -214,9 +217,13 @@ pub fn compact_detailed(
         "Model context is too small for the tools; select a larger context budget"
     );
     let hard_limit = context_limit.saturating_sub(reserved);
-    let target = ((hard_limit as f64 * ratio) as usize).max(256);
+    let target = if forced {
+        0
+    } else {
+        ((hard_limit as f64 * ratio) as usize).max(256)
+    };
     let before = estimate_tokens(&json!(messages));
-    if before <= hard_limit {
+    if before <= hard_limit && !forced {
         return Ok(None);
     }
     // Compact is eager (it reserves a quarter-window for output). The keep-list

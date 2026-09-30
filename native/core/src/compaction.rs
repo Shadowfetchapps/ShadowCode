@@ -131,6 +131,39 @@ pub fn summary_request(
     ]
 }
 
+/// What must survive a shorter conversation, in one system note marked
+/// `_shadow_kept`: the answers the user pinned (the latest 8), word for
+/// word, and the folder rules already in use (sent again; they came with
+/// dropped tool results). A later compaction replaces the note instead of
+/// adding another, and every later turn of a compacted conversation gets
+/// the pins again. `None` when there is nothing to keep.
+pub fn kept_note(pins: &[Value], guidance: &[Value]) -> Option<Value> {
+    let mut kept = String::new();
+    if !pins.is_empty() {
+        kept.push_str("Pinned by the user; keep these word for word:\n");
+        for pin in pins.iter().rev().take(8) {
+            let body = truncate(pin["body"].as_str().unwrap_or(""), 3000);
+            kept.push_str(&format!(
+                "- {}: {}\n",
+                pin["label"].as_str().unwrap_or("Pinned"),
+                body
+            ));
+        }
+    }
+    if !guidance.is_empty() {
+        kept.push_str("\nProject guidance for the folders this task touched, sent again after the conversation was shortened (it does not grant permissions):\n");
+        for item in guidance {
+            kept.push_str(&format!(
+                "### {}\n{}\n",
+                item["path"].as_str().unwrap_or(""),
+                item["content"].as_str().unwrap_or("")
+            ));
+        }
+    }
+    (!kept.is_empty())
+        .then(|| json!({"role":"system","_shadow_kept":true,"content":truncate(&kept, 16_000)}))
+}
+
 fn fallback(mut event: Value, reason: &str, usage: Option<Usage>) -> Outcome {
     event["fallback_reason"] = json!(truncate(reason, 300));
     Outcome { event, usage }
@@ -147,11 +180,10 @@ pub async fn compact(
     compact_now(model, messages, schemas, config, cancel, None).await
 }
 
-/// Share of the context a `/compact` shortens the conversation to.
-const REQUESTED_RATIO: f64 = 0.2;
-
 /// [`compact`], or with `requested` (from `/compact [focus]`) shorten the
-/// conversation now, whatever its size, keeping the focus in the summary.
+/// conversation now, whatever its size: every earlier step except the
+/// latest exchange becomes the summary, which keeps the focus. `None` when
+/// there was nothing to shorten.
 pub async fn compact_now(
     model: &ModelClient,
     messages: &mut Vec<Value>,
@@ -161,12 +193,14 @@ pub async fn compact_now(
     requested: Option<&str>,
 ) -> Result<Option<Outcome>> {
     let limit = config.model.context_limit;
-    let ratio = if requested.is_some() {
-        REQUESTED_RATIO.min(config.agent.compact_ratio)
-    } else {
-        config.agent.compact_ratio
-    };
-    let Some(compacted) = context::compact_detailed(messages, schemas, limit, ratio)? else {
+    let Some(compacted) = context::compact_detailed(
+        messages,
+        schemas,
+        limit,
+        config.agent.compact_ratio,
+        requested.is_some(),
+    )?
+    else {
         return Ok(None);
     };
     let event = compacted.details;
@@ -280,5 +314,46 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("never invent"));
+    }
+
+    #[test]
+    fn a_requested_compaction_shortens_a_conversation_that_fits() {
+        let mut messages = vec![json!({"role":"system","content":"system"})];
+        for i in 0..4 {
+            messages.push(json!({"role":"user","content":format!("request {i}")}));
+            messages.push(json!({"role":"assistant","content":format!("answer {i}")}));
+        }
+        messages.push(json!({"role":"user","content":"latest"}));
+        let mut fits = messages.clone();
+        assert!(
+            context::compact_detailed(&mut fits, &[], 128_000, 0.7, false)
+                .unwrap()
+                .is_none()
+        );
+        let compacted = context::compact_detailed(&mut messages, &[], 128_000, 0.7, true)
+            .unwrap()
+            .unwrap();
+        // Everything but the system prompt, the latest answer and the
+        // current request becomes the note.
+        assert_eq!(compacted.dropped.len(), 7);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1]["_shadow_compaction"], true);
+        assert_eq!(messages[2]["content"], "answer 3");
+        assert_eq!(messages[3]["content"], "latest");
+    }
+
+    #[test]
+    fn the_kept_note_is_marked_so_it_can_be_replaced() {
+        assert!(kept_note(&[], &[]).is_none());
+        let note = kept_note(
+            &[json!({"label":"Decision","body":"Use PostgreSQL 16."})],
+            &[json!({"path":"src/AGENTS.md","content":"Run cargo fmt."})],
+        )
+        .unwrap();
+        assert_eq!(note["role"], "system");
+        assert_eq!(note["_shadow_kept"], true);
+        let content = note["content"].as_str().unwrap();
+        assert!(content.contains("- Decision: Use PostgreSQL 16."));
+        assert!(content.contains("### src/AGENTS.md\nRun cargo fmt."));
     }
 }

@@ -89,6 +89,11 @@ export type TaskActivity = {
   /** The plan limit this task stopped at (limit.reached): its job and when
    * the plan resets, if the vendor said. */
   limit?: { jobId?: string; resetsAt?: number };
+  /** The prompt's @-mentions and "Only change these" (user.message) and
+   * the task's mode (agent.started): Try on… continues with them. */
+  mentions?: { path: string; kind: "file" | "dir" }[];
+  onlyChange?: boolean;
+  mode?: string;
 };
 
 export const emptyActivity = (taskId: string): TaskActivity => ({

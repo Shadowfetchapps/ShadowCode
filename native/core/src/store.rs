@@ -1224,6 +1224,11 @@ impl Store {
     }
     /// Queue the task and its recoverable job atomically.
     pub fn create_job(&self, job: &Value) -> Result<()> {
+        self.create_job_with(job, &Value::Null)
+    }
+    /// [`Self::create_job`], with more fields for its `user.message` (the
+    /// composer's @-mentions and "Only change these").
+    pub fn create_job_with(&self, job: &Value, message: &Value) -> Result<()> {
         let mut db = self.lock()?;
         let tx = db.transaction()?;
         let task_id = job["task_id"].as_str().context("Missing task ID")?;
@@ -1237,14 +1242,13 @@ impl Store {
             "INSERT INTO desktop_jobs(id,payload) VALUES(?,?)",
             params![job["id"].as_str(), job.to_string()],
         )?;
+        let mut payload = json!({"text":prompt});
+        for (key, value) in message.as_object().into_iter().flatten() {
+            payload[key] = value.clone();
+        }
         tx.execute(
             "INSERT INTO events(ts,type,session_id,task_id,payload) VALUES(?,'user.message',?,?,?)",
-            params![
-                now(),
-                session_id,
-                task_id,
-                json!({"text":prompt}).to_string()
-            ],
+            params![now(), session_id, task_id, payload.to_string()],
         )?;
         tx.execute("UPDATE sessions SET updated_at=?,title=CASE WHEN title IS NULL OR title='' OR title IN ('New task','Welcome') THEN ? ELSE title END WHERE id=?",params![now(),prompt.chars().take(80).collect::<String>(),session_id])?;
         tx.commit()?;

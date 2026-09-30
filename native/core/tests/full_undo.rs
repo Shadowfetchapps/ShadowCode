@@ -229,6 +229,42 @@ async fn failed_commands_are_still_checkpointed() {
 }
 
 #[tokio::test]
+async fn a_command_that_changes_files_outside_the_chosen_ones_says_so() {
+    let Fixture {
+        _root,
+        store,
+        tools,
+        ..
+    } = fixture(shell_config(), repo);
+    let tools = tools.with_scope(Some(vec![shadowcode_core::mentions::Mention {
+        path: "src".into(),
+        kind: "dir".into(),
+    }]));
+    // Commands run without asking here; what they change elsewhere is named.
+    let result = exec(
+        &tools,
+        "printf 'fn b() {}' > src/lib.rs && printf two > tracked.txt",
+    )
+    .await;
+    assert!(result.success, "{} {}", result.error, result.output);
+    assert_eq!(
+        result.output["outside_scope"]["paths"],
+        json!(["tracked.txt"])
+    );
+    let events = store
+        .events_after(&tools.events.session_id, 0, None, 1000)
+        .unwrap();
+    let outside = events
+        .iter()
+        .find(|e| e["type"] == "scope.outside")
+        .expect("scope.outside");
+    assert_eq!(outside["payload"]["paths"], json!(["tracked.txt"]));
+    // Inside the chosen folder: nothing to say.
+    let inside = exec(&tools, "printf 'fn c() {}' > src/lib.rs").await;
+    assert!(inside.output.get("outside_scope").is_none());
+}
+
+#[tokio::test]
 async fn old_checkpoint_refs_are_pruned() {
     let mut config = shell_config();
     config.checkpoints.keep = 2;
@@ -523,5 +559,75 @@ async fn vendor_cli_edits_are_checkpointed_and_rewound() {
         );
         assert_eq!(fs::read_to_string(project.join("old.txt")).unwrap(), "old");
         assert!(!project.join("notes.txt").exists());
+    }
+}
+
+#[tokio::test]
+async fn a_vendor_turn_is_checked_against_only_change_these_or_says_it_was_not() {
+    for checkpoints in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("existing.txt"), "original").unwrap();
+        fs::write(project.join("old.txt"), "old").unwrap();
+        let fake = FakeCodex::new(
+            root.path(),
+            json!({"auth":"chatgpt","turn":"edit",
+                "edits":{"existing.txt":"changed by vendor","notes.txt":"new from vendor"},
+                "deletes":["old.txt"]}),
+        );
+        let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+        Config::patch(
+            &paths,
+            json!({
+                "model":{"provider":"local","endpoint":"http://127.0.0.1:9/v1","name":"fixture","context_limit":16384},
+                "trusted_workspaces":[project],
+                "cli_agents": cli_agents(&fake),
+                "checkpoints": {"vendor": checkpoints},
+            }),
+        )
+        .unwrap();
+        let service = Service::open(paths, Some(project.clone())).unwrap();
+        let job = call(
+            &service,
+            "POST",
+            "/api/jobs",
+            json!({"task":"edit the notes","model":"cli:codex",
+                "mentions":[{"path":"existing.txt","kind":"file"}],"only_change":true}),
+        )
+        .await
+        .unwrap();
+        let id = job["id"].as_str().unwrap().to_owned();
+        let done = tokio::time::timeout(Duration::from_secs(40), service.engine.wait(&id))
+            .await
+            .expect("job finished")
+            .unwrap();
+        assert_eq!(json!(done)["status"], "completed", "{}", json!(done));
+        let sid = json!(done)["session_id"].as_str().unwrap().to_owned();
+        let events = service
+            .engine
+            .store()
+            .events_after(&sid, 0, None, 10_000)
+            .unwrap();
+        let outside = events.iter().find(|e| e["type"] == "scope.outside");
+        let unchecked = events
+            .iter()
+            .find(|e| e["type"] == "agent.warning" && e["payload"]["kind"] == "scope");
+        if checkpoints {
+            let outside = outside.unwrap_or_else(|| panic!("no scope.outside: {events:?}"));
+            assert_eq!(
+                sorted(&outside["payload"]["paths"]),
+                ["notes.txt", "old.txt"]
+            );
+            assert!(unchecked.is_none());
+        } else {
+            // Without a checkpoint nothing can be compared: it says so.
+            assert!(outside.is_none());
+            let text = unchecked.expect("a scope warning")["payload"]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert!(text.contains("not be checked"), "{text}");
+        }
     }
 }

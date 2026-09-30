@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
-import { compactedNote, replay } from "./transcript";
+import { compactedNote, replay, tryOnFor } from "./transcript";
+import { tryOnRequest } from "../hooks/useTaskActions";
 import type { EventRow } from "../api";
 
 const event = (
@@ -58,4 +59,73 @@ it("says what compaction kept", () => {
   ).toBe(
     "Conversation shortened as you asked; 12 earlier messages summarized; kept 2 pinned answers and re-applied 1 folder rule",
   );
+});
+
+it("closes a paused stuck card once the task goes on or ends", () => {
+  const stuck = event(2, "agent.stuck", {
+    job_id: "j1",
+    kind: "same_failure",
+    text: "The agent seems stuck.",
+    paused: true,
+  });
+  const card = (events: EventRow[]) =>
+    replay(events).items.find((i) => i.kind === "stuck");
+  const start = event(1, "agent.started", { task: "Fix it" });
+  expect(card([start, stuck])).toMatchObject({ paused: true });
+  expect(card([start, stuck])).not.toHaveProperty("resolved");
+  expect(
+    card([start, stuck, event(3, "tool.started", { tool: "exec" })]),
+  ).toMatchObject({ resolved: "continued" });
+  expect(
+    card([start, stuck, event(3, "agent.completed", { success: true })]),
+  ).toMatchObject({ resolved: "ended" });
+  // A subagent's card, or one for a task nobody could answer for, never
+  // waited.
+  expect(
+    card([
+      start,
+      event(2, "agent.stuck", { job_id: "j1", text: "Stuck.", paused: false }),
+    ]),
+  ).toMatchObject({ paused: false });
+});
+
+it("keeps a task's files, scope and mode for Try on…", () => {
+  const state = replay([
+    event(1, "user.message", {
+      text: "Fix the parser",
+      mentions: [{ path: "src/parser.rs", kind: "file" }],
+      only_change: true,
+    }),
+    event(2, "agent.started", { task: "Fix the parser", mode: "plan" }),
+    event(3, "agent.completed", { success: false, cancelled: true }),
+  ]);
+  const tryOn = tryOnFor(state, "one");
+  expect(tryOn).toMatchObject({
+    request: "Fix the parser",
+    mentions: [{ path: "src/parser.rs", kind: "file" }],
+    onlyChange: true,
+    mode: "plan",
+  });
+  expect(
+    tryOnRequest(tryOn, "local:qwen", {
+      workspace: "/w",
+      sessionId: "s1",
+      queue: false,
+    }),
+  ).toMatchObject({
+    model: "local:qwen",
+    session_id: "s1",
+    purpose: "planner",
+    mentions: [{ path: "src/parser.rs", kind: "file" }],
+    only_change: true,
+  });
+  // Without mentions nothing is scoped.
+  const plain = tryOnRequest(
+    { taskId: "one", from: "Codex", request: "Hi" },
+    "local:qwen",
+    { queue: false },
+  );
+  expect(plain.purpose).toBe("coder");
+  expect(plain).not.toHaveProperty("mentions");
+  expect(plain).not.toHaveProperty("only_change");
 });

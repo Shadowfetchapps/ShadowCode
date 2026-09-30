@@ -182,15 +182,18 @@ the original stays in the store and in exports.
 Types, grouped, with the payload fields clients rely on:
 
 - **Turn lifecycle**
-  - `user.message` `{text}` — the task text as stored (mentions resolved by
-    the engine are not inlined; Preview context is included).
+  - `user.message` `{text, mentions?, only_change?}` — the task text as
+    stored (mentions resolved by the engine are not inlined; Preview context
+    is included); a prompt with @-mentions keeps them and its "Only change
+    these" choice, which **Try on…** sends again.
   - `agent.started` `{job_id, task, mode, model, native, vendor_agent?, images}`.
   - `agent.completed` — the job's `result`: `{success, cancelled, summary,
     plan: {goal, steps}, usage, usage_is_estimated, verification, timings,
     limit_reached?, command?}`.
   - `agent.paused` `{job_id, status: "paused"}` (when the worker parks),
     `agent.steered` `{job_id, note}`.
-  - `agent.warning` `{text, kind?: "sandbox"|"checkpoint", vendor?}`.
+  - `agent.warning` `{text, kind?: "sandbox"|"checkpoint"|"scope"|"compact",
+    vendor?}`.
   - `agent.handoff` `{from, to, excerpt_chars, turns, files, delivery: "prompt_prefix"|"message_tape", job_id}`.
   - `workflow.selected` — the workflow or skill a slash command started.
   - `command.completed` `{name, result}` — a slash-command card (redacted);
@@ -777,7 +780,7 @@ in-band consent refusal ([Errors](#errors)). Body:
 | `permission_limit` | `"read_only"\|"workspace"\|"elevated"`? | narrows the project's permission level for this job (strict) |
 | `worktree` | bool? | start a new conversation in a fresh worktree ([Worktree tasks](#worktree-tasks)); `session_id` and `queue` are ignored |
 | `base_branch` | string? | with `worktree`: start from this local branch instead of the current files |
-| `only_change` | bool? | "Only change these": ShadowCode's own agent asks before any file tool changes a path outside `mentions` (even when edits are allowed; approval `reason` "Outside the files you chose for this task: …"); after a subscription turn, changed paths outside them are reported as `scope.outside {job_id, paths}` |
+| `only_change` | bool? | "Only change these": ShadowCode's own agent asks before any file tool changes a path outside `mentions` (even when edits are allowed; approval `reason` "Outside the files you chose for this task: …", with its own `grant` "file edits outside the files you chose", so allowing file edits for the task never covers them); a native `exec` that changed paths outside them reports `scope.outside {paths, tool: "exec"}` after it ran (and `outside_scope` in its result); after a subscription turn, changed paths outside them, including ones too large to record, are reported as `scope.outside {job_id, paths}`, or `agent.warning {kind: "scope"}` says the turn could not be checked (no project checkpoint: `checkpoints.vendor` off, or it was unavailable or failed). `background_start` processes are not checked |
 | `roles` | bool? | run a Code task as Plan → Implement → Review, a Plan task as its plan role ([Roles](#roles)); other modes are refused |
 
 - Job records keep the exact picker id in `routing.model_id`. A `local:gguf:`
@@ -1067,9 +1070,14 @@ Usage = {prompt_tokens, completion_tokens, total_tokens,
   requested?, focus?}`: after any compaction, the conversation's pinned
   answers (`/pin`, word for word, at most 8) and the folder guidance already
   delivered in the task are sent again in one system note (`pinned`,
-  `rules_reapplied` count them). `/compact [what to keep]` (session meta
-  `compact_request`) shortens the conversation at the start of the next
-  turn whatever its size (`requested: true`, the focus goes to the summary).
+  `rules_reapplied` count them); a later compaction replaces that note, and
+  each later turn of a compacted conversation starts with the pins again.
+  `/compact [what to keep]` (session meta `compact_request`) shortens the
+  conversation at the start of the next turn whatever its size: every
+  earlier step except the latest answer goes into the summary
+  (`requested: true`, the focus goes to the summary). The request is used
+  up either way; with nothing earlier to shorten, `agent.warning {kind:
+  "compact"}` says so.
   `method`, `fallback_reason`: `method` is
   `model_summary` (`summary` at most 6 000 bytes) or `bounded_history`.
   `fallback_reason`: `disabled`, `context_too_small` (under 8 192 tokens),
@@ -1195,9 +1203,16 @@ arguments or output, or file contents. `logging.level` (`error`, `warn`,
   the same way three times (same exit code and the same end of its output,
   numbers ignored), or changes a file back to an earlier version twice, the
   task records `agent.stuck {job_id, kind: "same_failure"|"edit_loop", text,
-  detail}` and pauses (`agent.stuck_check`, default on). The window offers
-  Keep going (`resume`), Give a hint (`steer` then `resume`), Try another
-  model (`cancel`, then the picker) and Stop. It fires once per loop.
+  detail, paused}` and pauses (`agent.stuck_check`, default on). The window
+  offers Keep going (`resume`), Give a hint (`steer` then `resume`), Try
+  another model (`cancel`, then the picker, keeping the task's mentions,
+  "Only change these" and mode) and Stop; the card closes once the task
+  runs again or ends. A task nobody can answer for there never pauses
+  (`paused: false`): subagents, role steps, automation runs and jobs a
+  connection owns (an ACP editor, the terminal UI, an MCP client). The agent
+  gets a note to change course instead, and ACP shows the text as a
+  thought. It fires once per loop; a command that later passes re-arms only
+  its own loops.
 - **Heads-ups.** A finished Code task (not a subagent) compares each file it
   changed with the file before the task: skip or focus markers added to
   tests, deleted test files, fewer tests or assertions, CI and hook files
@@ -1211,12 +1226,18 @@ arguments or output, or file contents. `logging.level` (`error`, `warn`,
   bundled `llamacpp` runtime, which parses calls through the model's
   template) that writes a call as text (`<tool_call>…</tool_call>`,
   `<|python_tag|>`, `<function=name>`, or an answer that is one JSON call)
-  has it read as that call when the name is an offered tool. Each records `tool_call.repaired {from: "arguments"|"text",
-  count}`.
+  has it read as that call when the name is an offered tool. Only calls
+  that end the answer count: one inside a code fence or followed by more
+  text was only quoted and stays text. `<|python_tag|>` calls are separated
+  by `;` outside argument strings. Each records `tool_call.repaired {from:
+  "arguments"|"text", count}`.
 - **Close edits.** `edit_file` with an `old_string` that matches nowhere is
   applied when it matches exactly one place ignoring line endings, spaces at
-  line ends or indentation (re-indented to the file's); the result carries
-  `note`. Two possible places refuse, as before.
+  line ends or indentation; the result carries `note`. Ignoring indentation
+  still needs the same block structure (every line shifted by the same
+  indentation), and the new text is re-indented by that shift. Two possible
+  places refuse, as before. The approval card's diff and the new-package
+  lookup use the same matching.
 
 ### Task timings
 
@@ -3101,8 +3122,9 @@ socket, each request scoped to the ACP session's project:
   (a final delta sends only the part not already streamed);
   `tool.started` → `tool_call`; `tool.completed` → `tool_call_update`
   (`rawOutput` up to 64 KB); `plan.updated` → `plan`; `agent.warning`,
-  `routing.selected|fallback`, `model.retry`, `context.compacted` →
-  `agent_thought_chunk`; `user.message` → `user_message_chunk` on replay only.
+  `agent.stuck`, `routing.selected|fallback`, `model.retry`,
+  `context.compacted` → `agent_thought_chunk`; `user.message` →
+  `user_message_chunk` on replay only.
 
 ## Profile folders
 

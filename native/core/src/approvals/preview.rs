@@ -124,14 +124,10 @@ pub fn native_contents(workspace: &Workspace, tool: &str, args: &Value) -> Vec<F
                 let text = std::str::from_utf8(&current).ok()?;
                 let updated = if let Some(old) = args["old_string"].as_str() {
                     let new = args["new_string"].as_str()?;
-                    if old.is_empty() || !text.contains(old) {
-                        return None;
-                    }
-                    if args["replace_all"] == true {
-                        text.replace(old, new)
-                    } else {
-                        text.replacen(old, new, 1)
-                    }
+                    // Matched exactly as the edit will run, close matches too.
+                    crate::tools::replace_string(text, old, new, args["replace_all"] == true)
+                        .ok()?
+                        .0
                 } else {
                     crate::tools::edit_line_hunks(text, args["hunks"].as_array()?).ok()?
                 };
@@ -189,14 +185,9 @@ fn native_changes(workspace: &Workspace, tool: &str, args: &Value) -> Option<Val
             let text = std::str::from_utf8(bytes).ok()?;
             let updated = if let Some(old) = args["old_string"].as_str() {
                 let new = args["new_string"].as_str()?;
-                if old.is_empty() || !text.contains(old) {
-                    return None;
-                }
-                if args["replace_all"] == true {
-                    text.replace(old, new)
-                } else {
-                    text.replacen(old, new, 1)
-                }
+                crate::tools::replace_string(text, old, new, args["replace_all"] == true)
+                    .ok()?
+                    .0
             } else {
                 crate::tools::edit_line_hunks(text, args["hunks"].as_array()?).ok()?
             };
@@ -410,6 +401,31 @@ mod tests {
         )
         .is_null());
         assert!(native(&ws, "read_file", &json!({"path":"a.txt"})).is_null());
+    }
+
+    #[test]
+    fn close_edits_preview_what_the_edit_will_do() {
+        let (dir, ws) = project();
+        std::fs::write(
+            dir.path().join("package.json"),
+            "{\r\n  \"dependencies\": {\r\n    \"a\": \"1\"\r\n  }\r\n}\r\n",
+        )
+        .unwrap();
+        // The edit uses Unix line endings; it still applies, so it is shown.
+        let args = json!({"path":"package.json","old_string":"    \"a\": \"1\"\n","new_string":"    \"a\": \"1\",\n    \"left-pad\": \"1\"\n"});
+        let edit = native(&ws, "edit_file", &args);
+        assert_eq!(edit["files"][0]["added"], 2, "{edit}");
+        let contents = native_contents(&ws, "edit_file", &args);
+        let after = String::from_utf8(contents[0].2.clone().unwrap()).unwrap();
+        assert!(after.contains("\"left-pad\": \"1\"\r\n"), "{after}");
+        // Ambiguous, as the edit would be: no preview.
+        std::fs::write(dir.path().join("twice.txt"), "x\nx\n").unwrap();
+        assert!(native(
+            &ws,
+            "edit_file",
+            &json!({"path":"twice.txt","old_string":"x","new_string":"y"})
+        )
+        .is_null());
     }
 
     #[test]

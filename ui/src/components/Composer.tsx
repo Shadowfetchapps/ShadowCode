@@ -323,7 +323,7 @@ export function Composer({
                 type="button"
                 className={`composer-chip only-change${onlyChange ? " on" : ""}`}
                 aria-pressed={onlyChange}
-                title="ShadowCode's own agent asks before changing any other file. Subscriptions are checked after each turn, and changes elsewhere are pointed out."
+                title="ShadowCode's own agent asks before its file tools change any other file. Commands it runs and subscription turns are checked afterwards, and changes elsewhere are pointed out."
                 onClick={() => onOnlyChange(!onlyChange)}
               >
                 Only change these

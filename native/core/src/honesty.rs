@@ -91,8 +91,36 @@ const SKIP_MARKERS: &[&str] = &[
     "@Ignore",
     "[Ignore]",
     "[Fact(Skip",
-    "skip:",
 ];
+
+/// Byte `at` of `line` starts a token: it does not continue a name.
+fn token_start(line: &str, at: usize) -> bool {
+    !line[..at]
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+/// `marker` starts a token in `line`, so it is not the end of a longer
+/// name (`os.Exit(` and `process.exit(` are not `xit(`).
+fn has_marker(line: &str, marker: &str) -> bool {
+    line.match_indices(marker)
+        .any(|(at, _)| token_start(line, at))
+}
+
+/// A test option that skips it, `{ skip: true }` or `{ skip: "why" }`
+/// (Node, Bun), and not a field such as `{ skip: 10 }`.
+fn skip_option(line: &str) -> bool {
+    line.match_indices("skip:").any(|(at, marker)| {
+        let value = line[at + marker.len()..].trim_start();
+        token_start(line, at) && (value.starts_with("true") || value.starts_with(['"', '\'', '`']))
+    })
+}
+
+/// An added line that skips or focuses a test.
+fn skips_a_test(line: &str) -> bool {
+    SKIP_MARKERS.iter().any(|m| has_marker(line, m)) || skip_option(line)
+}
 
 /// Markers that switch a check off for code.
 const SUPPRESSIONS: &[&str] = &[
@@ -226,7 +254,7 @@ pub fn file_flags(path: &str, before: Option<&str>, after: Option<&str>) -> Vec<
     if test {
         let skipped: Vec<&(usize, String)> = added
             .iter()
-            .filter(|(_, text)| SKIP_MARKERS.iter().any(|m| text.contains(m)))
+            .filter(|(_, text)| skips_a_test(text))
             .collect();
         if let Some((line, _)) = skipped.first() {
             flags.push(flag(
@@ -371,6 +399,41 @@ mod tests {
             Some("@pytest.mark.skip\ndef test_a():\n    assert 1\n"),
         );
         assert_eq!(kinds(&py), ["skipped_tests"]);
+        let node = file_flags(
+            "test/api.test.js",
+            Some("test('a', () => {});\n"),
+            Some("test('a', { skip: true }, () => {});\n"),
+        );
+        assert_eq!(kinds(&node), ["skipped_tests"]);
+    }
+
+    #[test]
+    fn exit_calls_and_pagination_fields_are_not_skips() {
+        let go = file_flags(
+            "foo_test.go",
+            Some("package foo\n"),
+            Some("package foo\n\nfunc TestMain(m *testing.M) { os.Exit(m.Run()) }\n"),
+        );
+        assert!(go.is_empty(), "{go:?}");
+        let js = file_flags(
+            "test/list.test.js",
+            Some("it('lists', () => {\n  expect(list()).toEqual([]);\n});\n"),
+            Some("it('lists', () => {\n  expect(list({ skip: 10 })).toEqual([]);\n  if (bad) process.exit(1);\n});\n"),
+        );
+        assert!(js.is_empty(), "{js:?}");
+        let py = file_flags(
+            "tests/test_main.py",
+            Some("def test_a():\n    assert 1\n"),
+            Some("def test_a():\n    assert 1\n\nsys.exit(pytest.main())\n"),
+        );
+        assert!(py.is_empty(), "{py:?}");
+        // A real `xit(` still counts.
+        let focused = file_flags(
+            "src/app.test.ts",
+            Some("it('works', () => {});\n"),
+            Some("xit('works', () => {});\n"),
+        );
+        assert_eq!(kinds(&focused), ["skipped_tests"]);
     }
 
     #[test]

@@ -949,15 +949,20 @@ Subscription CLIs use their own sandboxes, not this one.
   minute, a built-in digest is used instead. The full history always stays in
   the app. Turn summaries off with `agent.summary_compaction: false`.
 - **Shorten on purpose, keep what matters.** Type `/compact` to shorten the
-  conversation when you send your next message, or `/compact keep the API
-  design` to say what the summary must keep. Answers you pinned with `/pin`
-  are kept word for word through any shortening, and the rules files of the
-  folders the task worked in are sent again, so instructions aren't lost.
+  conversation when you send your next message, however long it is: every
+  earlier step except the latest answer becomes the summary. Type
+  `/compact keep the API design` to say what the summary must keep. Answers
+  you pinned with `/pin` are kept word for word through any shortening and
+  in every later message, and the rules files of the folders the task
+  worked in are sent again, so instructions aren't lost.
 - **When the agent is stuck.** If ShadowCode's own agent runs the same
   command and it fails the same way three times, or keeps changing a file
   back and forth, the task pauses with a card: **Keep going**, **Give a
-  hint** (your note reaches the agent), **Try another model** or **Stop**.
-  Turn it off with `agent.stuck_check: false`.
+  hint** (your note reaches the agent), **Try another model** (with the same
+  files and **Only change these**) or **Stop**. Tasks nobody can answer the
+  card for (automations, subagents, and tasks started from an editor or the
+  terminal UI) don't pause: the agent is told to try another way. Turn it
+  off with `agent.stuck_check: false`.
 - **Heads-ups when a task finishes.** If a task skipped or deleted tests,
   removed assertions, changed CI or hook settings, switched off a lint or
   type check in the code, or rewrote test snapshots, the conversation says
@@ -965,10 +970,14 @@ Subscription CLIs use their own sandboxes, not this one.
   sure *the tests pass* means what you think.
 - **Only change these.** After you @-mention files or folders, **Only change
   these** in the composer keeps the task to them: ShadowCode's own agent asks
-  before changing any other file, even when edits are allowed.
-  Subscriptions can't be stopped mid-turn, so after each turn the
+  before its file tools change any other file, even when edits are allowed
+  or you allowed file edits for the task. A command it runs can't be asked
+  about file by file, so the conversation names any other file a command
+  changed. Subscriptions can't be stopped mid-turn, so after each turn the
   conversation names any file they changed elsewhere; **Review** can undo
-  it.
+  it. This check needs project checkpoints for subscriptions
+  (`checkpoints.vendor`, on by default); without one, the conversation says
+  the turn wasn't checked.
 - **Busy or dropped providers.** A request that fails with a rate limit, an
   overloaded or failing provider, or a connection that drops mid-answer is
   sent again, up to three times (`agent.model_retries`), waiting longer each

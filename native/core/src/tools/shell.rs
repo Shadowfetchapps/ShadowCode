@@ -79,6 +79,7 @@ impl ToolExecutor {
             }
         }
         // Record what the command wrote even when it failed or was cancelled.
+        let mut outside = Vec::new();
         let checkpoint_note = match capture::after(
             checkpoint,
             &self.events.store,
@@ -104,6 +105,19 @@ impl ToolExecutor {
                     summary["ignored_saved"] = json!(outcome.ignored);
                     self.events.emit("checkpoint.updated", summary)?;
                 }
+                // "Only change these": a command is not asked about file by
+                // file, so what it changed elsewhere is named after it ran.
+                outside = self.changed_outside_scope(
+                    outcome
+                        .paths
+                        .iter()
+                        .map(String::as_str)
+                        .chain(outcome.skipped.iter().filter_map(|s| s["path"].as_str())),
+                );
+                if !outside.is_empty() {
+                    self.events
+                        .emit("scope.outside", json!({"paths":outside,"tool":"exec"}))?;
+                }
                 let mut note = outcome.to_json();
                 if let Some(warning) = outcome.warning("this command") {
                     note["warning"] = json!(warning);
@@ -122,6 +136,12 @@ impl ToolExecutor {
         let mut value = serde_json::to_value(result)?;
         value["sandbox"] = sandbox_note;
         value["checkpoint"] = checkpoint_note;
+        if !outside.is_empty() {
+            value["outside_scope"] = json!({
+                "paths": outside,
+                "note": "This command changed files outside the ones the user chose for this task. Change only the chosen files unless the user asks; the user can undo these in Review.",
+            });
+        }
         Ok(value)
     }
 }

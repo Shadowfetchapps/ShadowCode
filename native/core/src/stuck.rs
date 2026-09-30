@@ -6,8 +6,10 @@
 //! slower loops: a model that edits, runs the tests, sees the same failure,
 //! and tries again; or one that undoes and redoes the same edit. When it
 //! fires, the task pauses and the conversation offers Keep going, Give a
-//! hint, Try another model or Stop. It fires once per loop, and again only
-//! after the task made progress.
+//! hint, Try another model or Stop; a task nobody can answer for there (a
+//! subagent, an automation, an editor's) goes on and the agent is told to
+//! change course. It fires once per loop, and again only after the task
+//! made progress.
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -30,7 +32,10 @@ pub struct Detector {
     failures: HashMap<(String, u64), usize>,
     versions: HashMap<String, Vec<String>>,
     returns: HashMap<String, usize>,
-    fired: HashSet<String>,
+    /// Failure loops already reported: (command, failure signature).
+    fired_failures: HashSet<(String, u64)>,
+    /// Files already reported as going back and forth.
+    fired_files: HashSet<String>,
 }
 
 fn normalize_command(command: &str) -> String {
@@ -71,17 +76,15 @@ impl Detector {
             return None;
         }
         if success {
-            // Progress: this command works now.
+            // Progress: this command (exactly this one) works now.
             self.failures.retain(|(c, _), _| *c != command);
-            self.fired
-                .retain(|key| !key.starts_with(&format!("fail:{command}:")));
+            self.fired_failures.retain(|(c, _)| *c != command);
             return None;
         }
         let key = (command.clone(), signature(exit, output));
         let count = self.failures.entry(key.clone()).or_insert(0);
         *count += 1;
-        let fired = format!("fail:{command}:{}", key.1);
-        if *count >= SAME_FAILURES && self.fired.insert(fired) {
+        if *count >= SAME_FAILURES && self.fired_failures.insert(key) {
             let shown = crate::tools::truncate(&command, 120);
             return Some(Stuck {
                 kind: "same_failure",
@@ -110,7 +113,7 @@ impl Detector {
         }
         let count = self.returns.entry(path.to_owned()).or_insert(0);
         *count += 1;
-        if *count >= FILE_RETURNS && self.fired.insert(format!("file:{path}")) {
+        if *count >= FILE_RETURNS && self.fired_files.insert(path.to_owned()) {
             return Some(Stuck {
                 kind: "edit_loop",
                 text: format!(
@@ -152,6 +155,22 @@ mod tests {
             assert!(d.command("npm test", false, Some(1), out).is_none());
         }
         assert!(d.command("npm test", false, Some(1), out).is_some());
+    }
+
+    #[test]
+    fn a_pass_re_arms_only_its_own_command() {
+        let mut d = Detector::default();
+        let out = "e2e: login page times out\n";
+        for _ in 0..2 {
+            assert!(d.command("npm run test:e2e", false, Some(1), out).is_none());
+        }
+        assert!(d.command("npm run test:e2e", false, Some(1), out).is_some());
+        // `npm run test` passing says nothing about `npm run test:e2e`.
+        assert!(d.command("npm run test", true, Some(0), "ok").is_none());
+        assert!(
+            d.command("npm run test:e2e", false, Some(1), out).is_none(),
+            "no second alert without progress"
+        );
     }
 
     #[test]

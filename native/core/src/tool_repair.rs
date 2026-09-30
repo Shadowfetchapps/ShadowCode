@@ -6,7 +6,9 @@
 //! - Tool calls written as text instead of the protocol's `tool_calls`:
 //!   Qwen/Hermes `<tool_call>{…}</tool_call>`, Llama `<|python_tag|>{…}` and
 //!   `<function=name>{…}</function>`, or a whole answer that is one JSON call
-//!   (optionally fenced). Only names of tools offered in the request count.
+//!   (optionally fenced). Only names of tools offered in the request count,
+//!   and only calls that end the answer: one in a code fence or followed by
+//!   more text was quoted, not made.
 //!
 //! Anything that still does not read as one JSON object is left as it was
 //! and fails as before. The transcript notes each repair.
@@ -45,9 +47,11 @@ fn candidates(text: &str) -> Vec<String> {
     let no_commas = remove_trailing_commas(unfenced);
     out.push(no_commas.clone());
     let escaped = escape_raw_newlines(&no_commas);
-    out.push(escaped.clone());
-    if !escaped.contains('"') || looks_single_quoted(&escaped) {
-        out.push(single_to_double_quotes(&escaped));
+    out.push(escaped);
+    if !unfenced.contains('"') || looks_single_quoted(unfenced) {
+        // Quotes first, so the comma and newline repairs see the strings.
+        let quoted = single_to_double_quotes(unfenced);
+        out.push(escape_raw_newlines(&remove_trailing_commas(&quoted)));
     }
     out
 }
@@ -133,16 +137,34 @@ fn looks_single_quoted(text: &str) -> bool {
     text.trim_start().starts_with("{'") || text.contains("': '") || text.contains("':'")
 }
 
-/// `{'a': 'b'}` → `{"a": "b"}`, keeping apostrophes inside words.
+/// `{'a': 'b'}` → `{"a": "b"}`, keeping apostrophes inside words and
+/// escaped ones (`'it\'s'`) as they were meant.
 fn single_to_double_quotes(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut in_string = false;
-    for (i, &c) in chars.iter().enumerate() {
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
         match c {
+            '\\' => match chars.get(i) {
+                // `\'` is a plain apostrophe in JSON.
+                Some('\'') => {
+                    out.push('\'');
+                    i += 1;
+                }
+                Some(&next) => {
+                    out.push('\\');
+                    out.push(next);
+                    i += 1;
+                }
+                None => out.push('\\'),
+            },
             '\'' => {
-                let prev = i.checked_sub(1).map(|p| chars[p]);
-                let next = chars.get(i + 1).copied();
+                // `i` is already past this quote.
+                let prev = i.checked_sub(2).map(|p| chars[p]);
+                let next = chars.get(i).copied();
                 let inside_word = prev.is_some_and(char::is_alphanumeric)
                     && next.is_some_and(char::is_alphanumeric);
                 if inside_word {
@@ -195,89 +217,115 @@ fn call_from_value(value: &Value, tools: &[&str]) -> Option<TextCall> {
     })
 }
 
-fn between<'a>(text: &'a str, open: &str, close: &str) -> Vec<&'a str> {
-    let mut found = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(open) {
-        let after = &rest[start + open.len()..];
-        match after.find(close) {
-            Some(end) => {
-                found.push(&after[..end]);
-                rest = &after[end + close.len()..];
-            }
-            None => {
-                found.push(after);
-                break;
-            }
+/// The call blocks that end the answer: from an `open` outside any code
+/// fence, nothing but `open…close` blocks follow (the last may be
+/// unclosed). Returns the prose before them and each block's body. A block
+/// the model only quoted, in a code fence or with more prose after it, is
+/// not a call.
+fn trailing_blocks<'a>(text: &'a str, open: &str, close: &str) -> Option<(&'a str, Vec<&'a str>)> {
+    text.match_indices(open).find_map(|(start, _)| {
+        let prose = &text[..start];
+        if prose.matches("```").count() % 2 == 1 {
+            return None;
         }
-    }
-    found
-}
-
-/// Tool calls a model wrote as text, and the text left around them. Only
-/// names in `tools` count; `None` when the text holds no such call.
-pub fn calls_from_text(text: &str, tools: &[&str]) -> Option<(Vec<TextCall>, String)> {
-    let trimmed = text.trim();
-    let mut calls = Vec::new();
-    // Qwen / Hermes: <tool_call>{…}</tool_call>
-    for body in between(trimmed, "<tool_call>", "</tool_call>") {
-        if let Some(call) = arguments(body).and_then(|v| call_from_value(&v, tools)) {
-            calls.push(call);
-        }
-    }
-    if !calls.is_empty() {
-        return Some((calls, strip_all(trimmed, "<tool_call>", "</tool_call>")));
-    }
-    // Llama 3.1: <function=name>{…}</function>
-    for block in between(trimmed, "<function=", "</function>") {
-        if let Some((name, body)) = block.split_once('>') {
-            if tools.contains(&name.trim()) {
-                if let Some(arguments) = arguments(body) {
-                    calls.push(TextCall {
-                        name: name.trim().to_owned(),
-                        arguments,
-                    });
+        let mut bodies = Vec::new();
+        let mut rest = &text[start..];
+        while let Some(after) = rest.strip_prefix(open) {
+            match after.find(close) {
+                Some(end) => {
+                    bodies.push(&after[..end]);
+                    rest = after[end + close.len()..].trim_start();
+                }
+                None => {
+                    bodies.push(after);
+                    rest = "";
                 }
             }
         }
+        rest.is_empty().then(|| (prose.trim_end(), bodies))
+    })
+}
+
+/// `text` cut at each `separator` outside a double-quoted string.
+fn split_outside_strings(text: &str, separator: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut start, mut in_string, mut escaped) = (0, false, false);
+    for (at, c) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if c == '"' {
+            in_string = true;
+        } else if c == separator {
+            parts.push(&text[start..at]);
+            start = at + c.len_utf8();
+        }
     }
-    if !calls.is_empty() {
-        return Some((calls, strip_all(trimmed, "<function=", "</function>")));
+    parts.push(&text[start..]);
+    parts
+}
+
+/// Tool calls a model wrote as text at the end of its answer, and the text
+/// before them. Only names in `tools` count; `None` when the text holds no
+/// such call.
+pub fn calls_from_text(text: &str, tools: &[&str]) -> Option<(Vec<TextCall>, String)> {
+    let trimmed = text.trim();
+    let read = |body: &str| arguments(body).and_then(|v| call_from_value(&v, tools));
+    // Qwen / Hermes: <tool_call>{…}</tool_call>
+    if let Some((prose, bodies)) = trailing_blocks(trimmed, "<tool_call>", "</tool_call>") {
+        let calls: Vec<TextCall> = bodies.into_iter().filter_map(read).collect();
+        if !calls.is_empty() {
+            return Some((calls, prose.to_owned()));
+        }
     }
-    // Llama 3.1: <|python_tag|>{…}
-    if let Some((before, after)) = trimmed.split_once("<|python_tag|>") {
-        let body = after.split("<|eom_id|>").next().unwrap_or(after);
-        for part in body.split(';') {
-            if let Some(call) = arguments(part).and_then(|v| call_from_value(&v, tools)) {
-                calls.push(call);
+    // Llama 3.1: <function=name>{…}</function>
+    if let Some((prose, blocks)) = trailing_blocks(trimmed, "<function=", "</function>") {
+        let calls: Vec<TextCall> = blocks
+            .into_iter()
+            .filter_map(|block| {
+                let (name, body) = block.split_once('>')?;
+                let name = name.trim();
+                if !tools.contains(&name) {
+                    return None;
+                }
+                Some(TextCall {
+                    name: name.to_owned(),
+                    arguments: arguments(body)?,
+                })
+            })
+            .collect();
+        if !calls.is_empty() {
+            return Some((calls, prose.to_owned()));
+        }
+    }
+    // Llama 3.1: <|python_tag|>{…}, several calls separated by `;` (a `;`
+    // inside an argument string does not separate).
+    if let Some((prose, bodies)) = trailing_blocks(trimmed, "<|python_tag|>", "<|eom_id|>") {
+        let mut calls = Vec::new();
+        for body in bodies {
+            match read(body) {
+                Some(call) => calls.push(call),
+                None => calls.extend(
+                    split_outside_strings(body, ';')
+                        .into_iter()
+                        .filter_map(read),
+                ),
             }
         }
         if !calls.is_empty() {
-            return Some((calls, before.trim().to_owned()));
+            return Some((calls, prose.to_owned()));
         }
     }
     // The whole answer is one call (optionally fenced).
-    if let Some(call) = arguments(trimmed).and_then(|v| call_from_value(&v, tools)) {
+    if let Some(call) = read(trimmed) {
         return Some((vec![call], String::new()));
     }
     None
-}
-
-fn strip_all(text: &str, open: &str, close: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(open) {
-        out.push_str(&rest[..start]);
-        match rest[start..].find(close) {
-            Some(end) => rest = &rest[start + end + close.len()..],
-            None => {
-                rest = "";
-                break;
-            }
-        }
-    }
-    out.push_str(rest);
-    out.trim().to_owned()
 }
 
 #[cfg(test)]
@@ -357,5 +405,58 @@ mod tests {
         )
         .is_none());
         assert!(calls_from_text("All tests pass.", &tools).is_none());
+    }
+
+    #[test]
+    fn quoted_calls_are_not_run() {
+        let tools = ["exec", "write_file"];
+        let example =
+            "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"config.json\",\"content\":\"{}\"}}</tool_call>";
+        // In a code fence, or with more of the answer after it: quoted.
+        let fenced = format!("The README shows this format:\n```\n{example}\n```\nThat is all.");
+        assert!(calls_from_text(&fenced, &tools).is_none());
+        let fenced_last = format!("Calls look like this:\n```xml\n{example}");
+        assert!(calls_from_text(&fenced_last, &tools).is_none());
+        let inline = format!("A call such as {example} writes the file.");
+        assert!(calls_from_text(&inline, &tools).is_none());
+        // A real call after a quoted one: only the real one runs, and the
+        // quoted one stays in the answer.
+        let real = "<tool_call>{\"name\":\"exec\",\"arguments\":{\"command\":\"ls\"}}</tool_call>";
+        let both = format!("The format is {example}. Now:\n{real}");
+        let (calls, text) = calls_from_text(&both, &tools).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "exec");
+        assert!(text.contains("config.json"), "{text}");
+        let quoted_tag = "Llama writes `<|python_tag|>` before a call, like:\n```\n<|python_tag|>{\"name\": \"exec\", \"parameters\": {\"command\": \"ls\"}}\n```";
+        assert!(calls_from_text(quoted_tag, &tools).is_none());
+    }
+
+    #[test]
+    fn python_tag_calls_keep_semicolons_in_their_arguments() {
+        let tools = ["exec", "write_file"];
+        let one = "<|python_tag|>{\"name\": \"exec\", \"parameters\": {\"command\": \"cd web; npm test\"}}<|eom_id|>";
+        let (calls, text) = calls_from_text(one, &tools).unwrap();
+        assert_eq!(calls[0].arguments, json!({"command":"cd web; npm test"}));
+        assert_eq!(text, "");
+        let two = "<|python_tag|>{\"name\": \"exec\", \"parameters\": {\"command\": \"a; b\"}}; {\"name\": \"write_file\", \"parameters\": {\"path\": \"a.rs\", \"content\": \"let x = 1;\"}}";
+        let (calls, _) = calls_from_text(two, &tools).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].arguments, json!({"command":"a; b"}));
+        assert_eq!(
+            calls[1].arguments,
+            json!({"path":"a.rs","content":"let x = 1;"})
+        );
+    }
+
+    #[test]
+    fn single_quoted_arguments_keep_escaped_quotes_and_their_text() {
+        assert_eq!(
+            arguments(r"{'path': 'src/a.rs', 'content': 'let c = \'a\';'}"),
+            Some(json!({"path":"src/a.rs","content":"let c = 'a';"}))
+        );
+        assert_eq!(
+            arguments("{'path': 'a.txt', 'content': 'x = [1,]\nend,}',}"),
+            Some(json!({"path":"a.txt","content":"x = [1,]\nend,}"}))
+        );
     }
 }

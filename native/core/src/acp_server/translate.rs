@@ -355,6 +355,9 @@ impl Translator {
                 vec![json!({"sessionUpdate":"plan","entries":plan_entries(&payload["plan"])})]
             }
             "agent.warning" if !text.is_empty() => vec![thought_chunk(&format!("{text}\n"))],
+            // An editor's task never pauses when stuck: the agent is told to
+            // change course, and the editor sees why.
+            "agent.stuck" if !text.is_empty() => vec![thought_chunk(&format!("{text}\n"))],
             "routing.selected" | "routing.fallback" => {
                 let name = payload["model_name"]
                     .as_str()
@@ -482,6 +485,12 @@ mod tests {
             .map(|e| e["status"].as_str().unwrap())
             .collect();
         assert_eq!(statuses, ["completed", "in_progress", "pending"]);
+        let stuck = live.updates(&event(
+            "agent.stuck",
+            json!({"text":"The agent seems stuck.","paused":false}),
+        ));
+        assert_eq!(stuck[0]["sessionUpdate"], "agent_thought_chunk");
+        assert_eq!(stuck[0]["content"]["text"], "The agent seems stuck.\n");
         assert_eq!(tool_kind("exec"), "execute");
         let diff = preview_text(&json!({"kind":"files","files":[{"path":"a.rs","status":"modified","diff":"@@ -1 +1 @@\n-a\n+b"}]})).unwrap();
         assert!(diff.contains("--- a.rs (modified)") && diff.contains("+b"));

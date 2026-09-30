@@ -723,7 +723,7 @@ impl Engine {
             Permission::Project => None,
         };
         let job = self
-            .start_limited(
+            .start_unattended(
                 StartRequest {
                     workspace: folder.to_owned(),
                     task: automation.prompt.clone(),

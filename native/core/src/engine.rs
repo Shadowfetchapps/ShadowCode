@@ -64,6 +64,10 @@ struct LaunchContext<'a> {
     /// composer): an `@agent` on a cloud role asks first instead of being
     /// refused when it runs.
     interactive: bool,
+    /// Nobody watches this task in the window (an automation run), so it
+    /// never pauses to ask. Jobs a connection owns (an editor, the terminal
+    /// UI, an MCP client) are unattended too.
+    unattended: bool,
     turn: TurnOptions,
 }
 
@@ -174,6 +178,8 @@ struct Running {
     /// Paid-model spending of the task the user started (subagents share
     /// their parent's). `None` for vendor CLI and command jobs.
     spend: Option<Arc<crate::spending::Meter>>,
+    /// Nobody can answer a stuck card for this task (`LaunchContext`).
+    unattended: bool,
 }
 #[derive(Default)]
 struct QueueState {
@@ -687,6 +693,25 @@ impl Engine {
         )
         .await
     }
+    /// An automation run: `start_limited` for a task nobody watches, which
+    /// never pauses to ask when it is stuck.
+    pub(crate) async fn start_unattended(
+        &self,
+        request: StartRequest,
+        purpose: &str,
+        limit: Option<PermissionLevel>,
+    ) -> Result<Job> {
+        self.start_with_context(
+            request,
+            LaunchContext {
+                purpose,
+                permission_limit: limit,
+                unattended: true,
+                ..Default::default()
+            },
+        )
+        .await
+    }
     /// Start a turn the user explicitly consented to hand to a cloud route
     /// when that is needed (see `cli_agent::handoff`). Without consent such a
     /// turn fails with `handoff::ConsentRequired` before any row is written.
@@ -974,7 +999,14 @@ impl Engine {
             Some(owner) => owner.register(self, &job.id)?,
             None => CancellationToken::new(),
         };
-        if let Err(error) = self.0.store.create_job(&json!(job)) {
+        // The prompt keeps its @-mentions and "Only change these", so a
+        // continuation (Try on…) can keep the same scope.
+        let message = if context.turn.mentions.is_empty() {
+            Value::Null
+        } else {
+            json!({"mentions":context.turn.mentions,"only_change":context.turn.only_change})
+        };
+        if let Err(error) = self.0.store.create_job_with(&json!(job), &message) {
             if let Some(owner) = context.owner {
                 owner.forget(&job.id);
             }
@@ -1031,6 +1063,7 @@ impl Engine {
             local_waiting: AtomicBool::new(false),
             local_admitted: AtomicBool::new(false),
             edit_window: AtomicBool::new(false),
+            unattended: context.unattended || context.owner.is_some(),
         });
         if running.uses_local_runtime() {
             self.0
@@ -1961,6 +1994,16 @@ impl Engine {
             &job.task_id,
         )
         .await;
+        // "Only change these": a subscription can't be stopped mid-turn, so
+        // what it changed elsewhere is pointed out afterwards (Review can
+        // undo it), or the conversation says it could not be checked.
+        let scoped = running.turn.only_change && !running.turn.mentions.is_empty();
+        let unchecked = |reason: &str| {
+            let _ = events.emit(
+                "agent.warning",
+                json!({"kind":"scope","text":format!("The files this {label} turn changed were not checked against the files you chose: {reason}.")}),
+            );
+        };
         match recorded {
             Ok(mut outcome) => {
                 // Files you saved in the editor during the turn stay yours.
@@ -1995,13 +2038,18 @@ impl Engine {
                         summary["changed"] = json!(outcome.paths);
                         summary["ignored_saved"] = json!(outcome.ignored);
                         let _ = events.emit("checkpoint.updated", summary);
-                        // "Only change these": a subscription can't be
-                        // stopped mid-turn, so what it changed elsewhere is
-                        // pointed out afterwards (Review can undo it).
-                        if running.turn.only_change && !running.turn.mentions.is_empty() {
-                            let outside: Vec<&String> = outcome
+                    }
+                }
+                if scoped {
+                    match &outcome.unavailable {
+                        Some(reason) => unchecked(reason),
+                        None => {
+                            // Changes too many or too large to record count too.
+                            let outside: Vec<&str> = outcome
                                 .paths
                                 .iter()
+                                .map(String::as_str)
+                                .chain(outcome.skipped.iter().filter_map(|s| s["path"].as_str()))
                                 .filter(|p| !crate::mentions::in_scope(&running.turn.mentions, p))
                                 .collect();
                             if !outside.is_empty() {
@@ -2022,6 +2070,9 @@ impl Engine {
                     "agent.warning",
                     json!({"text":format!("Rewind may not cover this {label} turn: the project checkpoint failed ({error:#})."),"kind":"checkpoint"}),
                 );
+                if scoped {
+                    unchecked("the project checkpoint failed");
+                }
             }
         }
     }
@@ -2057,6 +2108,18 @@ impl Engine {
         // checkpointed when the parent applies it.
         let checkpoints =
             running.config.checkpoints.vendor && !read_only && running.child.is_none();
+        if !running.config.checkpoints.vendor
+            && !read_only
+            && running.child.is_none()
+            && running.turn.only_change
+            && !running.turn.mentions.is_empty()
+        {
+            // "Only change these" is checked from the turn's checkpoint.
+            events.emit(
+                "agent.warning",
+                json!({"kind":"scope","text":format!("The files this {} turn changes will not be checked against the files you chose: project checkpoints for subscriptions are off (checkpoints.vendor).", vendor.label())}),
+            )?;
+        }
         events.emit(
             "agent.warning",
             json!({"text":if running.child.is_some() {
@@ -2655,6 +2718,14 @@ impl Engine {
             Some(attached) => format!("{}\n\n{attached}", job.task),
             None => job.task.clone(),
         };
+        // An earlier compaction may have dropped the pinned answers; each
+        // later turn gets them again, word for word.
+        if messages.iter().any(|m| m["_shadow_compaction"] == true) {
+            let pins = self.0.store.pins(&job.session_id).unwrap_or_default();
+            if let Some(note) = crate::compaction::kept_note(&pins, &[]) {
+                messages.push(note);
+            }
+        }
         messages.push(crate::vision::user_message(&prompt, &image_refs));
         if let Some(note) = autonomy::bugfix_policy(&job.task) {
             messages.push(json!({"role":"system","content":note}));
@@ -2760,37 +2831,14 @@ impl Engine {
                     compaction["requested"] = json!(true);
                     compaction["focus"] = json!(requested);
                 }
-                // What must survive a shorter conversation: the answers the
-                // user pinned, word for word, and the folder rules already
-                // in use (sent again; they came with dropped tool results).
+                // What must survive a shorter conversation: the pinned
+                // answers and the folder rules in use, in one note that
+                // replaces the one an earlier compaction left.
                 let pins = self.0.store.pins(&job.session_id).unwrap_or_default();
                 let guidance = tools.guidance_again();
-                let mut kept = String::new();
-                if !pins.is_empty() {
-                    kept.push_str("Pinned by the user; keep these word for word:\n");
-                    for pin in pins.iter().rev().take(8) {
-                        let body = crate::tools::truncate(pin["body"].as_str().unwrap_or(""), 3000);
-                        kept.push_str(&format!(
-                            "- {}: {}\n",
-                            pin["label"].as_str().unwrap_or("Pinned"),
-                            body
-                        ));
-                    }
-                }
-                if !guidance.is_empty() {
-                    kept.push_str("\nProject guidance for the folders this task touched, sent again after the conversation was shortened (it does not grant permissions):\n");
-                    for item in &guidance {
-                        kept.push_str(&format!(
-                            "### {}\n{}\n",
-                            item["path"].as_str().unwrap_or(""),
-                            item["content"].as_str().unwrap_or("")
-                        ));
-                    }
-                }
-                if !kept.is_empty() {
-                    messages.push(
-                        json!({"role":"system","content":crate::tools::truncate(&kept, 16_000)}),
-                    );
+                messages.retain(|m| m["_shadow_kept"] != true);
+                if let Some(note) = crate::compaction::kept_note(&pins, &guidance) {
+                    messages.push(note);
                 }
                 compaction["pinned"] = json!(pins.len().min(8));
                 compaction["rules_reapplied"] = json!(guidance.len());
@@ -2807,6 +2855,12 @@ impl Engine {
                 if let Some(failure) = hooks::failure(&outcomes) {
                     bail!("Compaction lifecycle command failed: {failure}");
                 }
+            } else if requested.is_some() {
+                // The request is used up either way: say why nothing changed.
+                events.emit(
+                    "agent.warning",
+                    json!({"kind":"compact","text":"Nothing to shorten yet: the conversation has no earlier steps to summarize."}),
+                )?;
             }
             if let Ok(budget) =
                 autonomy::account(&messages, &schemas, running.config.model.context_limit)
@@ -3444,16 +3498,27 @@ impl Engine {
                     self.save_tape(&job.id, &messages).await?;
                 }
                 if let Some(hit) = stuck_hit {
-                    // The user decides: keep going, a hint, another model, or
-                    // stop. The next step waits (`await_steering`).
+                    // The user decides in the window: keep going, a hint,
+                    // another model, or stop. The next step waits
+                    // (`await_steering`). A subagent, a role step or a task
+                    // nobody watches there goes on, told to change course.
+                    let pause =
+                        !running.unattended && running.roles.is_none() && running.child.is_none();
                     events.emit(
                         "agent.stuck",
-                        json!({"job_id":job.id,"kind":hit.kind,"text":hit.text,"detail":hit.detail}),
+                        json!({"job_id":job.id,"kind":hit.kind,"text":hit.text,"detail":hit.detail,"paused":pause}),
                     )?;
-                    if running.roles.is_none() && running.child.is_none() {
-                        if let Err(error) = self.pause_job(&job.id) {
-                            tracing::warn!("stuck.pause error={error:#}");
-                        }
+                    let paused = pause
+                        && match self.pause_job(&job.id) {
+                            Ok(_) => true,
+                            Err(error) => {
+                                tracing::warn!("stuck.pause error={error:#}");
+                                false
+                            }
+                        };
+                    if !paused {
+                        messages.push(json!({"role":"system","content":format!("Stuck check: {} Do not repeat the same attempt. Try a different approach, or stop and explain what blocks you. This is a process note, not a new user instruction.", hit.text)}));
+                        self.save_tape(&job.id, &messages).await?;
                     }
                 }
             }

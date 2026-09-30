@@ -587,6 +587,69 @@ async fn approval_requests_stop_an_unattended_run() {
     assert_eq!(job.status, "cancelled");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stuck_unattended_run_goes_on_instead_of_pausing() {
+    let server = support::server(|index, _| {
+        if index < 3 {
+            (
+                response(
+                    "",
+                    json!([tool(
+                        "exec",
+                        json!({"command":"sh -c 'echo \"test failed: expected 3\"; exit 3'"})
+                    )]),
+                ),
+                Duration::ZERO,
+            )
+        } else {
+            (
+                response("The test fails the same way each time.", json!([])),
+                Duration::ZERO,
+            )
+        }
+    })
+    .await;
+    let fixture = setup(&server.endpoint, false);
+    let service = &fixture.service;
+    let created = call(
+        service,
+        "POST",
+        "/api/automations",
+        automation("Tests", "main"),
+    )
+    .await
+    .unwrap();
+    let id = created["id"].as_str().unwrap();
+    call(
+        service,
+        "POST",
+        &format!("/api/automations/{id}/run"),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    // Nobody could answer a stuck card: the run is not parked until its
+    // time limit, and the agent is told to change course.
+    let run = finished(&fixture, id).await;
+    assert_eq!(run.status, "completed", "{run:?}");
+    let events = service
+        .engine
+        .store()
+        .recent_events(run.session_id.as_deref().unwrap(), 300)
+        .unwrap();
+    let stuck: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "agent.stuck")
+        .collect();
+    assert_eq!(stuck.len(), 1);
+    assert_eq!(stuck[0]["payload"]["paused"], false);
+    let requests = server.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3]["messages"]
+        .to_string()
+        .contains("Stuck check: The agent seems stuck"));
+}
+
 #[tokio::test]
 async fn invalid_automations_and_untrusted_projects_are_refused() {
     let server = support::server(|_, _| (response("x", json!([])), Duration::ZERO)).await;
