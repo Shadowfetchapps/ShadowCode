@@ -187,21 +187,42 @@ pub(super) struct RoleTurn<'a> {
     pub session: Option<&'a str>,
 }
 
+/// The cloud providers a Plan → Implement → Review task sends work to.
+pub(super) struct CloudRoles {
+    pub providers: Vec<String>,
+    /// The user allowed them in the consent dialog for this turn, so they
+    /// are allowed for the rest of the conversation. Otherwise no dialog was
+    /// needed and they only saw the conversation while it ran in the cloud.
+    pub allowed: bool,
+}
+
+impl CloudRoles {
+    /// Remember the providers for the conversation once the job exists.
+    pub(super) fn record(&self, store: &crate::store::Store, session: &str) -> Result<()> {
+        match (self.providers.is_empty(), self.allowed) {
+            (true, _) => Ok(()),
+            (false, true) => roles::record_consent(store, session, &self.providers),
+            (false, false) => roles::record_seen(store, session, &self.providers),
+        }
+    }
+}
+
 impl Engine {
     /// Resolve and check a Plan → Implement → Review task before any job or
     /// task row exists. Returns the pipeline and the cloud providers it sends
-    /// work to, recorded as allowed for the conversation once the job exists.
+    /// work to, recorded for the conversation once the job exists.
     /// A cloud role in a conversation that ran on this computer (or that has
     /// earlier turns another provider has not seen) needs consent first:
     /// `handoff::ConsentRequired`, which the window answers with its consent
-    /// dialog.
+    /// dialog. Only an answered dialog allows a provider for later turns on
+    /// this computer.
     pub(super) fn prepare_roles(
         &self,
         request: RoleTurn<'_>,
         workspace: &Path,
         config: &Config,
         consent: bool,
-    ) -> Result<(Pipeline, Vec<String>)> {
+    ) -> Result<(Pipeline, CloudRoles)> {
         ensure!(
             matches!(request.mode, "code" | "plan"),
             "Plan → Implement → Review runs Code and Plan tasks. Turn it off under More › Roles to ask a question."
@@ -235,6 +256,12 @@ impl Engine {
             .session
             .map(|sid| roles::consented(store, sid))
             .unwrap_or_default();
+        // Providers that saw this conversation while it ran in the cloud;
+        // a turn on this computer since then is news to them.
+        let seen = match request.session {
+            Some(sid) if !prior.iter().any(|r| r.local) => roles::seen(store, sid),
+            _ => Default::default(),
+        };
         // Offline and turned-off vendors are refused outright; consent is
         // decided below for the whole task at once.
         let guard = roles::Guard {
@@ -250,7 +277,8 @@ impl Engine {
             let provider = &stage.model.provider;
             if !stage.local()
                 && !consented.contains(provider)
-                && (conversation_local || prior.iter().any(|r| &r.provider != provider))
+                && (conversation_local
+                    || (!seen.contains(provider) && prior.iter().any(|r| &r.provider != provider)))
             {
                 ask = true;
             }
@@ -277,7 +305,13 @@ impl Engine {
             return Err(refusal.into());
         }
         let providers = pipeline.cloud_providers();
-        Ok((pipeline, providers))
+        Ok((
+            pipeline,
+            CloudRoles {
+                providers,
+                allowed: ask,
+            },
+        ))
     }
 
     /// An `@agent` request that its role or definition sends to a cloud

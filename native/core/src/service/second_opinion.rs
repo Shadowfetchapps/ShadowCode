@@ -238,7 +238,7 @@ impl Service {
         };
         let writer = writer
             .as_ref()
-            .and_then(crate::cli_agent::handoff::TurnRoute::of_job);
+            .and_then(|job| opinion::job_route(&store, job));
         let conversation = match task
             .and_then(|task| store.task(task).ok().flatten())
             .and_then(|task| task["session_id"].as_str().map(str::to_owned))
@@ -248,7 +248,7 @@ impl Service {
                 .session_jobs(&session, 200)?
                 .iter()
                 .rev()
-                .find_map(crate::cli_agent::handoff::TurnRoute::of_job),
+                .find_map(|job| opinion::job_route(&store, job)),
             None => None,
         };
         let local_only = writer.as_ref().is_some_and(|w| w.local)

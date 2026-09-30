@@ -426,6 +426,8 @@ async fn plan_implement_review_runs_vendor_roles_and_applies_the_reviewed_diff()
         "{job}"
     );
     assert_eq!(job["routing"]["provider"], roles::PROVIDER);
+    // Only the review role (the conversation's loopback model) runs here.
+    assert_eq!(job["routing"]["local_roles"], json!(["review"]));
     let job_id = job["id"].as_str().unwrap().to_owned();
     let task_id = job["task_id"].as_str().unwrap().to_owned();
     // The diff is applied with the usual edit approval, in this conversation.
@@ -948,6 +950,81 @@ async fn declining_the_apply_approval_leaves_the_project_unchanged() {
     assert!(events(service, &sid, "subagent.applied").is_empty());
     // A skipped review leaves only the implement role's card.
     assert_eq!(events(service, &sid, "subagent.finished").len(), 1);
+    service.engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn roles_of_a_cloud_conversation_are_not_allowed_for_later_local_turns() {
+    // Codex saw this conversation while it ran on Codex, so no dialog was
+    // needed. That is no consent for turns that run on this computer later.
+    let setup = setup(
+        json!({"auth":"chatgpt","turn":"ok","replies":{"plan role":"1. Keep it small."}}),
+        json!({}),
+        |_| answer("Kept on this computer.", json!([])),
+    )
+    .await;
+    let service = &setup.service;
+    call(service, "POST", "/api/roles", json!({"plan":"cli:codex"})).await;
+    let plan = |task: &str, sid: Option<&str>| {
+        let mut body = json!({"task":task,"purpose":"planner","model":"cli:codex","roles":true});
+        if let Some(sid) = sid {
+            body["session_id"] = json!(sid);
+        }
+        body
+    };
+    let job = call(service, "POST", "/api/jobs", plan("Plan the change", None)).await;
+    assert!(job["needs_consent"].is_null(), "{job}");
+    let sid = job["session_id"].as_str().unwrap().to_owned();
+    let done = finished(service, job["id"].as_str().unwrap()).await;
+    assert_eq!(done["status"], "completed", "{}", done["summary"]);
+    assert!(roles::consented(&service.engine.store(), &sid).is_empty());
+    // Another roles turn in the cloud asks nothing: Codex saw it all.
+    let again = call(
+        service,
+        "POST",
+        "/api/jobs",
+        plan("Plan the next step", Some(&sid)),
+    )
+    .await;
+    assert!(again["needs_consent"].is_null(), "{again}");
+    let done = finished(service, again["id"].as_str().unwrap()).await;
+    assert_eq!(done["status"], "completed", "{}", done["summary"]);
+    // A private turn on this computer. Codex would receive it now, so the
+    // next roles turn and an @plan request both ask first.
+    call(
+        service,
+        "POST",
+        "/api/models/register",
+        json!({"id":"here","name":"fixture","provider":"local","endpoint":setup._model.endpoint,"context_limit":32768}),
+    )
+    .await;
+    let local = call(
+        service,
+        "POST",
+        "/api/jobs",
+        json!({"task":"Note a private detail","model":"here","session_id":sid}),
+    )
+    .await;
+    assert!(local["needs_consent"].is_null(), "{local}");
+    let done = finished(service, local["id"].as_str().unwrap()).await;
+    assert_eq!(done["status"], "completed", "{}", done["summary"]);
+    let ask = call(
+        service,
+        "POST",
+        "/api/jobs",
+        json!({"task":"Plan the last step","purpose":"planner","model":"here","session_id":sid,"roles":true}),
+    )
+    .await;
+    assert_eq!(ask["needs_consent"], true, "{ask}");
+    let ask = call(
+        service,
+        "POST",
+        "/api/jobs",
+        json!({"task":"@plan the last step","model":"here","session_id":sid}),
+    )
+    .await;
+    assert_eq!(ask["needs_consent"], true, "{ask}");
+    assert_eq!(lines(&setup.fake, "prompts.log").len(), 2);
     service.engine.shutdown().await.unwrap();
 }
 

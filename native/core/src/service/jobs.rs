@@ -97,7 +97,13 @@ impl Service {
     /// The project an "Always allow" request names, or the selected one.
     fn always_workspace(&self, value: &str) -> Result<std::path::PathBuf> {
         Ok(if value.is_empty() {
-            self.workspace()?
+            // A worktree task's conversation uses its project's commands.
+            let selection = self.snapshot_selection()?;
+            crate::roles::project_of(
+                &self.engine.store(),
+                &selection.workspace,
+                selection.session.as_deref(),
+            )
         } else {
             Workspace::open(&expand_path(value)?)?.path
         })

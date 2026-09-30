@@ -10,7 +10,8 @@
 //! user's own files win over imports.
 //!
 //! Every item can be switched off on its own (`rulebook.json` in the
-//! settings folder). Profile text reaches agents labelled as the user's
+//! settings folder); a project's switches also hold in the managed
+//! worktrees made from it. Profile text reaches agents labelled as the user's
 //! instructions; project text stays labelled as repository content. Neither
 //! grants permissions: approvals, trust, sandbox and read-only mode are
 //! decided elsewhere and never read these files.
@@ -231,7 +232,9 @@ pub struct Book {
     pub imports: Vec<String>,
     /// Problems reading the profile or the saved state.
     pub issues: Vec<String>,
-    project: Option<String>,
+    /// Folders whose project switches apply: the project, and for a managed
+    /// worktree the projects it was made from.
+    projects: Vec<String>,
 }
 
 fn not_found(error: &anyhow::Error) -> bool {
@@ -251,7 +254,9 @@ pub fn valid_import_name(name: &str) -> bool {
 }
 
 impl Book {
-    /// Open the profile for `project` (the canonical project folder).
+    /// Open the profile for `project` (the canonical project folder). In a
+    /// managed worktree (a subagent's, an implement role's, a worktree
+    /// task's) the switches of the project it was made from apply too.
     pub fn load(paths: &AppPaths, project: Option<&Path>) -> Self {
         let dir = profile_dir(paths);
         let mut issues = Vec::new();
@@ -259,7 +264,15 @@ impl Book {
             issues.push(format!("{error:#}"));
             State::default()
         });
-        Self::open(dir, state, project, issues)
+        let mut book = Self::open(dir, state, project, issues);
+        if let Some(project) = project {
+            book.projects.extend(
+                crate::worktrees::sources_of(paths, project)
+                    .into_iter()
+                    .map(|p| p.to_string_lossy().into_owned()),
+            );
+        }
+        book
     }
     /// A book over an explicit folder and state (tests, previews).
     pub fn open(
@@ -312,7 +325,10 @@ impl Book {
             state,
             imports,
             issues,
-            project: project.map(|p| p.to_string_lossy().into_owned()),
+            projects: project
+                .map(|p| p.to_string_lossy().into_owned())
+                .into_iter()
+                .collect(),
         }
     }
     pub fn exists(&self) -> bool {
@@ -322,10 +338,10 @@ impl Book {
     pub fn enabled(&self, id: &str) -> bool {
         if id.starts_with("project:") {
             !self
-                .project
-                .as_ref()
-                .and_then(|p| self.state.projects.get(p))
-                .is_some_and(|set| set.contains(id))
+                .projects
+                .iter()
+                .filter_map(|p| self.state.projects.get(p))
+                .any(|set| set.contains(id))
         } else {
             !self.state.disabled.contains(id)
         }
@@ -519,10 +535,19 @@ impl Book {
         &self,
         seen: &mut HashSet<String>,
     ) -> (String, Vec<(ProfileRules, instructions::Placement)>) {
+        self.render_profile_except(seen, &|_| false)
+    }
+    /// `render_profile` without the rules `skip` names (a vendor reads them
+    /// itself).
+    pub fn render_profile_except(
+        &self,
+        seen: &mut HashSet<String>,
+        skip: &dyn Fn(&ProfileRules) -> bool,
+    ) -> (String, Vec<(ProfileRules, instructions::Placement)>) {
         let rules: Vec<_> = self.profile_rules();
         let files: Vec<RootFile> = rules
             .iter()
-            .filter(|r| r.enabled)
+            .filter(|r| r.enabled && !skip(r))
             .map(|r| RootFile {
                 path: r.path.clone(),
                 content: r.content.clone(),
@@ -780,36 +805,76 @@ fn agent_files(dir: &Path) -> Vec<(String, String, String)> {
         .collect()
 }
 
-/// Switch one item on or off. Project items are saved for `project`.
+/// Switch one item on or off. Project items are saved for `project`; in a
+/// managed worktree, for the project it was made from.
 pub fn set_enabled(
     paths: &AppPaths,
     project: Option<&Path>,
     id: &str,
     enabled: bool,
 ) -> Result<()> {
+    set_enabled_with(paths, project, id, enabled, &export::vendor_home)
+}
+
+/// `set_enabled` with the vendors' own folders from `homes` (a fixture in
+/// tests), where the export's links follow the switch.
+pub(crate) fn set_enabled_with(
+    paths: &AppPaths,
+    project: Option<&Path>,
+    id: &str,
+    enabled: bool,
+    homes: &dyn Fn(&str) -> Result<PathBuf>,
+) -> Result<()> {
     ensure!(
         id.len() <= 1024 && !id.chars().any(char::is_control),
         "Invalid rule item"
     );
+    // The folders whose switches hold here, the project itself last.
+    let folders: Vec<String> = project
+        .map(|p| {
+            let mut folders = vec![p.to_path_buf()];
+            folders.extend(crate::worktrees::sources_of(paths, p));
+            folders
+                .into_iter()
+                .map(|f| f.to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
     State::update(paths, |state| {
-        let set = if id.starts_with("project:") {
-            let project = project.context("Open a project to switch its files on or off")?;
-            state
-                .projects
-                .entry(project.to_string_lossy().into_owned())
-                .or_default()
+        if id.starts_with("project:") {
+            let project = folders
+                .last()
+                .context("Open a project to switch its files on or off")?;
+            if enabled {
+                for folder in &folders {
+                    if let Some(set) = state.projects.get_mut(folder) {
+                        set.remove(id);
+                    }
+                }
+            } else {
+                state
+                    .projects
+                    .entry(project.clone())
+                    .or_default()
+                    .insert(id.to_owned());
+            }
         } else {
             ensure!(id.starts_with("profile:"), "Unknown rule item {id}");
-            &mut state.disabled
-        };
-        if enabled {
-            set.remove(id);
-        } else {
-            set.insert(id.to_owned());
+            if enabled {
+                state.disabled.remove(id);
+            } else {
+                state.disabled.insert(id.to_owned());
+            }
         }
         state.projects.retain(|_, set| !set.is_empty());
         Ok(())
-    })
+    })?;
+    // Links made by "Use in Claude Code / Codex" follow the switch.
+    if id.starts_with("profile:") {
+        export::sync_in(paths, homes)
+            .context("The switch was saved, but the export links were not updated")?;
+    }
+    Ok(())
 }
 
 /// Replace the profile's own `AGENTS.md`. `expected` is the hash the editor

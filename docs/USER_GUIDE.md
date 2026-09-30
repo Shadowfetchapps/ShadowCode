@@ -199,7 +199,8 @@ undo, because Rewind's checkpoints are kept there. Subscriptions' requests
   commands, such as `cargo test`, `npm run build` or `pytest -q`. That exact
   command then runs in this project without asking, for ShadowCode's own
   agent and for Claude Code, Cursor, Grok and Antigravity when they ask
-  ShadowCode; a different command, the same one with other arguments, or
+  ShadowCode, including subagents and roles working in their own copy of
+  the project; a different command, the same one with other arguments, or
   the same one run in a folder outside the project asks again. It is never
   offered for anything that deletes, installs, uses the network, rewrites
   history, runs outside the project, uses a variable or contains a key or
@@ -448,9 +449,10 @@ requests do not.
 Another model can check a change or an answer without touching your files.
 It reads what it is sent (and may read files in the project), but it cannot
 edit files or run commands: ShadowCode runs it the way it runs **Ask**, with
-no write or shell tools, and a subscription CLI runs in its plan or read-only
-mode with every edit or command request denied. It runs in the background of
-the project, after any task that is already running there.
+no write or shell tools and no subagents, and a subscription CLI runs in its
+plan or read-only mode with every permission request denied (tools from its
+own MCP settings and web fetches too). It runs in the background of the
+project, after any task that is already running there.
 
 - **Review before commit.** In the drawer's **Git** tab, under **Review
   before commit**, pick a reviewer and choose **Review staged changes**.
@@ -489,9 +491,10 @@ are sent; the rest of a large change is named, and the reviewer can read it
 from the files. Secret files (`.env`, keys) are never sent, and values that
 look like passwords or keys inside other files are hidden. In offline mode
 only models on this computer can review. When the work ran on this computer
-(the conversation's last turn, or the model that wrote the change), a cloud
-reviewer is never picked for you, and choosing one shows the consent dialog
-first; nothing is sent until you choose **Send**.
+(the conversation's last turn, or the model that wrote the change, such as
+the implement role of Plan → Implement → Review), a cloud reviewer is never
+picked for you, and choosing one shows the consent dialog first; nothing is
+sent until you choose **Send**.
 
 ## Terminal
 
@@ -849,7 +852,8 @@ ShadowCode's own agent, Claude Code, Codex, Cursor, Grok and Antigravity.
   `agents/`) work in every project. When a project has one with the same
   name, the project's is used and the page says so.
 - **Switches.** Turn any rule, skill, command or agent off, for your profile
-  or for one project.
+  or for one project. A project's switches also hold in the copies of it
+  that subagents, roles and worktree tasks work in.
 - **What each agent reads.** Pick an agent to see which files and skills it
   receives, which it reads by itself, what was cut to stay within the limits,
   and an estimated token count.
@@ -858,7 +862,8 @@ ShadowCode's own agent, Claude Code, Codex, Cursor, Grok and Antigravity.
 - **Import from Git** a shared profile (`https://` or SSH); **Update** shows
   the new commit.
 - **Use these rules outside ShadowCode** links your profile into the Claude
-  Code and Codex CLIs, only when you ask, without replacing any file.
+  Code and Codex CLIs, only when you ask, without replacing any file. The
+  links follow your switches, and what the links share is not sent twice.
 
 Rules and skills shape how agents work; they never grant permissions.
 **Settings › Advanced › Health** has a skill checker that reports problems

@@ -720,6 +720,124 @@ fn export_links_are_marked_reversible_and_never_replace_files() {
     assert!(State::load(&f.paths).unwrap().exports.is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn export_links_follow_switches_and_are_not_sent_twice() {
+    let f = fixture();
+    put(&f.profile, "AGENTS.md", "Profile rule.\n");
+    put(
+        &f.profile,
+        "skills/alpha/SKILL.md",
+        &skill("alpha", "A", "a"),
+    );
+    put(&f.profile, "skills/beta/SKILL.md", &skill("beta", "B", "b"));
+    let claude = f.project.parent().unwrap().join("claude-home");
+    let codex = f.project.parent().unwrap().join("codex-home");
+    let homes = |target: &str| -> Result<PathBuf> {
+        Ok(if target == "claude" {
+            claude.clone()
+        } else {
+            codex.clone()
+        })
+    };
+    let workspace = f.workspace();
+    let claude_run =
+        |book: &Book| delivery::plan_with(book, &workspace, Runner::Vendor(Vendor::Claude), &homes);
+    let before = claude_run(&f.book());
+    assert!(before.text.contains("Profile rule."));
+    assert_eq!(before.plugin_skills.len(), 2);
+    export::enable_in(&f.paths, "claude", &claude).unwrap();
+    // Claude Code reads the linked rules and skills itself: not sent again.
+    let after = claude_run(&f.book());
+    assert_eq!(after.text, "");
+    assert!(after.plugin_skills.is_empty());
+    assert_eq!(after.preview.items.len(), 3);
+    assert!(after
+        .preview
+        .items
+        .iter()
+        .all(|i| !i.included && i.reason.ends_with("(Use in Claude Code links it)")));
+    // Codex has no export on: it still receives everything.
+    let codex_run =
+        delivery::plan_with(&f.book(), &workspace, Runner::Vendor(Vendor::Codex), &homes);
+    assert!(codex_run.text.contains("Profile rule."));
+    // A switched-off rules file or skill loses its link.
+    let rules = claude.join("rules/shadowcode-profile.md");
+    let alpha = claude.join("skills/shadowcode-alpha");
+    set_enabled_with(&f.paths, None, "profile:AGENTS.md", false, &homes).unwrap();
+    set_enabled_with(
+        &f.paths,
+        None,
+        "profile:skills/alpha/SKILL.md",
+        false,
+        &homes,
+    )
+    .unwrap();
+    assert!(fs::symlink_metadata(&rules).is_err());
+    assert!(fs::symlink_metadata(&alpha).is_err());
+    assert!(claude.join("skills/shadowcode-beta/SKILL.md").is_file());
+    let status = export::status_in(&f.paths, &homes).unwrap();
+    assert_eq!(status["targets"][0]["created"].as_array().unwrap().len(), 1);
+    // With nothing left to link the export stays on, and a skill switched
+    // on again is linked again.
+    set_enabled_with(
+        &f.paths,
+        None,
+        "profile:skills/beta/SKILL.md",
+        false,
+        &homes,
+    )
+    .unwrap();
+    let status = export::status_in(&f.paths, &homes).unwrap();
+    assert_eq!(status["targets"][0]["enabled"], true);
+    assert_eq!(status["targets"][0]["created"], json!([]));
+    set_enabled_with(
+        &f.paths,
+        None,
+        "profile:skills/alpha/SKILL.md",
+        true,
+        &homes,
+    )
+    .unwrap();
+    assert!(alpha.join("SKILL.md").is_file());
+    export::disable(&f.paths, "claude").unwrap();
+    assert!(fs::symlink_metadata(&alpha).is_err());
+    assert!(State::load(&f.paths).unwrap().exports.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn links_made_before_a_failed_one_are_recorded_and_removable() {
+    let f = fixture();
+    put(&f.profile, "AGENTS.md", "Profile rule.\n");
+    put(
+        &f.profile,
+        "skills/alpha/SKILL.md",
+        &skill("alpha", "A", "a"),
+    );
+    let codex = f.project.parent().unwrap().join("codex-home");
+    // `skills` is a file here, so no skill link can be made.
+    put(&codex, "skills", "not a folder");
+    let error = export::enable_in(&f.paths, "codex", &codex).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("could not be changed"),
+        "{error:#}"
+    );
+    let rules = codex.join("AGENTS.md");
+    assert_eq!(fs::read_link(&rules).unwrap(), f.profile.join("AGENTS.md"));
+    let homes = |_: &str| -> Result<PathBuf> { Ok(codex.clone()) };
+    let status = export::status_in(&f.paths, &homes).unwrap();
+    assert_eq!(status["targets"][1]["enabled"], true);
+    assert_eq!(status["targets"][1]["created"].as_array().unwrap().len(), 1);
+    // "Stop using" removes the link that was made.
+    export::disable(&f.paths, "codex").unwrap();
+    assert!(fs::symlink_metadata(&rules).is_err());
+    assert_eq!(
+        fs::read_to_string(codex.join("skills")).unwrap(),
+        "not a folder"
+    );
+}
+
 #[test]
 fn only_https_and_ssh_repositories_are_accepted() {
     for ok in [
@@ -905,4 +1023,94 @@ async fn a_git_import_clones_updates_and_never_checks_out_links() {
     assert!(state.imports.is_empty() && state.disabled.is_empty());
     assert!(import::remove(&f.paths, "../team").is_err());
     assert!(import::update(&f.paths, "missing").await.is_err());
+}
+
+/// A managed worktree record made from `source`, as `worktrees::create`
+/// writes it; returns the canonical checkout folder.
+fn managed_worktree(paths: &AppPaths, source: &Path) -> PathBuf {
+    let root = paths.data.join("managed-worktrees");
+    fs::create_dir_all(root.join("records")).unwrap();
+    let id = crate::id();
+    let path = root.join("checkouts").join(&id);
+    fs::create_dir_all(&path).unwrap();
+    let record = crate::worktrees::Record {
+        id: id.clone(),
+        source: source.to_path_buf(),
+        path: path.clone(),
+        common_directory: PathBuf::new(),
+        base_commit: String::new(),
+        branch: format!("shadowcode/{id}"),
+        state: "ready".into(),
+        created_at: 0.0,
+        detail: String::new(),
+    };
+    fs::write(
+        root.join("records").join(format!("{id}.json")),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    path.canonicalize().unwrap()
+}
+
+#[test]
+fn project_switches_hold_in_the_projects_managed_worktrees() {
+    let f = fixture();
+    // A worktree task's worktree, and a subagent's worktree made from it.
+    let task = managed_worktree(&f.paths, &f.project);
+    let child = managed_worktree(&f.paths, &task);
+    assert_eq!(
+        crate::worktrees::sources_of(&f.paths, &child),
+        [task.clone(), f.project.clone()]
+    );
+    assert!(crate::worktrees::sources_of(&f.paths, &f.project).is_empty());
+    for dir in [&f.project, &task, &child] {
+        put(dir, "AGENTS.md", "Untrusted repository notes.\n");
+        put(
+            dir,
+            ".shadow/skills/deploy.md",
+            &skill("deploy", "Deploys the app", "deploy body"),
+        );
+    }
+    set_enabled(&f.paths, Some(&f.project), "project:AGENTS.md", false).unwrap();
+    set_enabled(
+        &f.paths,
+        Some(&f.project),
+        "project:.shadow/skills/deploy.md",
+        false,
+    )
+    .unwrap();
+    for dir in [&f.project, &task, &child] {
+        let book = Book::load(&f.paths, Some(dir));
+        let workspace = Workspace::open(dir).unwrap();
+        assert!(
+            !book.guidance(&workspace).contains("Untrusted repository"),
+            "{}",
+            dir.display()
+        );
+        assert!(book.model_skills(&workspace).is_empty());
+        let vendor = plan(&book, &workspace, Runner::Vendor(Vendor::Antigravity));
+        assert!(!vendor.text.contains("Untrusted repository"));
+        assert!(!vendor.text.contains("deploy"));
+    }
+    // Switching from a worktree's conversation changes the project's switch.
+    set_enabled(&f.paths, Some(&child), "project:AGENTS.md", true).unwrap();
+    let guidance =
+        |dir: &Path| Book::load(&f.paths, Some(dir)).guidance(&Workspace::open(dir).unwrap());
+    assert!(guidance(&f.project).contains("Untrusted repository"));
+    set_enabled(&f.paths, Some(&task), "project:AGENTS.md", false).unwrap();
+    assert!(!guidance(&f.project).contains("Untrusted repository"));
+    assert!(!guidance(&child).contains("Untrusted repository"));
+    let state = State::load(&f.paths).unwrap();
+    assert_eq!(
+        state.projects.keys().collect::<Vec<_>>(),
+        [&f.project.to_string_lossy().into_owned()]
+    );
+    // Another project keeps its own switches.
+    let other = f._root.path().join("other");
+    put(&other, "AGENTS.md", "Untrusted repository notes.\n");
+    let other = other.canonicalize().unwrap();
+    let book = Book::load(&f.paths, Some(&other));
+    assert!(book
+        .guidance(&Workspace::open(&other).unwrap())
+        .contains("Untrusted repository"));
 }

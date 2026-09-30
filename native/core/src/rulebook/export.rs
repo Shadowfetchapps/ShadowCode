@@ -2,8 +2,12 @@
 //! ShadowCode. Runs only when the user asks, and only creates symlinks
 //! whose names start with `shadowcode-` (or the vendor's global rules file
 //! when the user has none). An existing file or folder is never replaced.
-//! Every link is recorded, and turning the export off removes exactly the
-//! links it made, only while they still point into the profile.
+//! Every link is recorded (also when a later one fails), and turning the
+//! export off removes exactly the links it made, only while they still
+//! point into the profile. While an export is on, its links follow the
+//! switches: a switched-off rules file or skill loses its link, and runs
+//! inside ShadowCode do not send what the vendor already reads through a
+//! link (`delivery::plan`).
 //!
 //! - Claude Code: `~/.claude/rules/shadowcode-profile.md` → profile
 //!   `AGENTS.md`; `~/.claude/skills/shadowcode-<skill>` → each profile skill
@@ -12,12 +16,24 @@
 //!   does not exist; `~/.codex/skills/shadowcode-<skill>` → each profile
 //!   skill folder (`CODEX_HOME` is respected).
 use super::{Book, ExportLink, State};
-use crate::paths::AppPaths;
+use crate::{cli_agent::Vendor, paths::AppPaths};
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 pub const TARGETS: [&str; 2] = ["claude", "codex"];
+
+/// The export target a vendor CLI reads, if it has one.
+fn target_of(vendor: Vendor) -> Option<&'static str> {
+    match vendor {
+        Vendor::Claude => Some("claude"),
+        Vendor::Codex => Some("codex"),
+        _ => None,
+    }
+}
 
 fn home() -> Result<PathBuf> {
     Ok(PathBuf::from(
@@ -81,6 +97,31 @@ fn points_to(link: &Path, target: &Path) -> bool {
         && std::fs::read_link(link).is_ok_and(|t| t == target)
 }
 
+/// Profile files and skill folders `vendor` reads by itself through an
+/// export that is on: its recorded links in the vendor's current folder
+/// that still point at them. `homes` is `vendor_home` (a fixture in tests).
+pub(crate) fn linked(
+    book: &Book,
+    vendor: Vendor,
+    homes: &dyn Fn(&str) -> Result<PathBuf>,
+) -> HashSet<PathBuf> {
+    let Some(target) = target_of(vendor) else {
+        return HashSet::new();
+    };
+    let Some(recorded) = book.state.exports.get(target) else {
+        return HashSet::new();
+    };
+    let Ok(home) = homes(target) else {
+        return HashSet::new();
+    };
+    recorded
+        .iter()
+        .map(|l| (PathBuf::from(&l.link), PathBuf::from(&l.target)))
+        .filter(|(link, to)| link.starts_with(&home) && points_to(link, to))
+        .map(|(_, to)| to)
+        .collect()
+}
+
 /// What an export would do and what it has done.
 pub fn status(paths: &AppPaths) -> Result<Value> {
     status_in(paths, &vendor_home)
@@ -112,7 +153,9 @@ pub(crate) fn status_in(
             "id": target,
             "label": if target == "claude" { "Claude Code" } else { "Codex" },
             "home": vendor,
-            "enabled": !recorded.is_empty(),
+            // On until the user stops it, even while nothing is linked
+            // (every item switched off).
+            "enabled": book.state.exports.contains_key(target),
             "links": links,
             "created": recorded,
         }));
@@ -127,11 +170,53 @@ pub fn enable(paths: &AppPaths, target: &str) -> Result<Value> {
 }
 
 pub(crate) fn enable_in(paths: &AppPaths, target: &str, vendor: &Path) -> Result<Value> {
+    link_in(paths, target, vendor, false)
+}
+
+/// Bring every export that is on in step with the profile after a switch
+/// (`set_enabled`): a switched-off rules file or skill loses its link, a
+/// switched-on one gets it back. `homes` is `vendor_home` (a fixture in
+/// tests).
+pub(crate) fn sync_in(paths: &AppPaths, homes: &dyn Fn(&str) -> Result<PathBuf>) -> Result<()> {
+    let state = State::load(paths)?;
+    for target in TARGETS {
+        if state.exports.contains_key(target) {
+            link_in(paths, target, &homes(target)?, true)?;
+        }
+    }
+    Ok(())
+}
+
+/// Make the links `planned` wants for `target` and remove recorded ones it
+/// no longer wants (only while they still point into the profile). Every
+/// link that exists afterwards is recorded, even when another one failed;
+/// the failures are then reported. `stay_on` keeps the export on when
+/// nothing is linked.
+fn link_in(paths: &AppPaths, target: &str, vendor: &Path, stay_on: bool) -> Result<Value> {
     let book = Book::load(paths, None);
-    let vendor = vendor.to_path_buf();
+    let profile = super::profile_dir(paths);
+    let wanted = planned(&book, target, vendor);
+    let recorded = book.state.exports.get(target).cloned().unwrap_or_default();
     let mut created = Vec::new();
     let mut skipped = Vec::new();
-    for (link, to) in planned(&book, target, &vendor) {
+    let mut removed = Vec::new();
+    let mut failed = Vec::new();
+    for link in recorded {
+        let (path, to) = (PathBuf::from(&link.link), PathBuf::from(&link.target));
+        if wanted.iter().any(|(l, t)| *l == path && *t == to)
+            || !(to.starts_with(&profile) && points_to(&path, &to))
+        {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed.push(link.link),
+            Err(error) => {
+                failed.push(format!("Cannot remove {}: {error}", path.display()));
+                created.push(link);
+            }
+        }
+    }
+    for (link, to) in wanted {
         if points_to(&link, &to) {
             created.push(ExportLink {
                 link: link.display().to_string(),
@@ -143,13 +228,10 @@ pub(crate) fn enable_in(paths: &AppPaths, target: &str, vendor: &Path) -> Result
             skipped.push(json!({"link": link, "reason": "Something already exists here; it was left as it is"}));
             continue;
         }
-        if let Some(parent) = link.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Cannot create {}", parent.display()))?;
+        if let Err(error) = make_link(&link, &to) {
+            failed.push(format!("{error:#}"));
+            continue;
         }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&to, &link)
-            .with_context(|| format!("Cannot create {}", link.display()))?;
         created.push(ExportLink {
             link: link.display().to_string(),
             target: to.display().to_string(),
@@ -157,18 +239,30 @@ pub(crate) fn enable_in(paths: &AppPaths, target: &str, vendor: &Path) -> Result
     }
     let record = created.clone();
     State::update(paths, |state| {
-        let entry = state.exports.entry(target.to_owned()).or_default();
-        for link in record {
-            if !entry.contains(&link) {
-                entry.push(link);
-            }
-        }
-        if entry.is_empty() {
+        if record.is_empty() && !stay_on {
             state.exports.remove(target);
+        } else {
+            state.exports.insert(target.to_owned(), record);
         }
         Ok(())
     })?;
-    Ok(json!({"target": target, "created": created, "skipped": skipped}))
+    ensure!(
+        failed.is_empty(),
+        "Some links could not be changed: {}. The links that were made are kept, and Stop using removes them.",
+        failed.join("; ")
+    );
+    Ok(json!({"target": target, "created": created, "skipped": skipped, "removed": removed}))
+}
+
+fn make_link(link: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Cannot create {}", parent.display()))?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(to, link)
+        .with_context(|| format!("Cannot create {}", link.display()))?;
+    Ok(())
 }
 
 /// Remove the links the export made for `target`, only while they are

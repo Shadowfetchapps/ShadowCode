@@ -10,9 +10,10 @@
 //!   go to another model, which answers in plain text.
 //!
 //! Each runs as an ordinary job in `review` mode, so it is read-only the way
-//! Ask and Plan are: the native loop gets no write, shell or MCP tools, and
-//! vendor CLIs run in their plan or read-only mode with every edit or
-//! command request denied. It runs in a hidden conversation (`session_meta`
+//! Ask and Plan are: the native loop gets no write, shell or MCP tools (and
+//! no subagents, so the review stays on the chosen model), and vendor CLIs
+//! run in their plan or read-only mode with every permission request
+//! denied. It runs in a hidden conversation (`session_meta`
 //! `second_opinion`) queued behind any task running in the project, and its
 //! usage and cost are recorded like any job's.
 //!
@@ -518,13 +519,41 @@ pub(crate) struct Start<'a> {
     pub owner: Option<&'a JobOwner>,
 }
 
+/// The route a job ran on, for consent. A Plan → Implement → Review task
+/// counts as run on this computer when its implement role did, even if
+/// another role ran in the cloud: the change and its account came from here.
+pub fn job_route(store: &Store, job: &Value) -> Option<TurnRoute> {
+    let mut route = TurnRoute::of_job(job)?;
+    if route.provider == crate::roles::PROVIDER && !route.local {
+        route.local = match job["routing"]["local_roles"].as_array() {
+            Some(roles) => roles.iter().any(|role| role == "implement"),
+            // A task recorded before `local_roles`: its implement run says,
+            // and local when that record is gone.
+            None => {
+                let (id, session) = (
+                    job["id"].as_str().unwrap_or(""),
+                    job["session_id"].as_str().unwrap_or(""),
+                );
+                crate::subagents::list(store, session)
+                    .ok()
+                    .and_then(|runs| {
+                        runs.into_iter()
+                            .find(|run| run.parent_job == id && run.role == "implement")
+                    })
+                    .is_none_or(|run| run.route == "local")
+            }
+        };
+    }
+    Some(route)
+}
+
 /// The last route a conversation ran on, when it ran on this computer.
 fn local_conversation(store: &Store, session: &str) -> Result<Option<TurnRoute>> {
     let jobs = store.session_jobs(session, 200)?;
     Ok(jobs
         .iter()
         .rev()
-        .find_map(TurnRoute::of_job)
+        .find_map(|job| job_route(store, job))
         .filter(|route| route.local))
 }
 
@@ -680,7 +709,7 @@ pub(crate) async fn start(engine: &Engine, request: Start<'_>) -> Result<Record>
     let writer = request
         .writer_job
         .as_ref()
-        .and_then(TurnRoute::of_job)
+        .and_then(|job| job_route(&store, job))
         .map(|route| Route::of(&route));
     let about = match (request.kind, request.source.as_str()) {
         (_, "staged") => "the changes staged for the next commit",
@@ -1236,6 +1265,50 @@ mod tests {
         .iter()
         .map(|(s, p)| (s.to_string(), p.to_string()))
         .collect()
+    }
+
+    #[test]
+    fn a_roles_task_counts_as_local_when_its_implement_role_is() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("store.sqlite")).unwrap();
+        let job = |local_roles: Value| {
+            json!({
+                "id": "job1",
+                "session_id": "s1",
+                "routing": {
+                    "provider": crate::roles::PROVIDER,
+                    "model_id": "roles:plan=cli:claude,implement=qwen3:14b",
+                    "inference": "cloud",
+                    "local_roles": local_roles,
+                },
+            })
+        };
+        let local = |job: &Value| job_route(&store, job).unwrap().local;
+        // The task records its local roles; no subagent run is needed (the
+        // run index keeps only the latest 200 runs of a conversation).
+        assert!(local(&job(json!(["implement"]))));
+        assert!(!local(&job(json!(["plan"]))));
+        assert!(!local(&job(json!([]))));
+        // A task recorded before `local_roles`: its implement run says, and
+        // a run that is gone counts as local.
+        let old = job(Value::Null);
+        assert!(local(&old));
+        let run = |route: &str| json!({"id": "a".repeat(32), "parent_session": "s1", "parent_job": "job1", "role": "implement", "route": route});
+        store
+            .set_native_meta(
+                &keys::subagent_index("s1"),
+                &json!(["a".repeat(32)]).to_string(),
+            )
+            .unwrap();
+        for (route, expected) in [("cloud", false), ("local", true)] {
+            store
+                .set_native_meta(
+                    &keys::subagent_run(&"a".repeat(32)),
+                    &run(route).to_string(),
+                )
+                .unwrap();
+            assert_eq!(local(&old), expected, "{route}");
+        }
     }
 
     #[test]

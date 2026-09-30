@@ -49,7 +49,13 @@ pub const SKIP: &str = "skip";
 pub const LOCAL: &str = "local";
 /// `session_meta`: the cloud providers (`cli:claude`, `openrouter`, …) the
 /// user agreed may receive this conversation's work as a role (JSON list).
+/// Only an answered consent dialog adds to it.
 pub const CONSENT_META: &str = "consent:cloud_roles";
+/// `session_meta`: cloud providers that received this conversation as a role
+/// while it ran in the cloud, so no consent was needed (JSON list). They are
+/// not asked again about those earlier cloud turns; once a turn ran on this
+/// computer, they are asked like any other provider.
+pub const SEEN_META: &str = "roles:cloud_seen";
 /// The routing provider recorded on a Plan → Implement → Review task, so the
 /// next turn on any single model receives it as a handoff (`handoff::build`).
 pub const PROVIDER: &str = "shadowcode:roles";
@@ -252,24 +258,50 @@ pub fn save(store: &Store, workspace: &Path, setup: &Setup) -> Result<()> {
     store.set_native_meta(&key(workspace), &serde_json::to_string(&setup)?)
 }
 
-/// The project whose roles a conversation uses: a worktree task's own
-/// project, else the workspace the conversation runs in.
+/// The project a conversation belongs to (its roles, its "Always allow"
+/// rules): a worktree task's own project, else the workspace the
+/// conversation runs in. A subagent's or role's conversation, which may run
+/// in a throwaway worktree, belongs to its parent conversation's project.
 pub fn project_of(store: &Store, workspace: &Path, session: Option<&str>) -> PathBuf {
-    session
-        .and_then(|sid| {
-            store
-                .session_meta(sid, crate::store::keys::WORKTREE_SOURCE)
-                .ok()
-                .flatten()
-        })
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.to_path_buf())
+    use crate::store::keys;
+    let mut workspace = workspace.to_path_buf();
+    let mut session = session.map(str::to_owned);
+    // Subagents nest a few levels at most.
+    for _ in 0..8 {
+        let Some(sid) = session.take() else {
+            break;
+        };
+        if let Some(source) = store
+            .session_meta(&sid, keys::WORKTREE_SOURCE)
+            .ok()
+            .flatten()
+        {
+            return PathBuf::from(source);
+        }
+        let Some(parent) = store
+            .session_meta(&sid, keys::SUBAGENT_PARENT)
+            .ok()
+            .flatten()
+        else {
+            break;
+        };
+        let Some(path) = store
+            .session(&parent)
+            .ok()
+            .flatten()
+            .and_then(|row| row["workspace"].as_str().map(PathBuf::from))
+        else {
+            break;
+        };
+        workspace = path;
+        session = Some(parent);
+    }
+    workspace
 }
 
-/// The providers this conversation agreed may receive its work as a role.
-pub fn consented(store: &Store, session: &str) -> BTreeSet<String> {
+fn providers(store: &Store, session: &str, key: &str) -> BTreeSet<String> {
     store
-        .session_meta(session, CONSENT_META)
+        .session_meta(session, key)
         .ok()
         .flatten()
         .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
@@ -277,19 +309,48 @@ pub fn consented(store: &Store, session: &str) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
+fn add_providers<'a>(
+    store: &Store,
+    session: &str,
+    key: &str,
+    new: impl IntoIterator<Item = &'a String>,
+) -> Result<()> {
+    let mut all = providers(store, session, key);
+    let before = all.len();
+    all.extend(new.into_iter().cloned());
+    if all.len() == before && store.session_meta(session, key)?.is_some() {
+        return Ok(());
+    }
+    let list: Vec<&String> = all.iter().collect();
+    store.set_session_meta(session, key, &serde_json::to_string(&list)?)
+}
+
+/// The providers this conversation agreed may receive its work as a role.
+pub fn consented(store: &Store, session: &str) -> BTreeSet<String> {
+    providers(store, session, CONSENT_META)
+}
+
+/// Remember providers the user allowed in the consent dialog.
 pub fn record_consent<'a>(
     store: &Store,
     session: &str,
     providers: impl IntoIterator<Item = &'a String>,
 ) -> Result<()> {
-    let mut all = consented(store, session);
-    let before = all.len();
-    all.extend(providers.into_iter().cloned());
-    if all.len() == before && store.session_meta(session, CONSENT_META)?.is_some() {
-        return Ok(());
-    }
-    let list: Vec<&String> = all.iter().collect();
-    store.set_session_meta(session, CONSENT_META, &serde_json::to_string(&list)?)
+    add_providers(store, session, CONSENT_META, providers)
+}
+
+/// The providers that received this conversation as a role while it ran in
+/// the cloud ([`SEEN_META`]).
+pub fn seen(store: &Store, session: &str) -> BTreeSet<String> {
+    providers(store, session, SEEN_META)
+}
+
+pub fn record_seen<'a>(
+    store: &Store,
+    session: &str,
+    providers: impl IntoIterator<Item = &'a String>,
+) -> Result<()> {
+    add_providers(store, session, SEEN_META, providers)
 }
 
 /// Where one role runs.
@@ -520,6 +581,13 @@ impl Pipeline {
             fallback_reason: None,
             inference: if self.local() { "local" } else { "cloud" }.into(),
             route: "roles".into(),
+            local_roles: Some(
+                self.stages
+                    .iter()
+                    .filter(|s| s.local())
+                    .map(|s| s.role.id().to_owned())
+                    .collect(),
+            ),
         }
     }
 }
@@ -921,6 +989,47 @@ mod tests {
         let plan_only = plan_prompt("add X", None);
         assert!(plan_only.contains("<request>\nadd X\n</request>"));
         assert!(plan_only.contains("Do not change any files"));
+    }
+
+    #[test]
+    fn subagent_and_worktree_conversations_belong_to_their_project() {
+        use crate::store::keys;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("db")).unwrap();
+        let project = dir.path().join("project");
+        let session = |folder: &Path| {
+            store.create_session(folder, "m", "").unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let parent = session(&project);
+        assert_eq!(project_of(&store, &project, Some(&parent)), project);
+        assert_eq!(project_of(&store, &project, None), project);
+        // A write subagent in its worktree, and one it started in another.
+        let worktree = dir.path().join("worktree");
+        let child = session(&worktree);
+        store
+            .set_session_meta(&child, keys::SUBAGENT_PARENT, &parent)
+            .unwrap();
+        assert_eq!(project_of(&store, &worktree, Some(&child)), project);
+        let nested = dir.path().join("nested");
+        let grandchild = session(&nested);
+        store
+            .set_session_meta(&grandchild, keys::SUBAGENT_PARENT, &child)
+            .unwrap();
+        assert_eq!(project_of(&store, &nested, Some(&grandchild)), project);
+        // A worktree task, and a subagent of it.
+        let task = session(&worktree);
+        store
+            .set_session_meta(&task, keys::WORKTREE_SOURCE, &project.to_string_lossy())
+            .unwrap();
+        assert_eq!(project_of(&store, &worktree, Some(&task)), project);
+        let helper = session(&nested);
+        store
+            .set_session_meta(&helper, keys::SUBAGENT_PARENT, &task)
+            .unwrap();
+        assert_eq!(project_of(&store, &nested, Some(&helper)), project);
     }
 
     #[test]

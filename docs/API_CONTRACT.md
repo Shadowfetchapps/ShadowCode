@@ -741,7 +741,8 @@ Job = {id, workspace, session_id, task_id, task, images: string[], web,
        result: {success, cancelled, summary, plan, usage, usage_is_estimated, verification, timings, limit_reached?, command?}|null,
        timings: Timings|null}
 RoutingDecision = {purpose, source, requested, model_id, model_name, provider, context_limit,
-                   fallback_reason: string|null, inference: "local"|"cloud", route: "vendor_cli"|"local_llamacpp"|"native_http"}
+                   fallback_reason: string|null, inference: "local"|"cloud", route: "vendor_cli"|"local_llamacpp"|"native_http",
+                   local_roles?: string[]}
 JobSummary = {id, workspace, session_id, task_id, status, mode, purpose, model (≤512), started_at, finished_at,
               event_cursor, task (≤512 chars), task_truncated}
 ```
@@ -949,7 +950,10 @@ Routes:
 - `GET /api/approvals/always?workspace=` → `{workspace, commands: [{command,
   added_at}]}`: the project's "Always allow" commands (default: the selected
   project). Stored in ShadowCode's database (`native_meta`
-  `always_allow:<project>`), never in the repository; at most 100.
+  `always_allow:<project>`), never in the repository; at most 100. A
+  subagent, role or worktree task working in its own worktree uses (and
+  adds to) its project's commands, and the default while a worktree task's
+  conversation is selected is its project.
 - `DELETE /api/approvals/always {workspace?, command}` → the same, without it.
 
 ### Feed
@@ -1426,11 +1430,12 @@ history. Vendor CLIs are always started without
 
 A read-only review of the staged changes or of one task's changes by a
 model the user picks, or another model's view of a task's answer. Each runs
-as an ordinary job in `review` mode (read-only: no write, shell or MCP tools
-natively; vendor CLIs in plan/read-only mode with every edit or command
-request denied) in a hidden conversation (`session_meta` `second_opinion`,
-and `second_opinion_of` = the conversation it belongs to), queued behind any
-task in the project. Hidden conversations never appear in `GET
+as an ordinary job in `review` mode (read-only: no write, shell, MCP or
+subagent tools natively; vendor CLIs in plan/read-only mode with every
+permission request denied, MCP and web tools included) in a hidden
+conversation (`session_meta` `second_opinion`, and `second_opinion_of` = the
+conversation it belongs to), queued behind any task in the project. Hidden
+conversations never appear in `GET
 /api/sessions` and are deleted with the conversation they belong to (unless
 still running). Records are `native_meta` `second_opinion:<id>`, indexed per
 project (`second_opinion_index:<project>`, newest first, at most 40; the
@@ -1450,7 +1455,8 @@ written when a request is refused.
   (at most 2 000 characters). Offline mode refuses models that do not run
   on this computer. A cloud reviewer needs `consent: true` when the
   conversation's last turn ran on this computer or the model that wrote the
-  change did. `session_id` (staged reviews) is the conversation the user is
+  change did (for a Plan → Implement → Review task, its implement role).
+  `session_id` (staged reviews) is the conversation the user is
   in; without it, the conversation of the latest turn in the project that
   changed files.
 - `GET /api/second-opinions?workspace=&session_id=&task_id=&source=&limit=20&diff=`
@@ -1859,13 +1865,19 @@ See [SUBAGENTS.md](SUBAGENTS.md).
 - `POST /api/jobs` with `roles: true`: the job's `model` names the roles and
   `routing` is `{purpose: "roles", provider: "shadowcode:roles", model_id:
   "roles:<role>=<id>,…", model_name, inference: local|cloud, route:
-  "roles"}`. When a cloud role would receive a local conversation's work,
+  "roles", local_roles}`. `inference` is `local` only when every role runs
+  on this computer; `local_roles` lists the roles that do (a second opinion
+  on the task counts it as local work when `implement` is listed). When a
+  cloud role would receive a local conversation's work,
   the answer is `needs_consent` with `handoff: {from, to, excerpt_chars,
   images: 0, reason, roles: [{role, label, name, provider, agent?}]}`;
   resending with `handoff_consent: true` records the providers in the
-  conversation (`session_meta` `consent:cloud_roles`). A plain turn that
-  starts with an `@agent` whose role or definition model is a cloud one asks
-  the same way. Offline, a cloud role is refused with the reason.
+  conversation (`session_meta` `consent:cloud_roles`). Cloud roles of a
+  conversation that ran in the cloud need no consent and are only noted
+  (`roles:cloud_seen`); they are asked once a turn ran on this computer. A
+  plain turn that starts with an `@agent` whose role or definition model is
+  a cloud one asks the same way. Offline, a cloud role is refused with the
+  reason.
 - Task events: `roles.started {label, stages}`, `plan.updated` (one step per
   role plus "Apply the changes"), the roles' `subagent.*` events,
   `tool.started/completed` for `apply_agent_changes`, and `roles.finished
@@ -3025,7 +3037,8 @@ files. Behaviour: [RULES_AND_SKILLS.md](RULES_AND_SKILLS.md). Item ids are
   desktop's `open_rules_folder` command calls it and opens that path; the
   window never supplies a path.
 - Remote access refuses `/api/rules/imports…`, `/api/rules/export…` and
-  `/api/rules/folder`.
+  `/api/rules/folder`, and, while an export is on, `POST /api/rules/items`
+  for a `profile:` item (the export's links follow that switch).
 - Event `rules.delivered {vendor, mechanism, profile_files, project_files,
   skills, plugin_skills, bytes, estimated_tokens, truncated, hash}` for each
   vendor run that received the rulebook; `hash` is the run record's

@@ -476,6 +476,15 @@ async fn run_once(
     let mut approval: Option<PendingApproval<'_>> = None;
     let mut queued_approvals: VecDeque<(ApprovalPrompt, usize)> = VecDeque::new();
     let mut approval_drain_frames = 0usize;
+    // A second opinion only reads what it was sent and the project: every
+    // permission request is declined, whatever the tool (MCP tools from the
+    // vendor's own settings and web fetches included).
+    let second_opinion = request.options.read_only
+        && request
+            .events
+            .store
+            .session_meta(&request.session_id, crate::store::keys::SECOND_OPINION)?
+            .is_some();
     loop {
         if request.cancel.is_cancelled() {
             interrupt_vendor(&mut stdin, &mut adapter).await;
@@ -668,6 +677,7 @@ async fn run_once(
                                 return Err(RunLimit("Vendor CLI reused an outstanding permission request ID; no approval was sent".into()).into());
                             }
                             if request.steer.is_paused()
+                                || second_opinion
                                 || (request.options.read_only
                                     && matches!(
                                         prompt.kind.as_str(),
@@ -676,7 +686,15 @@ async fn run_once(
                             {
                                 request.events.emit("agent.warning", json!({"text":format!(
                                     "Denied automatically: this task is {}, so {}'s request was declined ({}).",
-                                    if request.steer.is_paused() { "paused" } else { "read-only" }, vendor.product_label(), clip(&prompt.command, 300)
+                                    if request.steer.is_paused() {
+                                        "paused"
+                                    } else if second_opinion {
+                                        "a read-only second opinion"
+                                    } else {
+                                        "read-only"
+                                    },
+                                    vendor.product_label(),
+                                    clip(&prompt.command, 300)
                                 ),"vendor":vendor.id(),"kind":prompt.kind}))?;
                                 send_lines(
                                     request,
@@ -1318,14 +1336,14 @@ async fn request_approval(
         .always
         .clone()
         .filter(|_| prompt.kind == "command");
+    // A role or subagent in its own worktree uses its project's rules.
+    let project = crate::roles::project_of(
+        &request.events.store,
+        &request.options.workspace,
+        Some(&request.session_id),
+    );
     if let Some(form) = &always_form {
-        if crate::approvals::always::covering(
-            &request.events.store,
-            &request.options.workspace,
-            form,
-        )?
-        .is_some()
-        {
+        if crate::approvals::always::covering(&request.events.store, &project, form)?.is_some() {
             // "Always allow in this project" covers this exact command.
             let mut granted = json!({"tool":prompt.tool,"grant":"always allowed in this project","scope":"project","command":form});
             crate::redaction::redact_value(&mut granted);
@@ -1418,11 +1436,7 @@ async fn request_approval(
     } else {
         if answer.for_project {
             if let Some(form) = &always_form {
-                crate::approvals::always::add(
-                    &request.events.store,
-                    &request.options.workspace,
-                    form,
-                )?;
+                crate::approvals::always::add(&request.events.store, &project, form)?;
             }
         }
         let scope = if answer.for_project {

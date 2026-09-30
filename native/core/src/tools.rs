@@ -600,9 +600,18 @@ impl ToolExecutor {
             })
             .collect()
     }
+    /// The project "Always allow" rules are kept for: a subagent's or a
+    /// worktree task's worktree uses its project's rules.
+    fn always_project(&self) -> std::path::PathBuf {
+        crate::roles::project_of(
+            &self.events.store,
+            &self.workspace.path,
+            Some(&self.events.session_id),
+        )
+    }
     /// The "Always allow in this project" rule that covers `command`.
     fn always_rule(&self, command: &str) -> Result<Option<String>> {
-        crate::approvals::always::covering(&self.events.store, &self.workspace.path, command)
+        crate::approvals::always::covering(&self.events.store, &self.always_project(), command)
     }
     async fn execute_inner(&self, call: &ToolCall) -> Result<Value> {
         ensure!(
@@ -782,7 +791,7 @@ impl ToolExecutor {
                         if let Some(form) = &always_form {
                             crate::approvals::always::add(
                                 &self.events.store,
-                                &self.workspace.path,
+                                &self.always_project(),
                                 form,
                             )?;
                         }
