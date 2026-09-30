@@ -11,11 +11,15 @@ export function FailureHelp({
   text,
   onStep,
   can,
+  retryDisabled = false,
 }: {
   text: string;
   onStep: (step: NextStep) => void;
   /** Steps this row can take (a row without a request can't retry). */
   can: (step: NextStep) => boolean;
+  /** A task is running or being sent: Try again waits, so a second click
+   * can't send the request twice. */
+  retryDisabled?: boolean;
 }) {
   const diagnosis = whatWentWrong(text);
   if (!diagnosis) return null;
@@ -38,6 +42,7 @@ export function FailureHelp({
               key={step}
               type="button"
               className={index === 0 ? "primary" : "ghost"}
+              disabled={step === "retry" && retryDisabled}
               onClick={() => onStep(step)}
             >
               {STEP_LABELS[step]}

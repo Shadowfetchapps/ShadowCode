@@ -187,6 +187,7 @@ function AgentAnswer({
                 ? Boolean(item.taskId)
                 : true
           }
+          retryDisabled={forkDisabled}
           onStep={(step) => {
             if (step === "retry" && item.request) actions.onRetry(item.request);
             else if (step === "try-on" && item.taskId)
