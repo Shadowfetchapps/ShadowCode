@@ -863,3 +863,50 @@ fn the_command_line_backs_up_restores_resets_and_repairs() {
     assert!(asides.iter().any(|a| a.join("shadow-agent.db").is_file()));
     assert!(asides.iter().any(|a| a.join("secrets.env").is_file()));
 }
+
+/// Keys moved to the desktop keyring are in a backup with API keys, and a
+/// restore after a reset brings them back (in `secrets.env`). The only
+/// test here that sets the process-wide `SHADOWCODE_TEST_KEYRING`.
+#[tokio::test(flavor = "multi_thread")]
+async fn keys_kept_in_the_keyring_are_backed_up_and_restored() {
+    use shadowcode_core::keyring;
+    let p = profile();
+    drop(Store::open(&p.paths.database()).unwrap());
+    std::env::set_var("SHADOWCODE_TEST_KEYRING", p.root.join("vault.json"));
+    let name = "SHADOWCODE_TEST_BACKUP_KEY";
+    config::set_secret(&p.paths, name, "kept-in-the-keyring").unwrap();
+    keyring::move_in(&p.paths, name).unwrap();
+    assert_eq!(config::file_secret(&p.paths, name).unwrap(), None);
+    let with_keys = BackupOptions {
+        include_secrets: true,
+        ..manual()
+    };
+    let (folder, manifest) = data::create_backup(&p.paths, with_keys).unwrap();
+    assert!(manifest.includes_secrets);
+    assert!(manifest.keys_left_out.is_empty(), "{manifest:?}");
+    let saved = fs::read_to_string(folder.join("config/secrets.env")).unwrap();
+    assert!(saved.contains("kept-in-the-keyring") && saved.contains("first-value"));
+    assert!(data::inspect(&p.paths, &folder).unwrap().restorable);
+
+    // A reset moves the settings (and the keyring's list) aside.
+    data::schedule_reset(&p.paths).unwrap();
+    let engine = Engine::open(p.paths.clone()).unwrap();
+    assert_eq!(config::secret(&p.paths, name).unwrap(), None);
+    engine.shutdown().await.unwrap();
+    drop(engine);
+    data::schedule_restore(&p.paths, &folder, true).unwrap();
+    let engine = Engine::open(p.paths.clone()).unwrap();
+    assert_eq!(
+        config::secret(&p.paths, name).unwrap().as_deref(),
+        Some("kept-in-the-keyring")
+    );
+    assert!(keyring::listed(&p.paths).is_empty());
+    engine.shutdown().await.unwrap();
+
+    // A keyring out of reach: the backup names the keys it could not hold.
+    keyring::move_in(&p.paths, name).unwrap();
+    fs::write(p.root.join("vault.json.unreachable"), "").unwrap();
+    let (_, manifest) = data::create_backup(&p.paths, with_keys).unwrap();
+    assert_eq!(manifest.keys_left_out, [name]);
+    std::env::remove_var("SHADOWCODE_TEST_KEYRING");
+}

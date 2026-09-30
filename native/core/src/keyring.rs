@@ -6,7 +6,10 @@
 //! and reads back the new place before removing the old one, so a key is
 //! never lost. `config/keyring.json` (mode 600) lists which keys live in the
 //! keyring; everything else stays in `secrets.env`, which is what headless
-//! machines, SSH sessions and `shadowcode serve` use.
+//! machines, SSH sessions and `shadowcode serve` use. Saving or removing a
+//! key that lives in the keyring from a session that cannot reach one puts
+//! it back in `secrets.env` (`crate::config::set_secret`), and a backup
+//! with API keys writes the keyring's keys into its `secrets.env`.
 //!
 //! Keys are stored with the attributes `application=shadowcode`, `profile`
 //! (a hash of the settings folder, so separate profiles never share keys)
@@ -16,10 +19,14 @@ use crate::paths::AppPaths;
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{mpsc, Mutex, OnceLock},
     time::Duration,
 };
+
+/// Tests that set `SHADOWCODE_TEST_KEYRING` (process-wide) hold this.
+#[cfg(test)]
+pub(crate) static TEST_KEYRING: Mutex<()> = Mutex::new(());
 
 /// Longest wait for the keyring.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -81,7 +88,12 @@ trait Vault: Send {
 fn vault() -> Result<Box<dyn Vault>> {
     #[cfg(debug_assertions)]
     if let Some(file) = std::env::var_os("SHADOWCODE_TEST_KEYRING") {
-        return Ok(Box::new(fake::FileVault(file.into())));
+        let file = std::path::PathBuf::from(file);
+        // `<file>.unreachable` stands for a session without a keyring.
+        if fake::unreachable(&file) {
+            bail!("Could not reach the desktop session bus");
+        }
+        return Ok(Box::new(fake::FileVault(file)));
     }
     Ok(Box::new(dbus::SecretService::open()?))
 }
@@ -121,7 +133,7 @@ fn borrowed(pairs: &[(String, String)]) -> Vec<(&str, &str)> {
 pub fn availability() -> std::result::Result<(), String> {
     #[cfg(debug_assertions)]
     if std::env::var_os("SHADOWCODE_TEST_KEYRING").is_some() {
-        return Ok(());
+        return with_vault(|_| Ok(())).map_err(|error| format!("{error:#}"));
     }
     if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none()
         && std::env::var_os("XDG_RUNTIME_DIR").is_none()
@@ -163,6 +175,40 @@ fn delete(paths: &AppPaths, name: &str) -> Result<()> {
         cache.remove(&cache_key(paths, name));
     }
     Ok(())
+}
+
+/// Stop listing a key as kept in the keyring: it is read from
+/// `secrets.env` from then on. The keyring's own copy is left as it is.
+pub fn forget(paths: &AppPaths, name: &str) -> Result<()> {
+    let mut names = listed(paths);
+    if !names.remove(name) {
+        return Ok(());
+    }
+    set_listed(paths, names)
+}
+
+/// Every key kept in the keyring, for a backup, and the names that could
+/// not be read (the keyring is locked or out of reach).
+pub fn read_all(paths: &AppPaths) -> (BTreeMap<String, String>, Vec<String>) {
+    let names = listed(paths);
+    let mut values = BTreeMap::new();
+    if availability().is_err() {
+        return (values, names.into_iter().collect());
+    }
+    let mut missing = Vec::new();
+    for name in names {
+        match get(paths, &name) {
+            Ok(Some(value)) => {
+                values.insert(name, value);
+            }
+            Ok(None) => missing.push(name),
+            Err(error) => {
+                tracing::warn!("keyring.read name={name} error={error:#}");
+                missing.push(name);
+            }
+        }
+    }
+    (values, missing)
 }
 
 /// Store a key that lives in the keyring (empty removes it).
@@ -387,6 +433,11 @@ mod fake {
     use std::path::PathBuf;
 
     pub struct FileVault(pub PathBuf);
+
+    pub fn unreachable(file: &std::path::Path) -> bool {
+        PathBuf::from(format!("{}.unreachable", file.display())).exists()
+    }
+
     impl FileVault {
         fn read(&self) -> Vec<(Vec<(String, String)>, String)> {
             std::fs::read(&self.0)
@@ -470,9 +521,10 @@ pub fn check_name(name: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// One test: `SHADOWCODE_TEST_KEYRING` is process-wide.
+    /// `SHADOWCODE_TEST_KEYRING` is process-wide: tests hold TEST_KEYRING.
     #[test]
     fn keys_move_into_the_keyring_and_back_without_being_lost() {
+        let _lock = TEST_KEYRING.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("SHADOWCODE_TEST_KEYRING", dir.path().join("vault.json"));
         let paths = AppPaths::isolated(&dir.path().join("profile")).unwrap();
@@ -546,6 +598,45 @@ mod tests {
         cache().lock().unwrap().clear();
         assert_eq!(
             crate::config::secret(&other, "OPENROUTER_API_KEY").unwrap(),
+            None
+        );
+        std::env::remove_var("SHADOWCODE_TEST_KEYRING");
+    }
+
+    /// The same profile over SSH or `shadowcode serve`, where no keyring
+    /// answers, can still replace or remove a key that was moved there.
+    #[test]
+    fn keys_in_the_keyring_can_be_replaced_where_it_is_out_of_reach() {
+        let _lock = TEST_KEYRING.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().join("vault.json");
+        std::env::set_var("SHADOWCODE_TEST_KEYRING", &vault);
+        let paths = AppPaths::isolated(&dir.path().join("profile")).unwrap();
+        for name in ["OPENROUTER_API_KEY", "OTHER_API_KEY"] {
+            crate::config::set_secret(&paths, name, "desktop-value").unwrap();
+            move_in(&paths, name).unwrap();
+        }
+        let (kept, missing) = read_all(&paths);
+        assert_eq!(kept.len(), 2);
+        assert!(missing.is_empty());
+
+        std::fs::write(dir.path().join("vault.json.unreachable"), "").unwrap();
+        assert!(availability().is_err());
+        let (kept, missing) = read_all(&paths);
+        assert!(kept.is_empty());
+        assert_eq!(missing, ["OPENROUTER_API_KEY", "OTHER_API_KEY"]);
+        crate::config::set_secret(&paths, "OPENROUTER_API_KEY", "ssh-value").unwrap();
+        assert!(!listed(&paths).contains("OPENROUTER_API_KEY"));
+        assert_eq!(
+            crate::config::secret(&paths, "OPENROUTER_API_KEY")
+                .unwrap()
+                .as_deref(),
+            Some("ssh-value")
+        );
+        crate::config::set_secret(&paths, "OTHER_API_KEY", "").unwrap();
+        assert!(listed(&paths).is_empty());
+        assert_eq!(
+            crate::config::secret(&paths, "OTHER_API_KEY").unwrap(),
             None
         );
         std::env::remove_var("SHADOWCODE_TEST_KEYRING");
