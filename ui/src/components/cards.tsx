@@ -79,6 +79,10 @@ export type ChatItem = (
        * keeps. */
       mode?: TaskMode;
       web?: boolean;
+      /** The limited task's @-mentions and "Only change these", which the
+       * continuation keeps too. */
+      mentions?: { path: string; kind: "file" | "dir" }[];
+      onlyChange?: boolean;
     }
   /** What happened after a plan limit (limit.fallback). */
   | {

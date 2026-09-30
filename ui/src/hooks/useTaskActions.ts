@@ -95,7 +95,8 @@ export function tryOnRequest(
 
 /** The job "Review and resume" starts: the scheduled continuation on the
  * same model, in the limited task's mode (a Plan or Ask task stays
- * read-only) and with its web access, as the scheduler would run it. */
+ * read-only) and with its web access, files and "Only change these", as
+ * the scheduler would run it. */
 export function resumeRequest(
   item: Extract<ChatItem, { kind: "resume" }>,
   where: { workspace: string; sessionId: string; queueing: boolean },
@@ -109,6 +110,12 @@ export function resumeRequest(
     queue: where.queueing,
     images: [],
     web: item.web === true,
+    ...(item.mentions?.length
+      ? {
+          mentions: item.mentions,
+          ...(item.onlyChange ? { only_change: true } : {}),
+        }
+      : {}),
   };
 }
 

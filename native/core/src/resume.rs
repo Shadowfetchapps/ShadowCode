@@ -40,6 +40,12 @@ pub struct Resume {
     pub mode: String,
     #[serde(default)]
     pub web: bool,
+    /// The limited task's @-mentions and "Only change these", which the
+    /// continuation keeps (as Try on… does). Older saved resumes have none.
+    #[serde(default)]
+    pub mentions: Vec<crate::mentions::Mention>,
+    #[serde(default)]
+    pub only_change: bool,
     pub at: f64,
     pub created_at: f64,
     /// The user already agreed to hand the conversation to this cloud route.
@@ -498,6 +504,8 @@ mod tests {
             task: "Fix the bug".into(),
             mode: "code".into(),
             web: false,
+            mentions: Vec::new(),
+            only_change: false,
             at,
             created_at: 1.0,
             handoff_consent: false,
@@ -517,5 +525,21 @@ mod tests {
         assert_eq!(take(&store, "b").unwrap().unwrap().at, 300.0);
         assert!(take(&store, "b").unwrap().is_none());
         assert!(list(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_resume_saved_before_scope_was_kept_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&dir.path().join("db")).unwrap();
+        let old = json!([{
+            "id": "r", "session_id": "s", "workspace": "/tmp/p", "job_id": "j",
+            "task_id": "t", "target": "cli:codex", "label": "Codex",
+            "task": "Fix the bug", "mode": "code", "web": false, "at": 100.0,
+            "created_at": 1.0, "handoff_consent": false,
+        }]);
+        store.set_native_meta(KEY, &old.to_string()).unwrap();
+        let resume = for_session(&store, "s").unwrap().expect("old resume loads");
+        assert!(resume.mentions.is_empty());
+        assert!(!resume.only_change);
     }
 }

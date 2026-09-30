@@ -14,6 +14,11 @@ impl Engine {
         // Plan or Ask task stays read-only) and web access.
         payload["mode"] = json!(resume.mode);
         payload["web"] = json!(resume.web);
+        // …and its @-mentions and "Only change these", as Try on… does.
+        if !resume.mentions.is_empty() {
+            payload["mentions"] = json!(resume.mentions);
+            payload["only_change"] = json!(resume.only_change);
+        }
         payload["job_id"] = payload
             .get("job_id")
             .cloned()
@@ -50,6 +55,17 @@ impl Engine {
             .or_else(|| crate::cli_agent::Vendor::from_provider(&routing.provider))
             .map(|v| v.product_label().to_owned())
             .unwrap_or_else(|| routing.model_name.clone());
+        // The files the limited task @-mentioned and "Only change these",
+        // kept on its `user.message` (see `start_with_context`).
+        let message = self
+            .0
+            .store
+            .last_task_event(&job.task_id, "user.message")?
+            .map(|e| e["payload"].clone())
+            .unwrap_or_default();
+        let mentions: Vec<crate::mentions::Mention> =
+            serde_json::from_value(message["mentions"].clone()).unwrap_or_default();
+        let only_change = !mentions.is_empty() && message["only_change"] == true;
         let resume = Resume {
             id: crate::id(),
             session_id: job.session_id.clone(),
@@ -61,6 +77,8 @@ impl Engine {
             task: job.task.clone(),
             mode: job.mode.clone(),
             web: job.web,
+            mentions,
+            only_change,
             at,
             created_at: crate::now(),
             handoff_consent,
@@ -117,8 +135,16 @@ impl Engine {
         // conversation says so (`resume.failed`).
         let model = crate::model_registry::resolve(&self.0.store, &resume.target, &config.model)
             .with_context(|| format!("{} can't be used right now", resume.label))?;
+        let turn = TurnOptions {
+            mentions: crate::mentions::validate(
+                &Workspace::open(&resume.workspace)?,
+                resume.mentions.clone(),
+            )?,
+            only_change: resume.only_change,
+            ..Default::default()
+        };
         let job = self
-            .start_consented_owned(
+            .start_turn_owned(
                 StartRequest {
                     workspace: resume.workspace.clone(),
                     task: resume.continuation(),
@@ -133,6 +159,7 @@ impl Engine {
                 None,
                 None,
                 resume.handoff_consent,
+                turn,
             )
             .await?;
         self.0.store.set_session_meta(

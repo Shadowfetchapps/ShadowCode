@@ -40,6 +40,12 @@ fn setup(endpoint: &str) -> (tempfile::TempDir, AppPaths, PathBuf) {
 
 /// A task that stopped at its plan limit, which resets at `resets_at`.
 fn limited(engine: &Engine, project: &Path, resets_at: f64) -> Job {
+    limited_with(engine, project, resets_at, &Value::Null)
+}
+
+/// [`limited`], with more fields on its `user.message` (the composer's
+/// @-mentions and "Only change these").
+fn limited_with(engine: &Engine, project: &Path, resets_at: f64, message: &Value) -> Job {
     let store = engine.store();
     let session = store.create_session(project, "fixture-model", "").unwrap();
     let mut job = Job {
@@ -60,7 +66,7 @@ fn limited(engine: &Engine, project: &Path, resets_at: f64) -> Job {
         started_at: shadowcode_core::now(),
         ..Default::default()
     };
-    store.create_job(&json!(job)).unwrap();
+    store.create_job_with(&json!(job), message).unwrap();
     job.status = "limit_reached".into();
     job.finished_at = Some(shadowcode_core::now());
     job.result = Some(
@@ -175,5 +181,61 @@ async fn a_resume_can_be_cancelled_and_one_missed_by_far_is_reported() {
     assert!(shadowcode_core::resume::list(&engine.store())
         .unwrap()
         .is_empty());
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_resume_keeps_the_tasks_mentions_and_only_change_these() {
+    let server = support::server(|_, _| {
+        (
+            json!({"choices":[{"message":{"role":"assistant","content":"Picked up where it stopped."},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}),
+            Duration::ZERO,
+        )
+    })
+    .await;
+    let (_root, paths, project) = setup(&server.endpoint);
+    fs::create_dir(project.join("src")).unwrap();
+    fs::write(project.join("src/a.rs"), "// resume-scope-marker\n").unwrap();
+    let engine = Engine::open(paths).unwrap();
+    let at = (shadowcode_core::now() + 3600.0).floor();
+    let scope = json!({"mentions":[{"path":"src/a.rs","kind":"file"}],"only_change":true});
+    let job = limited_with(&engine, &project, at, &scope);
+    let resume = engine.schedule_resume(&job.id, false).unwrap();
+    assert_eq!(resume.mentions.len(), 1);
+    assert_eq!(resume.mentions[0].path, "src/a.rs");
+    assert!(resume.only_change);
+    // The window's "Review and resume" sends the same scope.
+    let scheduled = &events(&engine, &job.session_id, "resume.scheduled")[0];
+    assert_eq!(scheduled["mentions"], scope["mentions"]);
+    assert_eq!(scheduled["only_change"], true);
+    engine.automation_tick(at + 5.0).await.unwrap();
+    let started = events(&engine, &job.session_id, "resume.started");
+    assert_eq!(
+        started.len(),
+        1,
+        "{:?}",
+        events(&engine, &job.session_id, "resume.failed")
+    );
+    assert_eq!(started[0]["mentions"], scope["mentions"]);
+    let follow_up = started[0]["job_id"].as_str().unwrap().to_owned();
+    let done = tokio::time::timeout(Duration::from_secs(120), engine.wait(&follow_up))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(done.status, "completed", "{}", done.summary);
+    // The continuation is limited to the same files, and the model read them.
+    let message = engine
+        .store()
+        .last_task_event(&done.task_id, "user.message")
+        .unwrap()
+        .unwrap();
+    assert_eq!(message["payload"]["mentions"], scope["mentions"]);
+    assert_eq!(message["payload"]["only_change"], true);
+    let sent = server.requests.lock().unwrap()[0].to_string();
+    assert!(
+        sent.contains("resume-scope-marker"),
+        "the mentioned file's text is sent with the continuation"
+    );
     engine.shutdown().await.unwrap();
 }

@@ -1014,8 +1014,12 @@ serve`; one-shot CLI commands never run it).
 - `DELETE /api/sessions/{id}/scheduled-resume` → `{resume: Resume|null}` (the
   removed one).
 - `Resume = {id, session_id, workspace, job_id, task_id, target, label, task,
-  mode, web, at, created_at, handoff_consent}`: `target` is the limited job's
-  exact picker id (`routing.model_id`), `label` its product ("Codex").
+  mode, web, mentions, only_change, at, created_at, handoff_consent}`:
+  `target` is the limited job's exact picker id (`routing.model_id`), `label`
+  its product ("Codex"). `mentions` (`[{path, kind}]`) and `only_change` are
+  the limited task's, read from its `user.message`; the continuation runs
+  with them as its turn's @-mentions and "Only change these". A resume saved
+  before 1.0 has none (`[]`, `false`).
 - At `at` the scheduler starts a queued job in the same conversation on
   `target` with the task "Continue where <label> stopped when its plan limit
   was reached. The request was: …", and sets the conversation's
@@ -1023,13 +1027,15 @@ serve`; one-shot CLI commands never run it).
   `target` cannot be resolved or started, nothing runs and the conversation
   says why.
 - Events on the limited task (`resume_id, at, target, label, mode, web,
-  job_id` in each; `mode` and `web` are the limited task's):
+  job_id` in each, plus `mentions` and `only_change` when the limited task
+  @-mentioned files; `mode`, `web` and the scope are the limited task's):
   `resume.scheduled {scheduler}`, `resume.cancelled`, `resume.started`
   (`job_id` is the new job), `resume.missed` (ShadowCode was not running and
   the time is more than 12 hours past), `resume.failed {reason, task}`, and
   `resume.needs_consent {reason, task}` (continuing would hand newer turns to
   a cloud route; the window starts `task` on `target`, in the same `mode`
-  and with the same `web`, through the usual consent dialog).
+  and with the same `web`, `mentions` and `only_change`, through the usual
+  consent dialog).
 
 ### Usage, cost, retries and compaction
 

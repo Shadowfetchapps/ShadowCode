@@ -31,3 +31,17 @@ it("resumes a Plan or Ask task read-only and keeps its web access", () => {
     web: false,
   });
 });
+
+it("resumes with the limited task's files and Only change these, as Try on does", () => {
+  const mentions = [{ path: "src/a.ts", kind: "file" as const }];
+  expect(
+    resumeRequest({ ...ready, mentions, onlyChange: true }, where),
+  ).toMatchObject({ mentions, only_change: true });
+  const loose = resumeRequest({ ...ready, mentions }, where);
+  expect(loose.mentions).toEqual(mentions);
+  expect(loose.only_change).toBeUndefined();
+  // A card without files (or from before they were kept) sends none.
+  const plain = resumeRequest(ready, where);
+  expect(plain.mentions).toBeUndefined();
+  expect(plain.only_change).toBeUndefined();
+});
