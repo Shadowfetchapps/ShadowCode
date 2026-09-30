@@ -1,11 +1,93 @@
-# ShadowCode 0.34.2
+# ShadowCode 1.0.0
 
-ShadowCode 0.34.2 is ready for everyone: you can start with no account at all,
+ShadowCode 1.0 is easy to start and ready for real work. New users get free
+models first, plain explanations when something fails and a glossary of the
+words the app uses. Everyone gets approvals that explain themselves, secret
+checks before anything leaves the computer, one rulebook for every agent,
+second opinions from another model, spending limits, and tools for big
+projects. The 0.34.2 notes follow below.
+
+## Easy to start
+
+- **Free models first.** Until you connect a subscription, the model picker
+  lists the free models on this computer first. Your code stays on your
+  machine.
+- **Plain words when something fails.** If a task fails because a key was
+  refused, credits ran out, the conversation got too long, the model doesn't
+  exist, the provider is busy, the local model isn't running or you're
+  offline, ShadowCode says so simply and offers the next step, such as
+  **Try again** or **Continue on another model…**.
+- **Words you'll see.** Press `?` for Help: it explains worktree,
+  checkpoint, rewind, context, tokens and more.
+- **Approvals you can read.** Every approval card says what the action does
+  in one sentence, how much it can affect, and whether Rewind can undo it,
+  even for long shell commands and for Codex, Claude Code and the other
+  subscriptions.
+
+## Safe by default
+
+- **No secrets by accident.** Commits, pushes and pull requests from
+  ShadowCode are checked for keys, passwords and `.env` files first; you
+  choose to remove the file, ignore it, or go ahead.
+- **Careful with new packages.** When the agent wants to install a package,
+  ShadowCode checks that it exists, how new it is, and whether its name is a
+  near-copy of a popular one.
+- **Your keys in the keyring.** API keys can be moved into the system
+  keyring (GNOME Keyring, KWallet, KeePassXC) with one click.
+- **Heads-ups.** If a task skipped or deleted tests, changed CI or switched
+  off a check, the conversation says so. **Only change these** keeps a task
+  to the files you name.
+- **Always allow here** for the exact test and build commands you run all
+  day, per project, and easy to take back.
+
+## Ready for real work
+
+- **One rulebook for every agent.** Write your rules and skills once; they
+  reach ShadowCode's own agent and every subscription CLI.
+- **Second opinions.** Have another model review your staged changes or a
+  task before you commit, with each finding on the line it's about.
+- **Roles.** Use one model to plan, another to implement and a third to
+  review.
+- **Spending limits.** Paid models ask before spending more than $1 on a task
+  or $10 in a day (you can change both), and show a price before you send.
+- **Recovers on its own.** Busy providers are retried with a visible count;
+  after a plan limit, a task can resume when the plan resets; a stuck task
+  pauses and asks you.
+- **Big projects.** The code index is kept between runs, covers up to 250,000
+  files and can focus on one folder of a monorepo.
+- **Review by risk.** Changed files are grouped with config and dependencies
+  first, and **Explain this change** describes a file's change in plain
+  words.
+- **Parallel tasks that just work.** A task in its own worktree can start
+  from any branch, runs your setup commands, gets your `.env` and its own
+  port.
+
+## Reliable
+
+- **Your data is safe.** Back up, restore, repair or start over from
+  Settings › Your data. Upgrades from every release since 0.28 are tested.
+- A model that runs out of graphics memory offers a smaller context; a task
+  that fails early ends with its reason; subscription usage is kept when a
+  turn fails; Rewind keeps files you saved during a subscription turn.
+- A stable, documented API for version 1.
+
+## Download
+
+`ShadowCode_1.0.0_amd64.AppImage`, `ShadowCode_1.0.0_amd64.deb` and
+`ShadowCode_1.0.0_appimage-runtime-sources.tar.gz`, with `SHA256SUMS`,
+`RELEASE-MANIFEST.json`, `RELEASE-AUTH` and `RELEASE-AUTH.sig`. Install the
+AppImage with the authenticated installer described in the
+[README](../README.md#install); the signature is checked before anything
+runs.
+
+## Published 0.34.2
+
+[ShadowCode 0.34.2](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.34.2)
+made ShadowCode ready for everyone: you can start with no account at all,
 the app tells you when an update is out, and a full quality pass fixed dozens
-of bugs across the engine, the window, the vendors and security. The 0.33.1
-notes follow below.
+of bugs across the engine, the window, the vendors and security.
 
-## Start with nothing
+### Start with nothing
 
 - **No account needed.** Open a project and ShadowCode offers a free model
   that runs on your own computer, picked for your memory and graphics card,
@@ -16,7 +98,7 @@ notes follow below.
   checked against a pinned fingerprint, can be paused and resumed, and never
   starts on its own.
 
-## Easier every day
+### Easier every day
 
 - **A calmer composer.** Effort, Compare and Worktree now live under
   **More**, so the message area stays clear.
@@ -29,14 +111,14 @@ notes follow below.
   sends nothing about you, and tells you how to update your kind of install.
   **Settings › About** shows the version and license.
 
-## Works with today's tools
+### Works with today's tools
 
 Checked live against the current Codex, Claude Code, Cursor, Grok and
 Antigravity releases. Claude Code now shows its real models and plan usage,
 effort settings work for Claude Code, Codex and Grok, and OpenRouter shows
 your account balance.
 
-## Safer and more reliable
+### Safer and more reliable
 
 - Rewind and Undo can no longer delete files that existed before a task.
 - Slow local models on a CPU are no longer cut off mid-answer, and a long
@@ -47,7 +129,7 @@ your account balance.
 - The Debian package passes lintian cleanly and is ready for distributions,
   with a man page and shell completions.
 
-## Download
+### Download
 
 `ShadowCode_0.34.2_amd64.AppImage`, `ShadowCode_0.34.2_amd64.deb` and
 `ShadowCode_0.34.2_appimage-runtime-sources.tar.gz`, with `SHA256SUMS`,

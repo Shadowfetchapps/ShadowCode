@@ -1207,10 +1207,11 @@ arguments or output, or file contents. `logging.level` (`error`, `warn`,
   [{kind, path, line, text}]}` and the event `task.flags` (same payload).
 - **Repaired tool calls.** Arguments that are almost JSON (a code fence,
   trailing commas, single quotes, raw newlines, JSON encoded twice) are
-  repaired; a model on this computer that writes a call as text
-  (`<tool_call>…</tool_call>`, `<|python_tag|>`, `<function=name>`, or an
-  answer that is one JSON call) has it read as that call when the name is an
-  offered tool. Each records `tool_call.repaired {from: "arguments"|"text",
+  repaired; a model served on this computer by another program (not the
+  bundled `llamacpp` runtime, which parses calls through the model's
+  template) that writes a call as text (`<tool_call>…</tool_call>`,
+  `<|python_tag|>`, `<function=name>`, or an answer that is one JSON call)
+  has it read as that call when the name is an offered tool. Each records `tool_call.repaired {from: "arguments"|"text",
   count}`.
 - **Close edits.** `edit_file` with an `old_string` that matches nowhere is
   applied when it matches exactly one place ignoring line endings, spaces at

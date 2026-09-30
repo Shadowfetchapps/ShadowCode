@@ -7,7 +7,7 @@ and authentication receipts to the exact candidate before publication.
 Pushing a `v*` tag starts `.github/workflows/release.yml`. Publication follows
 build/qualification, protected signing review and verification of all seven
 public assets. The signing environment permits only the tag being released
-(`v0.34.2` for 0.34.2); every later version needs reviewed trust-policy,
+(`v1.0.0` for 1.0.0); every later version needs reviewed trust-policy,
 deployment-rule and tooling-pin updates. The workflow uses
 `docs/RELEASE_NOTES.md` as the release text.
 
@@ -147,13 +147,14 @@ run green. Existing 0.33.0 receipts do not qualify the new package bytes.
 The first-authenticated install boundary remains 0.33.0; do not silently move
 this durable boundary.
 
-Public trust in `release/trust` currently allows epoch 1 and versions 0.33.0–0.34.2;
+Public trust in `release/trust` currently allows epoch 1 and versions 0.33.0–1.0.0;
 `release/install-policy` fixes the first authenticated version at 0.33.0.
 The `release-signing` environment has the signing secret and requires review by
 `Shadowfetchapps` (User ID `209457103`). Self-review is allowed and GitHub's
-default administrator override remains unchanged. For 0.34.2 its sole
-deployment rule is the tag `v0.34.2` (it was `v0.33.1` for 0.33.1);
-`NATIVE_RELEASE_SIGNING_ENVIRONMENT` points to that environment. For 0.34.2,
+default administrator override remains unchanged. For 1.0.0 its sole
+deployment rule is the tag `v1.0.0` (it was `v0.34.2` for 0.34.2 and
+`v0.33.1` for 0.33.1); `NATIVE_RELEASE_SIGNING_ENVIRONMENT` points to that
+environment. For 1.0.0,
 `NATIVE_RELEASE_TOOLING_COMMIT` pins the tagged release commit itself, as it
 did for 0.33.1 (`e15c4480e65db5650af012bb2a9773dbe89acf84`).
 

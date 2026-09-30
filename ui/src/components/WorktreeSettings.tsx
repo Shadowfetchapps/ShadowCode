@@ -96,7 +96,7 @@ export function WorktreeSettings({
         worktrees start from a local commit. You can also review and copy your
         current edits into a new worktree while preserving the originals.
       </p>
-      <WorktreeSetupForm onToast={onToast} />
+      <WorktreeSetupForm key={workspace} onToast={onToast} />
       <p className="hint">Source project</p>
       <code className="worktree-path">
         {workspace || (loading ? "Loading project…" : "Project unavailable")}

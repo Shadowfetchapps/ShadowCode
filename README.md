@@ -29,15 +29,27 @@ your computer. You don't need Ollama, LM Studio or any other model server.
   your memory and graphics card. Models already in an Ollama store can be
   imported by reference without copying.
 - **You approve actions.** Choose *Ask before actions* or *Allow project edits*.
-  Approval cards show the actual diff or command. After a task you review
-  just what it changed, keep or undo each change, and rewind shell commands
-  and subscription edits too.
+  Approval cards show the actual diff or command, say in one sentence what it
+  does, how much it can affect and whether Rewind can undo it. After a task
+  you review just what it changed (riskiest files first, with **Explain this
+  change**), keep or undo each change, and rewind shell commands and
+  subscription edits too.
+- **Nothing leaves by accident.** Commits, pushes and pull requests are
+  checked for secrets first, new packages are looked up before they are
+  installed, API keys can be kept in the system keyring, and paid models
+  stop to ask at a spending limit you set.
 - **Explicit execution boundaries.** ShadowCode's native agent uses the
   configured command sandbox. Vendor agents and your own terminal follow
   their own execution rules; their tools do not inherit that sandbox.
 - **A capable agent.** Subagents, language-server error checking after each
-  edit, a repo map and code search, and support for `CLAUDE.md`, Cursor rules
-  and Claude Code skills.
+  edit, a repo map and code search over projects of up to 250,000 files, one
+  rulebook for every agent, roles (a model to plan, one to implement, one to
+  review), second opinions from another model, and support for `CLAUDE.md`,
+  Cursor rules and Claude Code skills.
+- **Help when it goes wrong.** A failed task says what went wrong in plain
+  words with the next step, a stuck task pauses and asks, heads-ups point
+  out skipped tests or changed CI, and Help (`?`) explains the words the app
+  uses.
 - **Edit and verify.** The editor highlights code and preserves drafts; attached
   context shows bounded content and estimates. **Run a check…** starts an explicit
   command from a completed task without another model turn, keeping your draft.
@@ -45,18 +57,18 @@ your computer. You don't need Ollama, LM Studio or any other model server.
   own terminal, go from commit to pull request, preview the app you're
   building, dictate with your voice, and follow along from your phone.
 
-ShadowCode **0.34.2** is available in [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.34.2).
-See the [0.34.2 release notes](docs/RELEASE_NOTES.md) for changes and qualification
+ShadowCode **1.0.0** is available in [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v1.0.0).
+See the [1.0.0 release notes](docs/RELEASE_NOTES.md) for changes and qualification
 limits, and the [release history](CHANGELOG.md).
 
 ## Install
 
 Releases target x86_64 Linux with glibc 2.39 or newer (Ubuntu 24.04 or later).
 Check [GitHub releases](https://github.com/Shadowfetchapps/ShadowCode/releases)
-for published versions. The 0.34.2 packages and checksums are:
+for published versions. The 1.0.0 packages and checksums are:
 
-- `ShadowCode_0.34.2_amd64.AppImage`
-- `ShadowCode_0.34.2_amd64.deb`
+- `ShadowCode_1.0.0_amd64.AppImage`
+- `ShadowCode_1.0.0_amd64.deb`
 - `SHA256SUMS`, `RELEASE-MANIFEST.json`, `RELEASE-AUTH` and
   `RELEASE-AUTH.sig` (download these beside the package; the installer checks
   the publisher's signature before running anything)
@@ -68,7 +80,7 @@ assets are checksum-only and cannot be installed by this new entry point; use
 the instructions shipped with that released version for those existing assets.
 The 0.33.0 release attempt failed before signing and publication. Its tag stays
 unchanged. Version 0.33.1 was the first signed release; the public trust policy
-in `release/trust` now authorizes 0.33.0 through 0.34.2.
+in `release/trust` now authorizes 0.33.0 through 1.0.0.
 For development, use [Build from source](#build-from-source).
 
 Obtain an independently authenticated installer bundle as described below,
@@ -82,7 +94,7 @@ bundle and bootstrap requirements.
 From that independently authenticated installer bundle, run:
 
 ```bash
-bash /path/to/trusted-bundle/scripts/install-appimage.sh /path/to/downloads/ShadowCode_0.34.2_amd64.AppImage
+bash /path/to/trusted-bundle/scripts/install-appimage.sh /path/to/downloads/ShadowCode_1.0.0_amd64.AppImage
 ```
 
 The installer takes the AppImage path (or `--recover`), resolves its own trusted
@@ -116,22 +128,22 @@ as `--trust-dir` are not installer options.
   not yet qualified.
 
 After obtaining and verifying the intended package, run the AppImage without installing it:
-`./ShadowCode_0.34.2_amd64.AppImage --appimage-extract-and-run`. FUSE is not
+`./ShadowCode_1.0.0_amd64.AppImage --appimage-extract-and-run`. FUSE is not
 required.
 
 ### Debian package
 
 Verify the Debian artifact using the independently trusted verifier bundle.
-`verified-deb-0.34.2` must not already exist; install the verified snapshot:
+`verified-deb-1.0.0` must not already exist; install the verified snapshot:
 
 ```bash
 bash /path/to/trusted-bundle/scripts/verify-native-release.sh \
   --bundle-dir /path/to/downloads \
   --trust-dir /path/to/trusted-bundle/release/trust \
-  --artifact ShadowCode_0.34.2_amd64.deb \
-  --stage-dir ./verified-deb-0.34.2 \
-  --expect-version 0.34.2
-sudo apt install ./verified-deb-0.34.2/ShadowCode_0.34.2_amd64.deb
+  --artifact ShadowCode_1.0.0_amd64.deb \
+  --stage-dir ./verified-deb-1.0.0 \
+  --expect-version 1.0.0
+sudo apt install ./verified-deb-1.0.0/ShadowCode_1.0.0_amd64.deb
 ```
 
 This manual Debian verification does not provide the AppImage installer's durable
@@ -347,7 +359,10 @@ Choose **Worktree** in the composer's **More** menu (or press
 `Ctrl+Shift+Enter`) to start a task in its own worktree of the project, so it
 runs while another task works in your checkout. When it is done, **Apply to project** (checked with `git apply
 --check` first; conflicting files are listed and nothing is written), **Keep
-as branch** or **Discard**. The sidebar marks conversations that are running,
+as branch** or **Discard**. A worktree task can start from another branch,
+and **Tools › Worktrees › Setup for new worktrees** copies files such as
+`.env`, runs setup and teardown commands and gives each task its own `PORT`.
+The sidebar marks conversations that are running,
 need your approval, failed or finished while you were elsewhere; desktop
 notifications cover the same, and clicking one opens its conversation. The
 chip in the status bar shows context use and cost, e.g.
@@ -392,7 +407,8 @@ $0.001 per minute of speech. Details: [voice input](docs/VOICE.md).
 
 No subscription? Create a key at [openrouter.ai/keys](https://openrouter.ai/keys)
 and paste it into **Settings › Accounts › OpenRouter**. ShadowCode checks it
-with OpenRouter, stores it only in your profile, and never shows it again. The
+with OpenRouter, stores it only in your profile (or, if you choose, in the
+system keyring), and never shows it again. The
 picker's **API keys** group then lists OpenRouter's text models, with price
 per million tokens, *Vision* when the model accepts images and *Chat only*
 when it has no tool support. Search the picker by name or slug to find one.
@@ -404,7 +420,9 @@ shows credits used, your key's limit and the account balance, and a refused
 request shows OpenRouter's own explanation (for example that the account is
 out of credits). Each job and conversation records its
 tokens and cost (`/cost`), Claude and Gemini requests use prompt caching, and
-rate limits are retried automatically. Details: [OpenRouter](docs/OPENROUTER.md).
+rate limits are retried automatically. Spending limits (by default $1 a task
+and $10 a day) pause a task and ask before it spends more, and the composer
+shows a price before you send. Details: [OpenRouter](docs/OPENROUTER.md).
 
 ## Local models
 

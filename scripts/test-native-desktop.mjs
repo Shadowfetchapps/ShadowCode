@@ -536,7 +536,9 @@ try {
   const vendorHeading = vendorTargets.some((target) => target.billing === "unknown" || target.billing === "api_key") ? "Vendor CLIs" : "Subscriptions";
   const rows = await pickerRows();
   const groups = await execute("return [...document.querySelectorAll('.unified-picker-heading')].map(h=>h.textContent)");
-  assert.deepEqual(groups, [vendorHeading, "On this computer", "API keys"], "Vendor heading reflects observed billing, not CLI installation or availability");
+  // Until a subscription is ready (a clean host), the free local group leads.
+  const beginner = !vendorTargets.some((target) => target.availability === "ready");
+  assert.deepEqual(groups, beginner ? ["On this computer", vendorHeading, "API keys"] : [vendorHeading, "On this computer", "API keys"], "Vendor heading reflects observed billing, not CLI installation or availability; local models lead until a subscription is ready");
   assert.match(await execute("return [...document.querySelectorAll('.unified-picker-group')].find(g=>g.querySelector('.unified-picker-heading').textContent==='On this computer').textContent"), /No local models added yet/);
   // No OpenRouter key in this profile: API-key rows (if the list loaded) ask for one; none is Ready.
   const apiText = await execute("return [...document.querySelectorAll('.unified-picker-group')].find(g=>g.querySelector('.unified-picker-heading').textContent==='API keys').textContent");

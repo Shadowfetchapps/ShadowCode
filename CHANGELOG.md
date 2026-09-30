@@ -1,5 +1,88 @@
 # Changelog
 
+## 1.0.0: Easy to start, ready for real work
+
+For people starting out:
+- **Free models first.** Until a subscription is connected, the picker lists
+  the free models on this computer first (*Free · your code stays on this
+  computer*).
+- **What went wrong, in plain words.** A task that fails for a common reason
+  (key refused, out of credits, conversation too long, unknown model, rate
+  limit, provider trouble, local model not running, offline) explains it and
+  offers the next step: **Try again**, **Continue on another model…**,
+  **Choose a model** or **Open Local models**.
+- **Words you'll see.** Help (`?`) explains worktree, checkpoint, rewind,
+  context, tokens, hunk and more; some words in the app show their meaning
+  when you point at them.
+- **Approvals you can read.** Every approval card says in one sentence what
+  the action does, how much it can affect (*Read-only* to *Needs admin*) and
+  whether Rewind can undo it. A real shell parser reads pipelines, `&&`
+  lists, `$(…)`, heredocs, `sudo` and `bash -c`; subscriptions' requests are
+  explained the same way.
+
+Safety and trust:
+- **Always allow here** for exact test, build and lint commands, per project
+  and revocable; never for anything that deletes, installs, uses the network
+  or rewrites history.
+- **Secret checks** before every commit, push and pull request from
+  ShadowCode (**Remove from commit**, **Add to .gitignore**, **Commit
+  anyway**); the agent's own commits never include a staged secret.
+- **Project Git hooks** are asked about once per project; **new packages**
+  are looked up on npm, PyPI and crates.io (does it exist, how new is it, is
+  it one typo from a popular name); **lockfiles** are summarized.
+- **Keys in the system keyring.** **Settings › Accounts › Where your keys
+  are kept** moves API keys into the Secret Service keyring (GNOME Keyring,
+  KWallet, KeePassXC) and back; the private file stays the default.
+- Small Git-ignored files that are costly to lose (`.env`, local databases,
+  keys) are saved before each step and restored by Rewind.
+- **Heads-ups** when a task skipped or deleted tests, removed assertions,
+  changed CI or switched off a check. **Only change these** keeps a task to
+  the files you @-mentioned.
+
+Real work:
+- **One rulebook for every agent.** Your profile's rules, skills, commands
+  and agents reach ShadowCode's agent and every subscription CLI through each
+  CLI's own per-run option (**Settings › Rules & skills**, skill checker,
+  starter skills, import from Git).
+- **Second opinions.** Review staged changes or one task with another model
+  before committing, with findings on the lines they concern and **Ask the
+  agent to fix this**; **Ask another model** checks an answer. Reviewers
+  never edit files.
+- **Roles.** A model or subscription per step: plan, implement, review
+  (**Settings › Roles**, **More › Roles**).
+- **Spending limits** for paid models (ask at $1 a task and $10 a day by
+  default), a price estimate before sending, *Provider busy, retrying (2 of
+  5)*, **Resume at** a plan's reset time, **Try on…** another model, and
+  **Run details** for every task.
+- **Stuck detection** pauses a task that fails the same way three times or
+  edits a file back and forth (**Keep going**, **Give a hint**, **Try
+  another model**, **Stop**). `/compact [what to keep]` and `/pin` keep what
+  matters through shortening; local models' malformed tool calls are
+  repaired.
+- **Large projects.** The code index is kept between runs, covers up to
+  250,000 files, fills in progressively and can focus on one folder.
+- **Review by risk.** Changed files are grouped (config and CI,
+  dependencies, source, tests, generated, docs); **Explain this change**
+  describes one file's change in plain words, on request.
+- **Worktree tasks** can start from another branch and get setup commands,
+  copied files (such as `.env`), teardown commands and their own `PORT`.
+- A test caps what ShadowCode adds to each first request (system prompt and
+  tool definitions) at today's size plus 10%.
+
+Reliability:
+- **Your data.** Settings › Your data (and `shadowcode backup`, `restore`,
+  `repair`, `reset`) backs up, restores, repairs and starts over; upgrades
+  from every release since 0.28 are tested against saved profiles, and a
+  newer profile is never opened by an older version.
+- A stable, checked API contract (`docs/API_CONTRACT.md`) for 1.x.
+- A local model that runs out of GPU memory offers a smaller context or
+  another model; a task that fails before any output ends cleanly with its
+  reason; subscriptions' usage is kept when a turn fails; Rewind of a
+  subscription turn keeps the files you saved during it; a window render
+  error shows a reload screen.
+- A rotating, redacted app log is included in health reports.
+- The real-window test runs in a private Wayland session.
+
 ## 0.34.2: Ready for everyone
 
 For people starting out:

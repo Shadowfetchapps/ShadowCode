@@ -208,8 +208,11 @@ conversation:
 - a call written as text instead of a real tool call: Qwen and Hermes
   `<tool_call>{…}</tool_call>`, Llama `<|python_tag|>{…}` and
   `<function=name>{…}</function>`, or an answer that is only one JSON call.
-  Only tools offered in that request count, and only for models on this
-  computer;
+  Only tools offered in that request count, and only for models served by
+  another program on this computer (Ollama, LM Studio, vLLM …). The bundled
+  runtime already reads each model's own call format through its template,
+  so from it, text that looks like a call (a quoted file, for example) never
+  runs;
 - an edit whose "old text" differs from the file only in line endings,
   spaces at line ends or indentation is applied when it matches exactly one
   place, re-indented to fit, and the agent is told to check the result.

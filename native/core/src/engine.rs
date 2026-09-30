@@ -3059,13 +3059,17 @@ impl Engine {
                     "Task token budget reached; completed changes are retained for review"
                 );
             }
-            // Models on this computer sometimes write a tool call as text
+            // Models served by another program on this computer (Ollama, LM
+            // Studio, vLLM …) sometimes write a tool call as text
             // (`<tool_call>{…}</tool_call>`, a fenced JSON call): read it as
-            // the call it is, for tools offered in this request.
+            // the call it is, for tools offered in this request. The bundled
+            // runtime (`llamacpp`) parses each model's own call format
+            // through its verified template, so call-shaped text from it was
+            // not a call (for example a quoted file) and never runs.
             if response.tool_calls.is_empty()
                 && !schemas.is_empty()
-                && (crate::config::runs_on_this_computer(&running.config.model)
-                    || running.config.model.provider == "llamacpp")
+                && running.config.model.provider != "llamacpp"
+                && crate::config::runs_on_this_computer(&running.config.model)
             {
                 let names: Vec<&str> = schemas
                     .iter()
