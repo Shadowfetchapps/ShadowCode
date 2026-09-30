@@ -354,6 +354,7 @@ const READERS: &[&str] = &[
     "sha512sum",
     "base64",
     "bat",
+    "batcat",
     "nproc",
     "free",
     "uptime",
@@ -577,6 +578,8 @@ struct Unwrapped {
     unclear: bool,
     /// The folder a wrapper runs the program in (`env -C DIR`).
     chdir: Option<Word>,
+    /// `NAME=value` operands of `env` and `sudo`: set for the program.
+    assignments: Vec<String>,
 }
 
 /// A wrapper's options: the letters that take a value (stuck on or in the
@@ -719,12 +722,14 @@ fn wrapper_options(base: &str) -> (&'static str, &'static str, &'static [&'stati
 fn unwrap(words: &[Word]) -> Unwrapped {
     let mut rest = words;
     let mut chdir = None;
+    let mut assignments = Vec::new();
     loop {
         let Some(first) = rest.first() else {
             return Unwrapped {
                 words: Vec::new(),
                 unclear: false,
                 chdir,
+                assignments,
             };
         };
         let base = base_name(&first.text);
@@ -733,12 +738,14 @@ fn unwrap(words: &[Word]) -> Unwrapped {
                 words: rest.to_vec(),
                 unclear: rest.len() < words.len() && numeric(&first.text),
                 chdir,
+                assignments,
             };
         }
         let lost = || Unwrapped {
             words: Vec::new(),
             unclear: true,
             chdir: None,
+            assignments: Vec::new(),
         };
         let (values, stuck_only, long) = wrapper_options(base);
         // Options that give the command as one string, or the folder.
@@ -809,8 +816,11 @@ fn unwrap(words: &[Word]) -> Unwrapped {
                     }
                 }
                 index += 1;
-            } else if (base == "env" && text.contains('='))
-                || (base == "nice" && text.parse::<i32>().is_ok())
+            } else if matches!(base, "env" | "sudo") && text.contains('=') {
+                // `env NAME=value program`, `sudo NAME=value program`.
+                assignments.push(text.to_owned());
+                index += 1;
+            } else if (base == "nice" && text.parse::<i32>().is_ok())
                 || std::mem::take(&mut positional)
             {
                 index += 1;
@@ -836,13 +846,18 @@ fn url_host(simple: &Simple) -> Option<String> {
 /// Classify one simple command, following wrappers and `bash -c`.
 fn simple_step(simple: &Simple, ctx: &mut Ctx, read: &mut bool, depth: usize) -> Step {
     if simple.words.is_empty() {
-        // `NAME=value` alone only sets a shell variable.
-        return Step::new(Risk::ReadOnly, Undo::Nothing, "");
+        // `NAME=value` alone only sets a shell variable, which later steps
+        // may use (`PATH=./bin; ls`).
+        let mut step = Step::new(Risk::ReadOnly, Undo::Nothing, "");
+        let variables = simple.assignments.iter().map(|a| assignment_parts(a));
+        set_variables(&mut step, variables, read);
+        return step;
     }
     let Unwrapped {
         words,
         unclear,
         chdir,
+        assignments,
     } = unwrap(&simple.words);
     let admin = simple
         .words
@@ -875,7 +890,13 @@ fn simple_step(simple: &Simple, ctx: &mut Ctx, read: &mut bool, depth: usize) ->
         step = step.note("The program's name depends on a variable");
         step.opaque = true;
     }
-    if unclear {
+    // `coproc NAME { …; }` starts its command in the background, and the
+    // grammar doesn't read it.
+    if unclear
+        || words
+            .first()
+            .is_some_and(|w| base_name(&w.text) == "coproc")
+    {
         merge(
             &mut step,
             opaque_step("", "ShadowCode couldn't tell which program runs", read),
@@ -953,12 +974,286 @@ fn simple_step(simple: &Simple, ctx: &mut Ctx, read: &mut bool, depth: usize) ->
     if words.is_empty() && base_name(&simple.words[0].text) == "exec" {
         ctx.fds = descriptors(simple, ctx);
     }
+    // `LD_PRELOAD=… cat f`, `env GIT_CONFIG_COUNT=… git status`, and the
+    // builtins that set the variables they name (`read PATH`).
+    let named = builtin_variables(&words);
+    set_variables(
+        &mut step,
+        simple
+            .assignments
+            .iter()
+            .chain(&assignments)
+            .map(|a| assignment_parts(a))
+            .chain(named.iter().map(|name| (name.as_str(), None))),
+        read,
+    );
+    // `mapfile -C CALLBACK` runs the callback as shell code.
+    if matches!(base, "mapfile" | "readarray")
+        && Options::parse(&words[1..], "dnOsuCc", &[]).flag('C')
+    {
+        merge(
+            &mut step,
+            opaque_step("", "Runs shell code given in its options", read),
+        );
+    }
     if admin {
         step.raise(Risk::Admin, Undo::No);
         step.phrase = format!("as administrator, {}", lower_first(&step.phrase));
         step = step.note("Runs with administrator rights, outside the sandbox's limits");
     }
     step
+}
+
+/// Variables that change which programs a command runs or what they load:
+/// the loader's (`LD_PRELOAD`), Git's settings, helpers and repository
+/// (`GIT_CONFIG_COUNT`, `GIT_SSH_COMMAND`, `GIT_DIR`), pagers, editors and
+/// password helpers, where programs and settings are looked up (`PATH`,
+/// `HOME`), shell start-up files (`BASH_ENV`, `ENV`) and the interpreters'
+/// start-up options and module paths (`PYTHONPATH`, `NODE_OPTIONS`,
+/// `PERL5OPT`, `RUBYOPT`). `value` is `None` when it is not known.
+fn changes_what_runs(name: &str, value: Option<&str>) -> bool {
+    const NAMES: &[&str] = &[
+        "PATH",
+        "ENV",
+        "BASH_ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
+        "PROMPT_COMMAND",
+        "CDPATH",
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "ZDOTDIR",
+        "INPUTRC",
+        "SHELL",
+        "BROWSER",
+        "VISUAL",
+        "MANOPT",
+        "LESS",
+        "LESSOPEN",
+        "LESSCLOSE",
+        "LESSKEY",
+        "LESSKEYIN",
+        "LESSKEY_CONTENT",
+        "LESSEDIT",
+        "GCONV_PATH",
+        "TERMINFO",
+        "TERMINFO_DIRS",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "NODE_REPL_EXTERNAL_MODULE",
+        "PERL5OPT",
+        "PERL5LIB",
+        "PERLLIB",
+        "PERL5DB",
+        "RUBYOPT",
+        "RUBYLIB",
+        "PHPRC",
+        "PHP_INI_SCAN_DIR",
+        "TCLLIBPATH",
+        "CLASSPATH",
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "RUSTC",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "RUSTDOC",
+        "RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_HOME",
+        "RIPGREP_CONFIG_PATH",
+        "BAT_CONFIG_PATH",
+        "BAT_CONFIG_DIR",
+        "BAT_CACHE_PATH",
+        "BAT_OPTS",
+        "ACKRC",
+        "ACK_PAGER_COLOR",
+        "ACK_OPTIONS",
+        "TAR_OPTIONS",
+        "MAKEFLAGS",
+        "MFLAGS",
+        "GNUMAKEFLAGS",
+    ];
+    const PREFIXES: &[&str] = &["LD_", "DYLD_", "BASH_FUNC_", "LUA_", "R_PROFILE"];
+    // Git variables that only name the author, pick how paths are matched
+    // or keep Git from prompting.
+    const GIT_SAFE: &[&str] = &[
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_AUTHOR_DATE",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_COMMITTER_DATE",
+        "GIT_TERMINAL_PROMPT",
+        "GIT_OPTIONAL_LOCKS",
+        "GIT_MERGE_AUTOEDIT",
+        "GIT_FLUSH",
+        "GIT_LITERAL_PATHSPECS",
+        "GIT_GLOB_PATHSPECS",
+        "GIT_NOGLOB_PATHSPECS",
+        "GIT_ICASE_PATHSPECS",
+        "GIT_ADVICE",
+        "GIT_PROGRESS_DELAY",
+    ];
+    // Python variables that only change buffering, encoding or hashing,
+    // not what is imported.
+    const PYTHON_SAFE: &[&str] = &[
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONUNBUFFERED",
+        "PYTHONHASHSEED",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "PYTHONFAULTHANDLER",
+        "PYTHONNOUSERSITE",
+        "PYTHONSAFEPATH",
+        "PYTHONOPTIMIZE",
+        "PYTHONVERBOSE",
+    ];
+    // A pager, editor or password helper that runs nothing else
+    // (`GIT_PAGER=cat`, `GIT_EDITOR=true`).
+    if name.ends_with("PAGER") || name.ends_with("EDITOR") || name.ends_with("ASKPASS") {
+        return !value.is_some_and(|v| matches!(v, "" | "cat" | "less" | "more" | "true" | ":"));
+    }
+    // `BAT_PAGING=always` starts bat's pager even when the output is not a
+    // terminal.
+    if name == "BAT_PAGING" {
+        return !value.is_some_and(|v| matches!(v, "" | "never" | "auto"));
+    }
+    NAMES.contains(&name)
+        || PREFIXES.iter().any(|p| name.starts_with(p))
+        || (name.starts_with("GIT_") && !GIT_SAFE.contains(&name))
+        || (name.starts_with("PYTHON") && !PYTHON_SAFE.contains(&name))
+        // Cargo's runners and linkers (`CARGO_TARGET_…_RUNNER`) and the
+        // compiler it runs (`CARGO_BUILD_RUSTC_WRAPPER`).
+        || (name.starts_with("CARGO_")
+            && (name.ends_with("_RUNNER")
+                || name.ends_with("_LINKER")
+                || name.starts_with("CARGO_BUILD_RUST")))
+        // npm reads `npm_config_…` in either case (`script-shell`).
+        || name.to_ascii_lowercase().starts_with("npm_config_")
+}
+
+/// The name and value of `NAME=value`, `NAME+=value` or `NAME[i]=value`
+/// (the name with its index), without quotes around the value.
+fn assignment_parts(text: &str) -> (&str, Option<&str>) {
+    // The `=` after the index, which may hold one (`a[i=1]=2`).
+    let mut depth = 0usize;
+    let equals = text.char_indices().find_map(|(at, c)| {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            '=' if depth == 0 => return Some(at),
+            _ => {}
+        }
+        None
+    });
+    let (name, value) = match equals {
+        Some(at) => (&text[..at], &text[at + 1..]),
+        None => (text, ""),
+    };
+    let name = name.trim_end_matches('+');
+    let value = ['\'', '"']
+        .iter()
+        .find_map(|q| value.strip_prefix(*q).and_then(|v| v.strip_suffix(*q)))
+        .unwrap_or(value);
+    (name, Some(value))
+}
+
+/// Mark a step that sets a variable that [changes what
+/// runs](changes_what_runs): what it, or a later step, runs can't be read
+/// ahead. Takes names with their values, `None` when not known. A name
+/// may have an index (`a[i]`), which is arithmetic that may assign too
+/// (`a[PATH=1]`). A name that is not spelled out (`$N`, from
+/// `env "$N=…"`) may be any variable.
+fn set_variables<'a>(
+    step: &mut Step,
+    variables: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    read: &mut bool,
+) {
+    let mut names: Vec<String> = Vec::new();
+    let mut unknown = false;
+    for (name, value) in variables {
+        let (name, index) = name.split_once('[').unwrap_or((name, ""));
+        let assigned = shell::arithmetic_targets(index);
+        let each =
+            std::iter::once((name, value)).chain(assigned.iter().map(|n| (n.as_str(), None)));
+        for (name, value) in each {
+            let plain = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !plain {
+                unknown = true;
+            } else if changes_what_runs(name, value) && !names.iter().any(|n| n == name) {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    let mut notes = Vec::new();
+    if !names.is_empty() {
+        notes.push(format!(
+            "Sets {}, which can change which programs run",
+            list(&names)
+        ));
+    }
+    if unknown {
+        notes.push(
+            "Sets a variable named by another variable, which can change which programs run".into(),
+        );
+    }
+    for note in notes {
+        merge(step, opaque_step("", &note, read));
+        if step.phrase.is_empty() {
+            step.phrase = "sets shell variables".into();
+        }
+    }
+}
+
+/// The variables a builtin sets by name: `let` assigns in its arithmetic,
+/// `read`, `mapfile`/`readarray` and `getopts` store what they read, and
+/// `wait -p` a process number. A name given by a variable is returned as
+/// written (`$N`).
+fn builtin_variables(words: &[Word]) -> Vec<String> {
+    let Some(program) = words.first().map(|w| base_name(&w.text)) else {
+        return Vec::new();
+    };
+    let args = &words[1..];
+    let names = |words: Vec<&Word>| words.into_iter().map(|w| w.text.clone()).collect();
+    match program {
+        "let" => args
+            .iter()
+            .flat_map(|w| {
+                if w.dynamic {
+                    vec![w.text.clone()]
+                } else {
+                    shell::arithmetic_targets(&w.text)
+                }
+            })
+            .collect(),
+        "read" => {
+            let options = Options::parse(args, "adinNptu", &[]);
+            names(options.operands.iter().chain(options.value('a')).collect())
+        }
+        "mapfile" | "readarray" => {
+            let options = Options::parse(args, "dnOsuCc", &[]);
+            names(options.operands.iter().collect())
+        }
+        "getopts" => names(
+            Options::parse(args, "", &[])
+                .operands
+                .iter()
+                .skip(1)
+                .take(1)
+                .collect(),
+        ),
+        "wait" => names(
+            Options::parse(args, "p", &[])
+                .value('p')
+                .into_iter()
+                .collect(),
+        ),
+        _ => Vec::new(),
+    }
 }
 
 fn append(phrase: &mut String, more: &str) {
@@ -1410,8 +1705,8 @@ fn program_step(
             ctx.change_dir(None);
             Step::new(Risk::ReadOnly, Undo::Nothing, "")
         }
-        "export" | "unset" | "set" | "alias" | "local" | "declare" | "readonly" | "shopt"
-        | "source" | "." => {
+        "export" | "unset" | "set" | "alias" | "local" | "declare" | "typeset" | "readonly"
+        | "shopt" | "source" | "." => {
             if matches!(program.as_str(), "source" | ".") {
                 *read = false;
                 let file = operands(args)
@@ -1425,7 +1720,51 @@ fn program_step(
                 )
                 .note("Runs a script ShadowCode can't read ahead")
             } else {
-                Step::new(Risk::ReadOnly, Undo::Nothing, "sets shell variables")
+                let mut step = Step::new(Risk::ReadOnly, Undo::Nothing, "sets shell variables");
+                // A word from a variable may hold `NAME=value` (`declare "$D"`).
+                let defines = program != "unset" && program != "set" && program != "shopt";
+                let definitions = args
+                    .iter()
+                    .filter(|w| {
+                        !w.text.starts_with('-') && (w.text.contains('=') || (w.dynamic && defines))
+                    })
+                    .map(|w| w.text.as_str());
+                // `-n` makes a name refer to another variable, and `-i`
+                // makes the values given later arithmetic, which can assign
+                // other variables.
+                let special = matches!(program.as_str(), "declare" | "typeset" | "local")
+                    && args.iter().any(|w| {
+                        w.text.starts_with('-')
+                            && !w.text.starts_with("--")
+                            && w.text.contains(['n', 'i'])
+                    });
+                if special {
+                    merge(
+                        &mut step,
+                        opaque_step(
+                            "",
+                            "Gives a variable a special meaning, which ShadowCode can't follow",
+                            read,
+                        ),
+                    );
+                }
+                if program == "alias" {
+                    // `alias ls='…'` gives a later `ls` another meaning.
+                    if definitions.count() > 0 {
+                        merge(
+                            &mut step,
+                            opaque_step(
+                                "",
+                                "Gives a command name a new meaning, which ShadowCode can't follow",
+                                read,
+                            ),
+                        );
+                    }
+                } else {
+                    // `export PATH=…`, `declare -x GIT_PAGER=…`.
+                    set_variables(&mut step, definitions.map(assignment_parts), read);
+                }
+                step
             }
         }
         "rm" | "rmdir" | "unlink" | "shred" | "trash" | "trash-put" | "gio" => {
@@ -3274,14 +3613,75 @@ fn safe_script(script: &str) -> bool {
 }
 
 fn reader_step(program: &str, args: &[Word], ctx: &Ctx, read: &mut bool) -> Step {
-    if let Some(step) = reader_writes(program, args, ctx, read) {
-        return step;
+    let mut step = match reader_writes(program, args, ctx, read) {
+        Some(step) => step,
+        None => Step::new(
+            Risk::ReadOnly,
+            Undo::Nothing,
+            reader_phrase(program, args, ctx),
+        ),
+    };
+    // Readers that can also run another program.
+    let long = |names: &[&str]| gives_long(args, names);
+    let runs = match program {
+        "awk" => (awk_options_run(args) || args.iter().any(|w| awk_writes_or_runs(&w.text)))
+            .then_some("The awk program may write files or run commands"),
+        "rg" if args
+            .iter()
+            .any(|w| w.text == "--pre" || w.text.starts_with("--pre=")) =>
+        {
+            Some("Runs another program on each file it searches")
+        }
+        // `--hostname-bin` runs a program to fill in `{host}` in the links
+        // `--hyperlink-format` makes, which may also come from rg's config.
+        "rg" if long(&["hostname-bin", "hyperlink-format"]) => {
+            Some("May run another program to fill in its links")
+        }
+        "ag" | "ack" if long(&["pager"]) => Some("Sends its output to another program"),
+        "ack" if long(&["ackrc", "output"]) => Some("May run code given in its options"),
+        "bat" | "batcat" if bat_pages(args) => Some("Sends its output to another program"),
+        "bat" | "batcat" if long(&["lessopen"]) => {
+            Some("Runs another program on each file it shows")
+        }
+        "less" if less_runs(args) => Some("May run other programs or write a log file"),
+        "man" if man_runs(args) => Some("Runs another program to show the page"),
+        "tree" if tree_options(args).flag('R') => {
+            Some("Runs tree again in each folder and writes a listing there")
+        }
+        _ => None,
+    };
+    if let Some(note) = runs {
+        merge(&mut step, opaque_step("", note, read));
     }
-    let files: Vec<String> = operands(args)
-        .iter()
-        .map(|w| shown(&ctx.place(w)))
-        .collect();
-    let phrase = match program {
+    if program == "cloc" {
+        cloc_options(&mut step, args, ctx, read);
+    }
+    // `printf -v NAME …` sets a shell variable.
+    if program == "printf" {
+        let name = match args.first().map(|w| w.text.as_str()) {
+            Some("-v") => args.get(1).map(|w| w.text.as_str()),
+            Some(text) => text.strip_prefix("-v").filter(|name| !name.is_empty()),
+            None => None,
+        };
+        if let Some(name) = name {
+            set_variables(&mut step, [(name, None)], read);
+        }
+    }
+    step
+}
+
+/// What a reader does, in words.
+fn reader_phrase(program: &str, args: &[Word], ctx: &Ctx) -> String {
+    // tree's `-L 2`, `-H URL` take a value.
+    let tree = (program == "tree").then(|| tree_options(args));
+    let files: Vec<String> = match &tree {
+        Some(options) => options.operands.iter().collect(),
+        None => operands(args),
+    }
+    .iter()
+    .map(|w| shown(&ctx.place(w)))
+    .collect();
+    match program {
         "ls" | "tree" => format!(
             "lists {}",
             if files.is_empty() {
@@ -3290,7 +3690,7 @@ fn reader_step(program: &str, args: &[Word], ctx: &Ctx, read: &mut bool) -> Step
                 list(&files)
             }
         ),
-        "cat" | "less" | "more" | "head" | "tail" | "bat" => format!(
+        "cat" | "less" | "more" | "head" | "tail" | "bat" | "batcat" => format!(
             "shows {}",
             if files.is_empty() {
                 "its input".into()
@@ -3337,26 +3737,232 @@ fn reader_step(program: &str, args: &[Word], ctx: &Ctx, read: &mut bool) -> Step
             }
         ),
         _ => format!("reads information with {program}"),
-    };
-    let mut step = Step::new(Risk::ReadOnly, Undo::Nothing, phrase);
-    // Readers that can also run another program.
-    let runs = match program {
-        "awk" => (awk_options_run(args) || args.iter().any(|w| awk_writes_or_runs(&w.text)))
-            .then_some("The awk program may write files or run commands"),
-        "rg" => args
-            .iter()
-            .any(|w| w.text == "--pre" || w.text.starts_with("--pre="))
-            .then_some("Runs another program on each file it searches"),
-        "ag" | "ack" => args
-            .iter()
-            .any(|w| w.text.starts_with("--pager"))
-            .then_some("Sends its output to another program"),
-        _ => None,
-    };
-    if let Some(note) = runs {
-        merge(&mut step, opaque_step("", note, read));
     }
-    step
+}
+
+/// A long option before `--` naming one of `names`, abbreviated as
+/// getopt_long allows (`--pag` for `--pager`), with or without `=value`.
+fn gives_long(args: &[Word], names: &[&str]) -> bool {
+    args.iter().take_while(|w| w.text != "--").any(|w| {
+        w.text.strip_prefix("--").is_some_and(|given| {
+            let given = given.split('=').next().unwrap_or(given);
+            !long_names(given, names).is_empty()
+        })
+    })
+}
+
+/// bat with a pager: `--pager CMD`, or `--paging=always`, which starts the
+/// pager from `PAGER`, `BAT_PAGER` or bat's config even when the output is
+/// not a terminal.
+fn bat_pages(args: &[Word]) -> bool {
+    let words: Vec<&str> = args
+        .iter()
+        .map(|w| w.text.as_str())
+        .take_while(|t| *t != "--")
+        .collect();
+    words.iter().enumerate().any(|(at, text)| {
+        text.starts_with("--pager")
+            || *text == "--paging=always"
+            || (*text == "--paging" && words.get(at + 1) == Some(&"always"))
+    })
+}
+
+/// less options that run another program or write a file: a lesskey file
+/// (`-k`, which may set `LESSOPEN`), a log file (`-o`, `-O`) or a `+`
+/// start-up command other than moving or searching (`+!cmd`, `+|…`,
+/// `+v`).
+fn less_runs(args: &[Word]) -> bool {
+    const LONG: &[&str] = &[
+        "LOG-FILE=",
+        "lesskey-content=",
+        "lesskey-file=",
+        "lesskey-src=",
+        "log-file=",
+    ];
+    // A long option that starts with a capital letter names an upper-case
+    // option in any case after it (`--Log-file` is `--LOG-FILE`).
+    let args: Vec<Word> = args
+        .iter()
+        .take_while(|w| w.text != "--")
+        .map(|w| match w.text.strip_prefix("--") {
+            Some(given) if given.starts_with(|c: char| c.is_ascii_uppercase()) => {
+                let (name, value) = given.split_once('=').unwrap_or((given, ""));
+                let equals = if given.contains('=') { "=" } else { "" };
+                part_of(
+                    w,
+                    &format!("--{}{equals}{value}", name.to_ascii_uppercase()),
+                )
+            }
+            _ => w.clone(),
+        })
+        .chain(args.iter().skip_while(|w| w.text != "--").cloned())
+        .collect();
+    let options = Options::parse(&args, "bhjkoOpPtTxyz#D", LONG);
+    if "koO".chars().any(|letter| options.flag(letter))
+        || LONG
+            .iter()
+            .any(|name| options.has_long(name.trim_end_matches('=')))
+    {
+        return true;
+    }
+    options.operands.iter().any(|word| {
+        let Some(command) = word.text.strip_prefix('+') else {
+            return false;
+        };
+        let command = command.strip_prefix('+').unwrap_or(command);
+        command.chars().any(char::is_control)
+            || !(command.starts_with(['/', '?'])
+                || command
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || "GgFpPejkfbdu%".contains(c)))
+    })
+}
+
+/// man options that choose the program that shows the page: a pager
+/// (`-P`), a browser (`-H`), gxditview (`-X`) or a config file that names
+/// them (`-C`).
+fn man_runs(args: &[Word]) -> bool {
+    let options = Options::parse(
+        args,
+        "CeELmMpPrRsST",
+        &["config-file=", "gxditview", "html", "pager="],
+    );
+    "CHPX".chars().any(|letter| options.flag(letter))
+        || ["config-file", "gxditview", "html", "pager"]
+            .iter()
+            .any(|name| options.has_long(name))
+}
+
+fn tree_options(args: &[Word]) -> Options {
+    Options::parse(
+        args,
+        "LPIHTo",
+        &[
+            "authority=",
+            "charset=",
+            "filelimit=",
+            "gitfile=",
+            "hintro=",
+            "houtro=",
+            "infofile=",
+            "scheme=",
+            "sort=",
+            "timefmt=",
+        ],
+    )
+}
+
+/// cloc's options that run a program or write files. cloc reads options
+/// with Getopt::Long: one or two dashes, abbreviated, the value after `=`
+/// or in the next word. `--vcs` runs any value but `git`, `svn` or `auto`
+/// to list the files, `--extract-with` unpacks archives and `--config`
+/// reads more options from a file. `--out`, `--report-file`, `--sql` and
+/// the lists of files found write the file named; `--strip-comments` and
+/// `--strip-code` write a copy of each file counted. Getopt::Long also
+/// takes `+` for the dashes, `_` for `-` in the names and any case.
+fn cloc_options(step: &mut Step, args: &[Word], ctx: &Ctx, read: &mut bool) {
+    const WRITE: &[&str] = &[
+        "categorized",
+        "counted",
+        "found",
+        "ignored",
+        "out",
+        "report-file",
+        "sdir",
+        "sql",
+        "write-lang-def",
+        "write-lang-def-incl-dup",
+    ];
+    const RUN: &[&str] = &["config", "extract-with", "vcs"];
+    const STRIP: &[&str] = &["strip-code", "strip-comments"];
+    let mut files = Vec::new();
+    let mut runs = false;
+    let mut strips = false;
+    let mut index = 0;
+    while let Some(word) = args.get(index) {
+        index += 1;
+        let text = word.text.as_str();
+        if text == "--" {
+            break;
+        }
+        let Some(given) = text
+            .strip_prefix("--")
+            .or_else(|| text.strip_prefix('-'))
+            .or_else(|| text.strip_prefix('+'))
+        else {
+            continue;
+        };
+        let (given, stuck) = match given.split_once('=') {
+            Some((given, value)) => (given, Some(part_of(word, value))),
+            None => (given, None),
+        };
+        // One letter is a short option (`-v`).
+        if given.len() < 2 {
+            continue;
+        }
+        // Each name is also spelled with `_` (`--report_file`), and case
+        // is not checked.
+        let given = given.replace('_', "-").to_ascii_lowercase();
+        let given = given.as_str();
+        let names = |known: &[&str]| known.iter().any(|name| name.starts_with(given));
+        let (write, run, strip) = (names(WRITE), names(RUN), names(STRIP));
+        if !(write || run || strip) {
+            continue;
+        }
+        let value = stuck.or_else(|| {
+            index += 1;
+            args.get(index - 1).cloned()
+        });
+        strips |= strip;
+        if run {
+            let vcs_only = RUN
+                .iter()
+                .all(|name| !name.starts_with(given) || *name == "vcs");
+            runs |= !(vcs_only
+                && value
+                    .as_ref()
+                    .is_some_and(|v| matches!(v.text.as_str(), "git" | "svn" | "auto")));
+        }
+        if write {
+            files.extend(value);
+        }
+    }
+    if runs {
+        merge(
+            step,
+            opaque_step(
+                "",
+                "Runs another program to list or unpack the files it counts",
+                read,
+            ),
+        );
+    }
+    if strips {
+        let here = ctx.place(&Word {
+            text: ".".into(),
+            dynamic: false,
+            glob: false,
+        });
+        if matches!(here, Place::Inside(_)) {
+            step.raise(Risk::ChangesFiles, Undo::Yes);
+        } else {
+            step.raise(Risk::Outside, Undo::No);
+        }
+        append(
+            &mut step.phrase,
+            "writes a copy of each file without comments",
+        );
+    }
+    // `--sql -` writes to the output.
+    let files: Vec<&Word> = files
+        .iter()
+        .filter(|w| !matches!(ctx.place(w), Place::Null))
+        .collect();
+    if !files.is_empty() {
+        let written = paths_step(ctx, read, &files, "writes a report to", Risk::ChangesFiles);
+        append(&mut step.phrase, &written.phrase);
+        merge(step, written);
+    }
 }
 
 /// An awk program that runs commands or writes files: `system(…)`,
@@ -3484,8 +4090,9 @@ fn awk_options_run(args: &[Word]) -> bool {
     false
 }
 
-/// Readers that write a file named in their arguments: `yq -i`, `uniq IN
-/// OUT`, `xxd IN OUT`, `tree -o FILE`.
+/// Readers that write a file named in their arguments (`yq -i`, `uniq IN
+/// OUT`, `xxd IN OUT`, `tree -o FILE`, `file -C`, `history -w FILE`) or
+/// change the system (`date -s`, `hostname NAME`).
 fn reader_writes(program: &str, args: &[Word], ctx: &Ctx, read: &mut bool) -> Option<Step> {
     match program {
         "yq" => {
@@ -3501,6 +4108,17 @@ fn reader_writes(program: &str, args: &[Word], ctx: &Ctx, read: &mut bool) -> Op
                     "split-exp=",
                 ],
             );
+            if options.flag('s') || options.has_long("split-exp") {
+                // `-s EXPRESSION` writes each result to the file it names.
+                *read = false;
+                let mut step = Step::new(
+                    Risk::ChangesFiles,
+                    Undo::Yes,
+                    "writes each result to a file named by an expression",
+                );
+                step.unknown();
+                return Some(step.note("Writes to files ShadowCode can't work out ahead"));
+            }
             if !(options.flag('i') || options.has_long("inplace") || options.has_long("in-place")) {
                 return None;
             }
@@ -3584,22 +4202,7 @@ fn reader_writes(program: &str, args: &[Word], ctx: &Ctx, read: &mut bool) -> Op
             ))
         }
         "tree" => {
-            let options = Options::parse(
-                args,
-                "LPIHTo",
-                &[
-                    "authority=",
-                    "charset=",
-                    "filelimit=",
-                    "gitfile=",
-                    "hintro=",
-                    "houtro=",
-                    "infofile=",
-                    "scheme=",
-                    "sort=",
-                    "timefmt=",
-                ],
-            );
+            let options = tree_options(args);
             let output = options.value('o')?;
             Some(paths_step(
                 ctx,
@@ -3609,8 +4212,191 @@ fn reader_writes(program: &str, args: &[Word], ctx: &Ctx, read: &mut bool) -> Op
                 Risk::ChangesFiles,
             ))
         }
+        "file" => {
+            // `file -C` compiles the magic file into NAME.mgc in the
+            // current folder.
+            let options = Options::parse(
+                args,
+                "eFfmP",
+                &[
+                    "compile",
+                    "exclude-quiet=",
+                    "exclude=",
+                    "files-from=",
+                    "magic-file=",
+                    "parameter=",
+                    "separator=",
+                ],
+            );
+            if !(options.flag('C') || options.has_long("compile")) {
+                return None;
+            }
+            let magic = options
+                .value('m')
+                .or(options.long_value("magic-file"))
+                .map_or("magic", |w| {
+                    base_name(w.text.split(':').next().unwrap_or(&w.text))
+                });
+            let output = Word {
+                text: format!("{magic}.mgc"),
+                dynamic: options
+                    .value('m')
+                    .or(options.long_value("magic-file"))
+                    .is_some_and(|w| w.dynamic),
+                glob: false,
+            };
+            Some(paths_step(
+                ctx,
+                read,
+                &[&output],
+                "writes the compiled magic file",
+                Risk::ChangesFiles,
+            ))
+        }
+        "history" => {
+            // `history -a|-w [FILE]` writes the shell history, by default
+            // to `~/.bash_history`.
+            let options = Options::parse(args, "d", &[]);
+            if !(options.flag('a') || options.flag('w')) {
+                return None;
+            }
+            Some(match options.operands.first() {
+                Some(file) => paths_step(
+                    ctx,
+                    read,
+                    &[file],
+                    "writes the shell history to",
+                    Risk::ChangesFiles,
+                ),
+                None => Step::new(Risk::Outside, Undo::No, "writes the shell history file")
+                    .note("Changes a file outside the project"),
+            })
+        }
+        "hostname" => {
+            let options = Options::parse(args, "F", &["boot", "file="]);
+            let sets = !options.operands.is_empty()
+                || options.flag('F')
+                || options.flag('b')
+                || options.has_long("file")
+                || options.has_long("boot");
+            sets.then(|| {
+                Step::new(Risk::Admin, Undo::No, "changes this computer's name")
+                    .note("Changes the system outside the project")
+            })
+        }
+        // `bat cache --build|--clear [--target DIR]` rebuilds or deletes
+        // bat's cache, by default in your home folder.
+        "bat" | "batcat" if args.first().is_some_and(|w| w.text == "cache") => {
+            let options = Options::parse(
+                &args[1..],
+                "",
+                &[
+                    "acknowledgements",
+                    "blank",
+                    "build",
+                    "clear",
+                    "source=",
+                    "target=",
+                ],
+            );
+            let clear = options.flag('c') || options.has_long("clear");
+            if !(clear || options.flag('b') || options.has_long("build")) {
+                return None;
+            }
+            Some(match options.long_value("target") {
+                Some(dir) => paths_step(
+                    ctx,
+                    read,
+                    &[dir],
+                    if clear {
+                        "deletes bat's cache in"
+                    } else {
+                        "writes bat's cache to"
+                    },
+                    Risk::ChangesFiles,
+                ),
+                None => Step::new(
+                    Risk::Outside,
+                    Undo::No,
+                    if clear {
+                        "deletes bat's cache"
+                    } else {
+                        "rebuilds bat's cache"
+                    },
+                )
+                .note("Changes files outside the project"),
+            })
+        }
+        "date" => date_sets(args).then(|| {
+            Step::new(Risk::Admin, Undo::No, "sets the system clock")
+                .note("Changes the system outside the project")
+        }),
         _ => None,
     }
+}
+
+/// `date -s TIME`, `date --set=TIME` or `date MMDDhhmm`: sets the clock.
+/// `-d`, `-f`, `-r` and BSD's `-v` take a value, `-I` only one stuck on;
+/// an operand starting with `+` is a format. BSD's `-j` never sets the
+/// clock (`date -j -f FORMAT DATE`), and GNU date refuses it.
+fn date_sets(args: &[Word]) -> bool {
+    const LONG: &[&str] = &[
+        "date=",
+        "debug",
+        "file=",
+        "help",
+        "iso-8601",
+        "reference=",
+        "resolution",
+        "rfc-3339=",
+        "rfc-email",
+        "set=",
+        "universal",
+        "utc",
+        "version",
+    ];
+    let mut index = 0;
+    let mut options = true;
+    let mut sets = false;
+    let mut bsd = false;
+    while let Some(word) = args.get(index) {
+        index += 1;
+        let text = word.text.as_str();
+        if options && text == "--" {
+            options = false;
+            continue;
+        }
+        if let Some(given) = text.strip_prefix("--").filter(|_| options) {
+            let (given, stuck) = match given.split_once('=') {
+                Some((given, _)) => (given, true),
+                None => (given, false),
+            };
+            sets |= long_names(given, LONG).contains(&"set=");
+            if !stuck && long_takes_value(given, LONG) {
+                index += 1;
+            }
+            continue;
+        }
+        if options && text.len() > 1 && text.starts_with('-') {
+            for (at, letter) in text.char_indices().skip(1) {
+                match letter {
+                    's' => sets = true,
+                    'j' => bsd = true,
+                    'I' => break,
+                    'd' | 'f' | 'r' | 'v' => {
+                        if text[at + 1..].is_empty() {
+                            index += 1;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        sets |= !text.starts_with('+');
+    }
+    sets && !bsd
 }
 
 fn git_step(args: &[Word], ctx: &Ctx, read: &mut bool) -> Step {
@@ -5186,6 +5972,319 @@ mod tests {
         assert!(assess("tar --extract -f backup.tar")
             .explanation
             .starts_with("Unpacks"));
+    }
+
+    /// Readers given options that start another program or write a file,
+    /// and the plain forms that stay read-only.
+    const READER_OPTIONS: &[(&str, Risk)] = &[
+        ("cloc --out=report.txt .", Risk::ChangesFiles),
+        ("cloc --report-file /tmp/r.txt .", Risk::Outside),
+        ("cloc -rep=src/main.rs .", Risk::ChangesFiles),
+        ("cloc --sql=- .", Risk::ReadOnly),
+        ("cloc --vcs=git", Risk::ReadOnly),
+        ("cloc --by-file --csv src", Risk::ReadOnly),
+        ("cloc --strip-comments=nc src", Risk::ChangesFiles),
+        ("yq -s '.name' data.yaml", Risk::Outside),
+        ("file -C -m magic", Risk::ChangesFiles),
+        ("file src/main.rs", Risk::ReadOnly),
+        ("history -w notes.txt", Risk::ChangesFiles),
+        ("history -a", Risk::Outside),
+        ("history 20", Risk::ReadOnly),
+        ("hostname evil", Risk::Admin),
+        ("hostname -F /tmp/name", Risk::Admin),
+        ("hostname -f", Risk::ReadOnly),
+        ("date -s '2020-01-01'", Risk::Admin),
+        ("date --set=2020-01-01", Risk::Admin),
+        ("date --se 2020-01-01", Risk::Admin),
+        ("date -us 12:00", Risk::Admin),
+        ("date 0101000026", Risk::Admin),
+        ("date +%s", Risk::ReadOnly),
+        ("date -d tomorrow +%F", Risk::ReadOnly),
+        ("date -Iseconds", Risk::ReadOnly),
+        ("date -r Cargo.toml", Risk::ReadOnly),
+        ("date -j -f '%Y-%m-%d' 2024-01-01 +%s", Risk::ReadOnly),
+        ("date -jf %s 1700000000", Risk::ReadOnly),
+        ("date -v 1d +%F", Risk::ReadOnly),
+        ("cloc --report_file=src/main.rs .", Risk::ChangesFiles),
+        ("cloc --Report-File=src/main.rs .", Risk::ChangesFiles),
+        ("cloc +out=report.txt .", Risk::ChangesFiles),
+        ("cloc --strip-code=nc src", Risk::ChangesFiles),
+        ("cloc --strip_comments=nc src", Risk::ChangesFiles),
+        ("bat cache --build", Risk::Outside),
+        ("batcat cache -c", Risk::Outside),
+        ("bat cache --build --target .cache/bat", Risk::ChangesFiles),
+        ("bat cache", Risk::ReadOnly),
+        ("bat README.md", Risk::ReadOnly),
+        ("batcat -p README.md", Risk::ReadOnly),
+        ("bat --paging=never README.md", Risk::ReadOnly),
+        ("rg --pre-glob '*.gz' foo", Risk::ReadOnly),
+        ("rg --hidden foo", Risk::ReadOnly),
+        ("ack --nopager foo", Risk::ReadOnly),
+        ("less +F app.log", Risk::ReadOnly),
+        ("less +/error app.log", Risk::ReadOnly),
+        ("less -R +G app.log", Risk::ReadOnly),
+        ("man ls", Risk::ReadOnly),
+        ("man -k printf", Risk::ReadOnly),
+        ("tree -L 2 src", Risk::ReadOnly),
+        ("printf -v name %s x", Risk::ReadOnly),
+    ];
+
+    #[test]
+    fn readers_that_start_programs_or_write_files_are_not_read_only() {
+        let mut wrong = Vec::new();
+        for (text, expected) in READER_OPTIONS {
+            let got = assess(text);
+            if got.risk != *expected {
+                wrong.push(format!(
+                    "{text:?}: expected {expected:?}, got {:?} ({})",
+                    got.risk, got.explanation
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+        for text in [
+            "bat --paging=always --pager='python3 .cache/p.py' README.md",
+            "bat --paging always README.md",
+            "batcat --pager 'sh x' README.md",
+            "bat --lessopen README.md",
+            "cloc --vcs='sh .cache/x.sh' .",
+            "cloc --vcs 'find src -name x' .",
+            "cloc -vc=sh .",
+            "cloc --extract-with='sh x' a.tgz",
+            "cloc --extract_with='sh .cache/x.sh' a.tgz",
+            "cloc --EXTRACT-WITH='sh x' a.tgz",
+            "cloc +vcs='sh x' .",
+            "cloc --VCS='sh x' .",
+            "cloc --config opts.txt .",
+            "rg --color=always --hyperlink-format=default --hostname-bin=.cache/h.sh TODO",
+            "rg --hostname-bin .cache/h.sh TODO",
+            "rg --hyperlink-format=default TODO",
+            "ag --pag 'sh x' foo",
+            "ack --pager='sh x' foo",
+            "ack --ackrc=x.rc foo",
+            "less -k keys.bin f",
+            "less --lesskey-src=keys f",
+            "less -o log.txt f",
+            "less --Log-file=x f",
+            "less --Log x f",
+            "less '+!sh x' f",
+            "less +v f",
+            "less +$'/x\\n!sh x' f",
+            "man -P 'sh x' ls",
+            "man --html=./x ls",
+            "man -C my.conf ls",
+            "man -Hfirefox ls",
+            "tree -R -L 2 -H . .",
+        ] {
+            let a = assess(text);
+            assert!(!a.read && !a.complete, "{text}: {a:?}");
+            assert_ne!(a.risk, Risk::ReadOnly, "{text}");
+            assert!(a.always.is_none(), "{text}");
+        }
+        assert_eq!(assess("cloc --out=report.txt .").targets, ["report.txt"]);
+        assert_eq!(assess("file -C -m magic").targets, ["magic.mgc"]);
+        assert_eq!(
+            assess("cloc --out=report.txt .").explanation,
+            "Reads information with cloc and writes a report to report.txt."
+        );
+        assert_eq!(assess("tree -L 2 src").explanation, "Lists src.");
+        assert_eq!(assess("PATH=./bin").explanation, "Sets shell variables.");
+    }
+
+    #[test]
+    fn variables_that_change_what_runs_are_not_read() {
+        for text in [
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=./.cache/fsm.sh git status",
+            "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=./x git status",
+            "GIT_CONFIG_PARAMETERS=\"'core.pager'='sh x'\" git log",
+            "GIT_CONFIG_GLOBAL=./x.cfg git status",
+            "GIT_DIR=/tmp/other/.git git status",
+            "LD_PRELOAD=./x.so cat README.md",
+            "env LD_LIBRARY_PATH=. ls",
+            "GIT_PAGER='sh x' git log",
+            "GIT_EXTERNAL_DIFF=./x git diff",
+            "GIT_SSH_COMMAND=./x git status",
+            "GIT_ASKPASS=./x git status",
+            "SSH_ASKPASS=./x git status",
+            "EDITOR=./x git status",
+            "VISUAL=./x git status",
+            "GIT_EDITOR='sh x' git status",
+            "PAGER=./x man ls",
+            "LESSOPEN='|./x %s' less f",
+            "LESSCLOSE=./x less f",
+            "BASH_ENV=./x bash -c 'ls'",
+            "ENV=./x sh -c ls",
+            "PATH=./.cache:$PATH ls",
+            "PYTHONPATH=. cat f",
+            "PYTHONSTARTUP=x.py cat f",
+            "NODE_OPTIONS='--require ./x.js' cat f",
+            "PERL5OPT=-Mx cat f",
+            "RUBYOPT=-rx cat f",
+            "HOME=/tmp/x git status",
+            "npm_config_script_shell=./x cat f",
+            "sudo LD_PRELOAD=./x.so ls",
+            "nohup env LD_PRELOAD=./x.so cat f",
+            "timeout 5 env GIT_PAGER='sh x' git log",
+            "xargs env LD_PRELOAD=./x.so cat",
+            "bash -c 'GIT_PAGER=\"sh x\" git log'",
+            // Set for the steps after it.
+            "PATH=./bin; ls",
+            "export PATH=./bin; ls",
+            "export GIT_PAGER='sh x' && git log",
+            "declare -x NODE_OPTIONS='--require ./x.js'; ls",
+            "typeset LD_PRELOAD=./x.so; cat f",
+            "printf -v PATH %s ./bin; ls",
+            "alias ls='sh x'; ls",
+        ] {
+            let a = assess(text);
+            assert!(!a.read && !a.complete, "{text}: {a:?}");
+            assert_ne!(a.risk, Risk::ReadOnly, "{text}");
+            assert!(a.always.is_none(), "{text}");
+            assert!(a.undo >= Undo::Partly, "{text}");
+        }
+        let a = assess(
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=./x git status",
+        );
+        assert!(
+            a.notes.iter().any(|n| n
+                == "Sets GIT_CONFIG_COUNT, GIT_CONFIG_KEY_0 and GIT_CONFIG_VALUE_0, which can change which programs run"),
+            "{:?}",
+            a.notes
+        );
+        // Variables that change nothing that runs.
+        for text in [
+            "FOO=1 ls",
+            "GIT_PAGER=cat git log",
+            "GIT_PAGER= git log",
+            "GIT_EDITOR=true git status",
+            "GIT_AUTHOR_NAME=x git log",
+            "PYTHONDONTWRITEBYTECODE=1 cat f",
+            "RUST_LOG=debug cat f",
+            "env LANG=C ls",
+            "export FOO=1",
+            "FOO=1",
+        ] {
+            let a = assess(text);
+            assert!(a.read && a.complete, "{text}: {a:?}");
+            assert_eq!(a.risk, Risk::ReadOnly, "{text}");
+        }
+        // Never always allowed, however the variable is set.
+        for text in [
+            "LD_PRELOAD=./x.so cargo test",
+            "env LD_PRELOAD=./x.so cargo test",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=./x cargo test",
+            "env RUSTC_WRAPPER=./x cargo test",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=./x cargo test",
+            "PATH=./bin cargo test",
+            "NODE_OPTIONS='--require ./x.js' npm test",
+            "export PATH=./bin; cargo test",
+            "PATH=./bin; cargo test",
+            "env FOO=1 cargo test",
+        ] {
+            assert_eq!(assess(text).always, None, "{text}");
+            assert_eq!(always_allowed_form(text, Path::new(ROOT)), None, "{text}");
+        }
+        // A vendor's request is read the same way.
+        let a = vendor(
+            "command",
+            "claude.Bash",
+            "",
+            &json!({"input":{"command":"LD_PRELOAD=./x.so cat README.md"}}),
+            Path::new(ROOT),
+        );
+        assert!(!a.read && a.risk != Risk::ReadOnly, "{a:?}");
+    }
+
+    #[test]
+    fn variables_set_by_other_names_loops_arithmetic_and_builtins_are_not_read() {
+        for text in [
+            // A name known only when the command runs.
+            "N=LD_PRELOAD; env \"$N=./x.so\" cat README.md",
+            "N=PATH; export \"$N=./bin\"; ls",
+            "N=PATH; declare \"$N=./bin\"; ls",
+            "N=PATH; local \"$N=./bin\"; ls",
+            "N=PATH; readonly \"$N=./bin\"; ls",
+            "D=PATH=./bin; declare \"$D\"; ls",
+            "N=PATH; printf -v \"$N\" %s ./bin; ls",
+            "N=PATH; sudo \"$N=./bin\" ls",
+            // A name that refers to another, or values that are arithmetic.
+            "declare -n P=PATH; P=./bin; ls",
+            "local -n P=PATH; P=./bin; ls",
+            "typeset -gn P=PATH; P=./bin; ls",
+            "declare -i n; n=PATH=1; ls",
+            // Loop variables.
+            "for PATH in ./.cache; do ls; done",
+            "select PATH in ./.cache; do ls; done",
+            "for PATH; do ls; done",
+            "for GIT_PAGER in 'sh x'; do git log; done",
+            // Arithmetic.
+            "echo $((PATH=1)) >/dev/null; ls",
+            "echo $[PATH=1]; ls",
+            "((PATH=1)); ls",
+            "(( PATH += 1 )); ls",
+            "N=PATH; echo $(($N=1)); ls",
+            "echo ${PATH:=./bin}; ls",
+            "unset PATH; : ${PATH=./bin}; ls",
+            "x[PATH=1]=2; ls",
+            "echo ${x[PATH=1]}; ls",
+            "declare -a 'x[PATH=1]=2'; ls",
+            "[[ PATH=1 -eq 1 ]]; ls",
+            "let PATH=1; ls",
+            "let \"$E\"; ls",
+            "for ((PATH=1; PATH<2; PATH++)); do ls; done",
+            // Builtins that store what they read.
+            "read PATH < .cache/p; ls",
+            "read -r -a PATH <<< ./bin; ls",
+            "mapfile PATH < .cache/p; ls",
+            "readarray -t PATH < .cache/p; ls",
+            "getopts a PATH; ls",
+            "wait -p PATH; ls",
+            "mapfile -C 'sh x' -c 1 lines < f",
+            // A descriptor's number.
+            "exec {PATH}>/dev/null; ls",
+            "echo hi {PATH}>/dev/null; ls",
+            "coproc PATH { :; }; ls",
+            // bat and ack read these.
+            "BAT_OPTS='--paging=always --pager=\"sh .cache/x\"' bat README.md",
+            "BAT_PAGING=always bat README.md",
+            "BAT_CONFIG_DIR=./x bat README.md",
+            "BAT_CACHE_PATH=./x bat README.md",
+            "ACK_PAGER_COLOR='sh x' ack --color foo",
+        ] {
+            let a = assess(text);
+            assert!(!a.read, "{text}: {a:?}");
+            assert_ne!(a.risk, Risk::ReadOnly, "{text}");
+            assert!(a.always.is_none(), "{text}");
+        }
+        assert!(assess("N=PATH; export \"$N=./bin\"; ls")
+            .notes
+            .iter()
+            .any(|n| {
+                n
+            == "Sets a variable named by another variable, which can change which programs run"
+            }));
+        assert!(assess("for PATH in ./.cache; do ls; done")
+            .notes
+            .iter()
+            .any(|n| n == "Sets PATH, which can change which programs run"));
+        // Plain loops, arithmetic and reads stay as they were.
+        for text in [
+            "for f in a b; do echo $f; done",
+            "for ((i=0; i<3; i++)); do echo $i; done",
+            "echo $((1 + 2))",
+            "echo $((n == 2))",
+            "[[ $a = b ]] && echo yes",
+            "[[ $n -eq 1 ]] && echo one",
+            "echo ${name:-x}",
+            "for GIT_PAGER in cat; do git log; done",
+            "BAT_PAGING=never bat README.md",
+            "declare -r X=1",
+            "export \"A=$HOME\"",
+        ] {
+            let a = assess(text);
+            assert!(a.read && a.complete, "{text}: {a:?}");
+            assert_eq!(a.risk, Risk::ReadOnly, "{text}");
+        }
     }
 
     #[test]

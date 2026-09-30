@@ -142,6 +142,7 @@ pub fn parse(source: &str) -> Script {
         pipelines: 0,
         depth: 0,
         descriptor: None,
+        arithmetic: false,
     };
     walker.statement(root, None, false);
     if script.commands.len() > MAX_COMMANDS {
@@ -162,6 +163,9 @@ struct Walker<'a> {
     /// `>& FILE 0>&1`), with where it ends: the redirect starting there
     /// takes it.
     descriptor: Option<(String, usize)>,
+    /// Inside an arithmetic expression whose assignments were already
+    /// recorded.
+    arithmetic: bool,
 }
 
 impl Walker<'_> {
@@ -297,6 +301,10 @@ impl Walker<'_> {
             | "do_group"
             | "function_definition" => {
                 self.script.control_flow = true;
+                if node.kind() == "for_statement" {
+                    // `for NAME in …` and `select NAME in …` set NAME.
+                    self.loop_variable(node, pipe, substituted);
+                }
                 for child in named_children(node) {
                     match child.kind() {
                         // Loop variables and case patterns are not commands.
@@ -309,7 +317,9 @@ impl Walker<'_> {
                 }
             }
             "test_command" => {
-                // `[[ … ]]` only tests, but may hold substitutions.
+                // `[[ … ]]` only tests, but may hold substitutions, and
+                // its number comparisons evaluate arithmetic.
+                self.test_arithmetic(node);
                 self.collect_substitutions(node);
                 self.script.commands.push(Simple {
                     words: vec![Word {
@@ -329,7 +339,8 @@ impl Walker<'_> {
             }
             "ERROR" => self.unsupported("a syntax ShadowCode cannot read"),
             other if other.ends_with("_expression") || other == "arithmetic_expansion" => {
-                self.collect_substitutions(node);
+                // `(( … ))` and the parts of `for (( … ))`.
+                self.arithmetic(node);
             }
             other => {
                 let what = format!("`{other}`");
@@ -440,6 +451,15 @@ impl Walker<'_> {
                 }
                 (_, "subshell") => self.statement(child, None, true),
                 (_, "comment") => {}
+                // `{NAME}>FILE` puts the descriptor's number in NAME.
+                (_, "word" | "concatenation")
+                    if named_descriptor(&self.text(child)).is_some()
+                        && matches!(self.source.get(child.end_byte()), Some(b'<' | b'>')) =>
+                {
+                    let text = self.text(child);
+                    let name = named_descriptor(&text).unwrap_or_default().to_owned();
+                    self.assigned(vec![name], &text);
+                }
                 _ => simple.words.push(self.word(child)),
             }
         }
@@ -538,11 +558,25 @@ impl Walker<'_> {
         (redirect, rest)
     }
 
-    /// Commands inside `$(…)` or `<(…)` anywhere below `node`.
+    /// Commands inside `$(…)` or `<(…)` anywhere below `node`, and the
+    /// variables its arithmetic and `${NAME:=…}` assign.
     fn collect_substitutions(&mut self, node: Node) {
-        if matches!(node.kind(), "command_substitution" | "process_substitution") {
-            self.statement(node, None, true);
-            return;
+        match node.kind() {
+            "command_substitution" | "process_substitution" => {
+                self.statement(node, None, true);
+                return;
+            }
+            "arithmetic_expansion" | "subscript" if !self.arithmetic => {
+                self.arithmetic(node);
+                return;
+            }
+            "expansion" => {
+                let text = self.text(node);
+                if let Some(name) = default_assignment(&text) {
+                    self.assigned(vec![name], &text);
+                }
+            }
+            _ => {}
         }
         if !self.enter() {
             return;
@@ -551,6 +585,92 @@ impl Walker<'_> {
             self.collect_substitutions(child);
         }
         self.depth -= 1;
+    }
+
+    /// An arithmetic expression (`$((…))`, `((…))`, an array index): the
+    /// variables it assigns become a step, then its substitutions are
+    /// followed.
+    fn arithmetic(&mut self, node: Node) {
+        if !self.arithmetic {
+            let text = self.text(node);
+            self.assigned(arithmetic_targets(&text), &text);
+        }
+        let outer = std::mem::replace(&mut self.arithmetic, true);
+        if self.enter() {
+            for child in named_children(node) {
+                self.collect_substitutions(child);
+            }
+            self.depth -= 1;
+        }
+        self.arithmetic = outer;
+    }
+
+    /// `[[ A -eq B ]]` and the other number comparisons, and `-v NAME[I]`,
+    /// evaluate their operands as arithmetic.
+    fn test_arithmetic(&mut self, node: Node) {
+        const OPERATORS: &[&str] = &["-eq", "-ne", "-lt", "-le", "-gt", "-ge", "-v"];
+        if !self.enter() {
+            return;
+        }
+        for child in named_children(node) {
+            let arithmetic = matches!(child.kind(), "binary_expression" | "unary_expression")
+                && named_children(child).iter().any(|part| {
+                    part.kind() == "test_operator" && OPERATORS.contains(&self.text(*part).as_str())
+                });
+            if arithmetic {
+                let text = self.text(child);
+                self.assigned(arithmetic_targets(&text), &text);
+            } else {
+                self.test_arithmetic(child);
+            }
+        }
+        self.depth -= 1;
+    }
+
+    /// `for NAME in VALUES` (or `select`): a step that sets NAME to each
+    /// value, or to the arguments when there is no `in`.
+    fn loop_variable(
+        &mut self,
+        node: Node,
+        pipe: Option<(usize, usize, usize)>,
+        substituted: bool,
+    ) {
+        let mut name = None;
+        let mut values = Vec::new();
+        let mut cursor = node.walk();
+        for (index, child) in node.named_children(&mut cursor).enumerate() {
+            match node.field_name_for_named_child(index as u32) {
+                Some("variable") => name = Some(self.text(child)),
+                Some("value") => values.push(self.text(child)),
+                _ => {}
+            }
+        }
+        let Some(name) = name else {
+            return;
+        };
+        if values.is_empty() {
+            values.push("\"$@\"".into());
+        }
+        self.script.commands.push(Simple {
+            assignments: values.iter().map(|v| format!("{name}={v}")).collect(),
+            pipeline: pipe,
+            substituted,
+            ..Simple::default()
+        });
+    }
+
+    /// A step that sets `names` to `value` (the source it comes from).
+    fn assigned(&mut self, names: Vec<String>, value: &str) {
+        if names.is_empty() {
+            return;
+        }
+        self.script.commands.push(Simple {
+            assignments: names
+                .into_iter()
+                .map(|name| format!("{name}={value}"))
+                .collect(),
+            ..Simple::default()
+        });
     }
 
     fn word(&mut self, node: Node) -> Word {
@@ -668,6 +788,114 @@ impl Walker<'_> {
             }
         }
     }
+}
+
+/// The variables an arithmetic expression assigns: `NAME=…`, `NAME+=…`
+/// and the other assignment operators, `NAME++`, `--NAME`, also with an
+/// index (`a[i]=1`). A name written `$NAME` or `${NAME}` stands for the
+/// variable NAME holds and is returned as written, `$NAME`.
+pub fn arithmetic_targets(text: &str) -> Vec<String> {
+    const ASSIGN: &[&str] = &[
+        "<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=", "++", "--",
+    ];
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let bytes = text.as_bytes();
+    let mut names = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let start = at;
+        if !(bytes[at].is_ascii_alphabetic() || bytes[at] == b'_')
+            || (at > 0 && ident(bytes[at - 1]))
+        {
+            at += 1;
+            continue;
+        }
+        while at < bytes.len() && ident(bytes[at]) {
+            at += 1;
+        }
+        let name = &text[start..at];
+        let before = &text[..start];
+        let (dollar, before) = if let Some(before) = before.strip_suffix('$') {
+            (true, before)
+        } else if let Some(before) = before.strip_suffix("${") {
+            (true, before)
+        } else {
+            (false, before)
+        };
+        let mut end = at;
+        if dollar && bytes.get(end) == Some(&b'}') {
+            end += 1;
+        }
+        let mut rest = text[end..].trim_start();
+        // An index, which may hold brackets of its own.
+        if rest.starts_with('[') {
+            let mut depth = 0;
+            let mut close = rest.len();
+            for (offset, c) in rest.char_indices() {
+                match c {
+                    '[' => depth += 1,
+                    ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = offset + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            rest = rest[close..].trim_start();
+        }
+        let before = before.trim_end();
+        let assigns = (ASSIGN.iter().any(|op| rest.starts_with(op)) && !rest.starts_with("=="))
+            || before.ends_with("++")
+            || before.ends_with("--");
+        if assigns {
+            let name = if dollar {
+                format!("${name}")
+            } else {
+                name.to_owned()
+            };
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// The variable `${NAME:=…}` or `${NAME=…}` assigns, `$NAME` for
+/// `${!NAME:=…}`.
+fn default_assignment(text: &str) -> Option<String> {
+    let inner = text.strip_prefix("${")?;
+    let (indirect, inner) = match inner.strip_prefix('!') {
+        Some(inner) => (true, inner),
+        None => (false, inner),
+    };
+    let end = inner
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(inner.len());
+    let name = &inner[..end];
+    let mut rest = &inner[end..];
+    if rest.starts_with('[') {
+        rest = &rest[rest.find(']')? + 1..];
+    }
+    let valid = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
+    (valid && (rest.starts_with(":=") || rest.starts_with('='))).then(|| {
+        if indirect {
+            format!("${name}")
+        } else {
+            name.to_owned()
+        }
+    })
+}
+
+/// NAME in a `{NAME}` word written right before a redirect.
+fn named_descriptor(text: &str) -> Option<&str> {
+    let name = text.strip_prefix('{')?.strip_suffix('}')?;
+    let valid = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    valid.then_some(name)
 }
 
 fn named_children(node: Node) -> Vec<Node> {
@@ -1024,5 +1252,31 @@ mod tests {
             .iter()
             .any(|c| c.base() == "curl" && c.substituted));
         assert!(process.commands.iter().any(|c| c.base() == "bash"));
+    }
+
+    #[test]
+    fn loops_arithmetic_and_named_descriptors_set_variables() {
+        let assignments = |source: &str| -> Vec<String> {
+            parse(source)
+                .commands
+                .into_iter()
+                .flat_map(|c| c.assignments)
+                .collect()
+        };
+        assert_eq!(
+            assignments("for PATH in a 'b c'; do ls; done"),
+            ["PATH=a", "PATH='b c'"]
+        );
+        assert_eq!(assignments("for x; do ls; done"), ["x=\"$@\""]);
+        assert_eq!(assignments("echo $((PATH=1))"), ["PATH=$((PATH=1))"]);
+        assert_eq!(assignments("((i++)); ((--j))"), ["i=i++", "j=--j"]);
+        assert_eq!(assignments("echo ${HOME:=x}"), ["HOME=${HOME:=x}"]);
+        assert_eq!(assignments("echo {fd}>/dev/null"), ["fd={fd}"]);
+        assert_eq!(programs("echo hi {fd}>/dev/null"), ["", "echo hi"]);
+        assert!(assignments("echo $((a == 1)) ${x:-y} [[ $a = b ]]").is_empty());
+        assert_eq!(
+            arithmetic_targets("a[i=1] += 2, $N = 3, ${M}-=1, b <= c, d == e, 0x1f, --k"),
+            ["a", "i", "$N", "$M", "k"]
+        );
     }
 }

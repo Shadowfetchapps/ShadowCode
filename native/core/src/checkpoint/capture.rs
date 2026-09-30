@@ -361,7 +361,13 @@ pub fn cannot_write(command: &str) -> bool {
                     | "whoami"
                     | "id"
                     | "true"
-            ) && !rest.iter().any(|a| a.starts_with("--pre"));
+            ) && !rest.iter().any(|a| {
+                // rg runs these programs (`--hostname-bin` for the links
+                // `--hyperlink-format` makes).
+                a.starts_with("--pre")
+                    || a.starts_with("--hostname-bin")
+                    || a.starts_with("--hyperlink-format")
+            });
             let git_reader = *first == "git"
                 && matches!(
                     rest.first().copied(),
@@ -1172,6 +1178,9 @@ mod tests {
             "git diff --output=patch",
             "git checkout .",
             "rg --pre ./x foo",
+            "rg --hostname-bin=.cache/h.sh --hyperlink-format=default TODO",
+            "rg --hostname-bin .cache/h.sh TODO",
+            "rg --hyperlink-format default TODO",
             "cargo build",
             "FOO=1 cat x",
             "$(touch x)",
