@@ -104,8 +104,8 @@ jobs:
       - run: cargo +1.95.0 build --release -p shadowcode-core --examples --locked
       - name: Check pinned-source failures and mirror recovery
         run: node --test scripts/test-native-source-fetch.mjs
-      - name: Prove packaging PATH ignores host node hijacks
-        run: node --test scripts/test-native-packaging-env.mjs
+      - name: Packaging PATH ignores host node hijacks; Debian package checks
+        run: node --test scripts/test-native-packaging-env.mjs scripts/test-native-deb.mjs
       - name: Restore the managed llama.cpp build
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:

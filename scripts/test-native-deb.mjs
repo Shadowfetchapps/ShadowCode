@@ -155,6 +155,17 @@ test("the Debian changelog comes from the AppStream release history", () => {
   );
   assert.ok(text.includes(`releases/tag/v${version}`));
   assert.equal([...text.matchAll(/^shadow-code \(/gm)].length, releases.length);
+  // lintian refuses a newest entry that is not dated after the one before
+  // (latest-changelog-entry-without-new-date): tracked dates strictly fall.
+  const stamps = releases.map(({ date }) =>
+    Date.parse(date.includes("T") ? date : `${date}T00:00:00Z`),
+  );
+  stamps.slice(1).forEach((stamp, index) =>
+    assert.ok(
+      stamps[index] > stamp,
+      `AppStream release ${releases[index].version} must be dated after ${releases[index + 1].version}`,
+    ),
+  );
 });
 
 test("the copyright file carries the license and NOTICE in DEP-5 form", () => {

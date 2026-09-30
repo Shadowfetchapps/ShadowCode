@@ -29,7 +29,7 @@ grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' artifacts/built-pro
 node --input-type=module -e 'import assert from "node:assert/strict"; import { readFileSync } from "node:fs"; const receipt = JSON.parse(readFileSync("artifacts/native-endurance/native-endurance.json", "utf8")); assert.equal(receipt.passed, true); assert.equal(receipt.completed, 100);'`, scope: '100 sequential short command tasks through the real X11/WebKit window with explicit approvals and resource/listener measurements; the shared smoke optional cloud-consent observation is reported separately. Separate from representative long-stream input latency, physical Wayland, GPU inference and release-package endurance.' },
   'managed-runtime': { script: 'bash scripts/build-llama.cpp.sh --no-user-install\nnode --test --test-reporter=tap scripts/test-llama-runtime.mjs' },
   packages: { artifacts: true, script: `${version}\n` + String.raw`node scripts/build-native.mjs
-node --test --test-reporter=tap scripts/test-native-packaging-env.mjs
+node --test --test-reporter=tap scripts/test-native-packaging-env.mjs scripts/test-native-deb.mjs
 node scripts/check-native-package.mjs "target/release/bundle/appimage/ShadowCode_${'${VERSION}'}_amd64.AppImage" "target/release/bundle/deb/ShadowCode_${'${VERSION}'}_amd64.deb"
 node scripts/test-native-runtime-write-errors.mjs
 node scripts/test-native-runtime-sources.mjs
