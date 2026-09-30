@@ -12,9 +12,10 @@
 //! Files Git shows as binary (real binary content, or a `-diff` or `binary`
 //! attribute) are checked by name, and their content is read from Git when
 //! it is text. A check that could not read everything (too large, too many
-//! commits) says so in `unchecked`, and the callers refuse as for a finding.
-//! These Git processes obey none of the repository's hooks, fsmonitor,
-//! signature programs or filter drivers (`crate::git_guard`).
+//! commits, over a minute) says so in `unchecked`, and the callers refuse as
+//! for a finding. These Git processes obey none of the repository's hooks,
+//! fsmonitor, signature programs or filter drivers (`crate::git_guard`), nor
+//! its settings that change how a patch names files or which changes it shows.
 use anyhow::{ensure, Context, Result};
 use regex::Regex;
 use serde::Serialize;
@@ -36,8 +37,18 @@ const MAX_FINDINGS: usize = 50;
 const KEY_CHARS: usize = 64;
 /// Largest file read to see whether changed lines are inside a private key.
 const MAX_KEY_FILE: usize = 1024 * 1024;
+/// Longest a check reads the patch, and then the files it left out.
+const READ_TIME: Duration = Duration::from_secs(60);
+/// Bytes Git looks at to decide that a file is binary (a NUL byte there).
+const BINARY_TEST: usize = 8000;
+/// Files up to this size are read whole in one batch; a larger one is read
+/// only as far as it needs to be, by a Git of its own (reading a megabyte
+/// costs about as much as starting Git).
+const SMALL_BLOB: usize = 1024 * 1024;
 /// Why a check is incomplete.
 const TOO_LARGE: &str = "Part of the changes is too large to check for secrets (over 32 MB).";
+const TOO_SLOW: &str =
+    "Reading the changes took too long (over a minute), so part of them was not checked for secrets.";
 const TOO_MANY_COMMITS: &str =
     "More than 500 commits would be pushed; only the newest 500 were checked for secrets.";
 /// The marker that allows a line.
@@ -360,10 +371,49 @@ fn base64_chars(text: &str) -> usize {
         .count()
 }
 
+/// A line of a key as source code often holds it, one string literal per
+/// line (`"MIIE…\n"`, `"…",`, `+ "…" +`, `"…\n" \`, `b"…"`): the text
+/// inside. Quotes, joining and `\n` are never key data, so taking them off
+/// cannot turn other text into key data.
+fn unwrap_literal(text: &str) -> &str {
+    let quote = |c: char| matches!(c, '"' | '\'' | '`');
+    let mut text = text.trim();
+    loop {
+        let before = text.len();
+        // A string prefix (`b"`, `r'`, `u8"`, `L"`).
+        if let Some(at) = text
+            .bytes()
+            .take(3)
+            .position(|b| matches!(b, b'"' | b'\'' | b'`'))
+        {
+            if text.as_bytes()[..at].iter().all(u8::is_ascii_alphanumeric) {
+                text = &text[at + 1..];
+            }
+        }
+        text = text
+            .trim_start_matches(|c: char| {
+                c.is_whitespace() || quote(c) || matches!(c, '(' | '+' | '.' | '&' | ',')
+            })
+            .trim_end_matches(|c: char| {
+                c.is_whitespace()
+                    || quote(c)
+                    || matches!(c, ')' | '+' | '.' | '&' | ',' | ';' | '\\')
+            });
+        for escape in ["\\n", "\\r"] {
+            if let Some(rest) = text.strip_suffix(escape) {
+                text = rest;
+            }
+        }
+        if text.len() == before {
+            return text;
+        }
+    }
+}
+
 /// The key data characters of a line inside a key block, or `None` for a
 /// line that is not key data.
 fn key_data(text: &str) -> Option<usize> {
-    let text = text.trim();
+    let text = unwrap_literal(text);
     text.bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
         .then_some(text.len())
@@ -372,9 +422,11 @@ fn key_data(text: &str) -> Option<usize> {
 /// An armor header inside a key block (`Proc-Type: 4,ENCRYPTED`,
 /// `Version: …`).
 fn key_header(text: &str) -> bool {
-    text.trim().split_once(": ").is_some_and(|(name, _)| {
-        !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    })
+    unwrap_literal(text)
+        .split_once(": ")
+        .is_some_and(|(name, _)| {
+            !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
 }
 
 /// A whole key on one line (a JSON string with `\n` escapes): the key data
@@ -409,9 +461,65 @@ fn key_blocks(text: &str) -> Vec<(usize, usize, usize)> {
     blocks
 }
 
-/// The path in `diff --git a/P b/P` (renames are off, so both are the same).
-/// Quoted names are left to the `+++` line.
+/// A name Git quoted in a patch (it holds a quote, a backslash or a
+/// control character): `"…"` with C escapes. Returns the name and what
+/// follows the closing quote.
+fn unquote(text: &str) -> Option<(String, &str)> {
+    let quoted = text.strip_prefix('"')?;
+    let mut bytes = Vec::new();
+    let mut chars = quoted.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '"' => {
+                return Some((
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                    &quoted[at + 1..],
+                ))
+            }
+            '\\' => {
+                let (_, escaped) = chars.next()?;
+                bytes.push(match escaped {
+                    'a' => 7,
+                    'b' => 8,
+                    't' => b'\t',
+                    'n' => b'\n',
+                    'v' => 11,
+                    'f' => 12,
+                    'r' => b'\r',
+                    '"' | '\\' => escaped as u8,
+                    '0'..='3' => {
+                        let digits = [escaped, chars.next()?.1, chars.next()?.1];
+                        let mut byte = 0u8;
+                        for digit in digits {
+                            byte = byte * 8 + digit.to_digit(8)? as u8;
+                        }
+                        byte
+                    }
+                    _ => return None,
+                });
+            }
+            c => bytes.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes()),
+        }
+    }
+    None
+}
+
+/// A path as Git writes it in a patch line, quoted or not.
+fn patch_path(text: &str) -> String {
+    match unquote(text) {
+        Some((path, _)) => path,
+        None => text.to_owned(),
+    }
+}
+
+/// The path in `diff --git a/P b/P` (renames are off, so both are the same;
+/// the prefixes are pinned, whatever `diff.noprefix` and the like say).
 fn header_path(rest: &str) -> Option<String> {
+    if let Some((left, after)) = unquote(rest) {
+        let right = patch_path(after.strip_prefix(' ')?);
+        let path = left.strip_prefix("a/")?;
+        return (right.strip_prefix("b/")? == path).then(|| path.to_owned());
+    }
     let rest = rest.strip_prefix("a/")?;
     let half = rest.len().checked_sub(3)? / 2;
     let (left, right) = (rest.get(..half)?, rest.get(half..)?);
@@ -521,8 +629,7 @@ impl Section {
             return;
         }
         if self.key.is_none()
-            && text.trim().len() >= 40
-            && key_data(text).is_some()
+            && key_data(text).is_some_and(|chars| chars >= 40)
             && self.loose.len() < 10_000
         {
             self.loose.push(here);
@@ -583,7 +690,7 @@ pub fn scan_patch(patch: &str, ignored: &[String]) -> Scan {
             .or_else(|| raw.strip_prefix("diff --combined "))
         {
             file.finish(&mut scan, &commit);
-            file = Section::start(Some(path.to_owned()), ignored);
+            file = Section::start(Some(patch_path(path)), ignored);
             continue;
         }
         if raw.starts_with("@@") {
@@ -616,8 +723,12 @@ pub fn scan_patch(patch: &str, ignored: &[String]) -> Scan {
             } else if raw.starts_with("deleted file mode") {
                 file.skip = true;
             } else if let Some(target) = raw.strip_prefix("+++ ") {
-                let target = target.trim();
-                let path = target.strip_prefix("b/").unwrap_or(target).to_owned();
+                // Git ends a name holding a space with a tab here.
+                let target = patch_path(target.strip_suffix('\t').unwrap_or(target));
+                let path = match target.strip_prefix("b/") {
+                    Some(path) => path.to_owned(),
+                    None => target,
+                };
                 file.name(path, ignored);
             } else if raw.starts_with("Binary files ") {
                 file.binary = true;
@@ -652,7 +763,9 @@ enum Blob {
 
 /// A Git command for the secret check, run outside the sandbox: no pager,
 /// hooks, fsmonitor, signature programs, external diff or repository
-/// filter drivers, and no look inside submodules' working trees.
+/// filter drivers, and no look inside submodules' working trees. Settings
+/// that would hide changes from the patch are pinned: the whole
+/// repository's changes (`diff.relative`), and a root commit's (`log.showRoot`).
 async fn git_command(workspace: &Path, args: &[&str]) -> Result<tokio::process::Command> {
     let mut command = tokio::process::Command::new("git");
     command
@@ -669,6 +782,10 @@ async fn git_command(workspace: &Path, args: &[&str]) -> Result<tokio::process::
             "core.hooksPath=/dev/null",
             "-c",
             "core.fsmonitor=false",
+            "-c",
+            "diff.relative=false",
+            "-c",
+            "log.showRoot=true",
         ])
         .args(crate::git_guard::args_async(workspace, args).await?)
         .args(crate::git_guard::harden(args))
@@ -681,9 +798,12 @@ async fn git_command(workspace: &Path, args: &[&str]) -> Result<tokio::process::
     Ok(command)
 }
 
-/// A Git command's output, at most [`MAX_PATCH_BYTES`], and whether it was
-/// cut there; `None` when Git failed.
-async fn git_text(workspace: &Path, args: &[&str]) -> Result<Option<(String, bool)>> {
+/// A Git command's output, at most [`MAX_PATCH_BYTES`] read within
+/// [`READ_TIME`], and why it is incomplete; `None` when Git failed.
+async fn git_text(
+    workspace: &Path,
+    args: &[&str],
+) -> Result<Option<(String, Option<&'static str>)>> {
     let mut child = git_command(workspace, args)
         .await?
         .spawn()
@@ -701,86 +821,131 @@ async fn git_text(workspace: &Path, args: &[&str]) -> Result<Option<(String, boo
         }
         Ok(child.wait().await?.success())
     };
-    let done = tokio::time::timeout(Duration::from_secs(60), read)
-        .await
-        .context("Reading the changes for the secret check timed out")??;
-    if !done {
-        return Ok(None);
-    }
-    let cut = bytes.len() > MAX_PATCH_BYTES;
+    // Out of time: what was read is checked, and the rest is reported.
+    let unchecked = match tokio::time::timeout(READ_TIME, read).await {
+        Ok(done) => {
+            if !done? {
+                return Ok(None);
+            }
+            None
+        }
+        Err(_) => Some(TOO_SLOW),
+    };
+    let unchecked = unchecked.or((bytes.len() > MAX_PATCH_BYTES).then_some(TOO_LARGE));
     bytes.truncate(MAX_PATCH_BYTES);
-    Ok(Some((String::from_utf8_lossy(&bytes).into_owned(), cut)))
+    Ok(Some((
+        String::from_utf8_lossy(&bytes).into_owned(),
+        unchecked,
+    )))
 }
 
-/// Read blobs through one `git cat-file --batch`. Text (no NUL byte in the
-/// first 8000 bytes, as Git decides) is kept up to each blob's limit and
-/// `budget` bytes in all; binary content is skipped.
-async fn read_blobs(
+/// `git cat-file <batch>` asked for `ids`, one per line.
+async fn cat_file(
     workspace: &Path,
-    wanted: &HashMap<String, usize>,
-    budget: usize,
-) -> Result<HashMap<String, Blob>> {
-    let ids: Vec<&String> = wanted.keys().collect();
-    let mut child = git_command(workspace, &["cat-file", "--batch"])
+    batch: &str,
+    ids: &[&String],
+) -> Result<(
+    tokio::process::Child,
+    tokio::io::BufReader<tokio::process::ChildStdout>,
+)> {
+    let mut child = git_command(workspace, &["cat-file", batch])
         .await?
         .stdin(std::process::Stdio::piped())
         .spawn()
         .context("Git failed to start for the secret check")?;
     let mut input = child.stdin.take().context("Git has no input")?;
     let request: String = ids.iter().map(|id| format!("{id}\n")).collect();
-    let writer = tokio::spawn(async move {
+    tokio::spawn(async move {
         let _ = input.write_all(request.as_bytes()).await;
     });
-    let mut reader = tokio::io::BufReader::new(child.stdout.take().context("Git has no output")?);
-    let mut blobs = HashMap::new();
+    let reader = tokio::io::BufReader::new(child.stdout.take().context("Git has no output")?);
+    Ok((child, reader))
+}
+
+/// The type and size in a `cat-file` answer (`<id> <type> <size>`);
+/// `None` for `<id> missing`.
+fn object_header(line: &str) -> Option<(&str, usize)> {
+    let mut fields = line.split_whitespace().skip(1);
+    Some((fields.next()?, fields.next()?.parse().ok()?))
+}
+
+/// Read blobs into `blobs`. Text (no NUL byte in the first
+/// [`BINARY_TEST`] bytes, as Git decides) is kept up to each blob's limit
+/// and `budget` bytes in all. Sizes come first (`--batch-check`): small
+/// blobs are read whole through one `cat-file --batch`, and a large one on
+/// its own, stopped once its first bytes show it is binary, so a large
+/// binary file costs no more than those bytes.
+async fn read_blobs(
+    workspace: &Path,
+    wanted: &HashMap<String, usize>,
+    budget: usize,
+    blobs: &mut HashMap<String, Blob>,
+) -> Result<()> {
+    let ids: Vec<&String> = wanted.keys().collect();
+    let (_check, mut reader) = cat_file(workspace, "--batch-check", &ids).await?;
+    let (mut small, mut large) = (Vec::new(), Vec::new());
+    for id in &ids {
+        let mut header = String::new();
+        if reader.read_line(&mut header).await? == 0 {
+            break;
+        }
+        match object_header(&header) {
+            Some(("blob", size)) if size <= SMALL_BLOB => small.push(*id),
+            Some(("blob", size)) => large.push((*id, size)),
+            _ => {}
+        }
+    }
+    // Binary or too large from its first bytes, or `None`: text to keep.
     let mut kept = 0usize;
-    let read = async {
-        for id in &ids {
-            // "<id> <type> <size>", or "<id> missing".
+    let mut verdict = |id: &String, head: &[u8], size: usize| {
+        if head.contains(&0) {
+            Some(Blob::Binary)
+        } else if size <= wanted[id] && kept + size <= budget {
+            kept += size;
+            None
+        } else {
+            Some(Blob::TooLarge)
+        }
+    };
+    if !small.is_empty() {
+        let (_batch, mut reader) = cat_file(workspace, "--batch", &small).await?;
+        for id in small {
             let mut header = String::new();
             if reader.read_line(&mut header).await? == 0 {
                 break;
             }
-            let mut fields = header.split_whitespace().skip(1);
-            let (Some(kind), Some(size)) = (
-                fields.next(),
-                fields.next().and_then(|s| s.parse::<usize>().ok()),
-            ) else {
+            let Some((_, size)) = object_header(&header) else {
                 continue;
             };
-            let head = size.min(8000);
-            let mut data = vec![0; head];
+            // The content and its closing newline.
+            let mut data = vec![0; size + 1];
             reader.read_exact(&mut data).await?;
-            let binary = kind != "blob" || data.contains(&0);
-            if !binary && size <= wanted[*id] && kept + size <= budget {
-                data.resize(size, 0);
-                reader.read_exact(&mut data[head..]).await?;
-                kept += size;
-                blobs.insert(
-                    (*id).clone(),
-                    Blob::Text(String::from_utf8_lossy(&data).into_owned()),
-                );
-            } else {
-                tokio::io::copy(
-                    &mut (&mut reader).take((size - head) as u64),
-                    &mut tokio::io::sink(),
-                )
-                .await?;
-                blobs.insert(
-                    (*id).clone(),
-                    if binary { Blob::Binary } else { Blob::TooLarge },
-                );
-            }
-            let mut newline = [0u8; 1];
-            reader.read_exact(&mut newline).await?;
+            data.truncate(size);
+            let blob = verdict(id, &data[..size.min(BINARY_TEST)], size)
+                .unwrap_or_else(|| Blob::Text(String::from_utf8_lossy(&data).into_owned()));
+            blobs.insert(id.clone(), blob);
         }
-        anyhow::Ok(())
-    };
-    tokio::time::timeout(Duration::from_secs(60), read)
-        .await
-        .context("Reading changed files for the secret check timed out")??;
-    let _ = writer.await;
-    Ok(blobs)
+    }
+    for (id, size) in large {
+        let mut child = git_command(workspace, &["cat-file", "blob", id])
+            .await?
+            .spawn()
+            .context("Git failed to start for the secret check")?;
+        let mut stdout = child.stdout.take().context("Git has no output")?;
+        let mut data = vec![0; BINARY_TEST];
+        stdout.read_exact(&mut data).await?;
+        let blob = match verdict(id, &data, size) {
+            // Git is stopped when `child` is dropped.
+            Some(blob) => blob,
+            None => {
+                data.resize(size, 0);
+                stdout.read_exact(&mut data[BINARY_TEST..]).await?;
+                Blob::Text(String::from_utf8_lossy(&data).into_owned())
+            }
+        };
+        blobs.insert(id.clone(), blob);
+    }
+    Ok(())
 }
 
 /// Check what the patch left out: files Git showed as binary are read and
@@ -805,7 +970,16 @@ async fn follow_up(
         let entry = wanted.entry(followup.blob.clone()).or_default();
         *entry = (*entry).max(limit);
     }
-    let blobs = read_blobs(workspace, &wanted, budget).await?;
+    let mut blobs = HashMap::new();
+    // Out of time: the files read so far are checked, and the rest is
+    // reported.
+    let read = read_blobs(workspace, &wanted, budget, &mut blobs);
+    match tokio::time::timeout(READ_TIME, read).await {
+        Ok(result) => result?,
+        Err(_) => {
+            scan.unchecked.get_or_insert(TOO_SLOW);
+        }
+    }
     for followup in followups {
         let commit = &followup.commit;
         match (&followup.what, blobs.get(&followup.blob)) {
@@ -838,7 +1012,7 @@ async fn follow_up(
 
 /// The staged changes of `workspace`.
 pub async fn staged(workspace: &Path) -> Result<Scan> {
-    let (patch, cut) = git_text(
+    let (patch, unchecked) = git_text(
         workspace,
         &[
             "diff",
@@ -849,15 +1023,15 @@ pub async fn staged(workspace: &Path) -> Result<Scan> {
             "-U0",
             "--no-textconv",
             "--full-index",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
         ],
     )
     .await?
     .context("Could not read the staged changes")?;
     let ignored = ignore_patterns(workspace);
     let mut scan = scan_patch(&patch, &ignored);
-    if cut {
-        scan.unchecked = Some(TOO_LARGE);
-    }
+    scan.unchecked = unchecked;
     follow_up(
         workspace,
         &mut scan,
@@ -878,7 +1052,7 @@ pub async fn unpushed(workspace: &Path, commit: &str, remote: &str) -> Result<Sc
     );
     let remotes = format!("--remotes={remote}");
     let most = format!("--max-count={}", MAX_COMMITS + 1);
-    let (patch, cut) = git_text(
+    let (patch, unchecked) = git_text(
         workspace,
         &[
             "log",
@@ -890,6 +1064,8 @@ pub async fn unpushed(workspace: &Path, commit: &str, remote: &str) -> Result<Sc
             "--no-textconv",
             "-U0",
             "--full-index",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             "--format=commit:%H",
             &most,
             commit,
@@ -901,8 +1077,8 @@ pub async fn unpushed(workspace: &Path, commit: &str, remote: &str) -> Result<Sc
     .context("Could not read the commits to push")?;
     let ignored = ignore_patterns(workspace);
     let mut scan = scan_patch(&patch, &ignored);
-    if cut {
-        scan.unchecked = Some(TOO_LARGE);
+    if unchecked.is_some() {
+        scan.unchecked = unchecked;
     } else if patch.lines().filter(|l| l.starts_with("commit:")).count() > MAX_COMMITS {
         scan.unchecked = Some(TOO_MANY_COMMITS);
     }
@@ -1088,6 +1264,128 @@ diff --git a/gone.p12 b/gone.p12\ndeleted file mode 100644\nindex {a}..{zero}\nB
         );
         let ignored = scan_patch(&text, &["*.p12".into(), "*.json".into()]);
         assert!(ignored.is_clean() && ignored.followups.is_empty());
+    }
+
+    /// Names with a quote, a backslash or a control character are quoted
+    /// by Git, and a name with a space gets a tab after it on `+++`.
+    #[test]
+    fn quoted_and_spaced_names_are_read() {
+        let text = format!(
+            "diff --git \"a/we\\\"ird.p12\" \"b/we\\\"ird.p12\"\nnew file mode 100644\nindex {zero}..{a}\nBinary files /dev/null and \"b/we\\\"ird.p12\" differ\n\
+diff --git \"a/conf\\\\x/.env\" \"b/conf\\\\x/.env\"\nnew file mode 100644\nindex {zero}..{b}\n--- /dev/null\n+++ \"b/conf\\\\x/.env\"\n@@ -0,0 +1 @@\n+A=1\n\
+diff --git a/my key.p12 b/my key.p12\nnew file mode 100644\nindex {zero}..{c}\nBinary files /dev/null and b/my key.p12 differ\n\
+diff --git a/t\\303\\251st/a b.env b/t\\303\\251st/a b.env\nnew file mode 100644\nindex {zero}..{d}\n--- /dev/null\n+++ b/t\\303\\251st/a b.env\t\n@@ -0,0 +1 @@\n+A=1\n",
+            zero = "0".repeat(40),
+            a = "a".repeat(40),
+            b = "b".repeat(40),
+            c = "c".repeat(40),
+            d = "d".repeat(40),
+        );
+        let scan = scan_patch(&text, &[]);
+        let found: Vec<_> = scan
+            .findings
+            .iter()
+            .map(|f| (f.path.as_str(), f.kind.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("we\"ird.p12", "a private key file"),
+                ("conf\\x/.env", "an environment file"),
+                ("my key.p12", "a private key file"),
+            ],
+            "{scan:?}"
+        );
+        assert_eq!(scan.followups.len(), 2, "{scan:?}");
+        assert_eq!(
+            unquote("\"t\\303\\251st\\tx\" rest"),
+            Some(("t\u{e9}st\tx".to_owned(), " rest"))
+        );
+        assert_eq!(unquote("\"open"), None);
+        assert_eq!(unquote("plain"), None);
+    }
+
+    /// Keys written into source code, one string literal per line.
+    #[test]
+    fn keys_held_in_string_literals_are_found() {
+        let begin = armor("BEGIN", "RSA PRIVATE KEY");
+        let end = armor("END", "RSA PRIVATE KEY");
+        let data = &body()[..64];
+        let forms: [(&str, Vec<String>); 5] = [
+            (
+                "cert.h",
+                vec![
+                    format!("const char key[] = \"{begin}\\n\""),
+                    format!("    \"{data}\\n\""),
+                    format!("    \"{data}\\n\""),
+                    format!("    \"{end}\\n\";"),
+                ],
+            ),
+            (
+                "key.js",
+                vec![
+                    "const KEY = [".into(),
+                    format!("  \"{begin}\","),
+                    format!("  \"{data}\","),
+                    format!("  '{data}',"),
+                    format!("  \"{end}\","),
+                    "].join(\"\\n\");".into(),
+                ],
+            ),
+            (
+                "Key.java",
+                vec![
+                    format!("String key = \"{begin}\\n\""),
+                    format!("    + \"{data}\\n\""),
+                    format!("    + \"{data}\\n\""),
+                    format!("    + \"{end}\";"),
+                ],
+            ),
+            (
+                "key.py",
+                vec![
+                    format!("KEY = (b\"{begin}\\n\""),
+                    format!("       b\"{data}\\n\""),
+                    format!("       b\"{data}\\n\""),
+                    format!("       b\"{end}\\n\")"),
+                ],
+            ),
+            (
+                "key.go",
+                vec![
+                    format!("var key = \"{begin}\\n\" +"),
+                    format!("\t\"{data}\\n\" +"),
+                    format!("\t\"{data}\\r\\n\" +"),
+                    format!("\t\"{end}\""),
+                ],
+            ),
+        ];
+        for (path, lines) in &forms {
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let scan = scan_patch(&patch(path, &lines), &[]);
+            assert_eq!(scan.findings.len(), 1, "{path}: {scan:?}");
+            assert_eq!(scan.findings[0].kind, "a private key", "{path}");
+            assert_eq!(
+                scan.findings[0].preview, "128 characters of key data",
+                "{path}"
+            );
+            // The same file read whole, for a change between its markers.
+            let whole = lines.join("\n");
+            assert_eq!(key_blocks(&whole).len(), 1, "{path}");
+        }
+        // A long line takes time in proportion to its length.
+        let long = format!("A{}", "\\n".repeat(200_000));
+        assert_eq!(key_data(&long), Some(1));
+        // Code after a quoted BEGIN line still ends the block.
+        let code = patch(
+            "pem.ts",
+            &[
+                &format!("const HEADER = \"{begin}\";"),
+                "const x = 1;",
+                &format!("const t = \"{data}\";"),
+            ],
+        );
+        assert!(scan_patch(&code, &[]).findings.is_empty());
     }
 
     #[test]
@@ -1361,6 +1659,100 @@ diff --git a/gone.p12 b/gone.p12\ndeleted file mode 100644\nindex {a}..{zero}\nB
             ],
             "{scan:?}"
         );
+        assert_eq!(scan.unchecked, None);
+    }
+
+    /// A sandboxed command can write `.git/config`: settings that change
+    /// how a patch names files, which changes it shows, or whether a root
+    /// commit has one, hide nothing.
+    #[tokio::test]
+    async fn repository_settings_do_not_change_what_is_checked() {
+        let token = github();
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        for (name, value) in [
+            ("diff.noprefix", "true"),
+            ("diff.mnemonicPrefix", "true"),
+            ("diff.srcPrefix", "x/"),
+            ("diff.dstPrefix", "y/"),
+            ("diff.relative", "true"),
+            ("log.showRoot", "false"),
+        ] {
+            git(&repo, &["config", name, value]);
+        }
+        std::fs::create_dir(repo.join("sub")).unwrap();
+        std::fs::write(repo.join("sub/readme.txt"), "hello\n").unwrap();
+        std::fs::write(repo.join("cert.p12"), b"\x30\x82\x00\x00key container").unwrap();
+        std::fs::write(repo.join(".gitattributes"), "*.json -diff\n").unwrap();
+        std::fs::write(
+            repo.join("settings.json"),
+            format!("{{\n  \"token\": \"{token}\"\n}}\n"),
+        )
+        .unwrap();
+        git(&repo, &["add", "."]);
+        let expected = [
+            ("cert.p12", None, "a private key file"),
+            ("settings.json", Some(2), "a GitHub token"),
+        ];
+        let found = |scan: &Scan| {
+            let mut found: Vec<_> = scan
+                .findings
+                .iter()
+                .map(|f| (f.path.clone(), f.line, f.kind.clone()))
+                .collect();
+            found.sort();
+            found
+        };
+        let want: Vec<_> = expected
+            .iter()
+            .map(|(p, l, k)| (p.to_string(), *l, k.to_string()))
+            .collect();
+        // From the top, and from a project folder inside the repository.
+        for workspace in [repo.clone(), repo.join("sub")] {
+            let scan = staged(&workspace).await.unwrap();
+            assert_eq!(found(&scan), want, "{}: {scan:?}", workspace.display());
+        }
+        git(&repo, &["commit", "-qm", "secrets"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        let scan = unpushed(&repo, &head, "origin").await.unwrap();
+        assert_eq!(found(&scan), want, "{scan:?}");
+
+        // The first push of a new repository sends its root commit.
+        let fresh = root.path().join("fresh");
+        std::fs::create_dir(&fresh).unwrap();
+        git(&fresh, &["init", "-q", "-b", "main"]);
+        git(&fresh, &["config", "log.showRoot", "false"]);
+        git(&fresh, &["config", "diff.noprefix", "true"]);
+        std::fs::write(fresh.join("cert.p12"), b"\x30\x82\x00\x00key").unwrap();
+        std::fs::write(fresh.join("a.py"), format!("T = '{token}'\n")).unwrap();
+        git(&fresh, &["add", "."]);
+        git(&fresh, &["commit", "-qm", "first"]);
+        let head = git(&fresh, &["rev-parse", "HEAD"]);
+        let scan = unpushed(&fresh, &head, "origin").await.unwrap();
+        let paths: Vec<_> = scan.findings.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["a.py", "cert.p12"], "{scan:?}");
+    }
+
+    /// Git shows a large file as binary by its attributes: it is read and
+    /// checked; a large file of real binary content is not read further
+    /// than its first bytes.
+    #[tokio::test]
+    async fn large_files_git_shows_as_binary() {
+        let token = github();
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        std::fs::write(repo.join(".gitattributes"), "*.log binary\n").unwrap();
+        let lines = SMALL_BLOB / 50 + 10;
+        let mut log = format!("{}\n", "x".repeat(49)).repeat(lines);
+        log.push_str(&format!("token={token}\n"));
+        std::fs::write(repo.join("build.log"), &log).unwrap();
+        std::fs::write(repo.join("model.bin"), vec![0u8; 3 * SMALL_BLOB]).unwrap();
+        std::fs::write(repo.join("small.bin"), b"\x00\x01binary").unwrap();
+        git(&repo, &["add", "."]);
+        let scan = staged(&repo).await.unwrap();
+        assert_eq!(scan.findings.len(), 1, "{scan:?}");
+        assert_eq!(scan.findings[0].path, "build.log");
+        assert_eq!(scan.findings[0].line, Some(lines + 1));
         assert_eq!(scan.unchecked, None);
     }
 
