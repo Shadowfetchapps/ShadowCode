@@ -52,9 +52,9 @@ inputs:
   max-cost:
     description: >-
       Most the task may spend on a paid API model, in US dollars (for example
-      2.50). Empty keeps ShadowCode's limit of $1 per task. At the limit the
-      task stops (exit code 2). Subscriptions and local models are never
-      limited.
+      2.50; from 0.01 to 100000). Empty keeps ShadowCode's limit of $1 per
+      task. At the limit the task stops (exit code 2). Subscriptions and local
+      models are never limited.
     required: false
     default: ""
   output:
@@ -131,7 +131,11 @@ runs:
         [[ "$OUTPUT" =~ ^(pull-request|comment|none)$ ]] || fail "output must be pull-request, comment or none."
         [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "version must look like 0.31.1."
         [[ -z "$PIN" || "$PIN" =~ ^[0-9a-fA-F]{64}$ ]] || fail "appimage-sha256 must be 64 hex characters."
-        [[ -z "$MAX_COST" || "$MAX_COST" =~ ^[0-9]+(\.[0-9]+)?$ ]] || fail "max-cost must be an amount in US dollars, such as 2.50."
+        if [[ -n "$MAX_COST" ]]; then
+          # The same range ShadowCode accepts for --max-cost and spending.daily_usd.
+          [[ "$MAX_COST" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v usd="$MAX_COST" 'BEGIN { exit !(usd + 0 >= 0.01 && usd + 0 <= 100000) }' ||
+            fail "max-cost must be an amount in US dollars from 0.01 to 100000, such as 2.50."
+        fi
 
     - name: Download and verify ShadowCode
       id: install
@@ -179,8 +183,11 @@ runs:
         SHADOWCODE_API_KEY: ${{ inputs.api-key }}
       run: |
         set -uo pipefail
-        profile="$RUNNER_TEMP/shadowcode-profile"
-        result="$RUNNER_TEMP/shadowcode-result.json"
+        # A new folder for each use of the action: a job that uses it twice
+        # must not carry the first task's spending or settings into the second.
+        run_dir="$(mktemp -d "$RUNNER_TEMP/shadowcode-run.XXXXXX")" || exit 1
+        profile="$run_dir/profile"
+        result="$run_dir/result.json"
         mkdir -p "$profile"
         sc() { "$SHADOWCODE" --profile "$profile" --workspace "$PWD" "$@"; }
         task="$TASK"
@@ -207,7 +214,7 @@ runs:
         args=()
         if [[ -n "$MAX_COST" ]]; then
           args+=(--max-cost "$MAX_COST")
-          # The profile is new for each run, so today's total is this task's:
+          # The profile is new for each use, so today's total is this task's:
           # the daily limit follows max-cost so it never stops the task first.
           sc config spending.daily_usd "$MAX_COST" >/dev/null
         fi
@@ -270,12 +277,19 @@ runs:
         }
         if [[ "$STATUS" == "spending_limit" ]]; then
           # The CLI's advice (--max-cost, --interactive) is for a terminal.
-          summary="It reached the limit for one task."
+          kind="$(jq -r '.limit.kind // empty' "$RESULT" 2>/dev/null || true)"
           spent="$(jq -r '.limit.spent // empty' "$RESULT" 2>/dev/null || true)"
           limit="$(jq -r '.limit.limit // empty' "$RESULT" 2>/dev/null || true)"
           about="$(jq -r 'if .limit.estimated then "about " else "" end' "$RESULT" 2>/dev/null || true)"
+          if [[ "$kind" == "daily" ]]; then
+            summary="It reached the daily spending limit."
+            format='Paid models have cost %s$%.2f today; the daily limit is $%.2f.'
+          else
+            summary="It reached the limit for one task."
+            format='It spent %s$%.2f on paid models; the limit for one task is $%.2f.'
+          fi
           if [[ "$spent" =~ ^[0-9.e+-]+$ && "$limit" =~ ^[0-9.e+-]+$ ]]; then
-            printf -v summary 'It spent %s$%.2f on paid models; the limit for one task is $%.2f.' "$about" "$spent" "$limit"
+            printf -v summary "$format" "$about" "$spent" "$limit"
           fi
         fi
         pr_url=""

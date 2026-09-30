@@ -67,14 +67,16 @@ limit), `status` (`completed`, `failed`, `needs_approval`, `spending_limit`,
 2. **Downloads** `ShadowCode_<version>_amd64.AppImage` and `SHA256SUMS` from
    the GitHub release over HTTPS, refuses to continue unless the checksum
    matches (and your `appimage-sha256`, if set), and extracts it.
-3. **Runs the task** with a fresh profile in `$RUNNER_TEMP`: trusts the
-   checkout, sets permissions to "allow edits" (shell commands still ask),
-   and runs `shadowcode run --json --approval <approval>`. Only this step
-   receives the API key, and ShadowCode starts the agent's shell commands
-   with a minimal environment that does not include it. On a paid API model
-   the task stops once it has spent `max-cost` ($1 by default): the comment
-   says how much it spent, and files it changed are not turned into a pull
-   request. Set `max-cost` higher for bigger tasks.
+3. **Runs the task** with a new profile in `$RUNNER_TEMP` each time the
+   action is used, so a second use in the same job starts from nothing:
+   trusts the checkout, sets permissions to "allow edits" (shell commands
+   still ask), and runs `shadowcode run --json --approval <approval>`. Only
+   this step receives the API key, and ShadowCode starts the agent's shell
+   commands with a minimal environment that does not include it. On a paid
+   API model the task stops once it has spent `max-cost` ($1 by default,
+   anything from 0.01 to 100000): the comment says how much it spent, and
+   files it changed are not turned into a pull request. Set `max-cost`
+   higher for bigger tasks.
 4. **Delivers the result** in a separate step with the token: for
    `pull-request`, when files changed and the task succeeded, commits to a
    new `shadowcode/run-<id>` branch, pushes it, opens a pull request and
