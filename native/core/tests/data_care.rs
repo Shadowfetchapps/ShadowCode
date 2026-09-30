@@ -864,12 +864,15 @@ fn the_command_line_backs_up_restores_resets_and_repairs() {
     assert!(asides.iter().any(|a| a.join("secrets.env").is_file()));
 }
 
+/// Tests that set the process-wide `SHADOWCODE_TEST_KEYRING` hold this.
+static TEST_KEYRING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Keys moved to the desktop keyring are in a backup with API keys, and a
-/// restore after a reset brings them back (in `secrets.env`). The only
-/// test here that sets the process-wide `SHADOWCODE_TEST_KEYRING`.
+/// restore after a reset brings them back (in `secrets.env`).
 #[tokio::test(flavor = "multi_thread")]
 async fn keys_kept_in_the_keyring_are_backed_up_and_restored() {
     use shadowcode_core::keyring;
+    let _lock = TEST_KEYRING.lock().await;
     let p = profile();
     drop(Store::open(&p.paths.database()).unwrap());
     std::env::set_var("SHADOWCODE_TEST_KEYRING", p.root.join("vault.json"));
@@ -908,5 +911,53 @@ async fn keys_kept_in_the_keyring_are_backed_up_and_restored() {
     fs::write(p.root.join("vault.json.unreachable"), "").unwrap();
     let (_, manifest) = data::create_backup(&p.paths, with_keys).unwrap();
     assert_eq!(manifest.keys_left_out, [name]);
+    std::env::remove_var("SHADOWCODE_TEST_KEYRING");
+}
+
+/// A restore that fails part way puts `secrets.env` back as it was. The
+/// backup made just before it also holds the keyring's keys in its
+/// `secrets.env`; they must not come back into the plain file.
+#[cfg(unix)]
+#[test]
+fn a_failed_restore_keeps_keyring_keys_out_of_secrets_env() {
+    use shadowcode_core::keyring;
+    let _lock = TEST_KEYRING.blocking_lock();
+    let p = profile();
+    drop(Store::open(&p.paths.database()).unwrap());
+    let remote = p.paths.config.join("remote.json");
+    fs::write(&remote, "{}").unwrap();
+    let with_keys = BackupOptions {
+        include_secrets: true,
+        ..manual()
+    };
+    let (folder, manifest) = data::create_backup(&p.paths, with_keys).unwrap();
+    let order: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+    let at = |path: &str| order.iter().position(|p| *p == path).unwrap();
+    assert!(
+        at("config/secrets.env") < at("config/remote.json"),
+        "{order:?}"
+    );
+
+    std::env::set_var("SHADOWCODE_TEST_KEYRING", p.root.join("vault.json"));
+    let name = "SHADOWCODE_TEST_ROLLBACK_KEY";
+    config::set_secret(&p.paths, name, "only-in-the-keyring").unwrap();
+    keyring::move_in(&p.paths, name).unwrap();
+    let secrets = p.paths.config.join("secrets.env");
+    let original = fs::read(&secrets).unwrap();
+    data::schedule_restore(&p.paths, &folder, true).unwrap();
+    // remote.json cannot be put in place: the restore stops after
+    // secrets.env was replaced.
+    fs::remove_file(&remote).unwrap();
+    fs::create_dir_all(remote.join("in-the-way")).unwrap();
+    let lock = p.paths.lock().unwrap();
+    let error = data::apply_pending(&p.paths).unwrap_err();
+    drop(lock);
+    assert!(
+        format!("{error:#}").contains("config/remote.json"),
+        "{error:#}"
+    );
+    assert_eq!(fs::read(&secrets).unwrap(), original);
+    assert_eq!(config::file_secret(&p.paths, name).unwrap(), None);
+    assert!(keyring::listed(&p.paths).contains(name));
     std::env::remove_var("SHADOWCODE_TEST_KEYRING");
 }

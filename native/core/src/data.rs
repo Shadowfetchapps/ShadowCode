@@ -864,6 +864,18 @@ fn apply_restore(paths: &AppPaths, pending: &Pending) -> Result<Value> {
             file.path
         );
     }
+    // secrets.env as it is, to put back if the restore fails: the backup
+    // below also holds the keyring's keys in it, which must not land in
+    // the file.
+    let secrets = resolve(paths, SECRETS)?;
+    let original_secrets = match fs::read(&secrets) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(anyhow::Error::from(error)
+                .context("Could not read secrets.env before restoring; nothing was restored"))
+        }
+    };
     // Keep what is about to be replaced.
     let (before, _) = create_backup(
         paths,
@@ -891,7 +903,7 @@ fn apply_restore(paths: &AppPaths, pending: &Pending) -> Result<Value> {
         prepared.push((temporary, target, file.path.clone()));
     }
     let database = paths.database();
-    let mut replaced = Vec::new();
+    let mut replaced: Vec<(PathBuf, PathBuf, String)> = Vec::new();
     for (temporary, target, relative) in &prepared {
         if relative == DATABASE {
             // The old write-ahead log belongs to the old database; applying it
@@ -902,6 +914,13 @@ fn apply_restore(paths: &AppPaths, pending: &Pending) -> Result<Value> {
         }
         if let Err(error) = fs::rename(temporary, target) {
             for (_, target, relative) in &replaced {
+                if relative == SECRETS {
+                    let _ = match &original_secrets {
+                        Some(bytes) => atomic_write(target, bytes, true),
+                        None => fs::remove_file(target).map_err(Into::into),
+                    };
+                    continue;
+                }
                 let _ = fs::copy(before.join(relative), target);
             }
             for (temporary, _, _) in &prepared {
