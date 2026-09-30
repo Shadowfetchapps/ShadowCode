@@ -913,7 +913,9 @@ Preview = {kind: "files", files: [{path, status: "added"|"modified"|"deleted", d
   decides the tag. `read: false` means part of the command could not be read
   ahead (a syntax error, a path or program from a variable, code built while
   it runs, a variable set that changes which programs run such as `PATH`,
-  `LD_PRELOAD`, `GIT_CONFIG_*` or `GIT_PAGER`, a reader option that starts
+  `LD_PRELOAD`, `GIT_CONFIG_*` or `GIT_PAGER`, also as a `for` variable, in
+  arithmetic, by `read`/`mapfile`/`getopts`/`printf -v`, by a `{NAME}>`
+  redirect or under a name that comes from a variable, a reader option that starts
   another program such as `bat --pager`, `rg --hostname-bin` or
   `cloc --vcs`). `checks` is where other reviews of the same action add a section.
 - `always` (since 1.0) says what "Always allow in this project" would cover

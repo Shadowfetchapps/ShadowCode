@@ -186,7 +186,9 @@ step decides the tag. A command it can't read completely (a path or program
 that comes from a variable, for example) says so, and is never tagged
 *Read-only*. Neither is a command that sets a variable which changes what
 runs (`PATH`, `LD_PRELOAD`, `GIT_CONFIG_*`, a pager or an editor, before
-the command, with `env` or with `export`), or a reader given an option that
+the command, with `env` or `export`, as a loop variable, in arithmetic such
+as `$((PATH=1))`, with `read`, or through a name held in another variable),
+or a reader given an option that
 starts another program or writes a file (`bat --pager`,
 `rg --hostname-bin`, `cloc --vcs`, `cloc --out`). Deleting the project's
 `.git` folder, or the whole project, is marked as something Rewind can't
