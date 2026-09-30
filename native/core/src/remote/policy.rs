@@ -10,6 +10,8 @@
 //! - Rules & skills imports, the export into other CLIs' folders and opening
 //!   the profile folder (`/api/rules/imports…`, `/export…`, `/folder`) are
 //!   refused: they fetch from the network or write outside ShadowCode.
+//!   While that export is on, a profile switch (`/api/rules/items` with a
+//!   `profile:` id) is refused too: its links follow the switches.
 //! - Interactive terminals (`/api/terminals…`) and the direct command runner
 //!   (`/api/workspace/exec`), including background processes (`/api/background…`),
 //!   are refused unless the user turned on "Allow
@@ -55,6 +57,7 @@ pub const MICROPHONE: &str =
 pub const INVALID_PATH: &str = "Invalid application command path";
 pub const DATA_LOCAL: &str = "Backups, restore, repair and reset are available only in Settings › Your data on the computer running ShadowCode.";
 pub const RULES_LOCAL: &str = "Importing a profile, using your rules in other CLIs and opening the rules folder work only on the computer running ShadowCode.";
+pub const RULES_LINKED: &str = "Your profile is used in Claude Code or Codex, so its switches change files outside ShadowCode. Change them on the computer running ShadowCode.";
 pub const PREVIEW_LOCAL: &str =
     "The app preview works only in the ShadowCode window on the computer running your dev server.";
 
@@ -175,6 +178,16 @@ pub fn check(path: &str, body: &Value, access: &Access, paths: &AppPaths) -> Res
             return Err(Refusal(RULES_LOCAL));
         }
         _ => {}
+    }
+    // While "Use in Claude Code / Codex" is on, a profile switch adds or
+    // removes links in that CLI's own folder (`rulebook::set_enabled`).
+    if parts == ["rules", "items"]
+        && body["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("profile:"))
+        && crate::rulebook::State::load(paths).map_or(true, |s| !s.exports.is_empty())
+    {
+        return Err(Refusal(RULES_LINKED));
     }
     if parts == ["workspace", "exec"] && !access.allow_terminals {
         return Err(Refusal(TERMINALS_OFF));
@@ -403,7 +416,7 @@ mod tests {
         ("sqlite", "allowed: read-only inspection"),
         (
             "rules",
-            "allowed; imports, export and open folder refused (network, vendor folders)",
+            "allowed; imports, export, open folder and profile switches while exported refused (network, vendor folders)",
         ),
         ("memory", "allowed"),
         (
@@ -566,6 +579,30 @@ mod tests {
         ] {
             assert!(check(path, &Value::Null, &access, &paths).is_ok(), "{path}");
         }
+    }
+
+    #[test]
+    fn profile_switches_stay_on_this_computer_while_the_export_is_on() {
+        let (_root, paths) = paths();
+        let access = Access {
+            allow_terminals: true,
+        };
+        let profile = json!({"id": "profile:skills/x/SKILL.md", "enabled": false});
+        let project = json!({"id": "project:AGENTS.md", "enabled": false});
+        assert!(check("/api/rules/items", &profile, &access, &paths).is_ok());
+        crate::rulebook::State::update(&paths, |state| {
+            state.exports.insert("claude".into(), Vec::new());
+            Ok(())
+        })
+        .unwrap();
+        // A profile switch would add or remove links in ~/.claude.
+        assert_eq!(
+            check("/api/rules/items", &profile, &access, &paths),
+            Err(Refusal(RULES_LINKED))
+        );
+        // Project switches never touch the export's links.
+        assert!(check("/api/rules/items", &project, &access, &paths).is_ok());
+        assert!(check("/api/rules", &Value::Null, &access, &paths).is_ok());
     }
 
     #[test]

@@ -192,6 +192,8 @@ removes them.
 
 While it is on, the links follow your switches: switching your `AGENTS.md`
 or a skill off removes its link, and switching it on again adds it back.
+So while it is on, your profile's switches change only on the computer
+running ShadowCode, not over remote access.
 Claude Code and Codex runs inside ShadowCode read the linked rules and skills
 themselves, so ShadowCode does not send them a second time; **What each
 agent reads** says so.
