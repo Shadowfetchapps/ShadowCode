@@ -89,7 +89,7 @@ const RULES: Rule[] = [
     match: /model server on this computer failed/i,
     title: "The model on this computer hit an error",
     plain:
-      "The model server on this computer couldn't handle this request, and sending it again usually fails the same way. Try a smaller context or another model in Settings › Local models, or continue on another model.",
+      "The model server on this computer couldn't handle this request, and sending it again usually fails the same way. Pick another model in Settings › Local models, or continue on another model.",
     steps: ["open-local", "try-on"],
   },
   {
