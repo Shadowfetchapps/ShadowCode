@@ -378,7 +378,7 @@ async fn plan_implement_review_runs_vendor_roles_and_applies_the_reviewed_diff()
         json!({
             "auth":"chatgpt",
             "turn":"ok",
-            "mode_when":{"implement role":"edit"},
+            "mode_when":{"You are the implement role":"edit"},
             "edits":{"note.txt":"new\n","added.txt":"hello\n"},
             "replies":{"plan role":"1. Change note.txt to say new.\n2. Add added.txt."},
         }),
@@ -578,7 +578,7 @@ async fn plan_implement_review_runs_vendor_roles_and_applies_the_reviewed_diff()
 #[tokio::test]
 async fn a_vendor_roles_approvals_reach_the_parent_and_stop_ends_it() {
     let setup = setup(
-        json!({"auth":"chatgpt","turn":"ok","mode_when":{"implement role":"approval","plan role":"slow"},"slow":30}),
+        json!({"auth":"chatgpt","turn":"ok","mode_when":{"You are the implement role":"approval","You are the plan role":"slow"},"slow":30}),
         json!({"permissions":{"approve_shell":true}}),
         |_| answer("unused", json!([])),
     )
@@ -677,7 +677,7 @@ async fn a_vendor_roles_approvals_reach_the_parent_and_stop_ends_it() {
             setup
                 .fake
                 .marker("prompts.log")
-                .filter(|p| p.contains("plan role"))
+                .filter(|p| p.contains("You are the plan role"))
         },
         "the plan prompt",
     )
@@ -891,7 +891,7 @@ async fn declining_the_apply_approval_leaves_the_project_unchanged() {
         json!({
             "auth":"chatgpt",
             "turn":"ok",
-            "mode_when":{"implement role":"edit"},
+            "mode_when":{"You are the implement role":"edit"},
             "edits":{"note.txt":"new\n"},
         }),
         json!({"permissions":{"mode":"ask"}}),

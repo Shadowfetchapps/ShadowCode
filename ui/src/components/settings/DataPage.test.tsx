@@ -217,7 +217,8 @@ it("says what a backup could not include", async () => {
       expect.stringMatching(
         /^Backup saved to .*\. Not included: OPENROUTER_API_KEY: the keyring did not give it/,
       ),
-      "ok",
+      // Saved, but not everything: a notice rather than a success toast.
+      "info",
     ),
   );
 });
