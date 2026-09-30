@@ -122,12 +122,9 @@ pub fn reset_time(usage: &Value, detail: &str, now: f64) -> Option<f64> {
         .fold(None, |latest: Option<f64>, at| {
             Some(latest.map_or(at, |l| l.max(at)))
         });
-    exhausted.or_else(|| from_text(detail, now)).or_else(|| {
-        windows
-            .iter()
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, at)| *at)
-    })
+    exhausted
+        .or_else(|| from_text(detail, now))
+        .or_else(|| windows.iter().map(|(_, at)| *at).min_by(f64::total_cmp))
 }
 
 /// A reset time in a vendor's error text, read in this computer's time
@@ -245,6 +242,11 @@ fn month(word: &str) -> Option<u32> {
 /// "3:40 pm", "3pm", "15:40", "sep 30th, 2026 3:40 pm", optionally
 /// followed by "utc" → the next such local (or UTC) time after `now`.
 fn wall_time(text: &str, now: f64) -> Option<f64> {
+    wall_time_in(text, now, &Local)
+}
+
+/// [`wall_time`] with `zone` as this computer's time zone.
+fn wall_time_in<Tz: TimeZone>(text: &str, now: f64, zone: &Tz) -> Option<f64> {
     let words: Vec<&str> = text
         .split(|c: char| c.is_whitespace() || c == ',')
         .filter(|w| !w.is_empty())
@@ -305,13 +307,22 @@ fn wall_time(text: &str, now: f64) -> Option<f64> {
             "utc" | "gmt"
         )
     });
-    let today = Local.timestamp_opt(now as i64, 0).earliest()?.date_naive();
+    // A UTC time counts from the UTC date: east of UTC just after local
+    // midnight, the local date is already a day ahead.
+    let today = if utc {
+        chrono::Utc
+            .timestamp_opt(now as i64, 0)
+            .single()?
+            .date_naive()
+    } else {
+        zone.timestamp_opt(now as i64, 0).earliest()?.date_naive()
+    };
     let to_ts = |day: NaiveDate| -> Option<f64> {
         let at = day.and_time(time);
         let ts = if utc {
             chrono::Utc.from_utc_datetime(&at).timestamp()
         } else {
-            Local.from_local_datetime(&at).earliest()?.timestamp()
+            zone.from_local_datetime(&at).earliest()?.timestamp()
         };
         Some(ts as f64)
     };
@@ -366,6 +377,12 @@ mod tests {
             Some(now + 1200.0)
         );
         assert_eq!(reset_time(&open, "usage limit", now), Some(now + 900.0));
+        // The earliest reset, not the window with the least left.
+        let both = json!({"windows":[
+            {"remaining_percent": 10.0, "resets_at": now + 7200.0},
+            {"remaining_percent": 1.0, "resets_at": now + 5.0 * 86400.0},
+        ]});
+        assert_eq!(reset_time(&both, "usage limit", now), Some(now + 7200.0));
         // Past or absurd times are not believed.
         let stale = json!({"windows":[{"remaining_percent": 0.0, "resets_at": now - 5.0}]});
         assert_eq!(reset_time(&stale, "", now), None);
@@ -430,6 +447,30 @@ mod tests {
                     .unwrap()
                     .timestamp() as f64
             ))
+        );
+        // UTC times count from the UTC date, whatever the local zone.
+        let utc = |d: u32, h: u32| {
+            chrono::Utc
+                .with_ymd_and_hms(2026, 9, d, h, 0, 0)
+                .unwrap()
+                .timestamp() as f64
+        };
+        let east = chrono::FixedOffset::east_opt(10 * 3600).unwrap();
+        // 02:00 on the 30th in UTC+10 is 16:00 on the 29th in UTC.
+        assert_eq!(
+            wall_time_in("18:00 utc", utc(29, 16), &east),
+            Some(utc(29, 18))
+        );
+        let west = chrono::FixedOffset::west_opt(7 * 3600).unwrap();
+        // 20:00 on the 29th in UTC-7 is 03:00 on the 30th in UTC.
+        assert_eq!(
+            wall_time_in("01:00 utc", utc(30, 3), &west),
+            Some(utc(30, 1) + 86_400.0)
+        );
+        // Local times still use the given zone's date.
+        assert_eq!(
+            wall_time_in("3:40 am", utc(29, 16), &east),
+            Some(utc(29, 17) + 40.0 * 60.0)
         );
         for vague in [
             "usage limit reached",
