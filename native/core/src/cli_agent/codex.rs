@@ -688,14 +688,12 @@ impl CodexAppServerAdapter {
                 }))
             }
             "execCommandApproval" => {
+                // An argv array: quoted as a shell reads it back, so
+                // `["bash","-lc","git push --force"]` keeps its script as one word.
                 let command = params["command"]
                     .as_array()
                     .map(|parts| {
-                        parts
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(" ")
+                        crate::approvals::assess::join_argv(parts.iter().filter_map(Value::as_str))
                     })
                     .unwrap_or_default();
                 self.pending_approvals.insert(key.clone(), method.into());
