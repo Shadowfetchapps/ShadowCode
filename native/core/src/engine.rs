@@ -64,12 +64,15 @@ struct LaunchContext<'a> {
     /// composer): an `@agent` on a cloud role asks first instead of being
     /// refused when it runs.
     interactive: bool,
-    /// Nobody watches this task in the window: an automation run, a second
-    /// opinion's review in its hidden conversation, or a job a connection
-    /// owns (an editor, the terminal UI, an MCP client). It never pauses to
-    /// ask when stuck, and at a spending limit it stops instead of waiting
-    /// for an answer.
+    /// Nobody watches this task in the window (an automation run, a second
+    /// opinion's review; jobs a connection owns count too): it never pauses
+    /// to ask when it is stuck.
     unattended: bool,
+    /// At a spending limit the task stops instead of showing a card: a second
+    /// opinion's review runs in a hidden conversation, where a card would
+    /// wait unseen and hold up the project's queue. Automation runs keep
+    /// their card, which the automation answers as it is set up to.
+    stop_at_spend_limit: bool,
     turn: TurnOptions,
 }
 
@@ -747,9 +750,10 @@ impl Engine {
         )
         .await
     }
-    /// `start_consented_owned` for a task no one watches (see
-    /// `LaunchContext::unattended`). Later turns in the same conversation are
-    /// ordinary ones.
+    /// `start_consented_owned` for a second opinion's review, which no one
+    /// watches and which stops at a spending limit (see
+    /// `LaunchContext::unattended` and `stop_at_spend_limit`). Later turns in
+    /// the same conversation are ordinary ones.
     pub(crate) async fn start_unattended_owned(
         &self,
         request: StartRequest,
@@ -762,6 +766,7 @@ impl Engine {
                 purpose,
                 owner,
                 unattended: true,
+                stop_at_spend_limit: true,
                 ..Default::default()
             },
         )
@@ -1071,7 +1076,7 @@ impl Engine {
             // A second opinion's review runs in a hidden conversation, where
             // a spending card would wait unseen and hold up the project's
             // queue.
-            Arc::new(if context.unattended {
+            Arc::new(if context.stop_at_spend_limit {
                 meter.unattended()
             } else {
                 meter

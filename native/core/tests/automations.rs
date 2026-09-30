@@ -742,3 +742,60 @@ fn runs_interrupted_by_a_restart_are_recovered() {
         .contains("stopped before this run finished"));
     assert_eq!(store.recover_automation_runs().unwrap(), 0);
 }
+
+/// A run on a paid model that reaches its spending limit stops as
+/// `spending_limit` (the automation answers the card; it is not a failure).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paid_run_at_its_spending_limit_stops_as_spending_limit() {
+    let server = support::server(|index, _| {
+        let calls = if index < 3 {
+            json!([tool("list_files", json!({"path":"."}))])
+        } else {
+            json!([])
+        };
+        let reason = if index < 3 { "tool_calls" } else { "stop" };
+        (
+            json!({"choices":[{"message":{"role":"assistant","content":"Looking.","tool_calls":calls},"finish_reason":reason}],
+                "usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"cost":0.08}}),
+            Duration::ZERO,
+        )
+    })
+    .await;
+    let fixture = setup(&server.endpoint, false);
+    Config::patch(
+        &fixture.paths,
+        json!({
+            "model":{"provider":"openrouter","endpoint":server.endpoint,"name":"acme/coder","api_key_env":"SHADOWCODE_TEST_UNUSED_API_KEY","context_limit":32768},
+            "spending":{"task_usd":0.1,"daily_usd":null},
+        }),
+    )
+    .unwrap();
+    let service = &fixture.service;
+    let created = call(
+        service,
+        "POST",
+        "/api/automations",
+        automation("Paid", "main"),
+    )
+    .await
+    .unwrap();
+    let id = created["id"].as_str().unwrap();
+    call(
+        service,
+        "POST",
+        &format!("/api/automations/{id}/run"),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let run = finished(&fixture, id).await;
+    assert_eq!(run.status, "spending_limit", "{run:?}");
+    assert!(
+        run.detail
+            .starts_with("Stopped at the spending limit for paid models"),
+        "{}",
+        run.detail
+    );
+    // The limit stopped the run before another paid request.
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+}
