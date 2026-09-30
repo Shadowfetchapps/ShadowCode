@@ -1,6 +1,6 @@
 # Release procedure
 
-The most recent documented release is [**0.34.2**](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v0.34.2), published on September 29, 2026 from `3f81044` by [run 36515721147](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36515721147) with all 15 gates, protected signing and publication passing. Updating version files or
+The most recent documented release is [**1.0.0**](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v1.0.0), published on September 30, 2026 from `e0ab265` by [run 36677001772](https://github.com/Shadowfetchapps/ShadowCode/actions/runs/36677001772) (attempt 2) with all 15 gates, protected signing and publication passing. Attempt 1 stopped in the `release-tests` gate when the private test-session cleanup found a live, unreadable process of the runner's user on the hosted runner; the same test passed on the same commit in the `main` checks, so the unchanged run was re-run and the `v1.0.0` tag was not moved. Updating version files or
 these instructions does not publish or sign a release. Bind final build, test
 and authentication receipts to the exact candidate before publication.
 
