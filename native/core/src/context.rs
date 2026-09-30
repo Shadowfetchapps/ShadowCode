@@ -202,8 +202,10 @@ pub fn compaction_note(
     }
 }
 
-/// `forced` (`/compact`): shorten now even when the conversation fits,
-/// removing every old group that may go instead of stopping at `ratio`.
+/// `forced` (`/compact`): shorten now even when the conversation fits:
+/// every step before the current request goes, except the latest answer;
+/// this turn's steps after the request stay. A conversation that also no
+/// longer fits is then shortened further as usual.
 pub fn compact_detailed(
     messages: &mut Vec<Value>,
     schemas: &[Value],
@@ -217,13 +219,10 @@ pub fn compact_detailed(
         "Model context is too small for the tools; select a larger context budget"
     );
     let hard_limit = context_limit.saturating_sub(reserved);
-    let target = if forced {
-        0
-    } else {
-        ((hard_limit as f64 * ratio) as usize).max(256)
-    };
+    let target = ((hard_limit as f64 * ratio) as usize).max(256);
     let before = estimate_tokens(&json!(messages));
-    if before <= hard_limit && !forced {
+    let over = before > hard_limit;
+    if !over && !forced {
         return Ok(None);
     }
     // Compact is eager (it reserves a quarter-window for output). The keep-list
@@ -244,26 +243,48 @@ pub fn compact_detailed(
     let last_user = messages.iter().rposition(|m| m["role"] == "user");
     let preserved = crate::autonomy::preserve(messages);
     let mut groups: Vec<Vec<Value>> = Vec::new();
-    for message in messages.iter() {
+    let mut current = None;
+    for (index, message) in messages.iter().enumerate() {
         if message["role"] == "tool" {
             if let Some(group) = groups.last_mut() {
                 group.push(message.clone());
             }
         } else {
             groups.push(vec![message.clone()]);
+            if Some(index) == last_user {
+                current = Some(groups.len() - 1);
+            }
         }
     }
-    let current = last_user.map(|i| messages[i].clone());
+    // The latest answer before the current request (system notes, such as
+    // the pins note, don't count).
+    let answer = current.and_then(|c| {
+        groups[..c]
+            .iter()
+            .rposition(|g| g[0]["role"] == "assistant")
+    });
+    // A group may go to make room unless it is a system note, the current
+    // request or one of the last two groups; `/compact` removes every earlier
+    // step but the latest answer whatever the size.
+    let mut may_go: Vec<bool> = Vec::new();
+    let mut must_go: Vec<bool> = Vec::new();
+    for (i, group) in groups.iter().enumerate() {
+        let system = group[0]["role"] == "system";
+        may_go.push(!system && Some(i) != current && i + 2 < groups.len());
+        must_go.push(forced && !system && current.is_some_and(|c| i < c) && Some(i) != answer);
+    }
     let mut removed = 0;
     let mut notes = Vec::new();
     let mut dropped = Vec::new();
-    while estimate_tokens(&json!(groups.iter().flatten().collect::<Vec<_>>())) > target {
-        let removable = groups.iter().enumerate().position(|(i, group)| {
-            i + 2 < groups.len()
-                && group[0]["role"] != "system"
-                && current.as_ref() != Some(&group[0])
+    loop {
+        let removable = must_go.iter().position(|&go| go).or_else(|| {
+            (over && estimate_tokens(&json!(groups.iter().flatten().collect::<Vec<_>>())) > target)
+                .then(|| may_go.iter().position(|&go| go))
+                .flatten()
         });
         let Some(index) = removable else { break };
+        may_go.remove(index);
+        must_go.remove(index);
         let group = groups.remove(index);
         removed += group.len();
         if notes.len() < 8 && group[0]["role"] == "user" {

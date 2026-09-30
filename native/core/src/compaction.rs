@@ -181,9 +181,9 @@ pub async fn compact(
 }
 
 /// [`compact`], or with `requested` (from `/compact [focus]`) shorten the
-/// conversation now, whatever its size: every earlier step except the
-/// latest exchange becomes the summary, which keeps the focus. `None` when
-/// there was nothing to shorten.
+/// conversation now, whatever its size: every step before the current
+/// request except the latest answer becomes the summary, which keeps the
+/// focus. `None` when there was nothing to shorten.
 pub async fn compact_now(
     model: &ModelClient,
     messages: &mut Vec<Value>,
@@ -340,6 +340,54 @@ mod tests {
         assert_eq!(messages[1]["_shadow_compaction"], true);
         assert_eq!(messages[2]["content"], "answer 3");
         assert_eq!(messages[3]["content"], "latest");
+    }
+
+    #[test]
+    fn a_requested_compaction_keeps_the_latest_answer_and_this_turns_steps() {
+        let call = |id: &str| json!({"role":"assistant","content":"","tool_calls":[{"id":id,"type":"function","function":{"name":"read_file","arguments":"{}"}}]});
+        let result = |id: &str| json!({"role":"tool","tool_call_id":id,"content":"file"});
+        let mut messages = vec![
+            json!({"role":"system","content":"system"}),
+            json!({"role":"system","_shadow_compaction":true,"content":"earlier summary"}),
+            json!({"role":"user","content":"request 0"}),
+            call("a"),
+            result("a"),
+            json!({"role":"assistant","content":"answer 0"}),
+            // The pins note a compacted conversation gets before each request.
+            json!({"role":"system","_shadow_kept":true,"content":"pins"}),
+            json!({"role":"user","content":"latest"}),
+            json!({"role":"system","content":"verification note"}),
+            // This turn's reads of the files it names.
+            call("b"),
+            result("b"),
+            call("c"),
+            result("c"),
+            call("d"),
+            result("d"),
+        ];
+        let compacted = context::compact_detailed(&mut messages, &[], 128_000, 0.7, true)
+            .unwrap()
+            .unwrap();
+        // Only the earlier request and its tool step are summarized.
+        assert_eq!(compacted.dropped.len(), 3, "{:?}", compacted.dropped);
+        let contents: Vec<&str> = messages
+            .iter()
+            .map(|m| m["content"].as_str().unwrap_or(""))
+            .collect();
+        assert!(contents.contains(&"answer 0"), "{contents:?}");
+        assert!(contents.contains(&"latest"));
+        assert!(!contents.contains(&"request 0"));
+        assert_eq!(
+            messages.iter().filter(|m| m["role"] == "tool").count(),
+            3,
+            "this turn's steps stay"
+        );
+        // Nothing earlier is left: a second request has nothing to shorten.
+        assert!(
+            context::compact_detailed(&mut messages, &[], 128_000, 0.7, true)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

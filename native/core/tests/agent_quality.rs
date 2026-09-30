@@ -238,5 +238,26 @@ async fn compact_shortens_a_conversation_that_fits_and_pins_stay_in_later_turns(
             "{task}: {sent}"
         );
     }
+    // A second `/compact`, now with the pins note before the request, still
+    // keeps the latest answer (each request is answered "Answer {index}.").
+    let latest = requests
+        .iter()
+        .rposition(|r| r["messages"].to_string().contains("And an index on email."))
+        .unwrap();
+    let before = requests.len();
+    store.set_session_meta(&sid, COMPACT_REQUEST, "").unwrap();
+    run("Then a migration.", Some(sid.clone())).await;
+    let requests = server.requests.lock().unwrap().clone();
+    let messages = requests[before]["messages"].as_array().unwrap();
+    let kept = format!("Answer {latest}.");
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["role"] == "assistant" && m["content"] == kept.as_str()),
+        "{kept}: {messages:?}"
+    );
+    assert!(!messages
+        .iter()
+        .any(|m| m["role"] == "user" && m["content"] == "Now add a users table."));
     engine.shutdown().await.ok();
 }
