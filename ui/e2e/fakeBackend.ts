@@ -305,6 +305,7 @@ export function installFakeBackend(options: FakeOptions = {}) {
           name: "Safari on iPhone or iPad",
           created_at: now() - 7200,
           last_seen: now() - 300,
+          restored: false,
         },
       ],
       ntfy: {
@@ -314,6 +315,7 @@ export function installFakeBackend(options: FakeOptions = {}) {
         events: { approval: true, finished: true, failed: true, limit: true },
         token_saved: false,
         configured: false,
+        restored: false,
         error: null,
       },
     },
@@ -4494,6 +4496,11 @@ export function installFakeBackend(options: FakeOptions = {}) {
     if (path === "/api/remote" && method === "GET") return remoteView();
     if (path === "/api/remote" && method === "PUT") {
       Object.assign(state.remote, body);
+      // Turning it on confirms what came back with a restore.
+      if (body.enabled === true) {
+        for (const device of state.remote.devices) device.restored = false;
+        state.remote.ntfy.restored = false;
+      }
       return remoteView();
     }
     if (path === "/api/remote/pair") {
@@ -4528,6 +4535,8 @@ export function installFakeBackend(options: FakeOptions = {}) {
     if (path === "/api/remote/ntfy" && method === "PUT") {
       const { token, events, ...rest } = body;
       Object.assign(state.remote.ntfy, rest);
+      if (typeof body.server === "string" || typeof body.topic === "string")
+        state.remote.ntfy.restored = false;
       Object.assign(state.remote.ntfy.events, events || {});
       if (token !== undefined) state.remote.ntfy.token_saved = Boolean(token);
       state.remote.ntfy.configured = Boolean(

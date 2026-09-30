@@ -60,12 +60,15 @@ Files larger than 4 MB, and small files past the first 4,096, are left out;
 the backup says which, and it never fails because of them.
 
 API keys (`secrets.env`, and the keys you moved to the desktop keyring) and
-remote-access pairing (`remote.json`) are left out unless you tick **Include
-API keys and remote-access pairing** (or pass `--include-secrets`). If the
-keyring is locked, the keys it holds are left out and the backup says so.
-Anyone who gets such a backup can use your keys: keep it private. Only your
-account can open the backup folder. Downloaded models, worktrees and your
-project files are not included.
+remote-access pairing with the phone notification settings (`remote.json`)
+are left out unless you tick **Include API keys and remote-access pairing**
+(or pass `--include-secrets`). If the keyring is locked, the keys it holds
+are left out and the backup says so. Anyone who gets such a backup can use
+your keys: keep it private. Only your account can open the backup folder. In
+a folder other accounts can change, ShadowCode makes sure the new backup
+folder is its own and keeps writing into it even if someone renames it or
+puts a link in its place (the backup is then refused). Downloaded models,
+worktrees and your project files are not included.
 
 ## Restore
 
@@ -84,23 +87,34 @@ ShadowCode now** is offered when it is this window. Until then you can cancel
 it. When it runs, ShadowCode:
 
 1. checks the copied files again;
-2. backs up what it is about to replace (`…-before-restore`);
+2. backs up what it is about to replace (`…-before-restore`): `secrets.env`
+   as it is when the API keys are replaced (keys in the keyring stay there
+   and are not copied), and `remote.json` when remote access is replaced;
 3. puts the backup's database and settings in place; your API keys only if
    you ticked **Also restore the API keys in this backup** (restored keys are
    read from `secrets.env`: move them to the keyring again in Settings ›
-   Accounts if you like); and remote access with its paired devices only if
-   you ticked **Also restore remote access and paired devices**;
+   Accounts if you like); and remote access with its paired devices and phone
+   notification settings only if you ticked **Also restore remote access,
+   paired devices and phone notifications**;
 4. upgrades the database if the backup came from an older version.
 
-Remote access comes back switched off. Devices you removed since the backup
-was made can connect again, so check the paired devices in Settings › Remote
-access before you turn it on.
+Remote access comes back switched off, and what came back with it waits for
+you, because devices you removed since the backup was made are back in the
+list and the notification topic may be one a lost phone still follows:
+
+- the restored devices cannot connect, not even through
+  `shadowcode serve --remote`, until you turn remote access on in Settings ›
+  Remote access. Unpair the ones you no longer use there first; with
+  `serve --remote` alone, pair your devices again instead;
+- phone notifications are not sent until you save the server and topic again
+  in Settings › Remote access, or turn remote access on.
 
 `shadowcode restore FOLDER --yes` restores right away when ShadowCode is not
 running; without `--yes` it only checks the backup. Add `--include-secrets`
-for the API keys and `--include-remote` for remote access. **Copies made
-before upgrades** can be restored the same way; they bring back your history
-as it was, and leave your settings as they are.
+for the API keys and `--include-remote` for remote access, paired devices and
+phone notifications. **Copies made before upgrades** can be restored the same
+way; they bring back your history as it was, and leave your settings as they
+are.
 
 ## Check and repair
 

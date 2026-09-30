@@ -39,7 +39,7 @@ function lastText(last: LastOperation): string {
   if (!last.ok && last.kind !== "repair")
     return `The ${last.kind} on ${at} did not finish: ${last.error ?? "unknown error"}. Nothing was changed.`;
   if (last.kind === "restore")
-    return `Restored on ${at}. The data you had before is in ${last.backup_of_previous_data}.${last.remote_restored ? " Remote access is off: check the paired devices in Settings › Remote access before turning it on." : ""}`;
+    return `Restored on ${at}. The data you had before is in ${last.backup_of_previous_data}.${last.remote_restored ? " Remote access is off, and the restored devices and phone notifications wait until you turn it on in Settings › Remote access: check the devices there first." : ""}`;
   if (last.kind === "reset")
     return `Reset on ${at}. Your previous data was moved to ${(last.moved_to ?? []).join(", ") || "folders next to the profile"}.`;
   return last.ok
@@ -476,14 +476,17 @@ export function DataPage({ onToast }: { onToast: Toast }) {
                     checked={restoreRemote}
                     onChange={(e) => setRestoreRemote(e.target.checked)}
                   />{" "}
-                  Also restore remote access and paired devices
+                  Also restore remote access, paired devices and phone
+                  notifications
                 </label>
               )}
               {restoreRemote && (
                 <p className="hint data-warning" role="note">
-                  Devices you removed since this backup can connect again.
-                  Remote access stays off until you turn it on in Settings ›
-                  Remote access, where you can check the devices first.
+                  Devices you removed since this backup come back too, and its
+                  notification topic may be one a lost phone follows. Remote
+                  access stays off, and the restored devices can’t connect and
+                  no notification is sent until you turn it on in Settings ›
+                  Remote access, where you can check them first.
                 </p>
               )}
               {restoring.ignored.length > 0 && (

@@ -210,6 +210,9 @@ impl Manager {
         let next = self.update(|s| {
             if let Some(enabled) = patch["enabled"].as_bool() {
                 s.enabled = enabled;
+                if enabled {
+                    s.confirm_restored();
+                }
             }
             if let Some(address) = patch["address"].as_str() {
                 s.address = validate_address(address)?.to_string();
@@ -273,6 +276,7 @@ impl Manager {
             "addresses": local_addresses(),
             "devices": settings.devices.iter().map(|d| json!({
                 "id": d.id, "name": d.name, "created_at": d.created_at, "last_seen": d.last_seen,
+                "restored": d.restored,
             })).collect::<Vec<_>>(),
             "ntfy": {
                 "server": settings.ntfy.server,
@@ -281,6 +285,7 @@ impl Manager {
                 "events": settings.ntfy.events,
                 "token_saved": token_saved,
                 "configured": settings.ntfy.configured(),
+                "restored": settings.ntfy.restored,
                 "error": ntfy_error,
             },
         })
@@ -341,6 +346,7 @@ impl Manager {
             digest: auth::hex(&auth::digest(&token)),
             created_at: crate::now(),
             last_seen: Some(crate::now()),
+            restored: false,
         };
         let paired = Device {
             id: device.id.clone(),
@@ -367,7 +373,9 @@ impl Manager {
         Ok((token, paired))
     }
 
-    /// The device a token belongs to. Every stored digest is compared.
+    /// The device a token belongs to. Every stored digest is compared. A
+    /// device that came back with a restore is refused until the user turns
+    /// remote access on (`shadowcode serve --remote` alone does not).
     pub fn authenticate(&self, token: &str) -> Option<Device> {
         let settings = self.settings().ok()?;
         let digests: Vec<[u8; 32]> = settings
@@ -377,6 +385,9 @@ impl Manager {
             .collect();
         let index = auth::find_digest(token, &digests)?;
         let device = &settings.devices[index];
+        if device.restored {
+            return None;
+        }
         let now = crate::now();
         if device
             .last_seen
@@ -399,7 +410,7 @@ impl Manager {
     /// Still paired? (Streams re-check this so a revoked device drops off.)
     pub fn paired(&self, id: &str) -> bool {
         self.settings()
-            .is_ok_and(|s| s.devices.iter().any(|d| d.id == id))
+            .is_ok_and(|s| s.devices.iter().any(|d| d.id == id && !d.restored))
     }
 
     /// Unpair one device, or every device and every unused pairing link.
@@ -443,6 +454,11 @@ impl Manager {
                 } else {
                     ntfy::validate_topic(topic)?
                 };
+            }
+            // Saving the server and topic confirms settings that came back
+            // with a restore.
+            if patch["server"].is_string() || patch["topic"].is_string() {
+                ntfy.restored = false;
             }
             if let Some(details) = patch["details"].as_bool() {
                 ntfy.details = details;
@@ -550,7 +566,9 @@ async fn notifier(
         let Ok(settings) = manager.settings() else {
             continue;
         };
-        if !settings.ntfy.configured() {
+        // Settings that came back with a restore wait until the user checks
+        // them; remote access being off does not stop notifications.
+        if !settings.ntfy.configured() || settings.ntfy.restored {
             continue;
         }
         let Some(notice) = crate::notify::select(&event, &ntfy::prefs(&settings.ntfy)) else {

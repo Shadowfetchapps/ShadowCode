@@ -16,8 +16,9 @@
 //! job the next time an engine opens the profile, after it holds the profile
 //! lock and before it opens the database. A restore first backs up what it
 //! replaces; a reset moves folders aside and deletes nothing. API keys and
-//! remote-access pairing come back only when asked for, each on its own, and
-//! remote access comes back switched off.
+//! remote-access pairing come back only when asked for, each on its own;
+//! remote access comes back switched off, and its devices and phone
+//! notifications wait until the user turns it on.
 //!
 //! **Repair** runs in place: it backs up the database first, checks its
 //! integrity, rebuilds indexes and statistics, and moves regenerable cache
@@ -269,12 +270,32 @@ impl Collected {
     }
 }
 
-/// The profile files a backup copies as they are. API keys are written by
-/// [`backup_keys`] instead.
-fn profile_files(paths: &AppPaths, include_secrets: bool) -> Result<Collected> {
+/// What a backup holds besides the database, settings, agents and plugin
+/// records.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Extras {
+    None,
+    /// The user asked for API keys: `secrets.env` written by [`backup_keys`]
+    /// (with the keys moved to the keyring) and `remote.json`.
+    Secrets,
+    /// Before a restore: the files it replaces, copied as they are. The
+    /// keyring is never read: a restore leaves the keys in it where they are.
+    Replaced {
+        keys: bool,
+        remote: bool,
+    },
+}
+
+/// The profile files a backup copies as they are.
+fn profile_files(paths: &AppPaths, extras: Extras) -> Result<Collected> {
+    let (keys, remote) = match extras {
+        Extras::None => (false, false),
+        Extras::Secrets => (false, true),
+        Extras::Replaced { keys, remote } => (keys, remote),
+    };
     let mut collected = Collected::default();
-    for relative in ["config/config.yaml", REMOTE] {
-        if relative == REMOTE && !include_secrets {
+    for (relative, wanted) in [("config/config.yaml", true), (KEYS, keys), (REMOTE, remote)] {
+        if !wanted {
             continue;
         }
         let source = resolve(paths, relative)?;
@@ -325,8 +346,101 @@ fn backup_subfolder(path: &Path) -> Result<()> {
         .with_context(|| format!("Cannot create {}", path.display()))
 }
 
+/// A new backup folder, held open while it is written. The folder the user
+/// chose may be one other accounts can change: every write goes through the
+/// open folder (`/proc/self/fd/…`), so it lands in the folder this process
+/// made even if someone renames it or puts a symlink in its place.
+struct NewFolder {
+    path: PathBuf,
+    #[cfg(unix)]
+    handle: fs::File,
+}
+
+impl NewFolder {
+    /// Open the folder just made and make sure it is that folder: a real,
+    /// empty directory, owned by this account when other accounts can
+    /// change `parent` (elsewhere a network share may show another owner).
+    fn open(path: PathBuf, parent: &Path) -> Result<Self> {
+        let replaced = format!(
+            "The new backup folder {} was replaced while it was being made; choose a folder only you can change",
+            path.display()
+        );
+        #[cfg(unix)]
+        let folder = {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            let handle = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&path)
+                .with_context(|| replaced.clone())?;
+            // Group or others may write, and no sticky bit stops them from
+            // renaming what this account made.
+            let shared =
+                fs::metadata(parent).is_ok_and(|m| m.mode() & 0o022 != 0 && m.mode() & 0o1000 == 0);
+            ensure!(
+                !shared || handle.metadata()?.uid() == unsafe { libc::geteuid() },
+                "{replaced}"
+            );
+            Self { path, handle }
+        };
+        #[cfg(not(unix))]
+        let folder = {
+            let _ = parent;
+            Self { path }
+        };
+        ensure!(
+            fs::read_dir(folder.inside())?.next().is_none(),
+            "{replaced}"
+        );
+        Ok(folder)
+    }
+
+    /// Where to write: the open folder, whatever its name leads to now.
+    fn inside(&self) -> PathBuf {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let held = PathBuf::from(format!("/proc/self/fd/{}", self.handle.as_raw_fd()));
+            if held.is_dir() {
+                return held;
+            }
+        }
+        self.path.clone()
+    }
+
+    /// Its name still leads to the folder this process made.
+    fn in_place(&self) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let (Ok(named), Ok(held)) = (fs::symlink_metadata(&self.path), self.handle.metadata())
+            else {
+                return false;
+            };
+            named.dev() == held.dev() && named.ino() == held.ino()
+        }
+        #[cfg(not(unix))]
+        true
+    }
+
+    /// Never leave a half-written backup that looks usable.
+    fn discard(&self) {
+        let inside = self.inside();
+        for entry in fs::read_dir(&inside).into_iter().flatten().flatten() {
+            let _ = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                fs::remove_dir_all(entry.path())
+            } else {
+                fs::remove_file(entry.path())
+            };
+        }
+        if self.in_place() {
+            let _ = fs::remove_dir(&self.path);
+        }
+    }
+}
+
 /// A new, private (mode 700), uniquely named folder inside `parent`.
-fn new_backup_folder(parent: &Path, reason: &str) -> Result<PathBuf> {
+fn new_backup_folder(parent: &Path, reason: &str) -> Result<NewFolder> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let suffix = if reason == "manual" {
         String::new()
@@ -347,7 +461,7 @@ fn new_backup_folder(parent: &Path, reason: &str) -> Result<PathBuf> {
             builder.mode(0o700);
         }
         match builder.create(&folder) {
-            Ok(()) => return Ok(folder),
+            Ok(()) => return NewFolder::open(folder, parent),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(error)
@@ -398,6 +512,19 @@ pub struct BackupOptions<'a> {
 
 /// Create a backup and return its manifest and folder.
 pub fn create_backup(paths: &AppPaths, options: BackupOptions<'_>) -> Result<(PathBuf, Manifest)> {
+    let extras = if options.include_secrets {
+        Extras::Secrets
+    } else {
+        Extras::None
+    };
+    backup(paths, options, extras)
+}
+
+fn backup(
+    paths: &AppPaths,
+    options: BackupOptions<'_>,
+    extras: Extras,
+) -> Result<(PathBuf, Manifest)> {
     let parent = match options.folder {
         Some(folder) => {
             ensure!(
@@ -418,17 +545,29 @@ pub fn create_backup(paths: &AppPaths, options: BackupOptions<'_>) -> Result<(Pa
         }
     };
     let folder = new_backup_folder(&parent, options.reason)?;
-    match write_backup(paths, &folder, options) {
-        Ok(manifest) => Ok((folder, manifest)),
+    let written = write_backup(paths, &folder.inside(), options, extras).and_then(|manifest| {
+        ensure!(
+            folder.in_place(),
+            "The backup folder {} was moved or replaced while it was being written; choose a folder only you can change",
+            folder.path.display()
+        );
+        Ok(manifest)
+    });
+    match written {
+        Ok(manifest) => Ok((folder.path, manifest)),
         Err(error) => {
-            // Never leave a half-written backup that looks usable.
-            let _ = fs::remove_dir_all(&folder);
+            folder.discard();
             Err(error)
         }
     }
 }
 
-fn write_backup(paths: &AppPaths, folder: &Path, options: BackupOptions<'_>) -> Result<Manifest> {
+fn write_backup(
+    paths: &AppPaths,
+    folder: &Path,
+    options: BackupOptions<'_>,
+    extras: Extras,
+) -> Result<Manifest> {
     let mut files = Vec::new();
     let mut raw_copy = false;
     let mut schema_version = 0;
@@ -476,7 +615,7 @@ fn write_backup(paths: &AppPaths, folder: &Path, options: BackupOptions<'_>) -> 
     let Collected {
         files: copies,
         mut left_out,
-    } = profile_files(paths, options.include_secrets)?;
+    } = profile_files(paths, extras)?;
     for (source, relative) in copies {
         let target = folder.join(&relative);
         backup_subfolder(target.parent().context("backup folder")?)?;
@@ -490,8 +629,11 @@ fn write_backup(paths: &AppPaths, folder: &Path, options: BackupOptions<'_>) -> 
             sha256,
         });
     }
-    let mut includes_secrets = false;
-    if options.include_secrets {
+    // A copied `secrets.env` holds keys unless it is empty (every key moved
+    // to the keyring).
+    let mut includes_secrets = files.iter().any(|f| f.path == KEYS)
+        && crate::config::secrets(paths).is_ok_and(|keys| !keys.is_empty());
+    if extras == Extras::Secrets {
         let (text, keys, missing) = backup_keys(paths)?;
         left_out.extend(missing);
         if keys > 0 {
@@ -795,9 +937,11 @@ pub struct Pending {
 pub struct RestoreOptions {
     /// API keys (`secrets.env`), when the backup has them.
     pub include_secrets: bool,
-    /// Remote access and paired devices (`remote.json`), when the backup has
-    /// them. Devices removed since the backup could connect again, so it
-    /// comes back switched off until the user turns it on after checking.
+    /// Remote access, paired devices and phone notification settings
+    /// (`remote.json`), when the backup has them. Devices removed since the
+    /// backup come back too, so remote access comes back switched off and
+    /// the restored devices and notifications wait until the user turns it
+    /// on after checking them.
     pub include_remote: bool,
 }
 
@@ -907,16 +1051,33 @@ pub fn schedule_restore(paths: &AppPaths, path: &Path, options: RestoreOptions) 
     Ok(pending)
 }
 
-/// Turn remote access off in a staged `remote.json`: its paired devices may
-/// include ones removed since the backup, so the user checks them in
-/// Settings › Remote access before turning it on again. Returns the staged
-/// file's new entry.
+/// Turn remote access off in a staged `remote.json` and hold what came back
+/// with it: its paired devices may include ones removed since the backup,
+/// and its phone notification topic one a lost phone still follows. The
+/// devices cannot connect (not even through `shadowcode serve --remote`,
+/// which ignores the switch) and nothing is sent until the user turns
+/// remote access on in Settings › Remote access, having checked them
+/// (`remote::Settings::confirm_restored`). Returns the staged file's new
+/// entry.
 fn switched_off(staged: &Path) -> Result<FileEntry> {
     let mut settings: Value = serde_json::from_slice(&fs::read(staged)?)
         .ok()
         .filter(Value::is_object)
         .context("The backup's remote-access settings (remote.json) cannot be read")?;
     settings["enabled"] = Value::Bool(false);
+    for device in settings["devices"].as_array_mut().into_iter().flatten() {
+        if device.is_object() {
+            device["restored"] = Value::Bool(true);
+        }
+    }
+    let set = |key: &str| {
+        settings["ntfy"][key]
+            .as_str()
+            .is_some_and(|v| !v.is_empty())
+    };
+    if set("server") && set("topic") {
+        settings["ntfy"]["restored"] = Value::Bool(true);
+    }
     atomic_write(staged, &serde_json::to_vec_pretty(&settings)?, true)?;
     let (bytes, sha256) = sha256_file(staged)?;
     Ok(FileEntry {
@@ -998,13 +1159,17 @@ fn apply_restore(paths: &AppPaths, pending: &Pending) -> Result<Value> {
         );
     }
     // Keep what is about to be replaced.
-    let (before, _) = create_backup(
+    let (before, _) = backup(
         paths,
         BackupOptions {
-            include_secrets: pending.include_secrets || pending.include_remote,
+            include_secrets: false,
             folder: None,
             reason: "before-restore",
             allow_raw: true,
+        },
+        Extras::Replaced {
+            keys: pending.include_secrets,
+            remote: pending.include_remote,
         },
     )
     .context("Could not back up the current data before restoring; nothing was restored")?;
@@ -1444,5 +1609,56 @@ pub fn restart_hint(mode: Option<&str>, pid: u32) -> String {
             "A `shadowcode` command (process {pid}) holds your data: wait for it to finish, then open ShadowCode again."
         ),
         _ => "Quit ShadowCode and anything else using your data (`shadowcode serve`, ShadowCode in a terminal, or an editor running `shadowcode acp`), then open ShadowCode again.".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Someone who can change the chosen folder renames the new backup
+    /// folder and puts a symlink to their own folder in its place: every
+    /// file still lands in the folder this process made, the backup is
+    /// refused, and their folder is left alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_backup_folder_swapped_for_a_symlink_keeps_its_files_private() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::isolated(&temp.path().join("profile")).unwrap();
+        crate::config::set_secret(&paths, "OPENAI_API_KEY", "private-value").unwrap();
+        let shared = temp.path().join("shared");
+        let theirs = temp.path().join("theirs");
+        fs::create_dir_all(&shared).unwrap();
+        fs::create_dir_all(&theirs).unwrap();
+        let folder = new_backup_folder(&shared, "manual").unwrap();
+        let moved = shared.join("moved");
+        fs::rename(&folder.path, &moved).unwrap();
+        std::os::unix::fs::symlink(&theirs, &folder.path).unwrap();
+        let options = BackupOptions {
+            include_secrets: true,
+            folder: Some(&shared),
+            reason: "manual",
+            allow_raw: false,
+        };
+        write_backup(&paths, &folder.inside(), options, Extras::Secrets).unwrap();
+        assert_eq!(fs::read_dir(&theirs).unwrap().count(), 0);
+        assert!(moved.join(MANIFEST).is_file());
+        assert!(fs::read_to_string(moved.join(KEYS))
+            .unwrap()
+            .contains("private-value"));
+        assert!(!folder.in_place(), "the backup is refused");
+        folder.discard();
+        assert_eq!(fs::read_dir(&moved).unwrap().count(), 0);
+        assert!(fs::symlink_metadata(&folder.path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        // Only the new, empty, real folder is used.
+        let link = shared.join("link");
+        std::os::unix::fs::symlink(&theirs, &link).unwrap();
+        assert!(NewFolder::open(link, &shared).is_err());
+        fs::write(theirs.join("planted"), "x").unwrap();
+        assert!(NewFolder::open(theirs.clone(), temp.path()).is_err());
     }
 }

@@ -756,6 +756,133 @@ async fn ntfy_messages_follow_the_shared_decision() {
     f.manager.stop();
 }
 
+/// A restore with remote access brings back a device removed since the
+/// backup and the topic a lost phone follows. Neither works until the user
+/// checks them: not through `shadowcode serve --remote`, which starts the
+/// server without the switch, and not through the phone notifier, which
+/// runs whether remote access is on or off.
+#[tokio::test(flavor = "multi_thread")]
+async fn devices_and_notifications_from_a_restore_wait_until_remote_access_is_turned_on() {
+    use shadowcode_core::{
+        data,
+        remote::settings::{self, Device, Ntfy, Settings},
+        store::Store,
+    };
+    ui_files();
+    let (server, seen) = fake_ntfy().await;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = AppPaths::isolated(&dir.path().join("profile")).unwrap();
+    let workspace = dir.path().join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    drop(Store::open(&paths.database()).unwrap());
+    let token = auth::new_token().unwrap();
+    settings::save(
+        &paths,
+        &Settings {
+            enabled: true,
+            devices: vec![Device {
+                id: "lost".into(),
+                name: "Lost phone".into(),
+                digest: auth::hex(&auth::digest(&token)),
+                created_at: 1.0,
+                last_seen: None,
+                restored: false,
+            }],
+            ntfy: Ntfy {
+                server: server.clone(),
+                topic: "lost-phone-topic".into(),
+                ..Ntfy::default()
+            },
+            ..Settings::default()
+        },
+    )
+    .unwrap();
+    let (backup, _) = data::create_backup(
+        &paths,
+        data::BackupOptions {
+            include_secrets: true,
+            folder: None,
+            reason: "manual",
+            allow_raw: false,
+        },
+    )
+    .unwrap();
+    // Since then the phone was lost and removed, and the topic changed.
+    settings::save(&paths, &Settings::default()).unwrap();
+    data::schedule_restore(
+        &paths,
+        &backup,
+        data::RestoreOptions {
+            include_remote: true,
+            ..data::RestoreOptions::default()
+        },
+    )
+    .unwrap();
+
+    // The next start restores; `serve --remote` starts the server.
+    let service = Service::open(paths.clone(), Some(workspace)).unwrap();
+    let manager = service.remote().clone();
+    let cancel = CancellationToken::new();
+    manager.activate(&service, cancel.clone());
+    let address = manager
+        .start(&service, Some("127.0.0.1:0".parse().unwrap()))
+        .unwrap();
+    let status = manager.status();
+    assert_eq!(status["enabled"], false);
+    assert_eq!(status["devices"][0]["restored"], true, "{status}");
+    assert_eq!(status["ntfy"]["restored"], true, "{status}");
+    let version = || async {
+        reqwest::Client::new()
+            .get(format!("http://{address}/api/version"))
+            .bearer_auth(&token)
+            .header("x-shadow-view", "test-view-0001")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    };
+    assert_eq!(version().await, 401, "the removed phone cannot connect");
+    let failed = || {
+        service
+            .engine
+            .notifier()
+            .send(json!({"type":"agent.completed","session_id":"s","task_id":"t","payload":{"success":false,"summary":"boom"}}))
+            .unwrap();
+    };
+    failed();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "nothing goes to the old topic"
+    );
+
+    // Changing a switch is not enough; saving the server and topic again
+    // confirms them.
+    manager.set_ntfy(&json!({"details": true})).unwrap();
+    assert_eq!(manager.status()["ntfy"]["restored"], true);
+    manager
+        .set_ntfy(&json!({"server": server, "topic": "lost-phone-topic"}))
+        .unwrap();
+    assert_eq!(manager.status()["ntfy"]["restored"], false);
+    failed();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while seen.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(version().await, 401, "the devices still wait");
+
+    // Turning remote access on after checking the list lets them in.
+    let status = manager
+        .configure(&service, &json!({"enabled": true}))
+        .unwrap();
+    assert_eq!(status["devices"][0]["restored"], false, "{status}");
+    assert_eq!(version().await, 200);
+    cancel.cancel();
+    manager.stop();
+}
+
 /// Moving the server from this computer only to every address on the same
 /// port restarts it there, instead of failing because the old server still
 /// held the port. The runtime's only worker is kept busy during the change,

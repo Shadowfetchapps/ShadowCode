@@ -899,6 +899,7 @@ async fn remote_pairing_comes_back_only_when_asked_for_and_switched_off() {
         digest: digest.repeat(32),
         created_at: 1.0,
         last_seen: None,
+        restored: false,
     };
     let paired = Settings {
         enabled: true,
@@ -941,9 +942,14 @@ async fn remote_pairing_comes_back_only_when_asked_for_and_switched_off() {
     let last = finish(&p.paths);
     assert_eq!(last["remote_restored"], false, "{last}");
     assert_eq!(remote::load(&p.paths).unwrap(), now);
+    // The backup made first holds what the restore replaced, nothing more.
+    let previous = PathBuf::from(last["backup_of_previous_data"].as_str().unwrap());
+    assert!(previous.join("config/secrets.env").is_file());
+    assert!(!previous.join("config/remote.json").exists());
 
-    // Asked for on its own, it comes back switched off: the lost phone is
-    // paired again, so the user checks the devices before turning it on.
+    // Asked for on its own, it comes back switched off and its devices on
+    // hold: the lost phone is paired again, so the user checks the devices
+    // before turning it on.
     let pending = data::schedule_restore(
         &p.paths,
         &folder,
@@ -958,7 +964,13 @@ async fn remote_pairing_comes_back_only_when_asked_for_and_switched_off() {
     assert_eq!(last["remote_restored"], true, "{last}");
     let restored = remote::load(&p.paths).unwrap();
     assert!(!restored.enabled, "remote access stays off until turned on");
-    assert_eq!(restored.devices, paired.devices);
+    assert_eq!(restored.devices.len(), 1);
+    assert_eq!(restored.devices[0].name, "Lost phone");
+    assert!(restored.devices[0].restored, "it cannot connect yet");
+    assert!(
+        !restored.ntfy.restored,
+        "no phone notifications were set up"
+    );
     assert!(restored.allow_terminals);
     #[cfg(unix)]
     assert_eq!(mode(&remote::path(&p.paths)), 0o600);
@@ -968,11 +980,13 @@ async fn remote_pairing_comes_back_only_when_asked_for_and_switched_off() {
             .as_deref(),
         Some("first-value")
     );
-    // What it replaced is in the before-restore backup.
+    // What it replaced is in the before-restore backup, and nothing about
+    // the API keys, which it left alone.
     let previous = PathBuf::from(last["backup_of_previous_data"].as_str().unwrap());
     let kept: Settings =
         serde_json::from_slice(&fs::read(previous.join("config/remote.json")).unwrap()).unwrap();
     assert_eq!(kept, now);
+    assert!(!previous.join("config/secrets.env").exists());
 }
 
 #[cfg(unix)]
@@ -1001,6 +1015,15 @@ fn a_backup_into_a_chosen_folder_leaves_that_folder_as_it_is() {
         0o755,
         "the chosen folder keeps its permissions"
     );
+    // Folders other accounts can change work too; the new folder is checked
+    // to be this account's own.
+    for shared_mode in [0o777, 0o1777, 0o775] {
+        fs::set_permissions(&shared, fs::Permissions::from_mode(shared_mode)).unwrap();
+        let folder = chosen(&shared);
+        assert_eq!(mode(&folder), 0o700);
+        assert!(data::inspect(&p.paths, &folder).unwrap().restorable);
+    }
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(mode(&folder), 0o700);
     assert_eq!(mode(&folder.join("state")), 0o700);
     assert!(data::inspect(&p.paths, &folder).unwrap().restorable);
@@ -1068,19 +1091,25 @@ async fn a_backup_with_api_keys_holds_the_keys_moved_to_the_keyring() {
     // On the same computer, a restore brings back the backup's key, not the
     // keyring's newer one.
     keyring::move_in(&p.paths, name).unwrap();
-    config::set_secret(
-        &p.paths,
-        name,
-        &format!("{}-{}", "kept-in-keyring", "second"),
-    )
-    .unwrap();
+    let second = format!("{}-{}", "kept-in-keyring", "second");
+    config::set_secret(&p.paths, name, &second).unwrap();
     data::schedule_restore(&p.paths, &folder, keys).unwrap();
-    finish(&p.paths);
+    let last = finish(&p.paths);
     assert_eq!(
         config::secret(&p.paths, name).unwrap().as_deref(),
         Some(first.as_str())
     );
     assert!(!keyring::listed(&p.paths).contains(name));
+    // The keyring keeps its own copy, so the backup made before the restore
+    // copies secrets.env as it is and never writes the keyring's keys to a
+    // file nobody asked for.
+    assert_eq!(
+        keyring::get(&p.paths, name).unwrap().as_deref(),
+        Some(second.as_str())
+    );
+    let previous = PathBuf::from(last["backup_of_previous_data"].as_str().unwrap());
+    let before = fs::read_to_string(previous.join("config/secrets.env")).unwrap();
+    assert!(!before.contains(&second), "{before}");
 
     // A key the keyring does not give is named, and a backup with no key
     // does not claim to hold any.

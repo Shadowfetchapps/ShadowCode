@@ -345,6 +345,13 @@ export function RemotePage({ onToast }: { onToast: Toast }) {
       )}
 
       <h4>Paired devices</h4>
+      {status.devices.some((device) => device.restored) && (
+        <p className="warn-text remote-warning" role="note">
+          Devices marked “From a backup” came back with a restore and may
+          include one you removed since then. They can’t connect until you turn
+          on remote access. Unpair any you no longer use first.
+        </p>
+      )}
       {status.devices.length === 0 ? (
         <p className="hint">No devices are paired.</p>
       ) : (
@@ -354,6 +361,7 @@ export function RemotePage({ onToast }: { onToast: Toast }) {
               <span>
                 <strong>{device.name}</strong>
                 <small className="dim">
+                  {device.restored ? "From a backup · " : ""}
                   {device.last_seen
                     ? `Used ${relativeTime(device.last_seen)}`
                     : `Paired ${relativeTime(device.created_at)}`}
@@ -465,7 +473,8 @@ export function RemotePage({ onToast }: { onToast: Toast }) {
             busy ||
             (server === status.ntfy.server &&
               topic === status.ntfy.topic &&
-              !token)
+              !token &&
+              !status.ntfy.restored)
           }
           onClick={() =>
             void saveNtfy(
@@ -509,6 +518,13 @@ export function RemotePage({ onToast }: { onToast: Toast }) {
           </button>
         )}
       </div>
+      {status.ntfy.restored && status.ntfy.configured && (
+        <p className="warn-text remote-warning" role="note">
+          These settings came back with a restore, and a lost phone may still
+          follow this topic. Nothing is sent until you check them and choose
+          Save, or turn on remote access.
+        </p>
+      )}
       {status.ntfy.error && (
         <p className="health-bad" role="alert">
           Last notification failed: {status.ntfy.error}

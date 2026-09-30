@@ -99,9 +99,11 @@ pub enum Command {
         /// Also restore API keys when the backup has them.
         #[arg(long)]
         include_secrets: bool,
-        /// Also restore remote access and paired devices when the backup has
-        /// them. Devices you removed since then can connect again, so remote
-        /// access stays off until you turn it on in Settings › Remote access.
+        /// Also restore remote access, paired devices and phone notification
+        /// settings when the backup has them. Devices you removed since then
+        /// come back too, so remote access comes back off, and the restored
+        /// devices cannot connect and notifications are not sent until you
+        /// turn it on in Settings › Remote access.
         #[arg(long)]
         include_remote: bool,
         /// Restore; without it only the check runs.

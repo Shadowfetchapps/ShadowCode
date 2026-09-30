@@ -219,8 +219,10 @@ profile; otherwise they are scheduled for the next start (cancel in Settings ›
 Your data), and the command says which process to stop (the app,
 `shadowcode serve`, the terminal app, or an editor's `shadowcode acp`). A
 restore first backs up what it replaces; `--include-secrets` also restores
-the backup's API keys, and `--include-remote` its remote access and paired
-devices, switched off until you turn it on in Settings › Remote access.
+the backup's API keys, and `--include-remote` its remote access, paired
+devices and phone notification settings, switched off: the restored devices
+cannot connect (not even through `serve --remote`) and notifications are not
+sent until you turn remote access on in Settings › Remote access.
 `reset` moves settings and history aside into `<folder>.reset-<time>` folders
 and deletes nothing.
 

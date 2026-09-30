@@ -157,11 +157,13 @@ it("restores remote pairing only on its own tick, with a warning", async () => {
   expect(within(dialog).queryByRole("note")).toBeNull();
   fireEvent.click(
     within(dialog).getByLabelText(
-      "Also restore remote access and paired devices",
+      "Also restore remote access, paired devices and phone notifications",
     ),
   );
-  expect(within(dialog).getByRole("note").textContent).toMatch(
-    /Devices you removed since this backup can connect again\. Remote access stays off/,
+  const note = within(dialog).getByRole("note").textContent;
+  expect(note).toMatch(/Devices you removed since this backup come back too/);
+  expect(note).toMatch(
+    /restored devices can’t connect and no notification is sent until you turn it on/,
   );
   fireEvent.click(
     within(dialog).getByRole("button", { name: "Restore at next start" }),

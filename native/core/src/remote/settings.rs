@@ -57,6 +57,11 @@ pub struct Device {
     pub created_at: f64,
     #[serde(default)]
     pub last_seen: Option<f64>,
+    /// Came back with a restore (Settings › Your data) and may be a device
+    /// removed since that backup: it cannot connect until the user turns
+    /// remote access on in Settings, having checked the list.
+    #[serde(default)]
+    pub restored: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -68,10 +73,25 @@ pub struct Ntfy {
     /// Include the approval request or task summary in the message.
     pub details: bool,
     pub events: NtfyEvents,
+    /// Came back with a restore, and the topic may be one a lost phone
+    /// still follows: nothing is sent until the user saves the server and
+    /// topic again or turns remote access on.
+    pub restored: bool,
 }
 impl Ntfy {
     pub fn configured(&self) -> bool {
         !self.server.is_empty() && !self.topic.is_empty()
+    }
+}
+
+impl Settings {
+    /// The user turned remote access on after a restore: the devices and
+    /// phone notifications that came back with it work again.
+    pub fn confirm_restored(&mut self) {
+        for device in &mut self.devices {
+            device.restored = false;
+        }
+        self.ntfy.restored = false;
     }
 }
 
@@ -131,6 +151,7 @@ mod tests {
             digest: "00".repeat(32),
             created_at: 1.0,
             last_seen: None,
+            restored: false,
         });
         save(&paths, &settings).unwrap();
         assert_eq!(load(&paths).unwrap(), settings);

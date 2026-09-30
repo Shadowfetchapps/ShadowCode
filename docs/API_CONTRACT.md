@@ -2745,18 +2745,23 @@ only.
 RemoteStatus = {enabled, running, address, port, bound: string|null /* ip:port */, url: string|null, public_url,
                 exposed /* saved address is not loopback */, allow_terminals, error: string|null,
                 addresses: [{address, interface, kind: "loopback"|"tailscale"|"lan"}],
-                devices: [{id, name, created_at, last_seen: number|null}],
-                ntfy: {server, topic, details, events: {approval, finished, failed, limit}, token_saved, configured, error}}
+                devices: [{id, name, created_at, last_seen: number|null, restored}],
+                ntfy: {server, topic, details, events: {approval, finished, failed, limit}, token_saved, configured, restored, error}}
 ```
 
 - `GET /api/remote` → `RemoteStatus`; never includes tokens or digests.
+  `restored: true` marks what came back with a restore (Your data): such a
+  device cannot authenticate (401, also on a server started by
+  `shadowcode serve --remote`), and such phone notification settings send
+  nothing, until the user confirms them as below.
 - `PUT /api/remote {enabled?, address?, port?, public_url?, allow_terminals?}`
   → `RemoteStatus`. `address` must be `0.0.0.0`, `::`, a loopback address or
   one of this computer's addresses (default `127.0.0.1`); `port` 1024–65535
   (default 7390); `public_url` an `http(s)://` address without credentials,
   query or fragment (`""` clears it). Turning it on (or changing the address)
   starts or restarts the server; `enabled: false` stops it. A busy port is
-  reported in `error` (the switch is still saved).
+  reported in `error` (the switch is still saved). `enabled: true` also
+  clears every `restored` mark.
 - `POST /api/remote/pair {host?}` → `{link, base, expires_in, qr: {size,
   rows: ["0101…"]}}`. The link is `<base>/#pair=<code>`; the code works once
   within `expires_in` seconds (600); at most 4 unused codes. `host` picks one
@@ -2768,7 +2773,8 @@ RemoteStatus = {enabled, running, address, port, bound: string|null /* ip:port *
 - `PUT /api/remote/ntfy {server?, topic?, details?, events?: {approval?,
   finished?, failed?, limit?}, token?}` → `RemoteStatus`. Empty `server` or
   `topic` turns phone notifications off; `token` is stored as
-  `SHADOWCODE_NTFY_TOKEN` in the secret store (`""` removes it).
+  `SHADOWCODE_NTFY_TOKEN` in the secret store (`""` removes it). A body with
+  `server` or `topic` clears `ntfy.restored`; the other fields do not.
 - `POST /api/remote/ntfy/test` → `{ok: true}` after the server accepted a test message.
 
 Phone notifications use the desktop selection (`notify::select`) with the
@@ -3004,8 +3010,11 @@ not know are reported in `ignored` and not restored.
   `{path, manifest: Manifest}`. `folder` must be absolute (`~/` allowed); a
   new uniquely named folder (mode 700) is created inside it. The chosen
   folder itself is created when missing and otherwise left as it is (its
-  mode, owner and symlinks are not touched). A failed backup leaves no
-  folder behind.
+  mode, owner and symlinks are not touched). The new folder is held open and
+  written through that handle; when other accounts can write to the chosen
+  folder (no sticky bit), it must be owned by this account, and a backup
+  whose folder was renamed or replaced meanwhile is refused. A failed
+  backup leaves no folder behind.
 - `POST /api/data/backups/inspect {path}` → `Inspection`, changing nothing:
   ```
   {
@@ -3031,16 +3040,19 @@ not know are reported in `ignored` and not restored.
   `engine.restart` above). The next engine start (desktop,
   `shadowcode serve`, or any CLI command that opens the profile) holds the
   profile lock, re-checks the staged digests, backs up the current database,
-  settings (and API keys and remote access when they are replaced) into a
-  `before-restore` backup, and swaps the files in; the old write-ahead log is
-  removed with the old database. API keys (`secrets.env`) are restored only
-  with `include_secrets`, and the restored names are then read from
-  `secrets.env` rather than the keyring (`keyring.json` stops listing them).
-  Remote access and paired devices (`remote.json`) are restored only with
-  `include_remote`, and always with `enabled: false`: devices removed since
-  the backup could connect again, so the user turns it on after checking
-  them. Either only when the backup has the file. An older database is then
-  upgraded as usual.
+  settings (and `secrets.env` and `remote.json` as they are when they are
+  replaced; the keyring is not read) into a `before-restore` backup, and
+  swaps the files in; the old write-ahead log is removed with the old
+  database. API keys (`secrets.env`) are restored only with
+  `include_secrets`, and the restored names are then read from `secrets.env`
+  rather than the keyring (`keyring.json` stops listing them). Remote access,
+  paired devices and phone notification settings (`remote.json`) are
+  restored only with `include_remote`, and always with `enabled: false` and
+  every device and a configured `ntfy` marked `restored` (see
+  `RemoteStatus`): devices removed since the backup come back too, so they
+  wait until the user turns remote access on after checking them. Either
+  only when the backup has the file. An older database is then upgraded as
+  usual.
 - `POST /api/data/reset {confirm: "reset"}` → `{scheduled: true, pending,
   message}`. At the next start everything in the three profile folders moves
   into sibling folders `<folder>.reset-<YYYYMMDD-HHMMSS>` — except, in the

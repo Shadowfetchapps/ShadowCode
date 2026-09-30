@@ -694,9 +694,9 @@ async fn data_command(
                     .iter()
                     .any(|f| f.path == "config/remote.json");
                 outln!(
-                    "Remote access and paired devices: {}",
+                    "Remote access, paired devices and phone notifications: {}",
                     match (has_remote, *include_remote) {
-                        (true, true) => "restored from the backup, switched off until you turn it on in Settings › Remote access (devices you removed since then are back: check them first)",
+                        (true, true) => "restored from the backup and switched off. Its devices cannot connect and its phone notifications are not sent until you turn remote access on in Settings › Remote access; check the devices there first (ones you removed since then are back)",
                         (true, false) => "kept as they are (add --include-remote to restore them)",
                         (false, _) => "not in the backup; kept as they are",
                     }
@@ -907,6 +907,19 @@ fn remote_banner(status: &Value, address: std::net::SocketAddr) -> String {
     if status["allow_terminals"] == true {
         text.push_str("\nTerminals are allowed over remote access.");
     }
+    // A restore brings devices and notifications back on hold; serving does
+    // not release them.
+    let held = status["devices"].as_array().map_or(0, |all| {
+        all.iter().filter(|d| d["restored"] == true).count()
+    });
+    if held > 0 {
+        text.push_str(&format!(
+            "\nPaired devices restored from a backup ({held}) cannot connect until you turn remote access on in Settings › Remote access. Pair them again with the link below, or unpair them with `shadowcode remote revoke`."
+        ));
+    }
+    if status["ntfy"]["restored"] == true && status["ntfy"]["configured"] == true {
+        text.push_str("\nPhone notifications restored from a backup are not sent until you save them or turn remote access on in Settings › Remote access.");
+    }
     text
 }
 
@@ -948,14 +961,19 @@ fn remote_status_text(status: &Value) -> String {
     }
     for device in devices {
         text.push_str(&format!(
-            "{}  {}\n",
+            "{}  {}{}\n",
             device["id"]
                 .as_str()
                 .unwrap_or("")
                 .chars()
                 .take(8)
                 .collect::<String>(),
-            watch::plain(device["name"].as_str().unwrap_or(""))
+            watch::plain(device["name"].as_str().unwrap_or("")),
+            if device["restored"] == true {
+                "  (restored from a backup: cannot connect until you turn remote access on in Settings)"
+            } else {
+                ""
+            }
         ));
     }
     text
@@ -1919,6 +1937,27 @@ mod tests {
         assert!(banner("127.0.0.1:7390").contains("Only this computer"));
         let text = remote_status_text(&json!({"enabled": false, "devices": []}));
         assert!(text.contains("Remote access is off") && text.contains("No paired devices"));
+        // After a restore, serving says the restored devices and phone
+        // notifications wait.
+        let restored = json!({
+            "devices": [
+                {"id": "a1", "name": "Lost phone", "restored": true},
+                {"id": "b2", "name": "Tablet", "restored": false},
+            ],
+            "ntfy": {"configured": true, "restored": true},
+        });
+        let banner = remote_banner(&restored, "127.0.0.1:7390".parse().unwrap());
+        assert!(
+            banner.contains("restored from a backup (1) cannot connect"),
+            "{banner}"
+        );
+        assert!(banner.contains("Phone notifications restored from a backup are not sent"));
+        let text = remote_status_text(&restored);
+        assert!(
+            text.contains("Lost phone  (restored from a backup"),
+            "{text}"
+        );
+        assert!(!text.contains("Tablet  (restored"), "{text}");
         let pairing =
             pairing_text(&json!({"link": "http://127.0.0.1:7390/#pair=abc", "expires_in": 600}))
                 .unwrap();

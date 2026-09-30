@@ -20,7 +20,8 @@ export type BackupManifest = {
   left_out: string[];
 };
 
-/** The backup holds remote access and paired devices (`remote.json`). */
+/** The backup holds remote access, paired devices and phone notification
+ * settings (`remote.json`). */
 export const hasRemotePairing = (manifest: BackupManifest) =>
   manifest.files.some((f) => f.path === "config/remote.json");
 
