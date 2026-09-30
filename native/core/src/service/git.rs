@@ -288,26 +288,26 @@ impl Service {
         );
         let store = self.engine.store();
         let hooks = crate::git_hooks::found(&ws.path, crate::git_hooks::COMMIT_HOOKS).await;
-        let run_hooks = if hooks.is_empty() {
-            false
-        } else {
+        let ask = |hooks: &[crate::git_hooks::Hook], fingerprint: &str, changed: bool| {
+            json!({
+                "ok": false,
+                "status": 409,
+                "needs_hooks_choice": true,
+                "hooks": hooks,
+                "hooks_fingerprint": fingerprint,
+                "hooks_changed": changed,
+                "error": if changed {
+                    "This project's Git hooks changed since you chose to run them. Choose again whether commits from ShadowCode run them."
+                } else {
+                    "This project has its own Git hooks. Choose whether commits from ShadowCode run them."
+                },
+            })
+        };
+        // The hooks as they were when the user chose to run them.
+        let mut approved = None;
+        if !hooks.is_empty() {
             let fingerprint = crate::git_hooks::fingerprint(&ws.path).await;
-            let ask = |changed: bool| {
-                json!({
-                    "ok": false,
-                    "status": 409,
-                    "needs_hooks_choice": true,
-                    "hooks": hooks,
-                    "hooks_fingerprint": fingerprint,
-                    "hooks_changed": changed,
-                    "error": if changed {
-                        "This project's Git hooks changed since you chose to run them. Choose again whether commits from ShadowCode run them."
-                    } else {
-                        "This project has its own Git hooks. Choose whether commits from ShadowCode run them."
-                    },
-                })
-            };
-            match body["hooks"].as_str() {
+            let run = match body["hooks"].as_str() {
                 Some(choice @ ("run" | "skip")) => {
                     let run = choice == "run";
                     // "Run them" holds for the hooks the question showed.
@@ -316,23 +316,36 @@ impl Service {
                             .as_str()
                             .is_some_and(|seen| seen != fingerprint)
                     {
-                        return Ok(ask(true));
+                        return Ok(ask(&hooks, &fingerprint, true));
                     }
                     crate::git_hooks::set_preference(&store, &ws.path, Some(run), &fingerprint)?;
                     run
                 }
                 _ => match crate::git_hooks::choice(&store, &ws.path, &fingerprint)? {
                     crate::git_hooks::Choice { run: Some(run), .. } => run,
-                    crate::git_hooks::Choice { run: None, changed } => return Ok(ask(changed)),
+                    crate::git_hooks::Choice { run: None, changed } => {
+                        return Ok(ask(&hooks, &fingerprint, changed))
+                    }
                 },
-            }
-        };
+            };
+            approved = run.then_some(fingerprint);
+        }
         if body["allow_secrets"] != true {
             let scan = crate::secret_scan::staged(&ws.path).await?;
             if !scan.is_clean() {
                 return Ok(scan.refusal("committed"));
             }
         }
+        // The check can take a while: hooks changed meanwhile ask again
+        // instead of running.
+        if let Some(fingerprint) = &approved {
+            let now = crate::git_hooks::fingerprint(&ws.path).await;
+            if now != *fingerprint {
+                let hooks = crate::git_hooks::found(&ws.path, crate::git_hooks::COMMIT_HOOKS).await;
+                return Ok(ask(&hooks, &now, true));
+            }
+        }
+        let run_hooks = approved.is_some();
         let trace = run_hooks.then(tempfile::NamedTempFile::new).transpose()?;
         let result = Self::git_with_hooks(
             &ws.path,

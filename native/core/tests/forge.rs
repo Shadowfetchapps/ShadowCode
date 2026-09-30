@@ -691,4 +691,21 @@ async fn secrets_are_caught_before_commit_and_push_and_hooks_are_asked_once() {
         format!("{stopped:#}").contains("pre-commit hook stopped the commit"),
         "{stopped:#}"
     );
+    // What a hook runs is often set elsewhere: `npm test` is a
+    // package.json script, and editing it asks again too.
+    fs::write(
+        f.project.join("package.json"),
+        r#"{"scripts":{"test":"node -e 1"}}"#,
+    )
+    .unwrap();
+    let runner = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"Four"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(runner["needs_hooks_choice"], true, "{runner}");
+    assert_eq!(runner["hooks_changed"], true);
 }

@@ -127,8 +127,11 @@ export function useCommitGuard(
             ))}
           </ul>
           <p className="hint">
-            Your answer is kept for this project until the hooks change. Change
-            it in Settings › Permissions & network.
+            Your answer is kept for this project until the hooks or their
+            settings (package.json, .pre-commit-config.yaml …) change. Hooks run
+            with your full access, and so does what they start, such as the
+            project’s tests, which aren’t watched for changes. Change it in
+            Settings › Permissions & network.
           </p>
           <div className="row confirm-actions">
             <button
