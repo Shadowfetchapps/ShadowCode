@@ -985,8 +985,8 @@ Subscription CLIs use their own sandboxes, not this one.
   was busy; it answered after 2 retries.* A reply that was cut off is thrown
   away and replaced; tools only run after a complete reply, so nothing runs
   twice. Errors such as a wrong key or an unknown model are shown at once. If
-  the retries run out, **Try on…** continues the task on another model you
-  pick.
+  the retries run out, the line says *The provider still didn't answer after
+  3 retries.* and **Try on…** continues the task on another model you pick.
 - **Tokens and cost.** Every job and conversation records input, output and
   cached tokens and a cost in US dollars: what OpenRouter charged, zero for a
   model on this computer, and what a subscription CLI reports (Claude Code

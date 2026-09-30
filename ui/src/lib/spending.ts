@@ -58,6 +58,14 @@ export function retriedText(attempts: number): string {
   }.`;
 }
 
+/** The retry line when the task ended before the provider answered. */
+export function retryEndedText(attempts: number, cancelled: boolean): string {
+  if (cancelled) return "Stopped before the provider answered.";
+  return `The provider still didn't answer after ${attempts} ${
+    attempts === 1 ? "retry" : "retries"
+  }.`;
+}
+
 /** A run record from an `agent.completed` payload or a job, if present. */
 export function parseRunRecord(value: unknown): RunRecord | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value))

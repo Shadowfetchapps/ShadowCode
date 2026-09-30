@@ -29,6 +29,7 @@ import {
   money,
   parseRunRecord,
   retriedText,
+  retryEndedText,
   retryText,
   scheduledResumeText,
 } from "./spending";
@@ -136,6 +137,37 @@ function lastIndex(items: ChatItem[], test: (item: ChatItem) => boolean) {
   for (let index = items.length - 1; index >= 0; index--)
     if (test(items[index])) return index;
   return -1;
+}
+
+/** The task's retry line that still says "retrying…", if any. */
+function openRetry(items: ChatItem[], taskId: string | undefined) {
+  return lastIndex(
+    items,
+    (item) =>
+      item.kind === "note" &&
+      item.taskId === taskId &&
+      Boolean(item.retry) &&
+      !item.retry?.done,
+  );
+}
+
+/** Close the task's open retry line with what happened in the end. */
+function finishRetry(
+  items: ChatItem[],
+  taskId: string | undefined,
+  text: (attempts: number) => string,
+): ChatItem[] {
+  const index = openRetry(items, taskId);
+  if (index < 0) return items;
+  const note = items[index] as Extract<ChatItem, { kind: "note" }>;
+  const attempts = note.retry?.attempt || 1;
+  const next = [...items];
+  next[index] = {
+    ...note,
+    text: text(attempts),
+    retry: { attempt: attempts, done: true },
+  };
+  return next;
 }
 
 function objectFields(value: unknown): Record<string, unknown> | undefined {
@@ -679,14 +711,19 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
   items = applySpendAndResume(items, event, taskId);
   if (event.type === "model.retry") {
     const attempt = Number(p.attempt) || 1;
-    const index = lastIndex(
-      items,
-      (item) =>
-        item.kind === "note" &&
-        item.taskId === taskId &&
-        Boolean(item.retry) &&
-        !item.retry?.done,
-    );
+    // The failed attempt's partial reply is thrown away; the retry streams
+    // the answer again.
+    const discard = String(p.discard_message_id || "");
+    if (discard)
+      items = items.filter(
+        (item) =>
+          !(
+            item.kind === "agent" &&
+            item.taskId === taskId &&
+            item.messageId === discard
+          ),
+      );
+    const index = openRetry(items, taskId);
     const note: ChatItem = {
       kind: "note",
       taskId,
@@ -697,29 +734,14 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
     if (index < 0) items.push(note);
     else items[index] = { ...note, key: items[index].key };
   }
+  // The provider answered: streamed text, or a finished request (an answer
+  // with only tool calls streams no text).
   if (
-    (event.type === "model.stream" || event.type === "model.delta") &&
-    (p.text || p.message_id)
-  ) {
-    const index = lastIndex(
-      items,
-      (item) =>
-        item.kind === "note" &&
-        item.taskId === taskId &&
-        Boolean(item.retry) &&
-        !item.retry?.done,
-    );
-    if (index >= 0) {
-      const note = items[index] as Extract<ChatItem, { kind: "note" }>;
-      const attempts = note.retry?.attempt || 1;
-      items = [...items];
-      items[index] = {
-        ...note,
-        text: retriedText(attempts),
-        retry: { attempt: attempts, done: true },
-      };
-    }
-  }
+    ((event.type === "model.stream" || event.type === "model.delta") &&
+      (p.text || p.message_id)) ||
+    (event.type === "model.request_timing" && p.success === true)
+  )
+    items = finishRetry(items, taskId, retriedText);
   // Vendor account pushes carry `vendor`; per-task token/cost updates
   // (`turn`/`job`/`session`) do not change the picker's rows.
   if (event.type === "usage.updated" && p.vendor) usageVersion += 1;
@@ -1170,6 +1192,12 @@ export function applyEvent(state: Transcript, event: EventRow): Transcript {
       item.kind === "spend" && item.taskId === taskId && !item.resolved
         ? { ...item, resolved: "ended" as const }
         : item,
+    );
+    // A retry line never keeps saying "retrying…" after the task ended.
+    items = finishRetry(items, taskId, (attempts) =>
+      p.success
+        ? retriedText(attempts)
+        : retryEndedText(attempts, Boolean(p.cancelled)),
     );
     touch((a) => ({
       ...a,

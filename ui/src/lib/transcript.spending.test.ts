@@ -144,6 +144,69 @@ describe("provider retries", () => {
     ]);
     expect(of(again.items, "note").filter((n) => n.retry)).toHaveLength(2);
   });
+
+  it("throws away a reply cut off by a dropped connection", () => {
+    const state = replay([
+      event(1, "agent.started", { job_id: "j" }),
+      event(2, "model.stream", { text: "Half an ans", message_id: "m1" }),
+      event(3, "model.stream_end", { message_id: "m1", complete: false }),
+      event(4, "model.retry", {
+        attempt: 1,
+        max_attempts: 3,
+        reason: "disconnected",
+        delay_ms: 500,
+        discard_message_id: "m1",
+      }),
+      event(5, "model.stream", { text: "The whole answer.", message_id: "m2" }),
+      event(6, "model.delta", {
+        text: "The whole answer.",
+        message_id: "m2",
+        complete: true,
+      }),
+    ]);
+    const replies = of(state.items, "agent");
+    expect(replies.map((r) => r.text)).toEqual(["The whole answer."]);
+  });
+
+  it("closes the retry line when the retries run out or the answer has no text", () => {
+    const retrying = [
+      event(1, "agent.started", { job_id: "j" }),
+      event(2, "model.retry", {
+        attempt: 3,
+        max_attempts: 3,
+        reason: "overloaded",
+        delay_ms: 4000,
+      }),
+    ];
+    const failed = replay([
+      ...retrying,
+      event(3, "model.request_timing", { success: false }),
+      event(4, "agent.completed", {
+        success: false,
+        summary: "Model provider returned HTTP 503",
+      }),
+    ]);
+    const [gaveUp] = of(failed.items, "note").filter((n) => n.retry);
+    expect(gaveUp.text).toBe(
+      "The provider still didn't answer after 3 retries.",
+    );
+    expect(gaveUp.retry?.done).toBe(true);
+    const stopped = replay([
+      ...retrying,
+      event(3, "agent.completed", { success: false, cancelled: true }),
+    ]);
+    expect(of(stopped.items, "note").filter((n) => n.retry)[0].text).toBe(
+      "Stopped before the provider answered.",
+    );
+    // A retried request that answered with tool calls only streams no text.
+    const toolsOnly = replay([
+      ...retrying,
+      event(3, "model.request_timing", { success: true }),
+    ]);
+    expect(of(toolsOnly.items, "note").filter((n) => n.retry)[0].text).toBe(
+      "The provider was busy; it answered after 3 retries.",
+    );
+  });
 });
 
 describe("plan limits, resumes and Try on", () => {
