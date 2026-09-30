@@ -581,6 +581,13 @@ impl Pipeline {
             fallback_reason: None,
             inference: if self.local() { "local" } else { "cloud" }.into(),
             route: "roles".into(),
+            local_roles: Some(
+                self.stages
+                    .iter()
+                    .filter(|s| s.local())
+                    .map(|s| s.role.id().to_owned())
+                    .collect(),
+            ),
         }
     }
 }

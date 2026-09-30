@@ -734,7 +734,8 @@ Job = {id, workspace, session_id, task_id, task, images: string[], web,
        result: {success, cancelled, summary, plan, usage, usage_is_estimated, verification, timings, limit_reached?, command?}|null,
        timings: Timings|null}
 RoutingDecision = {purpose, source, requested, model_id, model_name, provider, context_limit,
-                   fallback_reason: string|null, inference: "local"|"cloud", route: "vendor_cli"|"local_llamacpp"|"native_http"}
+                   fallback_reason: string|null, inference: "local"|"cloud", route: "vendor_cli"|"local_llamacpp"|"native_http",
+                   local_roles?: string[]}
 JobSummary = {id, workspace, session_id, task_id, status, mode, purpose, model (≤512), started_at, finished_at,
               event_cursor, task (≤512 chars), task_truncated}
 ```
@@ -1798,7 +1799,10 @@ See [SUBAGENTS.md](SUBAGENTS.md).
 - `POST /api/jobs` with `roles: true`: the job's `model` names the roles and
   `routing` is `{purpose: "roles", provider: "shadowcode:roles", model_id:
   "roles:<role>=<id>,…", model_name, inference: local|cloud, route:
-  "roles"}`. When a cloud role would receive a local conversation's work,
+  "roles", local_roles}`. `inference` is `local` only when every role runs
+  on this computer; `local_roles` lists the roles that do (a second opinion
+  on the task counts it as local work when `implement` is listed). When a
+  cloud role would receive a local conversation's work,
   the answer is `needs_consent` with `handoff: {from, to, excerpt_chars,
   images: 0, reason, roles: [{role, label, name, provider, agent?}]}`;
   resending with `handoff_consent: true` records the providers in the
@@ -2916,7 +2920,8 @@ files. Behaviour: [RULES_AND_SKILLS.md](RULES_AND_SKILLS.md). Item ids are
   desktop's `open_rules_folder` command calls it and opens that path; the
   window never supplies a path.
 - Remote access refuses `/api/rules/imports…`, `/api/rules/export…` and
-  `/api/rules/folder`.
+  `/api/rules/folder`, and, while an export is on, `POST /api/rules/items`
+  for a `profile:` item (the export's links follow that switch).
 - Event `rules.delivered {vendor, mechanism, profile_files, project_files,
   skills, plugin_skills, bytes, estimated_tokens, truncated, hash}` for each
   vendor run that received the rulebook; `hash` is the run record's

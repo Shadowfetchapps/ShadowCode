@@ -106,6 +106,7 @@ impl Engine {
                 fallback_reason: None,
                 inference: inference.into(),
                 route: route.into(),
+                local_roles: None,
             }
         };
         // Paid requests count toward the task the user started.

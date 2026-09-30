@@ -426,6 +426,8 @@ async fn plan_implement_review_runs_vendor_roles_and_applies_the_reviewed_diff()
         "{job}"
     );
     assert_eq!(job["routing"]["provider"], roles::PROVIDER);
+    // Only the review role (the conversation's loopback model) runs here.
+    assert_eq!(job["routing"]["local_roles"], json!(["review"]));
     let job_id = job["id"].as_str().unwrap().to_owned();
     let task_id = job["task_id"].as_str().unwrap().to_owned();
     // The diff is applied with the usual edit approval, in this conversation.

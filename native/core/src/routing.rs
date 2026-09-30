@@ -75,6 +75,11 @@ pub struct Decision {
     pub inference: String,
     /// `vendor_cli`, `local_llamacpp`, or `native_http`.
     pub route: String,
+    /// Plan → Implement → Review only: the roles that run on this computer.
+    /// A second opinion on the task asks before sending a change a local
+    /// implement role wrote to a cloud reviewer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_roles: Option<Vec<String>>,
 }
 
 /// Where a model configuration runs, for records and consent.
