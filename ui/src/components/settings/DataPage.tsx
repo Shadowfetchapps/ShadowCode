@@ -4,6 +4,7 @@ import {
   dataApi,
   describeSummary,
   formatBytes,
+  hasRemotePairing,
   pickDataFolder,
   type DataOverview,
   type Inspection,
@@ -38,12 +39,31 @@ function lastText(last: LastOperation): string {
   if (!last.ok && last.kind !== "repair")
     return `The ${last.kind} on ${at} did not finish: ${last.error ?? "unknown error"}. Nothing was changed.`;
   if (last.kind === "restore")
-    return `Restored on ${at}. The data you had before is in ${last.backup_of_previous_data}.`;
+    return `Restored on ${at}. The data you had before is in ${last.backup_of_previous_data}.${last.remote_restored ? " Remote access is off: check the paired devices in Settings › Remote access before turning it on." : ""}`;
   if (last.kind === "reset")
     return `Reset on ${at}. Your previous data was moved to ${(last.moved_to ?? []).join(", ") || "folders next to the profile"}.`;
   return last.ok
     ? `Last check and repair on ${at}: no problems found.`
     : `Last check and repair on ${at} found damage. Restore a backup below.`;
+}
+
+/** Text with `command` spans shown as code. */
+function withCode(text: string) {
+  return text
+    .split("`")
+    .map((part, i) => (i % 2 ? <code key={i}>{part}</code> : part));
+}
+
+/** What to close so a scheduled restore or reset runs. The engine names
+ * the process holding the profile; a window attached to it is not enough. */
+function restartText(overview: DataOverview): string {
+  const mode = overview.engine?.mode;
+  if (overview.desktop_attached && mode === "desktop")
+    return "Another ShadowCode window holds your data: quit it and this one, then open ShadowCode again.";
+  return (
+    overview.engine?.restart ??
+    "Quit ShadowCode (and any `shadowcode serve`) and open it again."
+  );
 }
 
 /** Settings › Your data: backups, restore, check and repair, reset, and
@@ -55,6 +75,7 @@ export function DataPage({ onToast }: { onToast: Toast }) {
   const [includeSecrets, setIncludeSecrets] = useState(false);
   const [restoring, setRestoring] = useState<Inspection | null>(null);
   const [restoreSecrets, setRestoreSecrets] = useState(false);
+  const [restoreRemote, setRestoreRemote] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [report, setReport] = useState<RepairReport | null>(null);
   const remote = isRemote();
@@ -89,7 +110,11 @@ export function DataPage({ onToast }: { onToast: Toast }) {
       dataApi.createBackup(includeSecrets, folder),
     );
     if (made) {
-      onToast(`Backup saved to ${made.path}`, "ok");
+      const left = made.manifest.left_out ?? [];
+      onToast(
+        `Backup saved to ${made.path}${left.length ? `. Not included: ${left.join("; ")}` : ""}`,
+        "ok",
+      );
       await load();
     }
   }
@@ -98,6 +123,7 @@ export function DataPage({ onToast }: { onToast: Toast }) {
     const inspection = await act("inspect", () => dataApi.inspect(path));
     if (inspection) {
       setRestoreSecrets(false);
+      setRestoreRemote(false);
       setRestoring(inspection);
     }
   }
@@ -127,6 +153,14 @@ export function DataPage({ onToast }: { onToast: Toast }) {
 
   const pending = overview.pending;
   const db = overview.database;
+  const included = [
+    pending?.include_secrets && "API keys",
+    pending?.include_remote && "remote access",
+  ].filter(Boolean);
+  // Quitting this window helps only when it holds the profile itself.
+  const quitHelps =
+    !overview.desktop_attached &&
+    (!overview.engine?.mode || overview.engine.mode === "desktop");
   return (
     <section className="settings-page data-page">
       <h3>Your data</h3>
@@ -134,19 +168,21 @@ export function DataPage({ onToast }: { onToast: Toast }) {
         <div className="data-pending" role="status">
           <p>
             {pending.kind === "restore"
-              ? `A restore from ${pending.source} is scheduled${pending.include_secrets ? ", API keys included" : ""}.`
+              ? `A restore from ${pending.source} is scheduled${included.length ? `, ${included.join(" and ")} included` : ""}.`
               : "A reset is scheduled."}{" "}
-            It happens the next time ShadowCode starts. Quit ShadowCode (and any{" "}
-            <code>shadowcode serve</code>) and open it again.
+            It happens the next time ShadowCode starts.{" "}
+            {withCode(restartText(overview))}
           </p>
           <div className="row">
-            <button
-              type="button"
-              className="mini"
-              onClick={() => void invoke("desktop_quit")}
-            >
-              Quit ShadowCode now
-            </button>
+            {quitHelps && (
+              <button
+                type="button"
+                className="mini"
+                onClick={() => void invoke("desktop_quit")}
+              >
+                Quit ShadowCode now
+              </button>
+            )}
             <button
               type="button"
               className="ghost"
@@ -394,7 +430,7 @@ export function DataPage({ onToast }: { onToast: Toast }) {
               return;
             }
             const scheduled = await act("restore", () =>
-              dataApi.restore(restoring.path, restoreSecrets),
+              dataApi.restore(restoring.path, restoreSecrets, restoreRemote),
             );
             if (scheduled) {
               setRestoring(null);
@@ -432,6 +468,23 @@ export function DataPage({ onToast }: { onToast: Toast }) {
                   />{" "}
                   Also restore the API keys in this backup
                 </label>
+              )}
+              {hasRemotePairing(restoring.manifest) && (
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={restoreRemote}
+                    onChange={(e) => setRestoreRemote(e.target.checked)}
+                  />{" "}
+                  Also restore remote access and paired devices
+                </label>
+              )}
+              {restoreRemote && (
+                <p className="hint data-warning" role="note">
+                  Devices you removed since this backup can connect again.
+                  Remote access stays off until you turn it on in Settings ›
+                  Remote access, where you can check the devices first.
+                </p>
               )}
               {restoring.ignored.length > 0 && (
                 <p className="hint">

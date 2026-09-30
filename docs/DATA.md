@@ -35,9 +35,11 @@ that every upgrade finds your data. Don't rename them.
   checks that every conversation, task, job, goal, automation, comparison,
   unsaved editor draft, usage record, setting and API key is still there.
 - **Going back to an older version.** An older version refuses a database a
-  newer version has changed, and says which version to use; it changes
-  nothing. To go back, restore a backup made by the older version, or one of
-  the copies made before the upgrade (below).
+  newer version has changed, and says which version to use (the app shows it
+  in a message and closes); it changes nothing. To go back, restore a backup
+  made by the older version, or one of the copies made before the upgrade
+  (below), with `shadowcode restore FOLDER` in a terminal: the older app
+  cannot open Settings on that profile.
 
 ## Back up
 
@@ -45,18 +47,25 @@ that every upgrade finds your data. Don't rename them.
 folder named `shadowcode-backup-<date>-<time>` in
 `~/.local/share/shadow-agent/backups`. **Back up to another folder…** (or
 `shadowcode backup -o FOLDER`) puts it somewhere else, for example a USB
-drive. It holds:
+drive. The folder you choose is left as it is (it may be shared, or a link to
+another disk); a missing one is created. It holds:
 
 - a consistent copy of the database, taken while ShadowCode keeps working;
-- `config.yaml`, your agent definitions and plugin records;
+- `config.yaml`, your agent definitions and plugin records (hidden files and
+  folders such as `.git` are skipped);
 - `manifest.json`, with the size and SHA-256 of every file, so a damaged or
   incomplete copy is noticed before it is restored.
 
-API keys (`secrets.env`) and remote-access pairing (`remote.json`) are left
-out unless you tick **Include API keys and remote-access pairing** (or pass
-`--include-secrets`). Anyone who gets such a backup can use your keys: keep it
-private. Only your account can open the backup folder. Downloaded models,
-worktrees and your project files are not included.
+Files larger than 4 MB, and small files past the first 4,096, are left out;
+the backup says which, and it never fails because of them.
+
+API keys (`secrets.env`, and the keys you moved to the desktop keyring) and
+remote-access pairing (`remote.json`) are left out unless you tick **Include
+API keys and remote-access pairing** (or pass `--include-secrets`). If the
+keyring is locked, the keys it holds are left out and the backup says so.
+Anyone who gets such a backup can use your keys: keep it private. Only your
+account can open the backup folder. Downloaded models, worktrees and your
+project files are not included.
 
 ## Restore
 
@@ -68,20 +77,30 @@ damaged, that was made by a newer version, or whose settings don't load, and
 says why.
 
 The restore happens the next time ShadowCode starts, because the running app
-has the database open. Quit ShadowCode (and any `shadowcode serve`) and open
-it again; **Quit ShadowCode now** does the first part. Until then you can
-cancel it. When it runs, ShadowCode:
+has the database open. Quit what holds your data and open ShadowCode again:
+Settings › Your data says which process it is (the app, `shadowcode serve`,
+ShadowCode in a terminal, or an editor running `shadowcode acp`). **Quit
+ShadowCode now** is offered when it is this window. Until then you can cancel
+it. When it runs, ShadowCode:
 
 1. checks the copied files again;
 2. backs up what it is about to replace (`…-before-restore`);
-3. puts the backup's database and settings in place, and your API keys only
-   if you ticked **Also restore the API keys in this backup**;
+3. puts the backup's database and settings in place; your API keys only if
+   you ticked **Also restore the API keys in this backup** (restored keys are
+   read from `secrets.env`: move them to the keyring again in Settings ›
+   Accounts if you like); and remote access with its paired devices only if
+   you ticked **Also restore remote access and paired devices**;
 4. upgrades the database if the backup came from an older version.
 
+Remote access comes back switched off. Devices you removed since the backup
+was made can connect again, so check the paired devices in Settings › Remote
+access before you turn it on.
+
 `shadowcode restore FOLDER --yes` restores right away when ShadowCode is not
-running; without `--yes` it only checks the backup. **Copies made before
-upgrades** can be restored the same way; they bring back your history as it
-was, and leave your settings as they are.
+running; without `--yes` it only checks the backup. Add `--include-secrets`
+for the API keys and `--include-remote` for remote access. **Copies made
+before upgrades** can be restored the same way; they bring back your history
+as it was, and leave your settings as they are.
 
 ## Check and repair
 
@@ -104,7 +123,8 @@ backup.
 keys, conversations and history into folders named `<folder>.reset-<date>-<time>`
 next to the three folders above, so ShadowCode starts as if it was just
 installed. Nothing is deleted. Backups, worktrees and downloaded models stay
-where they are. Like a restore, it happens the next time ShadowCode starts
+where they are, also when the `XDG_*` variables put the three folders in one
+place. Like a restore, it happens the next time ShadowCode starts
 (right away from the command line when ShadowCode is not running), and you
 can cancel it until then. To undo a reset, quit ShadowCode and move the files
 back.

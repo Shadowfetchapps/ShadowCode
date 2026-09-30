@@ -542,6 +542,64 @@ async fn secrets_are_not_shown_remotely() {
 }
 
 #[tokio::test]
+async fn the_app_log_stays_on_this_computer() {
+    use std::io::Write;
+    let f = fixture().await;
+    let token = f.pair().await;
+    let paths = f.service.engine.paths().clone();
+    let dir = shadowcode_core::applog::dir(&paths);
+    std::fs::create_dir_all(&dir).unwrap();
+    writeln!(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(shadowcode_core::applog::FILE_NAME))
+            .unwrap(),
+        "2026-09-29T10:00:00.000+02:00 INFO  event: marker-line-for-the-log-test"
+    )
+    .unwrap();
+    let (status, _) = f.api(&token, "GET", "/api/logs", None).await;
+    assert_eq!(status, 403);
+    // Doctor answers the device, without the log's lines.
+    let (status, body) = f.api(&token, "GET", "/api/doctor", None).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.to_string().contains("marker-line"), "{body}");
+    let content: Value =
+        serde_json::from_str(body["diagnostic_export"]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(content["log"]["lines"], json!([]));
+    assert!(content["log"]["note"]
+        .as_str()
+        .unwrap()
+        .contains("not included over remote access"));
+    let id = body["diagnostic_export"]["id"].as_str().unwrap();
+    let (status, export) = f
+        .api(
+            &token,
+            "GET",
+            &format!("/api/diagnostic-exports/{id}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{export}");
+    assert!(!export.to_string().contains("marker-line"));
+    // On this computer the export keeps them.
+    let local = f
+        .service
+        .dispatch(Request {
+            method: "GET".into(),
+            path: "/api/doctor".into(),
+            body: Value::Null,
+        })
+        .await
+        .unwrap();
+    assert!(local["diagnostic_export"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("marker-line-for-the-log-test"));
+    f.manager.stop();
+}
+
+#[tokio::test]
 async fn event_stream_delivers_wakeups() {
     let f = fixture().await;
     let token = f.pair().await;

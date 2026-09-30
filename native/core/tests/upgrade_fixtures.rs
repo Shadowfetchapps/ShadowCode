@@ -574,6 +574,12 @@ fn a_newer_database_is_refused_without_changing_anything() {
         "{error}"
     );
     assert!(error.contains("Nothing was changed"), "{error}");
+    // Settings cannot open while the database is refused: the way back
+    // named is the command that works without opening it.
+    assert!(
+        error.contains("`shadowcode restore PATH`") && !error.contains("Settings ›"),
+        "{error}"
+    );
     let error = format!(
         "{:#}",
         Service::open(paths.clone(), Some(fixture.project.clone()))

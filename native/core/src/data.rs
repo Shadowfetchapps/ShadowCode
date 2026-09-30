@@ -6,15 +6,18 @@
 //! app runs), `config.yaml`, your agent definitions
 //! (`~/.config/shadowcode/agents`) and plugin install records, plus
 //! `manifest.json` with each file's size and SHA-256. API keys
-//! (`secrets.env`) and remote-access pairing (`remote.json`) are copied only
-//! when the user asks for them.
+//! (`secrets.env`, plus the keys moved to the desktop keyring) and
+//! remote-access pairing (`remote.json`) are copied only when the user asks
+//! for them.
 //!
 //! **Restore** and **reset** replace files the running engine has open, so
 //! they are scheduled: the request validates everything, stages the files in
 //! the state folder and writes a small marker; [`apply_pending`] finishes the
 //! job the next time an engine opens the profile, after it holds the profile
 //! lock and before it opens the database. A restore first backs up what it
-//! replaces; a reset moves folders aside and deletes nothing.
+//! replaces; a reset moves folders aside and deletes nothing. API keys and
+//! remote-access pairing come back only when asked for, each on its own, and
+//! remote access comes back switched off.
 //!
 //! **Repair** runs in place: it backs up the database first, checks its
 //! integrity, rebuilds indexes and statistics, and moves regenerable cache
@@ -44,6 +47,11 @@ const LAST: &str = "last-data-operation.json";
 /// State-folder copy of the files a scheduled restore will put in place.
 const STAGING: &str = "pending-restore";
 const DATABASE: &str = "state/shadow-agent.db";
+/// API keys: in a backup and restored only when asked for.
+const KEYS: &str = "config/secrets.env";
+/// Remote access and paired devices: backed up with the API keys, restored
+/// only when asked for on its own.
+const REMOTE: &str = "config/remote.json";
 /// Folders in the data directory a reset leaves where they are: the backups
 /// themselves, Git worktrees holding project changes (Git keeps pointing at
 /// them) and large downloads the user would otherwise fetch again.
@@ -59,7 +67,9 @@ pub const KEPT_ON_RESET: &[&str] = &[
 const CACHE_FILES: &[&str] = &["state/openrouter-models.json"];
 /// Largest single non-database file copied into a backup.
 const MAX_SMALL_FILE: u64 = 4 * 1024 * 1024;
-/// Most small files (agents, plugin records) copied into one backup.
+/// Most small files (agents, plugin records) copied into one backup. More
+/// are left out and listed, never a reason to fail: the backups made before
+/// a restore or a repair must not be blocked by an unusual agents folder.
 const MAX_SMALL_FILES: usize = 4096;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -80,6 +90,7 @@ pub struct Manifest {
     /// The database format (`PRAGMA user_version`) of the copied database.
     pub schema_version: i64,
     pub created_at: f64,
+    /// The backup holds at least one API key.
     pub includes_secrets: bool,
     /// `manual`, `before-restore`, `before-repair` or `upgrade-copy`.
     pub reason: String,
@@ -88,6 +99,10 @@ pub struct Manifest {
     /// backed up before a restore), so its files were copied as they were.
     #[serde(default)]
     pub raw_copy: bool,
+    /// What the backup could not include, in plain words: a key the keyring
+    /// did not give, files over the size or count limits.
+    #[serde(default)]
+    pub left_out: Vec<String>,
 }
 
 /// Where backups go unless the user picks another folder.
@@ -179,59 +194,139 @@ fn restorable(relative: &str) -> bool {
         || relative.starts_with("state/native-plugins/")
 }
 
+/// Files copied into a backup only when the user asks for API keys.
 fn secret_file(relative: &str) -> bool {
-    matches!(relative, "config/secrets.env" | "config/remote.json")
+    matches!(relative, KEYS | REMOTE)
 }
 
-/// Regular files below `dir` (symlinks are skipped), as `(path, relative)`.
-fn small_files(dir: &Path, prefix: &str, found: &mut Vec<(PathBuf, String)>) -> Result<()> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Ok(());
-    };
-    for entry in entries.flatten() {
-        let kind = entry.file_type()?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let relative = format!("{prefix}/{name}");
-        if kind.is_dir() {
-            small_files(&entry.path(), &relative, found)?;
-        } else if kind.is_file() && entry.metadata()?.len() <= MAX_SMALL_FILE {
-            ensure!(
-                found.len() < MAX_SMALL_FILES,
-                "Too many files to back up under {prefix}"
-            );
-            found.push((entry.path(), relative));
+/// "1 file", "3 files".
+fn count(n: usize, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+/// The small files a backup copies as they are, and what it left out.
+#[derive(Default)]
+struct Collected {
+    /// `(source, relative)`.
+    files: Vec<(PathBuf, String)>,
+    left_out: Vec<String>,
+}
+
+impl Collected {
+    /// Regular files below `dir`, as `root/…`. Symlinks and hidden files and
+    /// folders (such as `.git`) are skipped; files over the size or count
+    /// limits are noted in `left_out` instead of failing the backup.
+    fn add_tree(&mut self, dir: &Path, root: &str) -> Result<()> {
+        let (mut large, mut over) = (Vec::new(), 0);
+        self.walk(dir, root, &mut large, &mut over)?;
+        if let Some(first) = large.first() {
+            self.left_out.push(format!(
+                "{root}: {} larger than 4 MB, such as {first}",
+                count(large.len(), "file")
+            ));
         }
-    }
-    Ok(())
-}
-
-/// The profile files a backup holds, as `(source, relative)`.
-fn profile_files(paths: &AppPaths, include_secrets: bool) -> Result<Vec<(PathBuf, String)>> {
-    let mut files = Vec::new();
-    let mut add = |relative: &str| -> Result<()> {
-        let source = resolve(paths, relative)?;
-        if fs::symlink_metadata(&source).is_ok_and(|m| m.is_file()) {
-            files.push((source, relative.to_owned()));
+        if over > 0 {
+            self.left_out.push(format!(
+                "{root}: {} past the limit of {MAX_SMALL_FILES} files",
+                count(over, "file")
+            ));
         }
         Ok(())
-    };
-    add("config/config.yaml")?;
-    if include_secrets {
-        add("config/secrets.env")?;
-        add("config/remote.json")?;
     }
-    small_files(&crate::agents::user_dir(paths), "agents", &mut files)?;
-    small_files(
-        &paths.state.join("native-plugins"),
-        "state/native-plugins",
-        &mut files,
-    )?;
-    Ok(files)
+
+    fn walk(
+        &mut self,
+        dir: &Path,
+        prefix: &str,
+        large: &mut Vec<String>,
+        over: &mut usize,
+    ) -> Result<()> {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Ok(());
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let kind = entry.file_type()?;
+            let relative = format!("{prefix}/{name}");
+            if kind.is_dir() {
+                self.walk(&entry.path(), &relative, large, over)?;
+            } else if !kind.is_file() {
+                continue;
+            } else if entry.metadata()?.len() > MAX_SMALL_FILE {
+                large.push(relative);
+            } else if self.files.len() >= MAX_SMALL_FILES {
+                *over += 1;
+            } else {
+                self.files.push((entry.path(), relative));
+            }
+        }
+        Ok(())
+    }
 }
 
-/// A new, private, uniquely named folder inside `parent`.
+/// The profile files a backup copies as they are. API keys are written by
+/// [`backup_keys`] instead.
+fn profile_files(paths: &AppPaths, include_secrets: bool) -> Result<Collected> {
+    let mut collected = Collected::default();
+    for relative in ["config/config.yaml", REMOTE] {
+        if relative == REMOTE && !include_secrets {
+            continue;
+        }
+        let source = resolve(paths, relative)?;
+        if fs::symlink_metadata(&source).is_ok_and(|m| m.is_file()) {
+            collected.files.push((source, relative.to_owned()));
+        }
+    }
+    collected.add_tree(&crate::agents::user_dir(paths), "agents")?;
+    collected.add_tree(&paths.state.join("native-plugins"), "state/native-plugins")?;
+    Ok(collected)
+}
+
+/// The text of a backup's `secrets.env`: the keys saved in the file plus
+/// the keys moved to the keyring (read from it now), so a restore on a new
+/// computer or after a reset brings every key back. Also returns how many
+/// keys it holds and the keys the keyring did not give.
+fn backup_keys(paths: &AppPaths) -> Result<(String, usize, Vec<String>)> {
+    let mut keys = crate::config::secrets(paths)?;
+    let mut left_out = Vec::new();
+    for name in crate::keyring::listed(paths) {
+        match crate::keyring::get(paths, &name) {
+            Ok(Some(value)) => {
+                keys.insert(name, value);
+            }
+            Ok(None) => left_out.push(format!("{name}: not found in the keyring")),
+            Err(error) => left_out.push(format!("{name}: the keyring did not give it ({error:#})")),
+        }
+    }
+    let mut text = String::new();
+    for (name, value) in &keys {
+        text.push_str(&format!("{name}={}\n", serde_json::to_string(value)?));
+    }
+    Ok((text, keys.len(), left_out))
+}
+
+/// A folder inside a backup folder this process just created with mode 700,
+/// where nobody else can have put anything.
+fn backup_subfolder(path: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .with_context(|| format!("Cannot create {}", path.display()))
+}
+
+/// A new, private (mode 700), uniquely named folder inside `parent`.
 fn new_backup_folder(parent: &Path, reason: &str) -> Result<PathBuf> {
-    private_directory(parent)?;
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let suffix = if reason == "manual" {
         String::new()
@@ -309,9 +404,18 @@ pub fn create_backup(paths: &AppPaths, options: BackupOptions<'_>) -> Result<(Pa
                 folder.is_absolute(),
                 "Choose a full folder path for backups"
             );
+            // The user's own folder (Documents, a shared folder, a USB drive,
+            // maybe through a symlink) stays as it is; only a missing one is
+            // created. The backup folder inside it is private.
+            fs::create_dir_all(folder)
+                .with_context(|| format!("Cannot create the folder {}", folder.display()))?;
             folder.to_path_buf()
         }
-        None => backups_dir(paths),
+        None => {
+            let folder = backups_dir(paths);
+            private_directory(&folder)?;
+            folder
+        }
     };
     let folder = new_backup_folder(&parent, options.reason)?;
     match write_backup(paths, &folder, options) {
@@ -331,7 +435,7 @@ fn write_backup(paths: &AppPaths, folder: &Path, options: BackupOptions<'_>) -> 
     let database = paths.database();
     if database.is_file() {
         let target = folder.join(DATABASE);
-        private_directory(target.parent().context("backup folder")?)?;
+        backup_subfolder(target.parent().context("backup folder")?)?;
         match copy_database(&database, &target) {
             Ok(version) => schema_version = version,
             Err(error) if options.allow_raw => {
@@ -369,9 +473,13 @@ fn write_backup(paths: &AppPaths, folder: &Path, options: BackupOptions<'_>) -> 
             },
         );
     }
-    for (source, relative) in profile_files(paths, options.include_secrets)? {
+    let Collected {
+        files: copies,
+        mut left_out,
+    } = profile_files(paths, options.include_secrets)?;
+    for (source, relative) in copies {
         let target = folder.join(&relative);
-        private_directory(target.parent().context("backup folder")?)?;
+        backup_subfolder(target.parent().context("backup folder")?)?;
         fs::copy(&source, &target)
             .with_context(|| format!("Cannot copy {} into the backup", source.display()))?;
         seal(&target)?;
@@ -382,16 +490,34 @@ fn write_backup(paths: &AppPaths, folder: &Path, options: BackupOptions<'_>) -> 
             sha256,
         });
     }
+    let mut includes_secrets = false;
+    if options.include_secrets {
+        let (text, keys, missing) = backup_keys(paths)?;
+        left_out.extend(missing);
+        if keys > 0 {
+            let target = folder.join(KEYS);
+            backup_subfolder(target.parent().context("backup folder")?)?;
+            atomic_write(&target, text.as_bytes(), true)?;
+            let (bytes, sha256) = sha256_file(&target)?;
+            files.push(FileEntry {
+                path: KEYS.into(),
+                bytes,
+                sha256,
+            });
+            includes_secrets = true;
+        }
+    }
     let manifest = Manifest {
         format: BACKUP_FORMAT.into(),
         format_version: BACKUP_FORMAT_VERSION,
         app_version: crate::VERSION.into(),
         schema_version,
         created_at: crate::now(),
-        includes_secrets: options.include_secrets && files.iter().any(|f| secret_file(&f.path)),
+        includes_secrets,
         reason: options.reason.into(),
         files,
         raw_copy,
+        left_out,
     };
     for directory in ["state", "config", "agents"] {
         sync_dir(&folder.join(directory));
@@ -520,6 +646,7 @@ pub fn inspect(paths: &AppPaths, path: &Path) -> Result<Inspection> {
                     sha256,
                 }],
                 raw_copy: false,
+                left_out: Vec::new(),
             },
         });
     }
@@ -649,14 +776,29 @@ pub struct Pending {
     /// `restore` or `reset`.
     pub kind: String,
     pub requested_at: f64,
-    /// Restore: the backup it came from, and whether API keys come back too.
+    /// Restore: the backup it came from, and whether API keys and remote
+    /// access come back too.
     #[serde(default)]
     pub source: Option<PathBuf>,
     #[serde(default)]
     pub include_secrets: bool,
+    #[serde(default)]
+    pub include_remote: bool,
     /// Restore: the staged files (paths relative to the staging folder).
     #[serde(default)]
     pub manifest: Option<Manifest>,
+}
+
+/// What a restore brings back besides the database, settings, agents and
+/// plugin records.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RestoreOptions {
+    /// API keys (`secrets.env`), when the backup has them.
+    pub include_secrets: bool,
+    /// Remote access and paired devices (`remote.json`), when the backup has
+    /// them. Devices removed since the backup could connect again, so it
+    /// comes back switched off until the user turns it on after checking.
+    pub include_remote: bool,
 }
 
 pub fn pending(paths: &AppPaths) -> Result<Option<Pending>> {
@@ -704,9 +846,8 @@ fn write_pending(paths: &AppPaths, pending: &Pending) -> Result<()> {
     )
 }
 
-/// Validate a backup and stage it for the next start. `include_secrets`
-/// restores API keys too when the backup has them.
-pub fn schedule_restore(paths: &AppPaths, path: &Path, include_secrets: bool) -> Result<Pending> {
+/// Validate a backup and stage it for the next start.
+pub fn schedule_restore(paths: &AppPaths, path: &Path, options: RestoreOptions) -> Result<Pending> {
     let inspection = inspect(paths, path)?;
     ensure!(
         inspection.restorable,
@@ -718,7 +859,12 @@ pub fn schedule_restore(paths: &AppPaths, path: &Path, include_secrets: bool) ->
     private_directory(&staging)?;
     let mut files = Vec::new();
     for file in &inspection.manifest.files {
-        if !restorable(&file.path) || (secret_file(&file.path) && !include_secrets) {
+        let wanted = match file.path.as_str() {
+            KEYS => options.include_secrets,
+            REMOTE => options.include_remote,
+            _ => true,
+        };
+        if !restorable(&file.path) || !wanted {
             continue;
         }
         let source = if inspection.kind == "database" {
@@ -738,21 +884,46 @@ pub fn schedule_restore(paths: &AppPaths, path: &Path, include_secrets: bool) ->
             "{} changed while it was being copied; try again",
             file.path
         );
-        files.push(file.clone());
+        files.push(if file.path == REMOTE {
+            switched_off(&target)?
+        } else {
+            file.clone()
+        });
     }
     let mut manifest = inspection.manifest.clone();
     manifest.files = files;
-    manifest.includes_secrets =
-        include_secrets && manifest.files.iter().any(|f| secret_file(&f.path));
+    let has = |relative: &str| manifest.files.iter().any(|f| f.path == relative);
+    manifest.includes_secrets = has(KEYS);
+    let include_remote = has(REMOTE);
     let pending = Pending {
         kind: "restore".into(),
         requested_at: crate::now(),
         source: Some(inspection.path),
         include_secrets: manifest.includes_secrets,
+        include_remote,
         manifest: Some(manifest),
     };
     write_pending(paths, &pending)?;
     Ok(pending)
+}
+
+/// Turn remote access off in a staged `remote.json`: its paired devices may
+/// include ones removed since the backup, so the user checks them in
+/// Settings › Remote access before turning it on again. Returns the staged
+/// file's new entry.
+fn switched_off(staged: &Path) -> Result<FileEntry> {
+    let mut settings: Value = serde_json::from_slice(&fs::read(staged)?)
+        .ok()
+        .filter(Value::is_object)
+        .context("The backup's remote-access settings (remote.json) cannot be read")?;
+    settings["enabled"] = Value::Bool(false);
+    atomic_write(staged, &serde_json::to_vec_pretty(&settings)?, true)?;
+    let (bytes, sha256) = sha256_file(staged)?;
+    Ok(FileEntry {
+        path: REMOTE.into(),
+        bytes,
+        sha256,
+    })
 }
 
 /// Schedule moving everything aside at the next start.
@@ -763,6 +934,7 @@ pub fn schedule_reset(paths: &AppPaths) -> Result<Pending> {
         requested_at: crate::now(),
         source: None,
         include_secrets: false,
+        include_remote: false,
         manifest: None,
     };
     write_pending(paths, &pending)?;
@@ -829,7 +1001,7 @@ fn apply_restore(paths: &AppPaths, pending: &Pending) -> Result<Value> {
     let (before, _) = create_backup(
         paths,
         BackupOptions {
-            include_secrets: pending.include_secrets,
+            include_secrets: pending.include_secrets || pending.include_remote,
             folder: None,
             reason: "before-restore",
             allow_raw: true,
@@ -876,6 +1048,14 @@ fn apply_restore(paths: &AppPaths, pending: &Pending) -> Result<Value> {
         sync_dir(target.parent().unwrap_or(Path::new("/")));
         replaced.push((temporary.clone(), target.clone(), relative.clone()));
     }
+    if pending.include_secrets {
+        // The restored keys are the ones asked for: read them from
+        // secrets.env, not from the keyring they may have been moved to.
+        let restored = crate::config::file_secret_names(paths).unwrap_or_default();
+        if let Err(error) = crate::keyring::prefer_file(paths, &restored) {
+            tracing::warn!("restore could not update keyring.json: {error:#}");
+        }
+    }
     Ok(json!({
         "kind": "restore",
         "ok": true,
@@ -883,6 +1063,7 @@ fn apply_restore(paths: &AppPaths, pending: &Pending) -> Result<Value> {
         "source": pending.source,
         "restored": manifest.files.iter().map(|f| &f.path).collect::<Vec<_>>(),
         "secrets_restored": pending.include_secrets,
+        "remote_restored": pending.include_remote,
         "backup_of_previous_data": before,
         "from_version": manifest.app_version,
     }))
@@ -892,12 +1073,18 @@ fn apply_reset(paths: &AppPaths, _pending: &Pending) -> Result<Value> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut asides = Vec::new();
+    let roots = [&paths.config, &paths.data, &paths.state];
     let result = (|| -> Result<()> {
-        for (label, root) in [
-            ("config", &paths.config),
-            ("data", &paths.data),
-            ("state", &paths.state),
-        ] {
+        // XDG_CONFIG_HOME, XDG_DATA_HOME and XDG_STATE_HOME may name the same
+        // folder, or one inside another: each folder is handled once, keeping
+        // what any of its roles keeps, and never moving another role's
+        // folder with it.
+        let mut done: Vec<&PathBuf> = Vec::new();
+        for root in roots {
+            if done.contains(&root) {
+                continue;
+            }
+            done.push(root);
             let parent = root.parent().context("profile folder has no parent")?;
             let name = root.file_name().context("profile folder name")?;
             let mut aside = parent.join(format!("{}.reset-{stamp}", name.to_string_lossy()));
@@ -913,8 +1100,14 @@ fn apply_reset(paths: &AppPaths, _pending: &Pending) -> Result<Value> {
             entries.sort_by_key(|e| e.file_name());
             for entry in entries {
                 let file = entry.file_name().to_string_lossy().into_owned();
-                let keep = (label == "state" && matches!(file.as_str(), "native.lock" | PENDING))
-                    || (label == "data" && KEPT_ON_RESET.contains(&file.as_str()));
+                let path = entry.path();
+                // native.lock stays: moving it would let a second engine
+                // lock a fresh one while this one runs.
+                let keep = (root == &paths.state
+                    && matches!(file.as_str(), "native.lock" | PENDING))
+                    || (root == &paths.data && KEPT_ON_RESET.contains(&file.as_str()))
+                    || roots.iter().any(|other| other.starts_with(&path))
+                    || asides.contains(&path);
                 if keep {
                     continue;
                 }
@@ -1050,7 +1243,9 @@ pub fn reset_folders(paths: &AppPaths) -> Vec<PathBuf> {
             }
         }
     }
+    // Two folders are the same when the XDG variables name one place.
     found.sort();
+    found.dedup();
     found
 }
 
@@ -1224,7 +1419,30 @@ pub fn overview(paths: &AppPaths) -> Result<Value> {
         "upgrade_copies": upgrade_copies(paths),
         "reset_folders": reset_folders(paths),
         "kept_on_reset": KEPT_ON_RESET,
-        "pending": pending(paths)?.map(|p| json!({"kind": p.kind, "requested_at": p.requested_at, "source": p.source, "include_secrets": p.include_secrets})),
+        "pending": pending(paths)?.map(|p| json!({"kind": p.kind, "requested_at": p.requested_at, "source": p.source, "include_secrets": p.include_secrets, "include_remote": p.include_remote})),
         "last_operation": last_operation(paths),
     }))
+}
+
+/// What to close so a scheduled restore or reset runs. It runs when an
+/// engine next opens the profile, so the process that holds it now must
+/// stop: `mode` is that engine's (`control::Server`), `None` when unknown.
+/// A desktop window attached to another engine does not hold the profile.
+pub fn restart_hint(mode: Option<&str>, pid: u32) -> String {
+    match mode {
+        Some("desktop") => "Quit ShadowCode and open it again.".into(),
+        Some("server") => format!(
+            "`shadowcode serve` (process {pid}) holds your data: stop it, then open ShadowCode again."
+        ),
+        Some("acp") => format!(
+            "An editor runs ShadowCode's agent (`shadowcode acp`, process {pid}) and holds your data: close ShadowCode in that editor, or quit the editor, then open ShadowCode again."
+        ),
+        Some("tui") => format!(
+            "ShadowCode is open in a terminal (process {pid}) and holds your data: quit it there, then open ShadowCode again."
+        ),
+        Some("command") => format!(
+            "A `shadowcode` command (process {pid}) holds your data: wait for it to finish, then open ShadowCode again."
+        ),
+        _ => "Quit ShadowCode and anything else using your data (`shadowcode serve`, ShadowCode in a terminal, or an editor running `shadowcode acp`), then open ShadowCode again.".into(),
+    }
 }

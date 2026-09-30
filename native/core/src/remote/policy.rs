@@ -378,10 +378,10 @@ mod tests {
         ("onboarding", "allowed"),
         ("health", "allowed"),
         ("version", "allowed"),
-        ("doctor", "allowed"),
+        ("doctor", "allowed; the app log's lines are left out"),
         (
             "diagnostic-exports",
-            "allowed: allow-listed check results only",
+            "allowed: allow-listed check results and public run records; no app log for a remote device",
         ),
         ("guardian", "allowed"),
         ("about", "allowed: version, install kind, links"),

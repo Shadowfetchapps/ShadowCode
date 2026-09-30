@@ -1187,7 +1187,8 @@ arguments or output, or file contents. `logging.level` (`error`, `warn`,
 - `POST /api/logs/folder` → `{path}`: creates the folder. The desktop's
   `open_logs_folder` command calls it and opens that path; the window never
   supplies a path.
-- Remote access refuses `/api/logs…`.
+- Remote access refuses `/api/logs…`, and Doctor's export leaves the log's
+  lines out for a remote device.
 
 ### Agent quality
 
@@ -1943,7 +1944,8 @@ recorded once per conversation when a command runs without bubblewrap.
   `cli:…` are hidden because they can name local files or private hosts) and
   `log: {note, lines}`, the app log's last lines (at most 96 KiB; see
   [App log](#app-log)) with secrets redacted again and every file path
-  replaced by `<path>`.
+  replaced by `<path>`. Over remote access `lines` is empty and `note` says
+  the log stays on the computer running ShadowCode.
 - `GET /api/diagnostic-exports/{id}` → the same snapshot, for 10 minutes; at
   most four are retained per engine. Unknown or expired ids fail ("Diagnostic
   snapshot expired; run Doctor again"); Doctor is not rerun. The desktop
@@ -2935,11 +2937,17 @@ view.
 manifest.json
 state/shadow-agent.db          // consistent copy (VACUUM INTO), user_version kept
 config/config.yaml             // when present
-config/secrets.env             // only with include_secrets
+config/secrets.env             // only with include_secrets: secrets.env's keys plus
+                               // the keys moved to the keyring; absent when none
 config/remote.json             // only with include_secrets
 agents/...                     // your agent definitions (~/.config/shadowcode/agents)
 state/native-plugins/...       // plugin install records
 ```
+
+Hidden files and folders (such as `.git`) and symlinks are skipped. Files
+over 4 MB and small files past the first 4096 are left out and listed in
+`left_out`; they never fail a backup (nor the backups made before a restore
+or a repair).
 
 `Manifest`:
 
@@ -2949,10 +2957,12 @@ state/native-plugins/...       // plugin install records
   app_version: string,          // the ShadowCode that made it
   schema_version: number,       // database format of the copy
   created_at: number,
-  includes_secrets: boolean,
+  includes_secrets: boolean,    // holds at least one API key
   reason: "manual"|"before-restore"|"before-repair"|"upgrade-copy",
   files: [{path: string, bytes: number, sha256: string}],
-  raw_copy: boolean             // a damaged database copied as it was (not restorable)
+  raw_copy: boolean,            // a damaged database copied as it was (not restorable)
+  left_out: string[]            // what could not be included, in plain words (a key the
+                                // keyring did not give, files over the limits)
 }
 ```
 
@@ -2972,10 +2982,17 @@ not know are reported in `ignored` and not restored.
     upgrade_copies: [{path, name, bytes, created_at, schema_version: number|null}],
     reset_folders: string[],       // folders an earlier reset moved aside
     kept_on_reset: string[],       // data subfolders a reset leaves in place
-    pending: {kind: "restore"|"reset", requested_at, source: string|null, include_secrets}|null,
-    last_operation: LastOperation|null
+    pending: {kind: "restore"|"reset", requested_at, source: string|null, include_secrets, include_remote}|null,
+    last_operation: LastOperation|null,
+    engine: {mode: "desktop"|"server"|"tui"|"acp"|"command"|null, pid: number, restart: string},
+    desktop_attached?: boolean     // added by the desktop shell
   }
   ```
+  `engine` is the process that holds the profile (`mode` null when no
+  control server runs); `restart` says in plain words what to close so a
+  scheduled restore or reset runs, for example an editor's `shadowcode acp`.
+  `desktop_attached: true` means the desktop window is attached to that
+  process's engine, so quitting the window alone does not run it.
   `Listed` = `{path, name, app_version, schema_version, created_at,
   includes_secrets, reason, bytes}`, newest first; read from each
   `manifest.json` without checking digests. `upgrade_copies` are the
@@ -2985,7 +3002,9 @@ not know are reported in `ignored` and not restored.
   (default folder: `<data>/backups`).
 - `POST /api/data/backups {include_secrets?: boolean, folder?: string}` →
   `{path, manifest: Manifest}`. `folder` must be absolute (`~/` allowed); a
-  new uniquely named folder is created inside it. A failed backup leaves no
+  new uniquely named folder (mode 700) is created inside it. The chosen
+  folder itself is created when missing and otherwise left as it is (its
+  mode, owner and symlinks are not touched). A failed backup leaves no
   folder behind.
 - `POST /api/data/backups/inspect {path}` → `Inspection`, changing nothing:
   ```
@@ -3004,23 +3023,33 @@ not know are reported in `ignored` and not restored.
   (`PRAGMA quick_check`, opened read-only and immutable) and schema version,
   and that `config.yaml` loads in this version. A folder without a manifest
   or with a damaged one is an error.
-- `POST /api/data/restore {path, include_secrets?: boolean}` →
+- `POST /api/data/restore {path, include_secrets?: boolean, include_remote?: boolean}` →
   `{scheduled: true, pending: Pending, message}`. Validates like inspect
   (an unrestorable backup is an error listing the problems), copies the
   checked files to `<state>/pending-restore/` and writes
-  `<state>/pending-data-operation.json`. The next engine start (desktop,
+  `<state>/pending-data-operation.json`; `message` names what to close (as
+  `engine.restart` above). The next engine start (desktop,
   `shadowcode serve`, or any CLI command that opens the profile) holds the
   profile lock, re-checks the staged digests, backs up the current database,
-  settings (and API keys when they are replaced) into a `before-restore`
-  backup, and swaps the files in; the old write-ahead log is removed with
-  the old database. API keys are restored only with `include_secrets` and
-  when the backup has them. An older database is then upgraded as usual.
+  settings (and API keys and remote access when they are replaced) into a
+  `before-restore` backup, and swaps the files in; the old write-ahead log is
+  removed with the old database. API keys (`secrets.env`) are restored only
+  with `include_secrets`, and the restored names are then read from
+  `secrets.env` rather than the keyring (`keyring.json` stops listing them).
+  Remote access and paired devices (`remote.json`) are restored only with
+  `include_remote`, and always with `enabled: false`: devices removed since
+  the backup could connect again, so the user turns it on after checking
+  them. Either only when the backup has the file. An older database is then
+  upgraded as usual.
 - `POST /api/data/reset {confirm: "reset"}` → `{scheduled: true, pending,
   message}`. At the next start everything in the three profile folders moves
-  into sibling folders `<folder>.reset-<YYYYMMDD-HHMMSS>` — except
-  `native.lock` and, in the data folder, `kept_on_reset` (`backups`,
-  `managed-worktrees`, `parallel-worktrees`, `local-models`, `voice`,
-  `code-intel`). Nothing is deleted; if a move fails, everything already
+  into sibling folders `<folder>.reset-<YYYYMMDD-HHMMSS>` — except, in the
+  state folder, `native.lock` and the pending marker, and, in the data folder,
+  `kept_on_reset` (`backups`, `managed-worktrees`, `parallel-worktrees`,
+  `local-models`, `voice`, `code-intel`). When the XDG variables make two or
+  three of the folders one (or put one inside another), that folder is
+  handled once, keeps what each of its roles keeps, and never moves another
+  role's folder. Nothing is deleted; if a move fails, everything already
   moved is put back.
 - `DELETE /api/data/pending` → `{cancelled: boolean}`.
 - `POST /api/data/repair` → `{kind: "repair", ok, finished_at, checks:
@@ -3036,7 +3065,7 @@ not know are reported in `ignored` and not restored.
 
 `LastOperation` (`<state>/last-data-operation.json`) is the result of the
 last restore, reset or repair: `{kind, ok, finished_at, error?}` plus, for a
-restore, `source`, `restored`, `secrets_restored`,
+restore, `source`, `restored`, `secrets_restored`, `remote_restored`,
 `backup_of_previous_data`, `from_version`; for a reset, `moved_to`, `moved`,
 `kept`; for a repair, the repair answer above.
 

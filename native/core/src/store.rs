@@ -413,7 +413,7 @@ fn newer_database(version: i64, writer: Option<String>) -> anyhow::Error {
         .map(|v| format!("ShadowCode {v}"))
         .unwrap_or_else(|| "a newer ShadowCode".into());
     anyhow::anyhow!(
-        "This profile's database was last used by {writer} (database format {version}); this version ({}) reads formats up to {SCHEMA_VERSION}. Nothing was changed. Open it with that version or newer, or restore a backup made by this version (Settings › Your data, or `shadowcode restore PATH`).",
+        "This profile's database was last used by {writer} (database format {version}); this version ({}) reads formats up to {SCHEMA_VERSION}. Nothing was changed. Open it with that version or newer, or restore a backup made by this version: run `shadowcode restore PATH` in a terminal.",
         crate::VERSION
     )
 }

@@ -367,6 +367,7 @@ impl Server {
             "Invalid engine mode"
         );
         let mode = mode.to_owned();
+        service.set_engine_mode(&mode);
         let endpoint = Endpoint::for_paths(service.engine.paths())?;
         if let Some(directory) = endpoint.path.parent() {
             // Crashed or killed engines leave their socket files behind.

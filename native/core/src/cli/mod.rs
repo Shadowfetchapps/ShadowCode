@@ -437,7 +437,7 @@ pub async fn run(options: Options) -> Result<i32> {
     .path;
     let paths = options.paths()?;
     if let Some(command @ (Command::Restore { .. } | Command::Reset { .. })) = &options.command {
-        return data_command(&paths, command, options.json);
+        return data_command(&paths, &workspace, command, options.json).await;
     }
     if let Some(Command::Tui { session }) = &options.command {
         ensure!(
@@ -651,12 +651,18 @@ pub async fn run(options: Options) -> Result<i32> {
 /// Settings › Your data; when no ShadowCode is running on this profile they
 /// finish right away (this command holds the profile lock and never opens
 /// the database).
-fn data_command(paths: &AppPaths, command: &Command, json_output: bool) -> Result<i32> {
+async fn data_command(
+    paths: &AppPaths,
+    workspace: &Path,
+    command: &Command,
+    json_output: bool,
+) -> Result<i32> {
     use crate::data;
     let (value, yes) = match command {
         Command::Restore {
             path,
             include_secrets,
+            include_remote,
             yes,
         } => {
             let path = std::env::current_dir()?.join(expand(path)?);
@@ -679,6 +685,19 @@ fn data_command(paths: &AppPaths, command: &Command, json_output: bool) -> Resul
                     match (inspection.manifest.includes_secrets, *include_secrets) {
                         (true, true) => "restored from the backup",
                         (true, false) => "kept as they are (add --include-secrets to restore them)",
+                        (false, _) => "not in the backup; kept as they are",
+                    }
+                );
+                let has_remote = inspection
+                    .manifest
+                    .files
+                    .iter()
+                    .any(|f| f.path == "config/remote.json");
+                outln!(
+                    "Remote access and paired devices: {}",
+                    match (has_remote, *include_remote) {
+                        (true, true) => "restored from the backup, switched off until you turn it on in Settings › Remote access (devices you removed since then are back: check them first)",
+                        (true, false) => "kept as they are (add --include-remote to restore them)",
                         (false, _) => "not in the backup; kept as they are",
                     }
                 );
@@ -705,7 +724,14 @@ fn data_command(paths: &AppPaths, command: &Command, json_output: bool) -> Resul
                 return Ok(0);
             }
             (
-                json!(data::schedule_restore(paths, &path, *include_secrets)?),
+                json!(data::schedule_restore(
+                    paths,
+                    &path,
+                    data::RestoreOptions {
+                        include_secrets: *include_secrets,
+                        include_remote: *include_remote,
+                    }
+                )?),
                 true,
             )
         }
@@ -751,13 +777,35 @@ fn data_command(paths: &AppPaths, command: &Command, json_output: bool) -> Resul
             }
         }
         Err(error) if format!("{error:#}").contains("already running") => {
+            // Name the process that holds the profile: closing a desktop
+            // window attached to an editor's engine is not enough.
+            let runtime = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                crate::control::Endpoint::for_paths(paths)?
+                    .client(workspace.to_path_buf(), None)
+                    .dispatch(crate::service::Request {
+                        method: "GET".into(),
+                        path: "/api/runtime".into(),
+                        body: Value::Null,
+                    }),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(Value::Null);
+            let hint = data::restart_hint(
+                runtime["mode"].as_str(),
+                runtime["pid"].as_u64().unwrap_or(0) as u32,
+            );
             if json_output {
                 outln!(
                     "{}",
-                    serde_json::to_string_pretty(&json!({"scheduled": value}))?
+                    serde_json::to_string_pretty(
+                        &json!({"scheduled": value, "engine": runtime, "message": hint})
+                    )?
                 );
             } else {
-                outln!("ShadowCode is running on this profile. This finishes the next time it starts: quit ShadowCode (and any `shadowcode serve`) and open it again. Cancel it in Settings › Your data.");
+                outln!("ShadowCode is running on this profile. This finishes the next time it starts. {hint} Cancel it in Settings › Your data.");
             }
         }
         Err(error) => {
@@ -1064,11 +1112,15 @@ async fn execute(backend: &Backend, workspace: &Path, options: &Options) -> Resu
                 "Backup saved to {}",
                 value["path"].as_str().unwrap_or("")
             ));
-            value["items"] = json!([
-                {"label": "Files", "value": value["manifest"]["files"].as_array().map_or(0, Vec::len).to_string()},
-                {"label": "Size", "value": format!("{:.1} MB", bytes as f64 / 1_000_000.0)},
-                {"label": "API keys", "value": if value["manifest"]["includes_secrets"] == true { "included: keep this backup private" } else { "not included" }},
-            ]);
+            let mut items = vec![
+                json!({"label": "Files", "value": value["manifest"]["files"].as_array().map_or(0, Vec::len).to_string()}),
+                json!({"label": "Size", "value": format!("{:.1} MB", bytes as f64 / 1_000_000.0)}),
+                json!({"label": "API keys", "value": if value["manifest"]["includes_secrets"] == true { "included: keep this backup private" } else { "not included" }}),
+            ];
+            for note in value["manifest"]["left_out"].as_array().into_iter().flatten() {
+                items.push(json!({"label": "Not included", "value": note}));
+            }
+            value["items"] = json!(items);
             value
         }
         Command::Restore { .. } | Command::Reset { .. } => {

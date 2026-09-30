@@ -321,6 +321,12 @@ export function installFakeBackend(options: FakeOptions = {}) {
       pick: null as string | null,
       pending: null as Json | null,
       last: null as Json | null,
+      // The process holding the profile, and whether this window is
+      // attached to it (then quitting the window is not enough).
+      engine: { mode: "desktop", pid: 4242 } as Json,
+      attached: false,
+      // What the next backup reports it could not include.
+      left_out: [] as string[],
       backups: [
         {
           path: "/home/dev/.local/share/shadow-agent/backups/shadowcode-backup-20260928-093000",
@@ -4538,6 +4544,11 @@ export function installFakeBackend(options: FakeOptions = {}) {
         state: "/home/dev/.local/state/shadow-agent",
       };
       const backupsFolder = `${folders.data}/backups`;
+      const file = (path: string, bytes: number) => ({
+        path,
+        bytes,
+        sha256: "0".repeat(64),
+      });
       const manifest = (b: Json) => ({
         format: "shadowcode-backup",
         format_version: 1,
@@ -4547,14 +4558,24 @@ export function installFakeBackend(options: FakeOptions = {}) {
         includes_secrets: b.includes_secrets,
         reason: b.reason,
         files: [
-          {
-            path: "state/shadow-agent.db",
-            bytes: b.bytes,
-            sha256: "0".repeat(64),
-          },
+          file("state/shadow-agent.db", b.bytes),
+          ...(b.includes_secrets
+            ? [file("config/secrets.env", 120), file("config/remote.json", 400)]
+            : []),
         ],
         raw_copy: false,
+        left_out: b.left_out ?? [],
       });
+      const restart: Record<string, string> = {
+        desktop: "Quit ShadowCode and open it again.",
+        acp: `An editor runs ShadowCode's agent (\`shadowcode acp\`, process ${d.engine.pid}) and holds your data: close ShadowCode in that editor, or quit the editor, then open ShadowCode again.`,
+      };
+      const engine = {
+        ...d.engine,
+        restart:
+          restart[d.engine.mode] ??
+          "Quit ShadowCode and anything else using your data, then open ShadowCode again.",
+      };
       if (path === "/api/data" && method === "GET")
         return {
           folders,
@@ -4582,6 +4603,8 @@ export function installFakeBackend(options: FakeOptions = {}) {
           ],
           pending: d.pending,
           last_operation: d.last,
+          engine,
+          desktop_attached: d.attached,
         };
       if (path === "/api/data/backups" && method === "POST") {
         const stamp = `2026092${d.backups.length}-120000`;
@@ -4594,6 +4617,7 @@ export function installFakeBackend(options: FakeOptions = {}) {
           includes_secrets: Boolean(body?.include_secrets),
           reason: "manual",
           bytes: 2_500_000,
+          left_out: d.left_out,
         };
         if (!body?.folder) d.backups.push(b);
         return { path: b.path, manifest: manifest(b) };
@@ -4648,12 +4672,12 @@ export function installFakeBackend(options: FakeOptions = {}) {
           requested_at: now(),
           source: body.path,
           include_secrets: Boolean(body.include_secrets),
+          include_remote: Boolean(body.include_remote),
         };
         return {
           scheduled: true,
           pending: d.pending,
-          message:
-            "The restore finishes the next time ShadowCode starts. Quit ShadowCode (and any `shadowcode serve`) and open it again.",
+          message: `The restore finishes the next time ShadowCode starts. ${engine.restart}`,
         };
       }
       if (path === "/api/data/reset") {
@@ -4664,12 +4688,12 @@ export function installFakeBackend(options: FakeOptions = {}) {
           requested_at: now(),
           source: null,
           include_secrets: false,
+          include_remote: false,
         };
         return {
           scheduled: true,
           pending: d.pending,
-          message:
-            "The reset happens the next time ShadowCode starts. Quit ShadowCode (and any `shadowcode serve`) and open it again.",
+          message: `The reset happens the next time ShadowCode starts. ${engine.restart}`,
         };
       }
       if (path === "/api/data/pending" && method === "DELETE") {

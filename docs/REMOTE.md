@@ -84,7 +84,8 @@ The same as the desktop window, with these exceptions:
   `/api/preview…` is refused and the tab says so.
 - **Remote access settings stay on this computer.** A remote device cannot
   see or change pairing, devices, the address or phone notifications. The app
-  log (Settings › About › Open logs folder) stays on this computer too.
+  log (Settings › About › Open logs folder) stays on this computer too: a
+  health report made on the device leaves its lines out.
 - **Spending limits work the same.** A task paused at a spending limit shows
   its Continue and Stop card on the device too.
 - **Your data stays on this computer.** Backups, restore, repair and reset
