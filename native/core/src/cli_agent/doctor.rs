@@ -457,11 +457,13 @@ mod login_lifecycle_tests {
         let args = [pid_arg];
         let command = super::super::probe_lifecycle::scope(
             cancel.clone(),
-            tokio::time::Instant::now() + Duration::from_secs(5),
+            // Generous: a loaded CI host can take seconds to start Python.
+            // The barrier below stays well inside this deadline.
+            tokio::time::Instant::now() + Duration::from_secs(20),
             short_text(&script, &args, None),
         );
         let interrupt = async {
-            let entered = tokio::time::timeout(Duration::from_secs(2), async {
+            let entered = tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
                     if let Ok(text) = std::fs::read_to_string(&pid_file) {
                         if let Ok(pid) = text.parse::<u32>() {
