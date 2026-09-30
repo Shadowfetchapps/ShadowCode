@@ -909,7 +909,10 @@ fn age_days(date: &str, now: f64) -> Option<f64> {
 }
 
 enum Lookup {
-    Found(Option<String>),
+    Found(String),
+    /// A record over [`MAX_ANSWER_BYTES`]: its size says nothing about the
+    /// package's age, since the publisher decides it.
+    TooLarge,
     Missing,
     Failed(String),
 }
@@ -938,12 +941,11 @@ async fn fetch(client: &reqwest::Client, url: &str) -> Lookup {
             return Lookup::Failed("the answer was cut off".into());
         };
         if body.len() + chunk.len() > MAX_ANSWER_BYTES {
-            // A very large record: a long-lived, widely used package.
-            return Lookup::Found(None);
+            return Lookup::TooLarge;
         }
         body.extend_from_slice(&chunk);
     }
-    Lookup::Found(Some(String::from_utf8_lossy(&body).into_owned()))
+    Lookup::Found(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// The date a package was first published, from its registry record.
@@ -975,11 +977,25 @@ async fn look_up(client: &reqwest::Client, package: &Package, now: f64) -> Statu
             ))
         }
     };
-    match fetch(client, &url).await {
+    status(package, fetch(client, &url).await, now)
+}
+
+/// What a registry's answer says about `package`.
+fn status(package: &Package, lookup: Lookup, now: f64) -> Status {
+    match lookup {
         Lookup::Missing => Status::Missing,
         Lookup::Failed(reason) => Status::Unchecked(reason),
-        Lookup::Found(None) => Status::Known { age_days: None },
-        Lookup::Found(Some(record)) => {
+        // Only a package on the popular list is known to be established;
+        // anyone can publish a record this large.
+        Lookup::TooLarge
+            if popular(package.ecosystem)
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(&package.name)) =>
+        {
+            Status::Known { age_days: None }
+        }
+        Lookup::TooLarge => Status::Unchecked("its registry record is too large to read".into()),
+        Lookup::Found(record) => {
             let age = first_published(package.ecosystem, &record).and_then(|d| age_days(&d, now));
             match age {
                 Some(age) if age < NEW_DAYS => Status::New { age_days: age },
@@ -1183,7 +1199,8 @@ fn lock_entries(path: &str, text: &str) -> Option<BTreeMap<String, BTreeSet<Stri
                         .split(", ")
                         .filter_map(|spec| {
                             let spec = spec.trim_matches('"');
-                            let at = spec[1..].find('@').map(|i| i + 1)?;
+                            // After a scope's leading `@`; empty or odd keys are skipped.
+                            let at = spec.get(1..)?.find('@').map(|i| i + 1)?;
                             Some(spec[..at].to_owned())
                         })
                         .collect();
@@ -1489,5 +1506,41 @@ mod tests {
         );
         assert!(is_lockfile("web/pnpm-lock.yaml"));
         assert!(!is_lockfile("package.json"));
+    }
+
+    #[test]
+    fn odd_yarn_lock_keys_are_skipped() {
+        let yarn = "\"\":\n  version \"1.0.0\"\n\n:\n  version \"1.0.0\"\n\n\"\u{e9}@1.0.0\":\n  version \"1.0.0\"\n\nzod@^3:\n  version \"3.23.8\"\n";
+        let summary = lockfile_summary("yarn.lock", "", yarn).unwrap();
+        assert_eq!(
+            summary["summary"], "1 added, 0 updated, 0 removed",
+            "{summary}"
+        );
+        assert_eq!(summary["added"][0]["name"], "zod");
+    }
+
+    #[test]
+    fn a_record_too_large_to_read_is_not_taken_for_an_old_package() {
+        let npm = |name: &str| Package {
+            ecosystem: Ecosystem::Npm,
+            name: name.into(),
+        };
+        let at = 1_790_000_000.0;
+        assert_eq!(
+            status(&npm("lodash"), Lookup::TooLarge, at),
+            Status::Known { age_days: None }
+        );
+        let fresh = status(&npm("lodash-utils-pro"), Lookup::TooLarge, at);
+        assert!(matches!(fresh, Status::Unchecked(_)), "{fresh:?}");
+        let section = section(&[Verdict {
+            package: npm("lodash-utils-pro"),
+            status: fresh,
+            lookalike: None,
+        }])
+        .unwrap();
+        assert!(section["items"][0]
+            .as_str()
+            .unwrap()
+            .contains("not checked"));
     }
 }
