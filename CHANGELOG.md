@@ -71,9 +71,9 @@ Real work:
 
 Reliability:
 - **Your data.** Settings › Your data (and `shadowcode backup`, `restore`,
-  `repair`, `reset`) backs up, restores, repairs and starts over; upgrades
-  from every release since 0.28 are tested against saved profiles, and a
-  newer profile is never opened by an older version.
+  `doctor --repair`, `reset`) backs up, restores, repairs and starts over;
+  upgrades from every release since 0.28 are tested against saved profiles,
+  and a newer profile is never opened by an older version.
 - A stable, checked API contract (`docs/API_CONTRACT.md`) for 1.x.
 - A local model that runs out of GPU memory offers a smaller context or
   another model; a task that fails before any output ends cleanly with its
