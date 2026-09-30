@@ -264,6 +264,72 @@ async fn a_command_that_changes_files_outside_the_chosen_ones_says_so() {
     assert!(inside.output.get("outside_scope").is_none());
 }
 
+/// Without a checkpoint to compare against, a command's changes cannot be
+/// checked against the chosen files; the conversation says so instead of
+/// staying silent.
+#[tokio::test]
+async fn a_command_that_cannot_be_checked_against_the_chosen_files_says_so() {
+    let src = || {
+        Some(vec![shadowcode_core::mentions::Mention {
+            path: "src".into(),
+            kind: "dir".into(),
+        }])
+    };
+    let scope_warnings = |store: &Store, tools: &ToolExecutor| -> Vec<String> {
+        store
+            .events_after(&tools.events.session_id, 0, None, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e["type"] == "agent.warning" && e["payload"]["kind"] == "scope")
+            .map(|e| e["payload"]["text"].as_str().unwrap_or("").to_owned())
+            .collect()
+    };
+
+    // Checkpoints for commands are off.
+    let mut config = shell_config();
+    config.checkpoints.shell = false;
+    let off = fixture(config, repo);
+    let tools = off.tools.clone().with_scope(src());
+    let first = exec(&tools, "printf two > tracked.txt").await;
+    assert!(first.success, "{} {}", first.error, first.output);
+    assert!(first.output["scope_unchecked"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("checkpoints.shell"));
+    let second = exec(&tools, "printf three > tracked.txt").await;
+    assert!(second.output["scope_unchecked"].is_object());
+    // A command that cannot write has nothing to check.
+    let reader = exec(&tools, "cat tracked.txt").await;
+    assert!(reader.output.get("scope_unchecked").is_none());
+    // Said once for the turn, not once per command.
+    let warnings = scope_warnings(&off.store, &tools);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("not checked"), "{}", warnings[0]);
+
+    // A folder without Git that is too large to copy.
+    let mut config = shell_config();
+    config.checkpoints.max_copy_files = 2;
+    let big = fixture(config, |project| {
+        fs::create_dir(project.join("src")).unwrap();
+        for n in 0..5 {
+            fs::write(project.join(format!("f{n}.txt")), "x").unwrap();
+        }
+    });
+    let tools = big.tools.clone().with_scope(src());
+    let result = exec(&tools, "printf y > f0.txt").await;
+    assert!(result.success);
+    assert!(result.output.get("outside_scope").is_none());
+    assert!(result.output["scope_unchecked"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("Git"));
+    assert_eq!(scope_warnings(&big.store, &tools).len(), 1);
+
+    // Without "Only change these" there is nothing to check.
+    let plain = exec(&big.tools, "printf z > f1.txt").await;
+    assert!(plain.output.get("scope_unchecked").is_none());
+}
+
 #[tokio::test]
 async fn old_checkpoint_refs_are_pruned() {
     let mut config = shell_config();

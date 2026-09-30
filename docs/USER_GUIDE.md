@@ -975,9 +975,10 @@ Subscription CLIs use their own sandboxes, not this one.
   about file by file, so the conversation names any other file a command
   changed. Subscriptions can't be stopped mid-turn, so after each turn the
   conversation names any file they changed elsewhere; **Review** can undo
-  it. This check needs project checkpoints for subscriptions
-  (`checkpoints.vendor`, on by default); without one, the conversation says
-  the turn wasn't checked.
+  it. This check needs project checkpoints (`checkpoints.shell` for
+  commands, `checkpoints.vendor` for subscriptions, both on by default).
+  Without one, for example in a large folder that isn't under Git, the
+  conversation says the commands or the turn weren't checked.
 - **Busy or dropped providers.** A request that fails with a rate limit, an
   overloaded or failing provider, or a connection that drops mid-answer is
   sent again, up to three times (`agent.model_retries`), waiting longer each

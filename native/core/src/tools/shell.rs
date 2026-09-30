@@ -44,7 +44,8 @@ impl ToolExecutor {
                     .emit("agent.warning", json!({"text":warning,"kind":"sandbox"}))?;
             }
         }
-        let checkpoint = if self.config.checkpoints.shell && !capture::cannot_write(command) {
+        let writes = !capture::cannot_write(command);
+        let checkpoint = if self.config.checkpoints.shell && writes {
             capture::before(
                 &self.workspace.path,
                 &self.events.session_id,
@@ -80,6 +81,10 @@ impl ToolExecutor {
         }
         // Record what the command wrote even when it failed or was cancelled.
         let mut outside = Vec::new();
+        // "Only change these" is checked from the checkpoint; without one, a
+        // command that can write is not checked, and that is said instead.
+        let mut unchecked = (writes && !self.config.checkpoints.shell)
+            .then(|| "project checkpoints for commands are off (checkpoints.shell)".to_owned());
         let checkpoint_note = match capture::after(
             checkpoint,
             &self.events.store,
@@ -107,13 +112,17 @@ impl ToolExecutor {
                 }
                 // "Only change these": a command is not asked about file by
                 // file, so what it changed elsewhere is named after it ran.
-                outside = self.changed_outside_scope(
-                    outcome
-                        .paths
-                        .iter()
-                        .map(String::as_str)
-                        .chain(outcome.skipped.iter().filter_map(|s| s["path"].as_str())),
-                );
+                if let Some(reason) = &outcome.unavailable {
+                    unchecked = Some(reason.clone());
+                } else {
+                    outside = self.changed_outside_scope(
+                        outcome
+                            .paths
+                            .iter()
+                            .map(String::as_str)
+                            .chain(outcome.skipped.iter().filter_map(|s| s["path"].as_str())),
+                    );
+                }
                 if !outside.is_empty() {
                     self.events
                         .emit("scope.outside", json!({"paths":outside,"tool":"exec"}))?;
@@ -124,7 +133,14 @@ impl ToolExecutor {
                 }
                 note
             }
-            Err(error) => json!({"method":"none","error":format!("{error:#}")}),
+            Err(error) => {
+                unchecked = Some("the project checkpoint failed".to_owned());
+                json!({"method":"none","error":format!("{error:#}")})
+            }
+        };
+        let scope_unchecked = match unchecked {
+            Some(reason) => self.scope_unchecked(&reason)?,
+            None => None,
         };
         let result = result.map_err(|error| {
             if proxied {
@@ -141,6 +157,9 @@ impl ToolExecutor {
                 "paths": outside,
                 "note": "This command changed files outside the ones the user chose for this task. Change only the chosen files unless the user asks; the user can undo these in Review.",
             });
+        }
+        if let Some(note) = scope_unchecked {
+            value["scope_unchecked"] = note;
         }
         Ok(value)
     }

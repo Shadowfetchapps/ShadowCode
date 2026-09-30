@@ -780,7 +780,7 @@ in-band consent refusal ([Errors](#errors)). Body:
 | `permission_limit` | `"read_only"\|"workspace"\|"elevated"`? | narrows the project's permission level for this job (strict) |
 | `worktree` | bool? | start a new conversation in a fresh worktree ([Worktree tasks](#worktree-tasks)); `session_id` and `queue` are ignored |
 | `base_branch` | string? | with `worktree`: start from this local branch instead of the current files |
-| `only_change` | bool? | "Only change these": ShadowCode's own agent asks before any file tool changes a path outside `mentions` (even when edits are allowed; approval `reason` "Outside the files you chose for this task: …", with its own `grant` "file edits outside the files you chose", so allowing file edits for the task never covers them); a native `exec` that changed paths outside them reports `scope.outside {paths, tool: "exec"}` after it ran (and `outside_scope` in its result); after a subscription turn, changed paths outside them, including ones too large to record, are reported as `scope.outside {job_id, paths}`, or `agent.warning {kind: "scope"}` says the turn could not be checked (no project checkpoint: `checkpoints.vendor` off, or it was unavailable or failed). `background_start` processes are not checked |
+| `only_change` | bool? | "Only change these": ShadowCode's own agent asks before any file tool changes a path outside `mentions` (even when edits are allowed; approval `reason` "Outside the files you chose for this task: …", with its own `grant` "file edits outside the files you chose", so allowing file edits for the task never covers them); a native `exec` that changed paths outside them reports `scope.outside {paths, tool: "exec"}` after it ran (and `outside_scope` in its result); a command that can write and ran without a project checkpoint (`checkpoints.shell` off, or it was unavailable or failed) is not checked: `agent.warning {kind: "scope"}` says so once per turn, and its result carries `scope_unchecked {reason, note}`; after a subscription turn, changed paths outside them, including ones too large to record, are reported as `scope.outside {job_id, paths}`, or `agent.warning {kind: "scope"}` says the turn could not be checked (no project checkpoint: `checkpoints.vendor` off, or it was unavailable or failed). `background_start` processes are not checked |
 | `roles` | bool? | run a Code task as Plan → Implement → Review, a Plan task as its plan role ([Roles](#roles)); other modes are refused |
 
 - Job records keep the exact picker id in `routing.model_id`. A `local:gguf:`
@@ -1235,9 +1235,11 @@ arguments or output, or file contents. `logging.level` (`error`, `warn`,
   applied when it matches exactly one place ignoring line endings, spaces at
   line ends or indentation; the result carries `note`. Ignoring indentation
   still needs the same block structure (every line shifted by the same
-  indentation), and the new text is re-indented by that shift. Two possible
-  places refuse, as before. The approval card's diff and the new-package
-  lookup use the same matching.
+  indentation), and the new text is re-indented by that shift; a new line
+  indented less than the old text's lines is refused with an error that
+  says so (not "old_string not found"). Two possible places refuse, as
+  before. The approval card's diff and the new-package lookup use the same
+  matching.
 
 ### Task timings
 
@@ -1912,8 +1914,10 @@ Settings with API-visible meaning:
 The native `exec` tool result carries `sandbox: {mode: "bubblewrap"|"landlock"|"none",
 network, allow, home_read_only, home_skipped, proxy?: {reached, blocked}, …}`
 and `checkpoint: {method: "git"|"copy"|"none", paths, skipped: [{path,
-reason}], unavailable, ref, warning?}`. `agent.warning {kind: "sandbox"}` is
-recorded once per conversation when a command runs without bubblewrap.
+reason}], unavailable, ref, warning?}`, and with `only_change`,
+`outside_scope? {paths, note}` or `scope_unchecked? {reason, note}`.
+`agent.warning {kind: "sandbox"}` is recorded once per conversation when a
+command runs without bubblewrap.
 
 ### Routing
 

@@ -93,6 +93,9 @@ pub struct ToolExecutor {
     /// "Only change these": the files and folders edits may touch without
     /// asking; `None` when the task has no such limit.
     scope: Option<Vec<crate::mentions::Mention>>,
+    /// Set once the conversation was told a command could not be checked
+    /// against the scope, so a turn says it only once.
+    scope_unchecked_told: Arc<std::sync::atomic::AtomicBool>,
     /// Environment for shell commands (a worktree task's `PORT`).
     pub(crate) task_env: std::collections::BTreeMap<String, String>,
 }
@@ -139,6 +142,7 @@ impl ToolExecutor {
             mcp,
             extensions: Default::default(),
             scope: None,
+            scope_unchecked_told: Arc::default(),
             task_env,
         })
     }
@@ -536,6 +540,28 @@ impl ToolExecutor {
             .filter(|path| !crate::mentions::in_scope(scope, path))
             .map(str::to_owned)
             .collect()
+    }
+    /// A command that could write ran without a checkpoint to compare
+    /// against, so what it changed was not checked against the task's scope:
+    /// the conversation says so once per turn, and the result tells the model
+    /// every time. `None` without a scope.
+    pub(crate) fn scope_unchecked(&self, reason: &str) -> Result<Option<Value>> {
+        if self.scope.is_none() {
+            return Ok(None);
+        }
+        if !self
+            .scope_unchecked_told
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.events.emit(
+                "agent.warning",
+                json!({"kind":"scope","text":format!("Files changed by commands in this turn are not checked against the files you chose: {reason}.")}),
+            )?;
+        }
+        Ok(Some(json!({
+            "reason": reason,
+            "note": "The files this command changed could not be checked against the ones the user chose for this task. Change only the chosen files unless the user asks.",
+        })))
     }
     /// Paths a file tool would change outside the task's scope.
     fn outside_scope(&self, call: &ToolCall) -> Vec<String> {
@@ -1481,7 +1507,7 @@ pub(crate) fn replace_string(
     ensure!(!old.is_empty(), "old_string must not be empty");
     let count = text.matches(old).count();
     if count == 0 && !replace_all {
-        let (updated, how) = loose_replace(text, old, new).context("old_string not found")?;
+        let (updated, how) = loose_replace(text, old, new)?.context("old_string not found")?;
         return Ok((updated, Some(how)));
     }
     ensure!(count > 0, "old_string not found");
@@ -1530,22 +1556,23 @@ fn indent_shift(file: &[String], wanted: &[&str]) -> Option<(String, String)> {
 /// Replace `old` in `text` when it differs only in line endings, trailing
 /// spaces or indentation, and matches exactly one place. Returns the new
 /// text and how it matched; `None` when it matches nowhere or more than once.
-pub fn loose_replace(text: &str, old: &str, new: &str) -> Option<(String, &'static str)> {
+/// An error when it matches one place but `new` cannot be re-indented.
+pub fn loose_replace(text: &str, old: &str, new: &str) -> Result<Option<(String, &'static str)>> {
     // Windows line endings in the file, Unix ones in the edit.
     if text.contains("\r\n") && !old.contains('\r') {
         let old_crlf = old.replace('\n', "\r\n");
         if text.matches(&old_crlf).count() == 1 {
             let new_crlf = new.replace("\r\n", "\n").replace('\n', "\r\n");
-            return Some((
+            return Ok(Some((
                 text.replacen(&old_crlf, &new_crlf, 1),
                 "with other line endings",
-            ));
+            )));
         }
     }
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let wanted: Vec<&str> = old.trim_end_matches('\n').split('\n').collect();
     if wanted.is_empty() || wanted.len() > lines.len() {
-        return None;
+        return Ok(None);
     }
     let body = |line: &str| line.trim_end_matches(['\n', '\r']).to_owned();
     let passes: [LoosePass; 2] = [
@@ -1558,7 +1585,7 @@ pub fn loose_replace(text: &str, old: &str, new: &str) -> Option<(String, &'stat
     for (how, norm) in passes {
         let target: Vec<String> = wanted.iter().map(|l| norm(l)).collect();
         if target.iter().all(|l| l.is_empty()) {
-            return None;
+            return Ok(None);
         }
         // Ignoring indentation still needs the same block structure: the
         // file lines are old_string's lines shifted by one indentation.
@@ -1575,7 +1602,7 @@ pub fn loose_replace(text: &str, old: &str, new: &str) -> Option<(String, &'stat
         let (start, shift) = match starts.as_slice() {
             [] => continue,
             [one] => one.clone(),
-            _ => return None,
+            _ => return Ok(None),
         };
         let end = start + wanted.len();
         let eol = if lines[end - 1].ends_with("\r\n") {
@@ -1585,13 +1612,17 @@ pub fn loose_replace(text: &str, old: &str, new: &str) -> Option<(String, &'stat
         };
         let had_eol = lines[end - 1].ends_with('\n');
         // Re-indent the new text by the same shift; a line indented less
-        // than old_string's least indented line cannot be placed.
+        // than old_string's least indented line cannot be placed, and the
+        // model is told so rather than that nothing matched.
         let mut replaced = Vec::new();
         for line in new.trim_end_matches('\n').split('\n') {
             let line = line.trim_end_matches('\r');
             match &shift {
                 Some((have, gave)) if !line.trim().is_empty() => {
-                    replaced.push(format!("{have}{}", line.strip_prefix(gave.as_str())?));
+                    let Some(rest) = line.strip_prefix(gave.as_str()) else {
+                        bail!("old_string matches one place with different indentation, but a new_string line is indented less than old_string's least indented line, so it cannot be re-indented. Send old_string and new_string with the file's exact indentation");
+                    };
+                    replaced.push(format!("{have}{rest}"));
                 }
                 _ => replaced.push(line.to_owned()),
             }
@@ -1604,9 +1635,9 @@ pub fn loose_replace(text: &str, old: &str, new: &str) -> Option<(String, &'stat
             }
         }
         out.push_str(&lines[end..].concat());
-        return Some((out, how));
+        return Ok(Some((out, how)));
     }
-    None
+    Ok(None)
 }
 
 pub(crate) fn edit_line_hunks(text: &str, hunks: &[Value]) -> Result<String> {
@@ -1832,17 +1863,19 @@ pub fn schemas_tiered(tier: DescriptionTier) -> Vec<Value> {
 
 #[cfg(test)]
 mod loose_tests {
-    use super::loose_replace;
+    use super::{loose_replace, replace_string};
 
     #[test]
     fn close_edits_apply_only_when_they_match_one_place() {
         let crlf = "fn a() {\r\n    1\r\n}\r\n";
-        let (out, how) = loose_replace(crlf, "    1\n", "    2\n").unwrap();
+        let (out, how) = loose_replace(crlf, "    1\n", "    2\n").unwrap().unwrap();
         assert_eq!(out, "fn a() {\r\n    2\r\n}\r\n");
         assert_eq!(how, "with other line endings");
         let trailing = "let a = 1;   \nlet b = 2;\n";
         let (out, how) =
-            loose_replace(trailing, "let a = 1;\nlet b = 2;", "let a = 3;\nlet b = 4;").unwrap();
+            loose_replace(trailing, "let a = 1;\nlet b = 2;", "let a = 3;\nlet b = 4;")
+                .unwrap()
+                .unwrap();
         assert_eq!(out, "let a = 3;\nlet b = 4;\n");
         assert_eq!(how, "ignoring spaces at line ends");
         let nested = "impl A {\n        fn f() {\n            run();\n        }\n}\n";
@@ -1851,6 +1884,7 @@ mod loose_tests {
             "fn f() {\n    run();\n}",
             "fn f() {\n    run();\n    done();\n}",
         )
+        .unwrap()
         .unwrap();
         assert_eq!(
             out,
@@ -1858,9 +1892,11 @@ mod loose_tests {
         );
         assert_eq!(how, "ignoring indentation");
         // Two places match: refused rather than guessed.
-        assert!(loose_replace("  x = 1\n    x = 1\n", "x = 1", "x = 2").is_none());
+        assert!(loose_replace("  x = 1\n    x = 1\n", "x = 1", "x = 2")
+            .unwrap()
+            .is_none());
         // Nothing close: refused.
-        assert!(loose_replace("a\nb\n", "c", "d").is_none());
+        assert!(loose_replace("a\nb\n", "c", "d").unwrap().is_none());
     }
 
     #[test]
@@ -1868,10 +1904,16 @@ mod loose_tests {
         // The lines match once trimmed, but `return x` sits outside the
         // `if` in the file and inside it in the edit: never moved in.
         let python = "def f():\n    if a:\n        x = 1\n    return x\n";
-        assert!(loose_replace(python, "x = 1\nreturn x", "x = 2\nreturn x").is_none());
+        assert!(loose_replace(python, "x = 1\nreturn x", "x = 2\nreturn x")
+            .unwrap()
+            .is_none());
         // Tabs where the file has spaces do not line up either.
         let spaces = "fn f() {\n    a();\n        b();\n}\n";
-        assert!(loose_replace(spaces, "\ta();\n\t\tb();", "\ta();\n\t\tc();").is_none());
+        assert!(
+            loose_replace(spaces, "\ta();\n\t\tb();", "\ta();\n\t\tc();")
+                .unwrap()
+                .is_none()
+        );
         // The same structure shifted, including a line indented less than
         // the first, is re-indented by that one shift.
         let (out, how) = loose_replace(
@@ -1879,12 +1921,23 @@ mod loose_tests {
             "        if a:\n            x = 1\n        return x",
             "        if a:\n            x = 2\n        return x",
         )
+        .unwrap()
         .unwrap();
         assert_eq!(how, "ignoring indentation");
         assert_eq!(out, "def f():\n    if a:\n        x = 2\n    return x\n");
-        let (out, _) = loose_replace(python, "    x = 1\nreturn x", "    x = 3\nreturn x").unwrap();
+        let (out, _) = loose_replace(python, "    x = 1\nreturn x", "    x = 3\nreturn x")
+            .unwrap()
+            .unwrap();
         assert_eq!(out, "def f():\n    if a:\n        x = 3\n    return x\n");
-        // A new line indented less than the edit's own lines has no place.
-        assert!(loose_replace(python, "    x = 1", "x = 1\nprint(x)").is_none());
+        // A new line indented less than the edit's own lines has no place,
+        // and the edit says so instead of claiming nothing matched.
+        let error = loose_replace(python, "    x = 1", "x = 1\nprint(x)").unwrap_err();
+        assert!(error.to_string().contains("indented less"), "{error}");
+        let nested = "def f():\n    if a:\n        x = 1\n        y = 2\n";
+        let error = replace_string(nested, "  x = 1\n  y = 2", "x = 1\n  y = 3", false)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("not found"), "{error}");
+        assert!(error.contains("file's exact indentation"), "{error}");
     }
 }
