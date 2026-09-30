@@ -611,7 +611,7 @@ need a Unix build. ShadowCode 1.x ships for Linux, where all of them exist.
 | `GET` | `/api/workspace/why` | stable | allowed | [Workspace and files](#workspace-and-files) |
 | `GET` | `/api/worktree-tasks` | stable | allowed | [Worktrees](#worktrees) |
 | `GET` | `/api/worktree-tasks/setup` | stable | allowed | [Worktrees](#worktrees) |
-| `POST` | `/api/worktree-tasks/setup` | stable | allowed | [Worktrees](#worktrees) |
+| `POST` | `/api/worktree-tasks/setup` | stable | switch | [Worktrees](#worktrees) |
 | `GET` | `/api/worktree-tasks/{id}` | stable | allowed | [Worktrees](#worktrees) |
 | `POST` | `/api/worktree-tasks/{id}/apply` | stable | allowed | [Worktrees](#worktrees) |
 | `POST` | `/api/worktree-tasks/{id}/discard` | stable | allowed | [Worktrees](#worktrees) |
@@ -1389,15 +1389,16 @@ history. Vendor CLIs are always started without
 - `GET /api/review/tasks/{task_id}/file?path=` → the row plus `hash` and
   `hunks: [{id, header, old_start, old_len, new_start, new_len, lines:
   [{kind: "add"|"del"|"ctx", text, eol?: false}]}]`. A secret file (`.env`,
-  keys, credential files) answers `secret: true` and no hunks; it can still
-  be undone as a whole.
+  keys, credential files), or a link to one, answers `secret: true` and no
+  hunks; it can still be undone as a whole.
 - `POST /api/review/tasks/{task_id}/explain {path}` → `{ok: true, path, text,
   model, source: "model"|"local"}` or `{ok: false, path, error}`: the file's
   change (at most about 24 KB of diff) explained in plain words by the
   conversation's model, or the model loaded on this computer when the
-  conversation uses a subscription. Only on request; secret and binary files
-  are refused. On a paid model the request counts toward today's spending
-  and is refused (an error) once today's limit is reached.
+  conversation uses a subscription. Only on request; secret files (by name
+  or through a link) and binary files are refused. On a paid model the
+  request counts toward today's spending and is refused (an error) once
+  today's limit is reached.
 - `POST /api/review/tasks/{task_id}/undo {path, hunk?}` → the file's review
   after putting one hunk (by `id`) or the whole file back as it was before the
   task. Refused while a task runs in the project, outside the open project,
@@ -1714,7 +1715,8 @@ WorktreeTask = {id, workspace /* the project */, session_id, worktree, branch,
                 applied_files: string[], conflicts: string[], conflict_detail, kept_branch: string|null,
                 notes: string[], removed, port: number|null,
                 setup: {} | {ok, copied: string[], skipped: [{path, reason}], port,
-                        commands: [{command, ok, exit_code, seconds, output}]}}
+                        commands: [{command, ok, exit_code, seconds, output,
+                                    stopped?: "timeout"|"cancelled"|"signal"|"not_started", signal?}]}}
 WorktreeSetup = {copy: string[] /* ≤ 20 project files */, setup: string[], teardown: string[]
                  /* ≤ 10 one-line commands each */, port_start /* ≥ 1024 */, port_end}
 ```
@@ -1727,22 +1729,37 @@ WorktreeSetup = {copy: string[] /* ≤ 20 project files */, setup: string[], tea
   files named in the task, creates the conversation there and starts the job
   with the project's permission level as the ceiling. The answer is the job
   plus `worktree_task`. If the job cannot start (including consent)
-  everything is removed. Refused outside a Git repository root, with
+  everything is removed, after the `teardown` commands when setup commands
+  ran. Refused outside a Git repository root, with
   unresolved conflicts or no first commit, or for a local GGUF model while
   another task runs on a different local model.
 - `base_branch` (optional): start from that local branch's last commit
   instead of the current files (`base.included_uncommitted: false`);
-  refused when it is not a local branch.
+  refused when it is not a local branch (`refs/heads/<name>`: never a tag,
+  remote branch, commit ID or expression, even one with the same name).
+  Git's short name for a branch that shares a tag's name
+  (`heads/<name>`, as `GET /api/git` lists it) and `refs/heads/<name>`
+  name that branch too.
 - Setup: each new worktree gets the project's `WorktreeSetup`. Its `copy`
-  files (regular files up to 10 MB, never outside the project or in `.git`)
-  are copied from the project, then its `setup` commands run in the worktree
-  with `sh -c` as the user (`CI=1`, 10 minutes each), stopping at the first
-  failure; the task starts either way and `setup` records what happened. The
+  files (regular files up to 10 MB, never outside the project or in `.git`,
+  and never through a symlink in the project or the worktree) are copied
+  from the project, then its `setup` commands run in the worktree with
+  `sh -c` as the user (`CI=1`, 10 minutes each), stopping at the first
+  failure; the task starts either way and `setup` records what happened. A
+  command is over when its shell exits, even if it left a process running in
+  the background; at 10 minutes its whole process group is stopped
+  (`stopped: "timeout"`). While setup runs the task is saved with `state:
+  "starting"` and its worktree is reserved (it cannot be discarded yet), and
+  the project's other worktree tasks are not held up. Closing ShadowCode
+  stops a running setup the same way (`stopped: "cancelled"`); the request
+  fails and the task is kept as failed, to discard later. The
   task gets a port that is free on this computer and not used by another
-  open worktree task of the project; its shells, setup commands and
-  subscription CLIs see it as `PORT` and `SHADOWCODE_PORT` (`session_meta`
-  `task_env`). Before the worktree is removed (apply, keep, discard) its
-  `teardown` commands run (2 minutes each); failures are added to `notes`.
+  open worktree task of the project; its shells, background processes
+  (`background_start`, `/api/background`), setup commands and subscription
+  CLIs see it as `PORT` and `SHADOWCODE_PORT` (`session_meta` `task_env`,
+  removed when the task closes). Before the worktree is removed (apply,
+  keep, discard) its `teardown` commands run (2 minutes each); failures are
+  added to `notes`.
 - `GET /api/worktree-tasks/setup?workspace=` → `{workspace, setup:
   WorktreeSetup, suggested: WorktreeSetup}`: `suggested` comes from the
   project's lockfiles (`npm ci`, `pnpm install --frozen-lockfile`,
@@ -1751,6 +1768,9 @@ WorktreeSetup = {copy: string[] /* ≤ 20 project files */, setup: string[], tea
   `.env.development`; nothing runs until the user saves it.
 - `POST /api/worktree-tasks/setup {workspace?, setup: WorktreeSetup}` →
   `{workspace, setup}`. Storage: `native_meta` `worktree_setup:<project>`.
+  In both setup routes a worktree's own folder (the open conversation runs
+  in a worktree task) stands for its project. Remote access refuses saving
+  unless terminals are allowed: the commands run without an approval.
 - `GET /api/worktree-tasks?workspace=` → `{workspace, tasks}` (newest first,
   at most 30); `GET /api/worktree-tasks/{id}` refreshes one.
 - `POST /api/worktree-tasks/{id}/apply` → `WorktreeTask`: needs no turn
@@ -2738,7 +2758,7 @@ Downloads are refused offline.
               versions: [{name, version}], path, progress: {state: "installing"|"installed"|"error", error, log}|null}],
    managed_dir, npm: {available, path, node},
    index: {files, symbols, references, chunks, languages: {[lang]: files}, max_files, total,
-           complete, focus, size_bytes, persistent}|null /* see reindex below */,
+           complete, capped, focus, size_bytes, persistent}|null /* see reindex below */,
    embeddings: {models: EmbeddingModel[], active: string|null, runtime: string|null,
                 server: {model, pid, idle_sec}|null, coverage: {embedded, chunks}|null,
                 backfill: {state: "running"|"done"|"error", embedded, error}|null}}
@@ -2759,19 +2779,24 @@ Downloads are refused offline.
   active if none was chosen and embeds the project.
   `POST /api/code-intel/embeddings/remove {model}` → `{ok, removed, models}`.
 - `POST /api/code-intel/reindex` → `{ok, index, embedding_started}`: scans
-  in batches (at most 2,000 changed files parsed per batch) until the index
-  is complete or 90 seconds passed; `index.complete` says whether more
-  remains (call again). `index` (also in `GET /api/code-intel/status`) =
+  in batches (at most 2,000 changed files parsed per batch) until every file
+  the scan finds is indexed or 90 seconds passed; `index.complete` says
+  whether the index covers the project (call again when it does not and
+  `capped` is false). `index` (also in `GET /api/code-intel/status`) =
   `{files, symbols, references, chunks, languages, max_files, total,
-  complete, focus, size_bytes, persistent}`: `total` is the number of
-  indexable files the last scan found (up to 250 000), `persistent` whether
+  complete, capped, focus, size_bytes, persistent}`: `total` is the number of
+  indexable files the last scan found (up to 250 000), `capped` that the
+  project has more than a scan follows (250 000 files or 1 000 000 entries;
+  set a focus folder; such a scan is reused for a minute instead of walking
+  the project again), `persistent` whether
   the index is kept in the profile's cache (`$XDG_CACHE_HOME/shadow-agent/index`,
   or `<profile>/cache/index`) between runs. An index from another version, or
   a damaged one, is rebuilt.
 - `POST /api/code-intel/index/focus {focus: string|null}` → `index`: scan
   only that folder of the project (null: the whole project).
 - `POST /api/code-intel/index/clear` → `index`: delete the project's index;
-  it is rebuilt when needed.
+  it is rebuilt when needed. A managed worktree's index (a worktree task,
+  Compare lane or automation run) is deleted when the worktree is removed.
 - `POST /api/code-intel/search {query, path?, max_hits?}` (default 10) → `{ok,
   query, mode: "bm25"|"hybrid", count, hits: [{path, start_line, end_line,
   score, preview, symbols?, bm25?, similarity?}], semantic, note}`.

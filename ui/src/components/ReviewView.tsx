@@ -303,7 +303,11 @@ export function ReviewView({
                   )}
                   <span className="grow" />
                   {!detail.binary && !detail.secret && (
-                    <ExplainChange taskId={taskId} path={detail.path} />
+                    <ExplainChange
+                      key={`${taskId}:${detail.path}`}
+                      taskId={taskId}
+                      path={detail.path}
+                    />
                   )}
                   <button
                     type="button"

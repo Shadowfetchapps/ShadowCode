@@ -46,6 +46,9 @@ const MAX_REFS_PER_FILE: usize = 4_000;
 /// A repeated scan of the same project inside this window reuses the last one;
 /// edits made through the native tools are re-indexed by `touch` anyway.
 const RESCAN_AFTER: Duration = Duration::from_secs(2);
+/// The same for a project with more files than a scan follows: walking it
+/// again is the slow part, and cannot make the index cover more of it.
+const RESCAN_CAPPED_AFTER: Duration = Duration::from_secs(60);
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
@@ -118,7 +121,10 @@ pub fn use_cache(dir: PathBuf) {
 }
 
 fn db_path(root: &Path) -> Result<PathBuf> {
-    let root = root.canonicalize()?;
+    db_path_for(&root.canonicalize()?)
+}
+/// The index file of a project by its canonical path (which may be gone).
+fn db_path_for(root: &Path) -> Result<PathBuf> {
     let key = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
     if let Some(dir) = CACHE_DIR.lock().ok().and_then(|d| d.clone()) {
         crate::paths::private_directory(&dir)?;
@@ -226,12 +232,23 @@ pub fn set_focus(root: &Path, focus: Option<&str>) -> Result<Value> {
     stats(root)
 }
 
-/// Delete this project's index (it is rebuilt when needed).
+/// Delete this project's index (it is rebuilt when needed). A folder that is
+/// already gone (a removed worktree) is named by the canonical path it had.
 pub fn clear(root: &Path) -> Result<()> {
-    let path = db_path(root)?;
-    remove_db(&path);
-    forget_recent_scan(root);
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    remove_db(&db_path_for(&root)?);
+    if let Ok(mut scans) = LAST_SCAN.lock() {
+        if let Some(scans) = scans.as_mut() {
+            scans.remove(&root);
+        }
+    }
     Ok(())
+}
+
+/// Where the index of a project (by its canonical path) is kept.
+#[cfg(test)]
+pub(crate) fn index_path(root: &Path) -> PathBuf {
+    db_path_for(root).unwrap()
 }
 
 fn forget_recent_scan(root: &Path) {
@@ -547,20 +564,28 @@ fn still_indexable(root: &Path, rel: &str) -> bool {
         && fs::metadata(&full).is_ok_and(|m| m.is_file() && m.len() <= MAX_FILE_BYTES as u64)
 }
 
+/// Until when each project's last scan is reused.
 static LAST_SCAN: Mutex<Option<HashMap<PathBuf, Instant>>> = Mutex::new(None);
 
 /// Index specific relative paths (touched files) and/or a scan (one batch;
 /// a scan repeated within a couple of seconds reuses the last one).
 pub fn ensure_index(root: &Path, touched: &[String], scan: bool) -> Result<Value> {
-    run_index(root, touched, scan, true)
+    run_index(root, touched, scan, true, MAX_INDEX_FILES)
 }
 
 /// One more scan batch now, whatever the last scan (Settings › Reindex).
+/// `more` in the answer: files this scan found wait for another batch.
 pub fn index_more(root: &Path) -> Result<Value> {
-    run_index(root, &[], true, false)
+    run_index(root, &[], true, false, MAX_INDEX_FILES)
 }
 
-fn run_index(root: &Path, touched: &[String], scan: bool, reuse_recent: bool) -> Result<Value> {
+fn run_index(
+    root: &Path,
+    touched: &[String],
+    scan: bool,
+    reuse_recent: bool,
+    max_files: usize,
+) -> Result<Value> {
     ensure!(root.is_dir(), "workspace root required");
     let _guard = INDEX_LOCK
         .lock()
@@ -591,14 +616,14 @@ fn run_index(root: &Path, touched: &[String], scan: bool, reuse_recent: bool) ->
             .lock()
             .ok()
             .and_then(|scans| scans.as_ref()?.get(&key).copied())
-            .is_some_and(|at| at.elapsed() < RESCAN_AFTER);
+            .is_some_and(|until| Instant::now() < until);
     let focus = meta(&conn, "focus");
     let scan_root = match &focus {
         Some(folder) => root.join(folder),
         None => root.to_path_buf(),
     };
     let (walked, walk_complete) = if wants_scan && !recent_scan {
-        walk_sources(&scan_root, MAX_INDEX_FILES)
+        walk_sources(&scan_root, max_files)
     } else {
         (Vec::new(), false)
     };
@@ -636,9 +661,12 @@ fn run_index(root: &Path, touched: &[String], scan: bool, reuse_recent: bool) ->
         }
     }
     let complete = walk_complete && !budget_hit;
+    // The project has more files than a scan follows (or than it walks).
+    let capped = wants_scan && !recent_scan && !walk_complete;
     if wants_scan && !recent_scan {
         set_meta(&conn, "scan_total", &walked.len().to_string())?;
         set_meta(&conn, "scan_complete", if complete { "1" } else { "0" })?;
+        set_meta(&conn, "scan_capped", if capped { "1" } else { "0" })?;
         set_meta(&conn, "scanned_at", &now().to_string())?;
     }
     // Remove stale entries for deleted, renamed, oversized, ignored or secret
@@ -660,11 +688,18 @@ fn run_index(root: &Path, touched: &[String], scan: bool, reuse_recent: bool) ->
         }
     }
     transaction.commit()?;
-    if wants_scan && !recent_scan && complete {
+    // Every file the scan found was checked: a scan repeated soon reuses it,
+    // for longer when the project is over the limit.
+    if wants_scan && !recent_scan && !budget_hit {
+        let window = if capped {
+            RESCAN_CAPPED_AFTER
+        } else {
+            RESCAN_AFTER
+        };
         if let Ok(mut scans) = LAST_SCAN.lock() {
             scans
                 .get_or_insert_with(HashMap::new)
-                .insert(key, Instant::now());
+                .insert(key, Instant::now() + window);
         }
     }
     let total: i64 = conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
@@ -676,6 +711,8 @@ fn run_index(root: &Path, touched: &[String], scan: bool, reuse_recent: bool) ->
         "scanned_files": scanned,
         "parsed_files": parsed,
         "complete": complete,
+        "capped": capped,
+        "more": budget_hit,
         "bounded": true,
         "focus": focus,
         "storage": if CACHE_DIR.lock().ok().is_some_and(|d| d.is_some()) { "the profile's cache; workspace is unchanged" } else { "private process cache; workspace is unchanged" },
@@ -711,6 +748,7 @@ pub fn stats(root: &Path) -> Result<Value> {
         "max_files": MAX_INDEX_FILES,
         "total": meta(&conn, "scan_total").and_then(|t| t.parse::<u64>().ok()),
         "complete": meta(&conn, "scan_complete").as_deref() == Some("1"),
+        "capped": meta(&conn, "scan_capped").as_deref() == Some("1"),
         "focus": meta(&conn, "focus"),
         "size_bytes": size,
         "persistent": CACHE_DIR.lock().ok().is_some_and(|d| d.is_some()),
@@ -1199,12 +1237,15 @@ mod tests {
         let first = index_more(root.path()).unwrap();
         assert_eq!(first["parsed_files"], PARSE_BUDGET, "{first}");
         assert_eq!(first["complete"], false);
+        assert_eq!(first["more"], true);
+        assert_eq!(first["capped"], false);
         let status = stats(root.path()).unwrap();
         assert_eq!(status["total"], count as u64);
         assert_eq!(status["complete"], false);
         let second = index_more(root.path()).unwrap();
         assert_eq!(second["parsed_files"], 500);
         assert_eq!(second["complete"], true);
+        assert_eq!(second["more"], false);
         assert_eq!(stats(root.path()).unwrap()["files"], count as i64);
         assert!(
             started.elapsed() < Duration::from_secs(120),
@@ -1221,5 +1262,47 @@ mod tests {
         set_focus(root.path(), None).unwrap();
         clear(root.path()).unwrap();
         assert_eq!(stats(root.path()).unwrap()["files"], 0);
+    }
+
+    #[test]
+    fn a_project_over_the_file_limit_is_walked_once_and_says_so() {
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..12 {
+            fs::write(
+                root.path().join(format!("m{i}.rs")),
+                format!("pub fn f{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let first = run_index(root.path(), &[], true, true, 10).unwrap();
+        assert_eq!(first["scanned_files"], 10, "{first}");
+        assert_eq!(first["complete"], false);
+        assert_eq!(first["capped"], true);
+        assert_eq!(
+            first["more"], false,
+            "every file the scan follows is indexed"
+        );
+        // Walking it again cannot cover more: a scan soon after reuses it.
+        let again = run_index(root.path(), &[], true, true, 10).unwrap();
+        assert_eq!(again["scanned_files"], 0, "{again}");
+        let status = stats(root.path()).unwrap();
+        assert_eq!(status["capped"], true);
+        assert_eq!(status["complete"], false);
+        clear(root.path()).unwrap();
+    }
+
+    #[test]
+    fn the_index_of_a_removed_folder_is_cleared_by_its_old_path() {
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("worktree");
+        fs::create_dir(&worktree).unwrap();
+        fs::write(worktree.join("a.rs"), "pub fn a() {}\n").unwrap();
+        ensure_index(&worktree, &[], true).unwrap();
+        let canonical = worktree.canonicalize().unwrap();
+        let file = index_path(&canonical);
+        assert!(file.exists());
+        fs::remove_dir_all(&worktree).unwrap();
+        clear(&canonical).unwrap();
+        assert!(!file.exists());
     }
 }

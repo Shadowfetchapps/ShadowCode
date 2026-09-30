@@ -257,6 +257,8 @@ export type CodeIntelStatus = {
     /** Indexable files the last scan found. */
     total?: number | null;
     complete?: boolean;
+    /** The project has more files than a scan follows (250,000). */
+    capped?: boolean;
     /** Only this folder is scanned. */
     focus?: string | null;
     size_bytes?: number;
@@ -571,6 +573,9 @@ export type WorktreeTask = {
       command: string;
       ok: boolean;
       exit_code?: number | null;
+      /** Set when it did not exit by itself. */
+      stopped?: "timeout" | "cancelled" | "signal" | "not_started";
+      signal?: number;
       seconds: number;
       output: string;
     }[];

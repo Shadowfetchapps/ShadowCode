@@ -74,8 +74,9 @@ service.
 The same as the desktop window, with these exceptions:
 
 - **Terminals are off.** Interactive terminals, **Run** (a command typed
-  in the drawer) and the `/run`, `/test <command>` and `/background` slash
-  commands are refused unless you turn on **Allow terminals over remote
+  in the drawer), the `/run`, `/test <command>` and `/background` slash
+  commands and saving **Setup for new worktrees** (its commands run without
+  an approval) are refused unless you turn on **Allow terminals over remote
   access**. Tasks still run commands through the usual approvals, which the
   device can answer: a paired device can still get commands run, so pair only
   devices you control.

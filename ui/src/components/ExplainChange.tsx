@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { Markdown } from "./Markdown";
 
@@ -17,12 +17,20 @@ export function ExplainChange({
     | { kind: "done"; text: string; model: string }
     | { kind: "error"; text: string }
   >({ kind: "idle" });
+  // The file shown now: an answer for another one is dropped.
+  const shown = useRef("");
+  const key = `${taskId}\n${path}`;
   // A new file starts fresh.
-  useEffect(() => setState({ kind: "idle" }), [taskId, path]);
+  useEffect(() => {
+    shown.current = key;
+    setState({ kind: "idle" });
+  }, [key]);
   async function explain() {
+    const asked = key;
     setState({ kind: "working" });
     try {
       const answer = await api.explainChange(taskId, path);
+      if (shown.current !== asked) return;
       setState(
         answer.ok && answer.text
           ? { kind: "done", text: answer.text, model: answer.model || "" }
@@ -32,6 +40,7 @@ export function ExplainChange({
             },
       );
     } catch (e) {
+      if (shown.current !== asked) return;
       setState({ kind: "error", text: String(e) });
     }
   }

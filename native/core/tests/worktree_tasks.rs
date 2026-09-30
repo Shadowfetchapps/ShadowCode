@@ -517,6 +517,23 @@ async fn a_new_worktree_gets_its_files_its_setup_its_own_port_and_a_teardown() {
     let record = &started["worktree_task"];
     let port = record["port"].as_u64().expect("a port");
     assert!((41000..=41999).contains(&port), "{record}");
+    // The open conversation now runs in the worktree; the setup shown and
+    // saved there is still the project's, which new tasks start from.
+    let open = call(&f.service, "GET", "/api/worktree-tasks/setup", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(open["workspace"], json!(f.project), "{open}");
+    assert_eq!(open["setup"]["port_start"], 41000);
+    assert_eq!(open["suggested"]["copy"], json!([".env"]));
+    let saved = call(
+        &f.service,
+        "POST",
+        "/api/worktree-tasks/setup",
+        json!({"setup": open["setup"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["workspace"], json!(f.project));
     assert_eq!(record["setup"]["ok"], true, "{record}");
     let worktree = PathBuf::from(record["worktree"].as_str().unwrap());
     assert_eq!(
@@ -577,4 +594,51 @@ async fn a_worktree_task_can_start_from_another_branch() {
     .await
     .unwrap_err();
     assert!(format!("{missing:#}").contains("no-such-branch"));
+    // Only local branches: never a tag, even one that shares a branch's name.
+    let feature = git(&f.project, &["rev-parse", "feature"]);
+    git(&f.project, &["tag", "v-feature", &feature]);
+    git(&f.project, &["tag", "shared-name", &feature]);
+    git(&f.project, &["branch", "shared-name", "HEAD"]);
+    // The base branch picker offers the names the project's branch list
+    // shows, where that branch is `heads/shared-name`.
+    let overview = call(&f.service, "GET", "/api/git", Value::Null)
+        .await
+        .unwrap();
+    let listed = overview["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|branch| branch["name"].as_str())
+        .find(|name| name.ends_with("shared-name"))
+        .unwrap_or_else(|| panic!("{overview}"))
+        .to_owned();
+    for (base, refused) in [
+        ("v-feature", true),
+        ("HEAD~0", true),
+        ("tags/shared-name", true),
+        ("refs/tags/shared-name", true),
+        ("shared-name", false),
+        ("refs/heads/shared-name", false),
+        (listed.as_str(), false),
+    ] {
+        let started = call(
+            &f.service,
+            "POST",
+            "/api/run",
+            json!({"workspace":f.project,"task":"Set the answer","model":"m-alpha","worktree":true,"base_branch":base}),
+        )
+        .await;
+        if refused {
+            let error = format!("{:#}", started.unwrap_err());
+            assert!(error.contains("branch"), "{base}: {error}");
+            continue;
+        }
+        let started = started.unwrap();
+        let worktree = PathBuf::from(started["worktree_task"]["worktree"].as_str().unwrap());
+        assert!(
+            !worktree.join("feature.txt").exists(),
+            "{base} started from the tag"
+        );
+        finished(&f, started["id"].as_str().unwrap()).await;
+    }
 }

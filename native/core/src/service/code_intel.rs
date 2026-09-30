@@ -206,13 +206,15 @@ impl Service {
             ("POST", "/api/code-intel/reindex") => {
                 let root = workspace.clone();
                 let stats = tokio::task::spawn_blocking(move || {
-                    // Batches of changed files until the index is complete,
-                    // for at most a minute and a half per request; the
-                    // answer says whether more remains.
+                    // Batches of changed files until every file the scan
+                    // finds is indexed, for at most a minute and a half per
+                    // request; the answer says whether more remains. A
+                    // project over the file limit stops there too
+                    // (`capped`): only a focus folder covers more of it.
                     let started = std::time::Instant::now();
                     loop {
                         let batch = crate::symbol_index::index_more(&root)?;
-                        if batch["complete"] == true
+                        if batch["more"] != true
                             || started.elapsed() > std::time::Duration::from_secs(90)
                         {
                             break;

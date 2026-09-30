@@ -46,6 +46,36 @@ const MANIFESTS = new Set([
   "Pipfile",
 ]);
 
+/** Folders only build tools write into. */
+const OUTPUT_FOLDERS = new Set(["dist", "out", "coverage"]);
+/** Folders of hand-written code: a `build/` inside one is code too
+ * (`src/commands/build/index.ts`). */
+const SOURCE_FOLDERS = new Set(["src", "source", "lib", "app"]);
+/** Files people write, which build tools do not produce. */
+const HAND_WRITTEN =
+  /\.(ts|tsx|jsx|go|rs|py|java|kt|swift|c|cc|cpp|h|hpp|cs|rb|php|vue|svelte|sh)$/;
+/** JavaScript, which a `build/` folder holds as often as output: the scripts
+ * that run the build (`build/webpack.base.conf.js`,
+ * `scripts/build/release.mjs`, `commands/build/index.js`). */
+const SCRIPT = /\.(js|mjs|cjs)$/;
+/** A bundler's content-hashed name (`main.3f2a1b9c.js`,
+ * `787.0e1d2c3b.chunk.js`): output wherever it is. */
+const HASHED = /[.-](?=[0-9a-f]*\d)[0-9a-f]{8,}(\.chunk)?\.(js|mjs|cjs|css)$/;
+
+/** Output of a build: in a build folder that is not inside a source folder,
+ * and not a file people write (a `.d.ts` is generated). A `build/` folder
+ * holds scripts too: JavaScript there is output only by a hashed name. */
+function buildOutput(lower: string, lowerName: string): boolean {
+  const folders = lower.split("/").slice(0, -1);
+  const source = folders.findIndex((folder) => SOURCE_FOLDERS.has(folder));
+  const outside = source < 0 ? folders : folders.slice(0, source);
+  const output = outside.some((folder) => OUTPUT_FOLDERS.has(folder));
+  if (!output && !outside.includes("build")) return false;
+  if (lowerName.endsWith(".d.ts") || HASHED.test(lowerName)) return true;
+  if (HAND_WRITTEN.test(lowerName)) return false;
+  return output || !SCRIPT.test(lowerName);
+}
+
 /** Which group a changed file belongs to, by its path. */
 export function groupOf(path: string): TriageGroup {
   const lower = path.toLowerCase();
@@ -58,7 +88,7 @@ export function groupOf(path: string): TriageGroup {
   )
     return "dependencies";
   if (
-    /(^|\/)(dist|build|out|generated|__generated__|coverage)\//.test(lower) ||
+    /(^|\/)(generated|__generated__)\//.test(lower) ||
     /\.(min\.js|min\.css|map|pb\.go|g\.dart|snap)$/.test(lower) ||
     lower.includes("__snapshots__/")
   )
@@ -76,6 +106,8 @@ export function groupOf(path: string): TriageGroup {
     )
   )
     return "config";
+  // After config and CI: `.github/actions/build/action.yml` is CI.
+  if (buildOutput(lower, lowerName)) return "generated";
   if (
     /(^|\/)(tests?|__tests__|spec|e2e)\//.test(lower) ||
     /(^test_|_test\.|\.test\.|\.spec\.)/.test(lowerName)

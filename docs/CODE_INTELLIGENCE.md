@@ -119,7 +119,12 @@ shell scripts, SQL and similar) are indexed for search only.
   found, whether the scan is complete, and the index's size. **Reindex this project**
   continues a large scan (up to 90 seconds per click). A **focus folder**
   limits the index to one folder of the project, useful in a monorepo.
+  A project with more files than a scan follows (250,000, or a million
+  folder entries) says so and asks for a focus folder; its scan is reused
+  for a minute instead of walking the project again at every task.
   **Clear index** deletes the project's index; it is rebuilt when needed.
+  The index of a worktree task, Compare lane or automation run is deleted
+  when its worktree is removed.
 
 Tools that use it: `workspace_symbols`, `goto_definition` and
 `find_references` by name, `get_type_signature`, and the callers list after

@@ -6,6 +6,29 @@ import { Term } from "./Term";
 
 const ACTIVE = ["queued", "running", "paused", "cancelling"];
 
+type SetupCommand = NonNullable<
+  NonNullable<WorktreeTask["setup"]>["commands"]
+>[number];
+
+/** Why a setup command failed, in a few words. */
+export function setupFailure(command: SetupCommand): string {
+  if (command.exit_code != null) return `exited with ${command.exit_code}`;
+  switch (command.stopped) {
+    case "timeout":
+      return "took too long and was stopped";
+    case "cancelled":
+      return "was stopped when ShadowCode closed";
+    case "signal":
+      return command.signal
+        ? `was stopped (signal ${command.signal})`
+        : "was stopped";
+    case "not_started":
+      return "could not start";
+    default:
+      return "did not finish";
+  }
+}
+
 /** Shown above the composer while a conversation runs in its own worktree:
  * what changed there and, once it is done, Apply to project / Keep as
  * branch / Discard. */
@@ -54,10 +77,8 @@ export function WorktreeBar({
         <details className="worktree-setup-failed">
           <summary>
             Setup did not finish: <code>{failed.command}</code>{" "}
-            {failed.exit_code != null
-              ? `exited with ${failed.exit_code}`
-              : "did not run"}
-            . The task ran anyway; install steps may be missing.
+            {setupFailure(failed)}. The task ran anyway; install steps may be
+            missing.
           </summary>
           <pre>{failed.output}</pre>
         </details>

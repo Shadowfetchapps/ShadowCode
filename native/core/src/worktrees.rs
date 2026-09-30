@@ -119,6 +119,18 @@ pub(crate) async fn task_common_directory(
     Ok(Path::new(&common).canonicalize()?)
 }
 
+/// The project a managed checkout was made from, given the checkout's own
+/// (canonical) folder; `None` for any other folder.
+pub(crate) fn source_of_checkout(paths: &AppPaths, folder: &Path) -> Option<PathBuf> {
+    let checkouts = paths.data.join("managed-worktrees/checkouts");
+    let id = folder
+        .strip_prefix(checkouts.canonicalize().ok()?)
+        .ok()?
+        .to_str()?;
+    let record = task_record(paths, id).ok()?;
+    (record.path.canonicalize().ok()? == folder).then_some(record.source)
+}
+
 /// Verify a task's persisted checkout binding without requiring its source or
 /// checkout to exist. Archived records support idempotent completed cleanup;
 /// malformed/foreign active records never fall back to an older archive.
@@ -510,6 +522,7 @@ pub async fn remove(
         "Worktree changed; inspect it again before removal"
     );
     ensure!(inspection.can_remove, "{}", inspection.reason);
+    let index = index_root(paths, id);
     let (records, _) = roots(paths)?;
     let mut record = inspection.record;
     record.state = "removing".into();
@@ -550,6 +563,7 @@ pub async fn remove(
             )?;
             fs::File::open(&records)?.sync_all()?;
             fs::File::open(&archive)?.sync_all()?;
+            forget_index(index);
             Ok(record)
         }
         Err(error) => {
@@ -598,13 +612,28 @@ async fn dispose_checkout(
     delete_branch: bool,
     cancel: CancellationToken,
 ) -> Result<Option<String>> {
+    let index = index_root(paths, id);
     #[cfg(target_os = "linux")]
-    {
-        cleanup::dispose(paths, source, id, delete_branch, cancel).await
-    }
+    let result = cleanup::dispose(paths, source, id, delete_branch, cancel).await;
     #[cfg(not(target_os = "linux"))]
-    {
-        dispose_checkout_legacy(paths, source, id, delete_branch, cancel).await
+    let result = dispose_checkout_legacy(paths, source, id, delete_branch, cancel).await;
+    if result.is_ok() {
+        forget_index(index);
+    }
+    result
+}
+
+/// The folder a checkout's code index is keyed by (its canonical path),
+/// taken before the checkout is removed.
+fn index_root(paths: &AppPaths, id: &str) -> Option<PathBuf> {
+    let path = task_record(paths, id).ok()?.path;
+    Some(path.canonicalize().unwrap_or(path))
+}
+/// A removed checkout's code index (kept in the profile's cache) goes with
+/// it; otherwise every task, lane and run would leave one behind.
+fn forget_index(root: Option<PathBuf>) {
+    if let Some(root) = root.filter(|root| !root.exists()) {
+        let _ = crate::symbol_index::clear(&root);
     }
 }
 

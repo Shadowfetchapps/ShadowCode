@@ -726,13 +726,23 @@ keep or discard it.
 **Setup for new worktrees** (drawer › Tools › Worktrees) says what each new
 copy gets before the task starts:
 
-- **Files to copy**, such as `.env`, which Git doesn't carry.
+- **Files to copy**, such as `.env`, which Git doesn't carry. Only files
+  inside the project are copied, never through a symlink.
 - **Setup commands**, such as `npm ci`, run in the copy as you. If one
   fails, the task still runs and the bar says which command failed and why.
+  A command that starts something in the background is done when it
+  returns; one still running after 10 minutes is stopped, and so is one
+  still running when you close ShadowCode. Your other worktree tasks of the
+  project are not held up while setup runs.
 - **Teardown commands**, such as `docker compose down`, run before the copy
-  is removed.
+  is removed, and also when the task could not start after its setup ran.
 - **Ports**: each task gets its own free port from this range as `PORT`, so
-  two tasks' dev servers don't collide. The bar shows it.
+  two tasks' dev servers don't collide. Its commands and background
+  processes get it; the bar shows it. Once the task is applied, kept or
+  discarded, the conversation no longer uses it.
+
+The setup is the project's, even while a worktree task's conversation is
+open.
 
 **Use suggestions for this project** fills in what the project's lockfiles
 and `.env` files suggest. Nothing runs until you save it.
@@ -819,8 +829,10 @@ project (**Settings › Code intelligence**):
 - **Large projects.** The index is kept between runs, so reopening a
   project is quick. It covers up to 250,000 files and fills in over a few
   moments for a big repository; Settings shows how far it got and its size.
-  To index only part of a monorepo, set a **focus folder**. **Clear index**
-  deletes it; it is rebuilt when needed.
+  To index only part of a monorepo, set a **focus folder**; Settings asks
+  for one when the project has more files than that. **Clear index**
+  deletes it; it is rebuilt when needed. A worktree's index is deleted with
+  the worktree.
 
 Details: [code intelligence](CODE_INTELLIGENCE.md).
 
