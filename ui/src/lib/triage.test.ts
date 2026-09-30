@@ -29,7 +29,18 @@ it("groups files by what they are", () => {
 
 it("files only build output as generated, not code in a folder named build", () => {
   expect(groupOf("packages/web/dist/index.js")).toBe("generated");
-  expect(groupOf("build/app.js")).toBe("generated");
+  expect(groupOf("dist/index.mjs")).toBe("generated");
+  expect(groupOf("out/extension.js")).toBe("generated");
+  expect(groupOf("build/index.html")).toBe("generated");
+  expect(groupOf("build/static/js/main.3f2a1b9c.js")).toBe("generated");
+  expect(groupOf("build/static/js/787.0e1d2c3b.chunk.js")).toBe("generated");
+  expect(groupOf("build/static/css/main.5b6c7d8e.css")).toBe("generated");
+  // The scripts that run a build, in JavaScript projects without src/.
+  expect(groupOf("build/webpack.base.conf.js")).toBe("source");
+  expect(groupOf("build/check-versions.js")).toBe("source");
+  expect(groupOf("scripts/build/release.mjs")).toBe("source");
+  expect(groupOf("packages/cli/commands/build/index.js")).toBe("source");
+  expect(groupOf("tools/build/rollup.cjs")).toBe("source");
   expect(groupOf("dist/index.d.ts")).toBe("generated");
   expect(groupOf("coverage/lcov-report/index.html")).toBe("generated");
   expect(groupOf("src/generated/client.ts")).toBe("generated");

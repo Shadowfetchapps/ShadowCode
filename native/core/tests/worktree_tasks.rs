@@ -599,10 +599,27 @@ async fn a_worktree_task_can_start_from_another_branch() {
     git(&f.project, &["tag", "v-feature", &feature]);
     git(&f.project, &["tag", "shared-name", &feature]);
     git(&f.project, &["branch", "shared-name", "HEAD"]);
+    // The base branch picker offers the names the project's branch list
+    // shows, where that branch is `heads/shared-name`.
+    let overview = call(&f.service, "GET", "/api/git", Value::Null)
+        .await
+        .unwrap();
+    let listed = overview["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|branch| branch["name"].as_str())
+        .find(|name| name.ends_with("shared-name"))
+        .unwrap_or_else(|| panic!("{overview}"))
+        .to_owned();
     for (base, refused) in [
         ("v-feature", true),
         ("HEAD~0", true),
+        ("tags/shared-name", true),
+        ("refs/tags/shared-name", true),
         ("shared-name", false),
+        ("refs/heads/shared-name", false),
+        (listed.as_str(), false),
     ] {
         let started = call(
             &f.service,

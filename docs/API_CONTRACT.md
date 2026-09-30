@@ -1669,7 +1669,7 @@ WorktreeTask = {id, workspace /* the project */, session_id, worktree, branch,
                 notes: string[], removed, port: number|null,
                 setup: {} | {ok, copied: string[], skipped: [{path, reason}], port,
                         commands: [{command, ok, exit_code, seconds, output,
-                                    stopped?: "timeout"|"signal"|"not_started", signal?}]}}
+                                    stopped?: "timeout"|"cancelled"|"signal"|"not_started", signal?}]}}
 WorktreeSetup = {copy: string[] /* ≤ 20 project files */, setup: string[], teardown: string[]
                  /* ≤ 10 one-line commands each */, port_start /* ≥ 1024 */, port_end}
 ```
@@ -1690,6 +1690,9 @@ WorktreeSetup = {copy: string[] /* ≤ 20 project files */, setup: string[], tea
   instead of the current files (`base.included_uncommitted: false`);
   refused when it is not a local branch (`refs/heads/<name>`: never a tag,
   remote branch, commit ID or expression, even one with the same name).
+  Git's short name for a branch that shares a tag's name
+  (`heads/<name>`, as `GET /api/git` lists it) and `refs/heads/<name>`
+  name that branch too.
 - Setup: each new worktree gets the project's `WorktreeSetup`. Its `copy`
   files (regular files up to 10 MB, never outside the project or in `.git`,
   and never through a symlink in the project or the worktree) are copied
@@ -1700,7 +1703,9 @@ WorktreeSetup = {copy: string[] /* ≤ 20 project files */, setup: string[], tea
   the background; at 10 minutes its whole process group is stopped
   (`stopped: "timeout"`). While setup runs the task is saved with `state:
   "starting"` and its worktree is reserved (it cannot be discarded yet), and
-  the project's other worktree tasks are not held up. The
+  the project's other worktree tasks are not held up. Closing ShadowCode
+  stops a running setup the same way (`stopped: "cancelled"`); the request
+  fails and the task is kept as failed, to discard later. The
   task gets a port that is free on this computer and not used by another
   open worktree task of the project; its shells, background processes
   (`background_start`, `/api/background`), setup commands and subscription

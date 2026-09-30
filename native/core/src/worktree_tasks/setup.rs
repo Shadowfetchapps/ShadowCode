@@ -21,6 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio_util::sync::CancellationToken;
 
 /// Longest a setup command may run, and a teardown command.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(600);
@@ -194,17 +195,22 @@ impl Tail {
 
 /// Run one command with `sh -c` in its own process group. It is over when
 /// the shell exits, even if something it started in the background still
-/// runs; after `timeout` the whole group is killed. `{command, ok,
-/// exit_code, seconds, output}`, plus `stopped` ("timeout", "signal" with
-/// `signal`, or "not_started") when it did not exit by itself.
+/// runs; after `timeout`, or when `cancel` fires (ShadowCode is closing),
+/// the whole group is killed. `{command, ok, exit_code, seconds, output}`,
+/// plus `stopped` ("timeout", "cancelled", "signal" with `signal`, or
+/// "not_started") when it did not exit by itself.
 async fn run_command(
     dir: &Path,
     command: &str,
     env: &BTreeMap<String, String>,
     timeout: Duration,
+    cancel: &CancellationToken,
 ) -> Value {
     let started = Instant::now();
     let seconds = || (started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
+    if cancel.is_cancelled() {
+        return json!({"command": command, "ok": false, "stopped": "cancelled", "seconds": 0.0, "output": "Not started: ShadowCode is closing"});
+    }
     let mut process = tokio::process::Command::new("sh");
     process
         .args(["-c", command])
@@ -225,7 +231,11 @@ async fn run_command(
     };
     let stdout = Tail::read(child.stdout.take());
     let stderr = Tail::read(child.stderr.take());
-    let waited = tokio::time::timeout(timeout, child.wait()).await;
+    let waited = tokio::select! {
+        status = child.wait() => Ok(status),
+        () = tokio::time::sleep(timeout) => Err("timeout"),
+        () = cancel.cancelled() => Err("cancelled"),
+    };
     if waited.is_err() {
         #[cfg(unix)]
         if let Some(pid) = child.id() {
@@ -262,9 +272,13 @@ async fn run_command(
             }
         }
         Ok(Err(error)) => tail.push_str(&format!("\nCould not wait for it: {error}")),
-        Err(_) => {
-            result["stopped"] = json!("timeout");
-            tail.push_str(&format!("\nStopped after {} seconds", timeout.as_secs()));
+        Err(stopped) => {
+            result["stopped"] = json!(stopped);
+            tail.push_str(&if stopped == "timeout" {
+                format!("\nStopped after {} seconds", timeout.as_secs())
+            } else {
+                "\nStopped: ShadowCode is closing".to_owned()
+            });
         }
     }
     result["output"] = json!(crate::redaction::redact_text(tail.trim_start()).text);
@@ -329,9 +343,15 @@ fn copy_file(source: &Path, worktree: &Path, path: &str) -> std::result::Result<
 }
 
 /// Prepare a new worktree: copy the chosen files, then run the setup
-/// commands (stopping at the first failure). `{ok, copied, skipped,
-/// commands}`.
-pub async fn run_setup(setup: &Setup, source: &Path, worktree: &Path, port: Option<u16>) -> Value {
+/// commands (stopping at the first failure, or when `cancel` fires).
+/// `{ok, copied, skipped, commands}`.
+pub async fn run_setup(
+    setup: &Setup,
+    source: &Path,
+    worktree: &Path,
+    port: Option<u16>,
+    cancel: &CancellationToken,
+) -> Value {
     let mut copied = Vec::new();
     let mut skipped = Vec::new();
     for path in &setup.copy {
@@ -344,7 +364,7 @@ pub async fn run_setup(setup: &Setup, source: &Path, worktree: &Path, port: Opti
     let mut commands = Vec::new();
     let mut ok = true;
     for command in &setup.setup {
-        let result = run_command(worktree, command, &env, SETUP_TIMEOUT).await;
+        let result = run_command(worktree, command, &env, SETUP_TIMEOUT, cancel).await;
         ok = result["ok"] == true;
         commands.push(result);
         if !ok {
@@ -354,12 +374,14 @@ pub async fn run_setup(setup: &Setup, source: &Path, worktree: &Path, port: Opti
     json!({"ok": ok, "copied": copied, "skipped": skipped, "commands": commands, "port": port})
 }
 
-/// Before a worktree is removed: its teardown commands, best effort.
+/// Before a worktree is removed: its teardown commands, best effort. They
+/// are cleanup, so closing ShadowCode waits for them rather than stop them.
 pub async fn run_teardown(setup: &Setup, worktree: &Path, port: Option<u16>) -> Vec<Value> {
     let env = env_for(port);
+    let never = CancellationToken::new();
     let mut results = Vec::new();
     for command in &setup.teardown {
-        results.push(run_command(worktree, command, &env, TEARDOWN_TIMEOUT).await);
+        results.push(run_command(worktree, command, &env, TEARDOWN_TIMEOUT, &never).await);
     }
     results
 }
@@ -367,6 +389,10 @@ pub async fn run_teardown(setup: &Setup, worktree: &Path, port: Option<u16>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn never() -> CancellationToken {
+        CancellationToken::new()
+    }
 
     #[test]
     fn suggestions_follow_the_lockfiles_and_env_files() {
@@ -406,7 +432,7 @@ mod tests {
             ],
             ..Setup::default()
         };
-        let outcome = run_setup(&setup, source.path(), worktree.path(), Some(4321)).await;
+        let outcome = run_setup(&setup, source.path(), worktree.path(), Some(4321), &never()).await;
         assert_eq!(outcome["ok"], false);
         assert_eq!(outcome["copied"], json!([".env"]));
         assert_eq!(outcome["skipped"][0]["path"], "missing.txt");
@@ -451,7 +477,7 @@ mod tests {
             copy: vec![".env".into(), "apps/web/.env".into(), "shared/.env".into()],
             ..Setup::default()
         };
-        let outcome = run_setup(&setup, &source, &worktree, None).await;
+        let outcome = run_setup(&setup, &source, &worktree, None, &never()).await;
         assert_eq!(outcome["copied"], json!([]), "{outcome}");
         assert_eq!(outcome["skipped"].as_array().unwrap().len(), 3);
         assert_eq!(
@@ -465,7 +491,7 @@ mod tests {
         // A real folder in a fresh worktree is created and copied into.
         let fresh = root.path().join("fresh");
         fs::create_dir(&fresh).unwrap();
-        let outcome = run_setup(&setup, &source, &fresh, None).await;
+        let outcome = run_setup(&setup, &source, &fresh, None, &never()).await;
         assert_eq!(
             outcome["copied"],
             json!([".env", "apps/web/.env"]),
@@ -486,7 +512,7 @@ mod tests {
             setup: vec!["sleep 8 &".into(), "echo second".into()],
             ..Setup::default()
         };
-        let outcome = run_setup(&setup, dir.path(), dir.path(), None).await;
+        let outcome = run_setup(&setup, dir.path(), dir.path(), None, &never()).await;
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "{:?}",
@@ -506,6 +532,7 @@ mod tests {
             "echo begun; (sleep 2; touch late) & sleep 30",
             &env,
             Duration::from_secs(1),
+            &never(),
         )
         .await;
         assert_eq!(result["ok"], false);
@@ -519,7 +546,14 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(2500)).await;
         assert!(!late.exists(), "the background part outlived the timeout");
 
-        let killed = run_command(dir.path(), "kill -9 $$", &env, Duration::from_secs(10)).await;
+        let killed = run_command(
+            dir.path(),
+            "kill -9 $$",
+            &env,
+            Duration::from_secs(10),
+            &never(),
+        )
+        .await;
         assert_eq!(killed["stopped"], "signal");
         assert_eq!(killed["signal"], 9);
         assert!(killed["exit_code"].is_null());
@@ -528,8 +562,59 @@ mod tests {
             "true",
             &env,
             Duration::from_secs(10),
+            &never(),
         )
         .await;
         assert_eq!(missing["stopped"], "not_started");
+    }
+
+    #[tokio::test]
+    async fn closing_shadowcode_stops_the_setup_and_everything_it_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let late = dir.path().join("late");
+        let setup = Setup {
+            setup: vec![
+                "echo begun; (sleep 2; touch late) & sleep 30".into(),
+                "touch next".into(),
+            ],
+            ..Setup::default()
+        };
+        let closing = CancellationToken::new();
+        let cancel = closing.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            cancel.cancel();
+        });
+        let started = Instant::now();
+        let outcome = run_setup(&setup, dir.path(), dir.path(), None, &closing).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(outcome["ok"], false, "{outcome}");
+        let commands = outcome["commands"].as_array().unwrap();
+        assert_eq!(commands.len(), 1, "{outcome}");
+        assert_eq!(commands[0]["stopped"], "cancelled");
+        let output = commands[0]["output"].as_str().unwrap();
+        assert!(
+            output.starts_with("begun") && output.ends_with("Stopped: ShadowCode is closing"),
+            "{output}"
+        );
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(!late.exists(), "the background part outlived the setup");
+        assert!(!dir.path().join("next").exists());
+
+        // Once closing, nothing more starts.
+        let skipped = run_command(
+            dir.path(),
+            "touch next",
+            &BTreeMap::new(),
+            Duration::from_secs(10),
+            &closing,
+        )
+        .await;
+        assert_eq!(skipped["stopped"], "cancelled");
+        assert!(!dir.path().join("next").exists());
     }
 }

@@ -16,6 +16,8 @@ export function setupFailure(command: SetupCommand): string {
   switch (command.stopped) {
     case "timeout":
       return "took too long and was stopped";
+    case "cancelled":
+      return "was stopped when ShadowCode closed";
     case "signal":
       return command.signal
         ? `was stopped (signal ${command.signal})`

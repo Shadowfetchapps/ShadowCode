@@ -369,6 +369,46 @@ fn copy_attachments(source: &Path, worktree: &Path, task: &str, images: &[String
     Ok(())
 }
 
+/// The last commit of the local branch `name`. Only `refs/heads/…`: never a
+/// tag, remote branch, commit ID or expression, even one that shares the
+/// branch's name. Git's short names (the branch list's) spell a branch that
+/// shares a tag's name `heads/<name>`, or `refs/heads/<name>`: those mean
+/// that branch when no branch has the whole name.
+async fn local_branch_commit(source: &Path, name: &str) -> Result<String> {
+    let reference = format!("refs/heads/{name}");
+    let named = tokio::process::Command::new("git")
+        .args(["check-ref-format", &reference])
+        .output()
+        .await?;
+    ensure!(
+        named.status.success() && !name.starts_with('-'),
+        "Choose a branch name"
+    );
+    let mut references = vec![reference];
+    if name.starts_with("refs/heads/") {
+        references.push(name.to_owned());
+    } else if name.starts_with("heads/") {
+        references.push(format!("refs/{name}"));
+    }
+    for reference in references {
+        let output = tokio::process::Command::new("git")
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{reference}^{{commit}}"),
+            ])
+            .current_dir(source)
+            .output()
+            .await?;
+        let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if output.status.success() && !commit.is_empty() {
+            return Ok(commit);
+        }
+    }
+    anyhow::bail!("There is no local branch named {name}")
+}
+
 /// Create the worktree and its conversation. The caller starts the first
 /// turn there and then calls `started`, or `abandon` when it could not.
 pub(crate) async fn prepare(
@@ -391,33 +431,9 @@ pub(crate) async fn prepare(
     .await?;
     let base = match base_branch.map(str::trim).filter(|b| !b.is_empty()) {
         // Another local branch: its last commit, without the project's
-        // uncommitted work. Only `refs/heads/…`: never a tag, remote branch,
-        // commit ID or expression, even one that shares the branch's name.
+        // uncommitted work.
         Some(branch) => {
-            let reference = format!("refs/heads/{branch}");
-            let named = tokio::process::Command::new("git")
-                .args(["check-ref-format", &reference])
-                .output()
-                .await?;
-            ensure!(
-                named.status.success() && !branch.starts_with('-'),
-                "Choose a branch name"
-            );
-            let output = tokio::process::Command::new("git")
-                .args([
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    &format!("{reference}^{{commit}}"),
-                ])
-                .current_dir(&source)
-                .output()
-                .await?;
-            let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            ensure!(
-                output.status.success() && !commit.is_empty(),
-                "There is no local branch named {branch}"
-            );
+            let commit = local_branch_commit(&source, branch).await?;
             Base {
                 commit: commit.clone(),
                 head: commit,
@@ -502,13 +518,15 @@ pub(crate) async fn prepare(
     // holding the project's repository or this record, so other tasks of the
     // project can start, apply, keep or discard meanwhile. The worktree stays
     // reserved, so no turn starts in it and it cannot be removed until setup
-    // is over.
+    // is over. Closing ShadowCode stops the setup rather than wait for it.
     let reservation = engine.reserve_workspace(&record.worktree);
     drop(record_guard);
     drop(repository);
     let finished: Result<Record> = async {
-        let _reservation = reservation?;
-        record.setup = setup::run_setup(&wanted, &source, &record.worktree, record.port).await;
+        let reservation = reservation?;
+        let closing = reservation.cancellation();
+        record.setup =
+            setup::run_setup(&wanted, &source, &record.worktree, record.port, &closing).await;
         let store = engine.store();
         let _guard = locks::record(&store, &record.id, &cancel).await?;
         let mut current = load(&store, &record.id)?;
@@ -519,6 +537,10 @@ pub(crate) async fn prepare(
         );
         current.setup = record.setup.clone();
         save(&store, &current)?;
+        ensure!(
+            !closing.is_cancelled(),
+            "Setup stopped: ShadowCode is closing"
+        );
         Ok(current)
     }
     .await;
@@ -1786,5 +1808,62 @@ mod tests {
         abandon(&f.engine, prepared.clone()).await;
         assert!(!prepared.worktree.exists());
         f.engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closing_shadowcode_stops_a_running_setup_instead_of_waiting_for_it() {
+        let f = fixture().await;
+        let source = f.source.canonicalize().unwrap();
+        let entered = f.root.path().join("entered");
+        setup::save(
+            &f.engine.store(),
+            &source,
+            setup::Setup {
+                setup: vec![format!(
+                    "touch {}; while true; do sleep 0.05; done",
+                    entered.display()
+                )],
+                ..setup::Setup::default()
+            },
+        )
+        .unwrap();
+        let engine = f.engine.clone();
+        let preparing = tokio::spawn(async move {
+            prepare(&engine, &source, "Endless setup", &[], "fixture-only", None).await
+        });
+        until(|| entered.exists(), "Setup never started").await;
+        let started = std::time::Instant::now();
+        f.engine.shutdown().await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        let error = tokio::time::timeout(Duration::from_secs(10), preparing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("closing"), "{error:#}");
+        // The task stays, with why its setup stopped, for cleanup later.
+        let ids: Vec<String> = serde_json::from_str(
+            &f.engine
+                .store()
+                .native_meta(&keys::worktree_task_index(&f.record.workspace))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let kept = ids
+            .iter()
+            .filter_map(|id| load(&f.engine.store(), id).ok())
+            .find(|record| record.task == "Endless setup")
+            .expect("the task was kept");
+        assert_eq!(kept.status, "failed");
+        assert_eq!(
+            kept.setup["commands"][0]["stopped"], "cancelled",
+            "{}",
+            kept.setup
+        );
     }
 }

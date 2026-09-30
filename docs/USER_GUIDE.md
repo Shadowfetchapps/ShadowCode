@@ -697,8 +697,9 @@ copy gets before the task starts:
 - **Setup commands**, such as `npm ci`, run in the copy as you. If one
   fails, the task still runs and the bar says which command failed and why.
   A command that starts something in the background is done when it
-  returns; one still running after 10 minutes is stopped. Your other
-  worktree tasks of the project are not held up while setup runs.
+  returns; one still running after 10 minutes is stopped, and so is one
+  still running when you close ShadowCode. Your other worktree tasks of the
+  project are not held up while setup runs.
 - **Teardown commands**, such as `docker compose down`, run before the copy
   is removed, and also when the task could not start after its setup ran.
 - **Ports**: each task gets its own free port from this range as `PORT`, so

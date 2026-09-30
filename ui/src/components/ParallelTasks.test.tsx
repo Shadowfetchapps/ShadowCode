@@ -164,6 +164,7 @@ it("says why a setup command failed, not that it did not run", () => {
   const cases: [object, string][] = [
     [{ exit_code: 1 }, "exited with 1"],
     [{ stopped: "timeout" }, "took too long and was stopped"],
+    [{ stopped: "cancelled" }, "was stopped when ShadowCode closed"],
     [{ stopped: "signal", signal: 9 }, "was stopped (signal 9)"],
     [{ stopped: "not_started" }, "could not start"],
   ];

@@ -574,7 +574,7 @@ export type WorktreeTask = {
       ok: boolean;
       exit_code?: number | null;
       /** Set when it did not exit by itself. */
-      stopped?: "timeout" | "signal" | "not_started";
+      stopped?: "timeout" | "cancelled" | "signal" | "not_started";
       signal?: number;
       seconds: number;
       output: string;
