@@ -780,7 +780,9 @@ pub(crate) async fn start(engine: &Engine, request: Start<'_>) -> Result<Record>
     let started = match tagged {
         Ok(()) => {
             engine
-                .start_consented_owned(
+                // Unattended: no one sees the hidden conversation, so at a
+                // spending limit the review stops instead of waiting there.
+                .start_unattended_owned(
                     StartRequest {
                         workspace: ws.path.clone(),
                         task: text.clone(),
@@ -793,9 +795,7 @@ pub(crate) async fn start(engine: &Engine, request: Start<'_>) -> Result<Record>
                         web: false,
                     },
                     "reviewer",
-                    None,
                     request.owner,
-                    false,
                 )
                 .await
         }

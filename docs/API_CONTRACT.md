@@ -299,15 +299,19 @@ conversation other than the one on screen (`shadowcode_core::notify`:
 
 - `approval.requested` ("Waiting for you: <command or tool>"), `approval.expiring`,
   `agent.completed` with `success: false` and no plan limit ("task failed"),
-  `limit.fallback` (and whether the task continued on a local model), and a
-  successful `agent.completed`. Cancelled tasks never notify.
+  `limit.fallback` (and whether the task continued on a local model),
+  `spend.limit_reached` ("ShadowCode · spending limit reached": the card's
+  title, then "Continue or stop it in its conversation."; phone notices
+  through ntfy too), and a successful `agent.completed`. Cancelled tasks
+  never notify.
 - Automation runs notify through `automation.finished` instead of their
   task's `agent.completed` (runs are recognized from `automation.started`),
   only when the automation's `notify` option is on: "ShadowCode · <name>"
   with the summary, or why it stopped (approval needed, time limit,
   failure). A run stopped by the user does not notify.
 - Settings (`ui` group): `notify` (all), `notify_approval`, `notify_failed`,
-  `notify_limit`, `notify_finished` (default on), `notify_sound` (default off).
+  `notify_limit` (plan and spending limits), `notify_finished` (default on),
+  `notify_sound` (default off).
 - Tauri command `set_visible_session {sessionId}` tells the shell which
   conversation the window shows.
 
@@ -945,12 +949,13 @@ Routes:
 ### Feed
 
 - `GET /api/feed?session_id=&limit=` → `{approvals: Approval[], jobs:
-  JobSummary[], events: string[], waiting: string[]}`. `approvals` are the
-  pending approvals of that conversation (all without `session_id`); `jobs`
-  are the rows of `GET /api/jobs?view=summary`; `waiting` lists every
-  conversation with a pending approval or a waiting spending card (sidebar
-  badges); `events` lists the broadcast types after which the feed may have
-  changed: `approval.requested`, `approval.resolved`, `job.changed`,
+  JobSummary[], events: string[], waiting: string[], spending: string[]}`.
+  `approvals` are the pending approvals of that conversation (all without
+  `session_id`); `jobs` are the rows of `GET /api/jobs?view=summary`;
+  `waiting` lists every conversation with a pending approval or a waiting
+  spending card, and `spending` those of them whose only wait is a spending
+  card (sidebar badges); `events` lists the broadcast types after which the
+  feed may have changed: `approval.requested`, `approval.resolved`, `job.changed`,
   `agent.started`, `agent.completed`, `agent.paused`, `agent.resumed`,
   `limit.fallback`, `spend.limit_reached`, `spend.limit_resolved`. The window reads the feed
   on those wake-ups plus a 15 s backstop.
@@ -1118,13 +1123,16 @@ models on this computer and the offline preview are never limited.
     not wait: it ends `failed` with the summary "Stopped at the per-task
     spending limit for paid models ($…)…" or "Today's spending limit for paid
     models ($…) is reached…", which the second opinion shows as its `error`.
+    A later turn the user starts in that conversation waits like any other.
   - Event `spend.limit_resolved {prompt_id, job_id, kind, action, limit?,
     reason?, text?}`: `action` `continue` (the per-task limit, or today's
     limit, is raised to `raise_to`: the limit plus one more step of the
     setting, past what is already spent) or `stop`. `reason` is set when
-    no one answered but the limit stopped applying (a setting changed, or
-    the day's total reset); when the other limit, or a changed amount, is
-    what blocks now, a new `spend.limit_reached` card follows.
+    no one answered: `limit_changed` when the limit stopped applying (a
+    setting changed, or the day's total reset) and the task goes on;
+    `replaced` (with `text`) when the other limit, or a changed amount, is
+    what blocks now: the task still waits, and a new `spend.limit_reached`
+    card follows.
   - Event `spend.unknown {job_id, model, text}` once per task when a paid
     request has no known price; it is not counted as $0.
 - Requests on a paid model outside any task (commit and pull request drafts,

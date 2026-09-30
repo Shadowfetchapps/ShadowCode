@@ -428,6 +428,8 @@ async fn headless_clients_see_the_card_answer_it_and_get_an_estimate() {
         .await
         .unwrap();
     assert_eq!(feed["waiting"], json!([session]), "{feed}");
+    // ...as waiting at a spending limit, not for an approval.
+    assert_eq!(feed["spending"], json!([session]), "{feed}");
     for kind in ["spend.limit_reached", "spend.limit_resolved"] {
         assert!(
             feed["events"].as_array().unwrap().contains(&json!(kind)),

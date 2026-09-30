@@ -624,8 +624,8 @@ task keeps going. When it reaches a limit, it pauses between steps (never in
 the middle of a command or an edit) and shows a card: **Continue (limit raised
 to $2.00)** raises the limit by one more step and carries on; **Stop** ends
 the task, keeping the changes made so far. A raised daily limit lasts until
-midnight. A conversation with a card waiting is marked in the sidebar, as it
-is for an approval. A second opinion does not wait: it stops and says which
+midnight. A conversation with a card waiting is marked in the sidebar with a
+dollar sign. A second opinion's review does not wait: it stops and says which
 limit it reached.
 
 Costs that ShadowCode works out from the model's listed prices count too and
@@ -714,8 +714,9 @@ and `.env` files suggest. Nothing runs until you save it.
 ## Conversations in the sidebar
 
 - **Badges**: a pulsing dot while a task runs, a clock while it is queued, a
-  hand when it **needs your approval**, a warning sign when it **failed**, and
-  a dot when it **finished** while you were elsewhere (until you open it).
+  hand when it **needs your approval**, a dollar sign when it **waits at a
+  spending limit**, a warning sign when it **failed**, and a dot when it
+  **finished** while you were elsewhere (until you open it).
 - **Right-click** a conversation (or press the menu key) to **Rename**,
   **Pin**, **Fork**, **Export** or **Delete** it. Deleting a conversation
   also deletes its subagents' conversations, unless a fork of it still

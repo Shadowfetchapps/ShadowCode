@@ -79,6 +79,42 @@ describe("spending limits in the transcript", () => {
       }),
     ]);
     expect(of(lifted.items, "spend")[0].resolved).toBe("lifted");
+    expect(of(lifted.items, "spend")[0].outcome).toBe(
+      "The limit no longer applies, so the task went on.",
+    );
+    // Replaced by the card for the limit that blocks now: the task did not
+    // go on, and the old card does not say it did.
+    const replaced = replay([
+      ...start,
+      event(6, "spend.limit_resolved", {
+        prompt_id: "p1",
+        action: "continue",
+        reason: "replaced",
+        text: "Today's spending limit now stops this task instead.",
+      }),
+      event(7, "spend.limit_reached", {
+        ...card,
+        id: "p2",
+        kind: "daily",
+      }),
+    ]);
+    const [old, next] = of(replaced.items, "spend");
+    expect(old.outcome).toBe(
+      "Today's spending limit now stops this task instead.",
+    );
+    expect(old.outcome).not.toContain("went on");
+    expect(next.resolved).toBeUndefined();
+    const untold = replay([
+      ...start,
+      event(6, "spend.limit_resolved", {
+        prompt_id: "p1",
+        action: "continue",
+        reason: "replaced",
+      }),
+    ]);
+    expect(of(untold.items, "spend")[0].outcome).toBe(
+      "Another spending limit now stops this task.",
+    );
     // A task that ends while the card waits closes it.
     const ended = replay([
       ...start,
@@ -274,7 +310,7 @@ describe("plan limits, resumes and Try on", () => {
     const [resume] = of(waiting.items, "resume");
     expect(resume.state).toBe("scheduled");
     expect(resume.text).toMatch(
-      /^Will resume on Codex at .+, when its plan limit resets\.$/,
+      /^Will resume on Codex (?:tomorrow )?at .+, when its plan limit resets\.$/,
     );
     expect(of(waiting.items, "limit")[0].resumeScheduled).toBe(true);
     const started = replay([

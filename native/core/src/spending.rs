@@ -495,7 +495,13 @@ impl Meter {
             if prompt.kind == kind && prompt.limit == limit {
                 return Ok(prompt);
             }
-            self.lift("limit_changed")?;
+            // The task still waits: the old card says why it closed.
+            let text = match (prompt.kind == kind, kind) {
+                (true, _) => "The limit changed, but this task is still over it.",
+                (false, Kind::Daily) => "Today's spending limit now stops this task instead.",
+                (false, Kind::Task) => "This task's own spending limit now stops it instead.",
+            };
+            self.resolve_unanswered("replaced", Some(text))?;
         }
         let (spent, estimated, step) = match kind {
             Kind::Task => {
@@ -539,13 +545,20 @@ impl Meter {
     /// Clear a waiting card whose limit no longer applies (the setting was
     /// raised or turned off, or a new day began).
     pub fn lift(&self, reason: &str) -> Result<()> {
+        self.resolve_unanswered(reason, None)
+    }
+
+    /// Close the waiting card without an answer: `reason` says why, and
+    /// `text` when the task did not go on (`replaced`).
+    fn resolve_unanswered(&self, reason: &str, text: Option<&str>) -> Result<()> {
         let Some(prompt) = self.state().prompt.take() else {
             return Ok(());
         };
-        self.events.emit(
-            "spend.limit_resolved",
-            json!({"prompt_id": prompt.id, "job_id": self.job_id, "kind": prompt.kind, "action": "continue", "reason": reason}),
-        )?;
+        let mut payload = json!({"prompt_id": prompt.id, "job_id": self.job_id, "kind": prompt.kind, "action": "continue", "reason": reason});
+        if let Some(text) = text {
+            payload["text"] = json!(text);
+        }
+        self.events.emit("spend.limit_resolved", payload)?;
         self.changed.notify_waiters();
         Ok(())
     }

@@ -64,6 +64,10 @@ struct LaunchContext<'a> {
     /// composer): an `@agent` on a cloud role asks first instead of being
     /// refused when it runs.
     interactive: bool,
+    /// No one watches this task (a second opinion's review in its hidden
+    /// conversation): at a spending limit it stops instead of waiting for
+    /// an answer.
+    unattended: bool,
     turn: TurnOptions,
 }
 
@@ -720,6 +724,26 @@ impl Engine {
         )
         .await
     }
+    /// `start_consented_owned` for a task no one watches (see
+    /// `LaunchContext::unattended`). Later turns in the same conversation are
+    /// ordinary ones.
+    pub(crate) async fn start_unattended_owned(
+        &self,
+        request: StartRequest,
+        purpose: &str,
+        owner: Option<&JobOwner>,
+    ) -> Result<Job> {
+        self.start_with_context(
+            request,
+            LaunchContext {
+                purpose,
+                owner,
+                unattended: true,
+                ..Default::default()
+            },
+        )
+        .await
+    }
     /// `start_consented_owned` with the composer's per-turn choices (effort,
     /// @-mentions).
     pub(crate) async fn start_turn_owned(
@@ -927,13 +951,6 @@ impl Engine {
                 .to_owned()
         };
         let event_cursor = self.0.store.event_cursor(&sid)?;
-        // A second opinion runs in a hidden conversation, where a spending
-        // card would wait unseen and hold up the project's queue.
-        let unattended = self
-            .0
-            .store
-            .session_meta(&sid, keys::SECOND_OPINION)?
-            .is_some();
         let clock = crate::timing::Clock::default();
         let job = Job {
             id: crate::id(),
@@ -1019,7 +1036,10 @@ impl Engine {
                 },
                 context.turn.max_cost_usd,
             );
-            Arc::new(if unattended {
+            // A second opinion's review runs in a hidden conversation, where
+            // a spending card would wait unseen and hold up the project's
+            // queue.
+            Arc::new(if context.unattended {
                 meter.unattended()
             } else {
                 meter

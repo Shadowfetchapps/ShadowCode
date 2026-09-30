@@ -929,6 +929,38 @@ async fn a_paid_reviewer_at_a_spending_limit_stops_instead_of_waiting() {
         .iter()
         .all(|e| e["type"] != "spend.limit_reached"));
     assert!(service.engine.spending_waiting().unwrap().is_empty());
+    // A follow-up the user types after opening the review conversation is
+    // an ordinary turn: it shows the card and waits for an answer.
+    let follow = call(
+        service,
+        "POST",
+        "/api/jobs",
+        json!({"workspace":f.project,"session_id":hidden,"task":"Why is value 3?","model":"paid","purpose":"reviewer","handoff_consent":true}),
+    )
+    .await;
+    let job_id = follow["id"].as_str().unwrap();
+    let started = Instant::now();
+    let waiting = loop {
+        let waiting = service.engine.spending_waiting().unwrap();
+        if !waiting.is_empty() {
+            break waiting;
+        }
+        let job = service.engine.job(job_id).unwrap().unwrap();
+        assert!(
+            matches!(job.status.as_str(), "queued" | "running"),
+            "{}",
+            job.summary
+        );
+        assert!(started.elapsed() < Duration::from_secs(60), "no card");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    };
+    assert_eq!(waiting[0]["session_id"], hidden);
+    assert!(
+        requests_for(&f.server, "beta").is_empty(),
+        "nothing was sent"
+    );
+    let stopped = service.engine.cancel(job_id).await.unwrap();
+    assert_eq!(stopped.status, "cancelled", "{}", stopped.summary);
     service.engine.shutdown().await.unwrap();
 }
 

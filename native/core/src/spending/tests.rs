@@ -351,7 +351,12 @@ fn a_card_for_a_limit_that_no_longer_blocks_is_replaced() {
     let resolved = events(&f, "spend.limit_resolved");
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0]["prompt_id"], task.id.as_str());
-    assert_eq!(resolved[0]["reason"], "limit_changed");
+    // Not the lift of a limit that cleared: the task did not go on.
+    assert_eq!(resolved[0]["reason"], "replaced");
+    assert_eq!(
+        resolved[0]["text"],
+        "Today's spending limit now stops this task instead."
+    );
     assert_eq!(events(&f, "spend.limit_reached").len(), 2);
     // Only the card for the limit that blocks can be answered, and it raises
     // that limit alone.
@@ -375,4 +380,11 @@ fn a_card_for_a_limit_that_no_longer_blocks_is_replaced() {
     assert_ne!(first.id, second.id);
     assert_eq!(second.limit, 1.2);
     assert_eq!(f.meter.pending(), Some(second));
+    let replaced = events(&f, "spend.limit_resolved").pop().unwrap();
+    assert_eq!(replaced["prompt_id"], first.id.as_str());
+    assert_eq!(replaced["reason"], "replaced");
+    assert_eq!(
+        replaced["text"],
+        "The limit changed, but this task is still over it."
+    );
 }

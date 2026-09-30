@@ -10,6 +10,7 @@
   overflow: hidden;
 }
 .task-row.badge-approval .task-link,
+.task-row.badge-spending .task-link,
 .task-row.badge-failed .task-link,
 .task-row.badge-unread .task-link {
   color: var(--text);
@@ -19,7 +20,8 @@
   color: var(--warn);
   opacity: 1;
 }
-.task-row.badge-approval {
+.task-row.badge-approval,
+.task-row.badge-spending {
   box-shadow: inset 2px 0 0 var(--warn);
 }
 .task-link .badge-failed-icon {

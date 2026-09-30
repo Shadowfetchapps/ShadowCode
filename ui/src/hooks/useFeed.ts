@@ -9,6 +9,8 @@ export type FeedPage = {
   /** Every conversation with a pending approval or spending card (sidebar
    * badges). */
   waiting?: string[];
+  /** The conversations of `waiting` whose only wait is a spending card. */
+  spending?: string[];
 };
 export type FeedDependencies = {
   /** One read of the feed for the selected conversation ("" = all). */
@@ -74,6 +76,7 @@ export function useFeed(
       : NO_APPROVALS;
   const [jobs, setJobsState] = useState<Job[]>([]);
   const [waiting, setWaiting] = useState<string[]>([]);
+  const [spending, setSpending] = useState<string[]>([]);
   const session = useRef(sessionId);
   session.current = sessionId;
   const dependencies = useRef(deps);
@@ -117,6 +120,10 @@ export function useFeed(
           setJobs(page.jobs);
           const nextWaiting = page.waiting || [];
           setWaiting((prev) => (same(prev, nextWaiting) ? prev : nextWaiting));
+          const nextSpending = page.spending || [];
+          setSpending((prev) =>
+            same(prev, nextSpending) ? prev : nextSpending,
+          );
           if (page.events?.length) kinds.current = new Set(page.events);
         } catch {
           /* The reconnect banner covers outages; keep the last state. */
@@ -163,5 +170,5 @@ export function useFeed(
     void refresh();
   }, [sessionId, refresh]);
 
-  return { approvals, jobs, waiting, setJobs, refresh };
+  return { approvals, jobs, waiting, spending, setJobs, refresh };
 }

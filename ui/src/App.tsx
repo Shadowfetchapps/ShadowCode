@@ -171,6 +171,7 @@ export default function App() {
   const conversationBadges = useConversationBadges({
     jobs,
     waiting: feed.waiting,
+    spending: feed.spending,
     sessionId,
     sessions,
   });

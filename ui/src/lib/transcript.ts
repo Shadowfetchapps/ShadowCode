@@ -1300,11 +1300,15 @@ function applySpendAndResume(
                   : p.action === "stop"
                     ? "stop"
                     : "continue",
+              // "replaced": another limit, or a changed amount, still
+              // stops the task; its new card follows.
               outcome: String(
                 p.text ||
                   (p.action === "stop"
                     ? "Stopped at your spending limit."
-                    : "The limit no longer applies, so the task went on."),
+                    : p.reason === "replaced"
+                      ? "Another spending limit now stops this task."
+                      : "The limit no longer applies, so the task went on."),
               ),
             }
           : item,
