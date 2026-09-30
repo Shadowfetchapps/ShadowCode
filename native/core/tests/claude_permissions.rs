@@ -283,3 +283,112 @@ async fn claude_write_denial_preserves_the_file() {
 async fn claude_read_only_write_is_denied_without_requesting_user_approval() {
     run_permission_fixture(true, true).await;
 }
+
+/// Asks to use an MCP tool from the user's own Claude settings.
+#[cfg(unix)]
+const FAKE_CLAUDE_MCP: &str = r#"#!/usr/bin/env python3
+import json, sys
+def send(value):
+    print(json.dumps(value), flush=True)
+for raw in sys.stdin:
+    frame = json.loads(raw)
+    if frame.get('type') == 'user':
+        send({'type':'system','subtype':'init','session_id':'fixture-session'})
+        send({'type':'control_request','request_id':'mcp-permission','request':{'subtype':'can_use_tool','tool_name':'mcp__github__create_comment','input':{'body':'posted'}}})
+    elif frame.get('type') == 'control_response':
+        behavior = frame['response']['response']['behavior']
+        send({'type':'result','subtype':'success','result':'Posted' if behavior == 'allow' else 'Not posted'})
+"#;
+
+/// A read-only Claude Code run asks for an MCP tool: the approval reaches
+/// the user in an ordinary read-only task, while a second opinion declines
+/// it without asking. Returns the run's answer and the approvals shown.
+#[cfg(unix)]
+async fn run_mcp_request(second_opinion: bool) -> (String, usize) {
+    use shadowcode_core::{
+        approvals::ApprovalHub,
+        cli_agent::runner,
+        events::TaskEvents,
+        paths::AppPaths,
+        steering::SteerControl,
+        store::{keys, Store},
+    };
+    use std::{os::unix::fs::PermissionsExt, sync::Arc};
+    use tokio_util::sync::CancellationToken;
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let binary = root.path().join("fake-claude");
+    fs::write(&binary, FAKE_CLAUDE_MCP).unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+    let store = Arc::new(Store::open(&paths.database()).unwrap());
+    let session = store.create_session(&project, "cli:claude", "").unwrap();
+    let session_id = session["id"].as_str().unwrap().to_owned();
+    if second_opinion {
+        store
+            .set_session_meta(&session_id, keys::SECOND_OPINION, "fixture")
+            .unwrap();
+    }
+    let task_id = store.create_task(&session_id, "review").unwrap();
+    let (sender, _) = tokio::sync::broadcast::channel(64);
+    let events = TaskEvents {
+        store: store.clone(),
+        session_id: session_id.clone(),
+        task_id: task_id.clone(),
+        sender,
+    };
+    let hub = ApprovalHub::default();
+    let steer = SteerControl::default();
+    let config = CliAgentsConfig {
+        approval_timeout_sec: 10,
+        max_run_time_sec: 10,
+        ..Default::default()
+    };
+    let mut options = launch(&project);
+    options.binary = binary.to_string_lossy().into_owned();
+    options.read_only = true;
+    let mut shown = 0;
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let run = runner::run(runner::Request {
+            vendor: Vendor::Claude,
+            options,
+            config: &config,
+            prompt: "review".into(),
+            images: Vec::new(),
+            session_id: session_id.clone(),
+            task_id: task_id.clone(),
+            job_id: "fixture-job".into(),
+            events: &events,
+            approvals: &hub,
+            cancel: CancellationToken::new(),
+            steer: &steer,
+            approvals_required: true,
+            catalog: None,
+            approval_route: None,
+        });
+        tokio::pin!(run);
+        loop {
+            tokio::select! {
+                result = &mut run => break result,
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {
+                    if let Some(approval) = hub.list(Some(&session_id)).into_iter().next() {
+                        shown += 1;
+                        hub.decide(&approval.id, &session_id, false).unwrap();
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("permission fixture timed out")
+    .unwrap();
+    (result.text, shown)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_second_opinion_declines_every_vendor_permission_request() {
+    assert_eq!(run_mcp_request(false).await, ("Not posted".into(), 1));
+    assert_eq!(run_mcp_request(true).await, ("Not posted".into(), 0));
+}

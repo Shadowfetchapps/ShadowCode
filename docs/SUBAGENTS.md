@@ -132,8 +132,11 @@ Guardrails:
 
 - **Consent.** When the conversation runs on this computer (or has earlier
   turns another provider has not seen), a cloud role asks first with the
-  usual consent dialog, which names each cloud role. Allowed providers are
-  remembered for the conversation; a subagent there may then use them too.
+  usual consent dialog, which names each cloud role. Providers you allow
+  there are remembered for the conversation; a subagent there may then use
+  them too. A cloud role that ran while the conversation was in the cloud
+  needed no dialog, so it is not remembered as allowed: once a turn runs on
+  this computer, it asks like any other.
 - **Offline.** Cloud roles are refused with the reason; roles on this
   computer run.
 - **One local model at a time.** Roles run one after another, so each may

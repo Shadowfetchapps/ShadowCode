@@ -989,14 +989,16 @@ impl Engine {
             )?;
         }
         // The cloud providers this turn's roles use have now received the
-        // conversation with the user's consent (or it never ran locally).
-        let consented: Vec<String> = match (&pipeline, &mention_consent) {
-            (Some((_, providers)), _) => providers.clone(),
-            (None, Some(provider)) => vec![provider.clone()],
-            _ => Vec::new(),
-        };
-        if !consented.is_empty() {
-            crate::roles::record_consent(&self.0.store, &job.session_id, &consented)?;
+        // conversation: allowed for later turns only when the user answered
+        // the consent dialog, else noted as having seen its cloud turns.
+        match (&pipeline, &mention_consent) {
+            (Some((_, cloud)), _) => cloud.record(&self.0.store, &job.session_id)?,
+            (None, Some(provider)) => crate::roles::record_consent(
+                &self.0.store,
+                &job.session_id,
+                std::slice::from_ref(provider),
+            )?,
+            _ => {}
         }
         let spend = (context.command.is_none()
             && crate::runtime::Runtime::for_model(&config.model) == crate::runtime::Runtime::Local)

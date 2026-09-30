@@ -56,7 +56,9 @@ outside it is not followed.
   shows *Not used here* next to your copy and names the file that replaces
   it. Within your profile, your own files win over imports.
 - **Switches.** Every item has a switch. Profile switches apply everywhere;
-  project switches apply to that project only. Choices are saved in
+  project switches apply to that project only, including the copies
+  ShadowCode makes of it for subagents, the implement role, worktree tasks,
+  compare and automations. Choices are saved in
   `~/.config/shadow-agent/rulebook.json` (mode 600), never in the project.
 
 A project file you switch off is left out of everything ShadowCode sends. A
@@ -184,7 +186,15 @@ choose one. They create symlinks and never replace an existing file:
 A path that already exists is listed as left alone. **Stop using in …**
 removes exactly the links ShadowCode made, and only while they still point
 into your profile. Skill folders from imports and single-file skills are not
-linked.
+linked. If one link cannot be made (for example the skills folder is not
+yours), the links that were made are kept and shown, and **Stop using in …**
+removes them.
+
+While it is on, the links follow your switches: switching your `AGENTS.md`
+or a skill off removes its link, and switching it on again adds it back.
+Claude Code and Codex runs inside ShadowCode read the linked rules and skills
+themselves, so ShadowCode does not send them a second time; **What each
+agent reads** says so.
 
 ## Skill checker
 

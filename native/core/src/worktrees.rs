@@ -246,6 +246,38 @@ pub struct Inspection {
 fn read_record_identity(paths: &AppPaths, id: &str) -> Result<Record> {
     read_record_identity_at(paths, id, false)
 }
+/// The checkouts a managed worktree was made from, nearest first: its
+/// source, then that one's source when it is a managed worktree too (a
+/// subagent's worktree inside a worktree task). Empty for any other folder.
+/// `path` is canonical, like `Workspace::path`.
+pub fn sources_of(paths: &AppPaths, path: &Path) -> Vec<PathBuf> {
+    let Ok(checkouts) = paths
+        .data
+        .join("managed-worktrees")
+        .join("checkouts")
+        .canonicalize()
+    else {
+        return Vec::new();
+    };
+    let mut sources = Vec::new();
+    let mut current = path.to_path_buf();
+    while sources.len() < 8 {
+        let Some(id) = current
+            .strip_prefix(&checkouts)
+            .ok()
+            .and_then(|rest| rest.iter().next())
+            .and_then(|id| id.to_str())
+        else {
+            break;
+        };
+        let Ok(record) = read_record_identity(paths, id) else {
+            break;
+        };
+        current = record.source;
+        sources.push(current.clone());
+    }
+    sources
+}
 fn read_record_identity_at(paths: &AppPaths, id: &str, archived: bool) -> Result<Record> {
     ensure!(
         id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()),

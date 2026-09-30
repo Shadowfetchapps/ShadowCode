@@ -14,10 +14,11 @@
 //!   a clearly labelled text block ahead of the first prompt of each run,
 //!   whether the session is new or resumed.
 //!
-//! Vendors read some project files themselves; those are not repeated.
-//! Nothing is written into `~/.claude`, `~/.codex` or any other vendor
-//! folder: per-run files live in ShadowCode's private state folder and are
-//! removed when the run ends.
+//! Vendors read some project files themselves; those are not repeated, nor
+//! are profile rules and skills the optional export links into the
+//! vendor's own folder (`export`). Delivery itself writes nothing into
+//! `~/.claude`, `~/.codex` or any other vendor folder: per-run files live
+//! in ShadowCode's private state folder and are removed when the run ends.
 use super::{Book, PRECEDENCE, SKILL_INDEX_BYTES, SKILL_INDEX_ENTRIES};
 use crate::{
     cli_agent::Vendor,
@@ -238,10 +239,25 @@ fn placed_item(
 
 /// Build what `runner` receives for this project.
 pub fn plan(book: &Book, workspace: &Workspace, runner: Runner) -> Plan {
+    plan_with(book, workspace, runner, &super::export::vendor_home)
+}
+
+/// `plan` with the vendors' own folders from `homes` (a fixture in tests).
+pub(crate) fn plan_with(
+    book: &Book,
+    workspace: &Workspace,
+    runner: Runner,
+    homes: &dyn Fn(&str) -> Result<PathBuf>,
+) -> Plan {
     let vendor = match runner {
         Runner::Vendor(v) => Some(v),
         Runner::Native => None,
     };
+    // Profile files the vendor reads itself through "Use in …" links.
+    let linked = vendor
+        .map(|v| super::export::linked(book, v, homes))
+        .unwrap_or_default();
+    let product = vendor.map(Vendor::product_label).unwrap_or("");
     let mut items = Vec::new();
     let mut seen = HashSet::new();
     let (files, requested) = instructions::root_files(workspace);
@@ -256,9 +272,17 @@ pub fn plan(book: &Book, workspace: &Workspace, runner: Runner) -> Plan {
             }
         }
     }
-    let (profile_text, placed) = book.render_profile(&mut seen);
+    let (profile_text, placed) =
+        book.render_profile_except(&mut seen, &|rule| linked.contains(Path::new(&rule.path)));
     for (rule, placement) in &placed {
-        items.push(if rule.enabled {
+        items.push(if rule.enabled && linked.contains(Path::new(&rule.path)) {
+            item(
+                &rule.path,
+                "profile-rules",
+                false,
+                format!("{product} reads this file itself (Use in {product} links it)"),
+            )
+        } else if rule.enabled {
             placed_item(
                 &rule.path,
                 "profile-rules",
@@ -289,7 +313,6 @@ pub fn plan(book: &Book, workspace: &Workspace, runner: Runner) -> Plan {
     };
     let (project_text, project_placed) =
         instructions::render_root(&delivered, &delivered_requested, budget, label, &mut seen);
-    let product = vendor.map(Vendor::product_label).unwrap_or("");
     for file in &files {
         let enabled = book.enabled(&super::project_id(&file.path));
         let row = if !enabled {
@@ -394,6 +417,19 @@ pub fn plan(book: &Book, workspace: &Workspace, runner: Runner) -> Plan {
                         "skill",
                         false,
                         format!("{product} finds this skill itself"),
+                    ));
+                    continue;
+                }
+                if profile
+                    && Path::new(&d.info.path)
+                        .parent()
+                        .is_some_and(|folder| linked.contains(folder))
+                {
+                    items.push(item(
+                        &d.info.path,
+                        "skill",
+                        false,
+                        format!("{product} finds this skill itself (Use in {product} links it)"),
                     ));
                     continue;
                 }

@@ -10,9 +10,10 @@
 //!   go to another model, which answers in plain text.
 //!
 //! Each runs as an ordinary job in `review` mode, so it is read-only the way
-//! Ask and Plan are: the native loop gets no write, shell or MCP tools, and
-//! vendor CLIs run in their plan or read-only mode with every edit or
-//! command request denied. It runs in a hidden conversation (`session_meta`
+//! Ask and Plan are: the native loop gets no write, shell or MCP tools (and
+//! no subagents, so the review stays on the chosen model), and vendor CLIs
+//! run in their plan or read-only mode with every permission request
+//! denied. It runs in a hidden conversation (`session_meta`
 //! `second_opinion`) queued behind any task running in the project, and its
 //! usage and cost are recorded like any job's.
 //!
@@ -518,13 +519,31 @@ pub(crate) struct Start<'a> {
     pub owner: Option<&'a JobOwner>,
 }
 
+/// The route a job ran on, for consent. A Plan → Implement → Review task
+/// counts as run on this computer when its implement role did, even if
+/// another role ran in the cloud: the change and its account came from here.
+pub fn job_route(store: &Store, job: &Value) -> Option<TurnRoute> {
+    let mut route = TurnRoute::of_job(job)?;
+    if route.provider == crate::roles::PROVIDER && !route.local {
+        let (id, session) = (
+            job["id"].as_str().unwrap_or(""),
+            job["session_id"].as_str().unwrap_or(""),
+        );
+        route.local = crate::subagents::list(store, session)
+            .unwrap_or_default()
+            .iter()
+            .any(|run| run.parent_job == id && run.role == "implement" && run.route == "local");
+    }
+    Some(route)
+}
+
 /// The last route a conversation ran on, when it ran on this computer.
 fn local_conversation(store: &Store, session: &str) -> Result<Option<TurnRoute>> {
     let jobs = store.session_jobs(session, 200)?;
     Ok(jobs
         .iter()
         .rev()
-        .find_map(TurnRoute::of_job)
+        .find_map(|job| job_route(store, job))
         .filter(|route| route.local))
 }
 
@@ -680,7 +699,7 @@ pub(crate) async fn start(engine: &Engine, request: Start<'_>) -> Result<Record>
     let writer = request
         .writer_job
         .as_ref()
-        .and_then(TurnRoute::of_job)
+        .and_then(|job| job_route(&store, job))
         .map(|route| Route::of(&route));
     let about = match (request.kind, request.source.as_str()) {
         (_, "staged") => "the changes staged for the next commit",

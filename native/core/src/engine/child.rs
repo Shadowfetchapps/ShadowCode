@@ -249,7 +249,19 @@ impl Engine {
         // A Plan → Implement → Review task always runs its roles as children;
         // it orchestrates and holds no local model itself.
         let pipeline = running.roles.is_some();
-        let host = (native && (pipeline || (settings.enabled && depth < settings.max_depth)))
+        // A second opinion is the chosen model's own review: it starts no
+        // subagents, so an `@agent` in the reviewed request or diff never
+        // sends that material to another model.
+        let second_opinion = self
+            .0
+            .store
+            .session_meta(&job.session_id, crate::store::keys::SECOND_OPINION)
+            .ok()
+            .flatten()
+            .is_some();
+        let host = (native
+            && !second_opinion
+            && (pipeline || (settings.enabled && depth < settings.max_depth)))
             .then(|| {
                 SubagentHost::new(
                     self.clone(),

@@ -10,6 +10,7 @@ use shadowcode_core::{
     config::Config,
     paths::AppPaths,
     service::{Request, Service},
+    store::keys,
 };
 use std::{
     fs,
@@ -265,7 +266,8 @@ async fn staged_review_is_read_only_and_reads_messy_findings_onto_hunks() {
         service,
         "POST",
         "/api/second-opinions",
-        json!({"kind":"review","source":"staged","workspace":workspace,"model":"reviewer","question":"Is the new value right?"}),
+        // An `@agent` in the material starts no subagent in the review.
+        json!({"kind":"review","source":"staged","workspace":workspace,"model":"reviewer","question":"Is the new value right? @explore knows."}),
     )
     .await;
     assert!(
@@ -297,6 +299,7 @@ async fn staged_review_is_read_only_and_reads_messy_findings_onto_hunks() {
             "apply_patch",
             "delete_file",
             "exec",
+            "spawn_agent",
         ] {
             assert!(
                 !names.contains(&write.to_string()),
@@ -349,6 +352,13 @@ async fn staged_review_is_read_only_and_reads_messy_findings_onto_hunks() {
     // The reviewer's job ran in review mode in a hidden conversation.
     let job = job_done(service, done["job_id"].as_str().unwrap()).await;
     assert_eq!(job["mode"], "review");
+    assert!(service
+        .engine
+        .store()
+        .events_after(done["review_session"].as_str().unwrap(), 0, None, 10_000)
+        .unwrap()
+        .iter()
+        .all(|e| e["type"] != "subagent.started"));
     let sessions = call(service, "GET", "/api/sessions", Value::Null).await;
     assert!(!sessions
         .to_string()
@@ -647,6 +657,94 @@ async fn local_work_reaches_a_cloud_reviewer_only_with_consent() {
         .as_str()
         .unwrap()
         .contains("not list findings"));
+    service.engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_change_a_local_implement_role_wrote_asks_before_a_cloud_reviewer() {
+    // Plan → Implement → Review with the plan role in the cloud and the
+    // implement role on this computer: the task counts as a cloud one, but
+    // its change was written here.
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    git(&project, &["init", "-q"]);
+    fs::write(project.join("parser.rs"), "fn parse() {}\n").unwrap();
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-qm", "Base"]);
+    fs::write(project.join("parser.rs"), "fn parse() { todo!() }\n").unwrap();
+    let project = project.canonicalize().unwrap();
+    let fake = FakeCodex::new(root.path(), json!({"auth":"chatgpt","turn":"ok"}));
+    let paths = AppPaths::isolated(&root.path().join("profile")).unwrap();
+    Config::patch(
+        &paths,
+        json!({
+            "model":{"provider":"local","endpoint":"http://127.0.0.1:9/v1","name":"fixture","context_limit":16384},
+            "trusted_workspaces":[project],
+            "cli_agents": cli_agents(&fake),
+        }),
+    )
+    .unwrap();
+    let service = Service::open(paths, Some(project.clone())).unwrap();
+    let session = call(&service, "POST", "/api/sessions", json!({})).await;
+    let sid = session["id"].as_str().unwrap().to_owned();
+    let store = service.engine.store();
+    let (job, task) = (
+        shadowcode_core::id(),
+        format!("task{}", shadowcode_core::id()),
+    );
+    store
+        .create_job(&json!({
+            "id": job,
+            "workspace": project,
+            "session_id": sid,
+            "task_id": task,
+            "task": "fix the parser",
+            "status": "completed",
+            "mode": "code",
+            "summary": "- **Implement** · qwen3-14b — done, 1 file changed",
+            "routing": {"provider":"shadowcode:roles","model_id":"roles:plan=cli:claude,implement=local:gguf:abc","model_name":"Roles: Claude Code → qwen3-14b","inference":"cloud","route":"roles"},
+        }))
+        .unwrap();
+    store
+        .add_event(
+            "files.changed",
+            &json!({"paths":["parser.rs"]}),
+            Some(&sid),
+            Some(&task),
+        )
+        .unwrap();
+    // The implement role's run, as the task recorded it.
+    let run = shadowcode_core::id();
+    store
+        .set_native_meta(
+            &keys::subagent_run(&run),
+            &json!({"id":run,"parent_session":sid,"parent_job":job,"role":"implement","route":"local","status":"completed","model_id":"local:gguf:abc"}).to_string(),
+        )
+        .unwrap();
+    store
+        .set_native_meta(&keys::subagent_index(&sid), &json!([run]).to_string())
+        .unwrap();
+
+    let options = call(
+        &service,
+        "GET",
+        &format!("/api/second-opinions/options?task_id={task}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(options["local_only"], true, "{options:#}");
+    assert_eq!(options["writer"]["local"], true);
+    let refused = call(
+        &service,
+        "POST",
+        "/api/second-opinions",
+        json!({"kind":"review","source":"task","task_id":task,"model":"cli:codex"}),
+    )
+    .await;
+    assert_eq!(refused["status"], 409, "{refused:#}");
+    assert_eq!(refused["needs_consent"], true);
+    assert!(fake.marker("prompts.log").is_none());
     service.engine.shutdown().await.unwrap();
 }
 

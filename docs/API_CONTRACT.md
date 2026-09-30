@@ -939,7 +939,9 @@ Routes:
 - `GET /api/approvals/always?workspace=` → `{workspace, commands: [{command,
   added_at}]}`: the project's "Always allow" commands (default: the selected
   project). Stored in ShadowCode's database (`native_meta`
-  `always_allow:<project>`), never in the repository; at most 100.
+  `always_allow:<project>`), never in the repository; at most 100. A
+  subagent, role or worktree task working in its own worktree uses (and
+  adds to) its project's commands.
 - `DELETE /api/approvals/always {workspace?, command}` → the same, without it.
 
 ### Feed
@@ -1379,11 +1381,12 @@ history. Vendor CLIs are always started without
 
 A read-only review of the staged changes or of one task's changes by a
 model the user picks, or another model's view of a task's answer. Each runs
-as an ordinary job in `review` mode (read-only: no write, shell or MCP tools
-natively; vendor CLIs in plan/read-only mode with every edit or command
-request denied) in a hidden conversation (`session_meta` `second_opinion`,
-and `second_opinion_of` = the conversation it belongs to), queued behind any
-task in the project. Hidden conversations never appear in `GET
+as an ordinary job in `review` mode (read-only: no write, shell, MCP or
+subagent tools natively; vendor CLIs in plan/read-only mode with every
+permission request denied, MCP and web tools included) in a hidden
+conversation (`session_meta` `second_opinion`, and `second_opinion_of` = the
+conversation it belongs to), queued behind any task in the project. Hidden
+conversations never appear in `GET
 /api/sessions` and are deleted with the conversation they belong to (unless
 still running). Records are `native_meta` `second_opinion:<id>`, indexed per
 project (`second_opinion_index:<project>`, newest first, at most 40; the
@@ -1403,7 +1406,8 @@ written when a request is refused.
   (at most 2 000 characters). Offline mode refuses models that do not run
   on this computer. A cloud reviewer needs `consent: true` when the
   conversation's last turn ran on this computer or the model that wrote the
-  change did. `session_id` (staged reviews) is the conversation the user is
+  change did (for a Plan → Implement → Review task, its implement role).
+  `session_id` (staged reviews) is the conversation the user is
   in; without it, the conversation of the latest turn in the project that
   changed files.
 - `GET /api/second-opinions?workspace=&session_id=&task_id=&source=&limit=20&diff=`
@@ -1797,9 +1801,12 @@ See [SUBAGENTS.md](SUBAGENTS.md).
   the answer is `needs_consent` with `handoff: {from, to, excerpt_chars,
   images: 0, reason, roles: [{role, label, name, provider, agent?}]}`;
   resending with `handoff_consent: true` records the providers in the
-  conversation (`session_meta` `consent:cloud_roles`). A plain turn that
-  starts with an `@agent` whose role or definition model is a cloud one asks
-  the same way. Offline, a cloud role is refused with the reason.
+  conversation (`session_meta` `consent:cloud_roles`). Cloud roles of a
+  conversation that ran in the cloud need no consent and are only noted
+  (`roles:cloud_seen`); they are asked once a turn ran on this computer. A
+  plain turn that starts with an `@agent` whose role or definition model is
+  a cloud one asks the same way. Offline, a cloud role is refused with the
+  reason.
 - Task events: `roles.started {label, stages}`, `plan.updated` (one step per
   role plus "Apply the changes"), the roles' `subagent.*` events,
   `tool.started/completed` for `apply_agent_changes`, and `roles.finished
