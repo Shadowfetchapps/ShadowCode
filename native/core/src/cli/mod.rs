@@ -437,7 +437,7 @@ pub async fn run(options: Options) -> Result<i32> {
     .path;
     let paths = options.paths()?;
     if let Some(command @ (Command::Restore { .. } | Command::Reset { .. })) = &options.command {
-        return data_command(&paths, command, options.json);
+        return data_command(&paths, &workspace, command, options.json).await;
     }
     if let Some(Command::Tui { session }) = &options.command {
         ensure!(
@@ -651,12 +651,18 @@ pub async fn run(options: Options) -> Result<i32> {
 /// Settings › Your data; when no ShadowCode is running on this profile they
 /// finish right away (this command holds the profile lock and never opens
 /// the database).
-fn data_command(paths: &AppPaths, command: &Command, json_output: bool) -> Result<i32> {
+async fn data_command(
+    paths: &AppPaths,
+    workspace: &Path,
+    command: &Command,
+    json_output: bool,
+) -> Result<i32> {
     use crate::data;
     let (value, yes) = match command {
         Command::Restore {
             path,
             include_secrets,
+            include_remote,
             yes,
         } => {
             let path = std::env::current_dir()?.join(expand(path)?);
@@ -679,6 +685,19 @@ fn data_command(paths: &AppPaths, command: &Command, json_output: bool) -> Resul
                     match (inspection.manifest.includes_secrets, *include_secrets) {
                         (true, true) => "restored from the backup",
                         (true, false) => "kept as they are (add --include-secrets to restore them)",
+                        (false, _) => "not in the backup; kept as they are",
+                    }
+                );
+                let has_remote = inspection
+                    .manifest
+                    .files
+                    .iter()
+                    .any(|f| f.path == "config/remote.json");
+                outln!(
+                    "Remote access, paired devices and phone notifications: {}",
+                    match (has_remote, *include_remote) {
+                        (true, true) => "restored from the backup and switched off. Its devices cannot connect and its phone notifications are not sent until you turn remote access on in Settings › Remote access; check the devices there first (ones you removed since then are back)",
+                        (true, false) => "kept as they are (add --include-remote to restore them)",
                         (false, _) => "not in the backup; kept as they are",
                     }
                 );
@@ -705,7 +724,14 @@ fn data_command(paths: &AppPaths, command: &Command, json_output: bool) -> Resul
                 return Ok(0);
             }
             (
-                json!(data::schedule_restore(paths, &path, *include_secrets)?),
+                json!(data::schedule_restore(
+                    paths,
+                    &path,
+                    data::RestoreOptions {
+                        include_secrets: *include_secrets,
+                        include_remote: *include_remote,
+                    }
+                )?),
                 true,
             )
         }
@@ -751,13 +777,35 @@ fn data_command(paths: &AppPaths, command: &Command, json_output: bool) -> Resul
             }
         }
         Err(error) if format!("{error:#}").contains("already running") => {
+            // Name the process that holds the profile: closing a desktop
+            // window attached to an editor's engine is not enough.
+            let runtime = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                crate::control::Endpoint::for_paths(paths)?
+                    .client(workspace.to_path_buf(), None)
+                    .dispatch(crate::service::Request {
+                        method: "GET".into(),
+                        path: "/api/runtime".into(),
+                        body: Value::Null,
+                    }),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(Value::Null);
+            let hint = data::restart_hint(
+                runtime["mode"].as_str(),
+                runtime["pid"].as_u64().unwrap_or(0) as u32,
+            );
             if json_output {
                 outln!(
                     "{}",
-                    serde_json::to_string_pretty(&json!({"scheduled": value}))?
+                    serde_json::to_string_pretty(
+                        &json!({"scheduled": value, "engine": runtime, "message": hint})
+                    )?
                 );
             } else {
-                outln!("ShadowCode is running on this profile. This finishes the next time it starts: quit ShadowCode (and any `shadowcode serve`) and open it again. Cancel it in Settings › Your data.");
+                outln!("ShadowCode is running on this profile. This finishes the next time it starts. {hint} Cancel it in Settings › Your data.");
             }
         }
         Err(error) => {
@@ -859,6 +907,19 @@ fn remote_banner(status: &Value, address: std::net::SocketAddr) -> String {
     if status["allow_terminals"] == true {
         text.push_str("\nTerminals are allowed over remote access.");
     }
+    // A restore brings devices and notifications back on hold; serving does
+    // not release them.
+    let held = status["devices"].as_array().map_or(0, |all| {
+        all.iter().filter(|d| d["restored"] == true).count()
+    });
+    if held > 0 {
+        text.push_str(&format!(
+            "\nPaired devices restored from a backup ({held}) cannot connect until you turn remote access on in Settings › Remote access. Pair them again with the link below, or unpair them with `shadowcode remote revoke`."
+        ));
+    }
+    if status["ntfy"]["restored"] == true && status["ntfy"]["configured"] == true {
+        text.push_str("\nPhone notifications restored from a backup are not sent until you save them or turn remote access on in Settings › Remote access.");
+    }
     text
 }
 
@@ -900,14 +961,19 @@ fn remote_status_text(status: &Value) -> String {
     }
     for device in devices {
         text.push_str(&format!(
-            "{}  {}\n",
+            "{}  {}{}\n",
             device["id"]
                 .as_str()
                 .unwrap_or("")
                 .chars()
                 .take(8)
                 .collect::<String>(),
-            watch::plain(device["name"].as_str().unwrap_or(""))
+            watch::plain(device["name"].as_str().unwrap_or("")),
+            if device["restored"] == true {
+                "  (restored from a backup: cannot connect until you turn remote access on in Settings)"
+            } else {
+                ""
+            }
         ));
     }
     text
@@ -1064,26 +1130,15 @@ async fn execute(backend: &Backend, workspace: &Path, options: &Options) -> Resu
                 "Backup saved to {}",
                 value["path"].as_str().unwrap_or("")
             ));
-            value["items"] = json!([
-                {"label": "Files", "value": value["manifest"]["files"].as_array().map_or(0, Vec::len).to_string()},
-                {"label": "Size", "value": format!("{:.1} MB", bytes as f64 / 1_000_000.0)},
-                {"label": "API keys", "value": if value["manifest"]["includes_secrets"] == true { "included: keep this backup private" } else { "not included" }},
-            ]);
-            let left_out: Vec<&str> = value["manifest"]["keys_left_out"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect();
-            if !left_out.is_empty() {
-                let note = format!(
-                    "{} (the keyring was locked or out of reach; unlock it and back up again)",
-                    left_out.join(", ")
-                );
-                if let Some(items) = value["items"].as_array_mut() {
-                    items.push(json!({"label": "Not included", "value": note}));
-                }
+            let mut items = vec![
+                json!({"label": "Files", "value": value["manifest"]["files"].as_array().map_or(0, Vec::len).to_string()}),
+                json!({"label": "Size", "value": format!("{:.1} MB", bytes as f64 / 1_000_000.0)}),
+                json!({"label": "API keys", "value": if value["manifest"]["includes_secrets"] == true { "included: keep this backup private" } else { "not included" }}),
+            ];
+            for note in value["manifest"]["left_out"].as_array().into_iter().flatten() {
+                items.push(json!({"label": "Not included", "value": note}));
             }
+            value["items"] = json!(items);
             value
         }
         Command::Restore { .. } | Command::Reset { .. } => {
@@ -1882,6 +1937,27 @@ mod tests {
         assert!(banner("127.0.0.1:7390").contains("Only this computer"));
         let text = remote_status_text(&json!({"enabled": false, "devices": []}));
         assert!(text.contains("Remote access is off") && text.contains("No paired devices"));
+        // After a restore, serving says the restored devices and phone
+        // notifications wait.
+        let restored = json!({
+            "devices": [
+                {"id": "a1", "name": "Lost phone", "restored": true},
+                {"id": "b2", "name": "Tablet", "restored": false},
+            ],
+            "ntfy": {"configured": true, "restored": true},
+        });
+        let banner = remote_banner(&restored, "127.0.0.1:7390".parse().unwrap());
+        assert!(
+            banner.contains("restored from a backup (1) cannot connect"),
+            "{banner}"
+        );
+        assert!(banner.contains("Phone notifications restored from a backup are not sent"));
+        let text = remote_status_text(&restored);
+        assert!(
+            text.contains("Lost phone  (restored from a backup"),
+            "{text}"
+        );
+        assert!(!text.contains("Tablet  (restored"), "{text}");
         let pairing =
             pairing_text(&json!({"link": "http://127.0.0.1:7390/#pair=abc", "expires_in": 600}))
                 .unwrap();

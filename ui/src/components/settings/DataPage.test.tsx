@@ -123,6 +123,7 @@ it("offers API keys only when the backup has them, and refuses a damaged one", a
   expect(posted("/api/data/restore")[0].body).toEqual({
     path: "/media/usb/shadowcode-backup-20260926-080000",
     include_secrets: true,
+    include_remote: false,
   });
 
   fake.state.data.pick = "/media/usb/damaged-backup";
@@ -138,6 +139,87 @@ it("offers API keys only when the backup has them, and refuses a damaged one", a
   fireEvent.click(within(refused).getByRole("button", { name: "Close" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(posted("/api/data/restore")).toHaveLength(1);
+});
+
+it("restores remote pairing only on its own tick, with a warning", async () => {
+  fake.state.data.pick = "/media/usb/shadowcode-backup-20260926-080000";
+  render(<DataPage onToast={vi.fn()} />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Restore from another folder…" }),
+  );
+  const dialog = await screen.findByRole("dialog", {
+    name: "Restore this backup?",
+  });
+  // Ticking the API keys does not bring back paired devices.
+  fireEvent.click(
+    within(dialog).getByLabelText("Also restore the API keys in this backup"),
+  );
+  expect(within(dialog).queryByRole("note")).toBeNull();
+  fireEvent.click(
+    within(dialog).getByLabelText(
+      "Also restore remote access, paired devices and phone notifications",
+    ),
+  );
+  const note = within(dialog).getByRole("note").textContent;
+  expect(note).toMatch(/Devices you removed since this backup come back too/);
+  expect(note).toMatch(
+    /restored devices can’t connect and no notification is sent until you turn it on/,
+  );
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Restore at next start" }),
+  );
+  await waitFor(() => expect(posted("/api/data/restore")).toHaveLength(1));
+  expect(posted("/api/data/restore")[0].body).toMatchObject({
+    include_secrets: true,
+    include_remote: true,
+  });
+  expect(
+    await screen.findByText(
+      /is scheduled, API keys and remote access included\./,
+    ),
+  ).toBeTruthy();
+});
+
+it("names the editor that holds the profile instead of offering to quit", async () => {
+  fake.state.data.engine = { mode: "acp", pid: 5151 };
+  fake.state.data.attached = true;
+  render(<DataPage onToast={vi.fn()} />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Reset ShadowCode…" }),
+  );
+  fireEvent.click(
+    within(
+      await screen.findByRole("dialog", { name: "Reset ShadowCode?" }),
+    ).getByRole("button", { name: "Reset at next start" }),
+  );
+  const banner = (await screen.findByText(/A reset is scheduled/))
+    .parentElement as HTMLElement;
+  expect(banner.textContent).toMatch(
+    /An editor runs ShadowCode's agent \(shadowcode acp, process 5151\)/,
+  );
+  expect(within(banner).getByText("shadowcode acp").tagName).toBe("CODE");
+  // Quitting this window would not let the reset run.
+  expect(
+    screen.queryByRole("button", { name: "Quit ShadowCode now" }),
+  ).toBeNull();
+  expect(screen.getByRole("button", { name: "Cancel the reset" })).toBeTruthy();
+});
+
+it("says what a backup could not include", async () => {
+  fake.state.data.left_out = [
+    "OPENROUTER_API_KEY: the keyring did not give it (The keyring is locked; unlock it to use this key)",
+  ];
+  const onToast = vi.fn();
+  render(<DataPage onToast={onToast} />);
+  fireEvent.click(await screen.findByRole("button", { name: /Back up now/ }));
+  await waitFor(() =>
+    expect(onToast).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^Backup saved to .*\. Not included: OPENROUTER_API_KEY: the keyring did not give it/,
+      ),
+      "ok",
+    ),
+  );
 });
 
 it("schedules a reset only after confirming, and shows repair results", async () => {

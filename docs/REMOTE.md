@@ -42,6 +42,13 @@ one device; **Unpair all devices** removes every device and cancels unused
 links. From a terminal: `shadowcode remote` (status and devices),
 `shadowcode remote revoke <id-prefix>` or `shadowcode remote revoke --all`.
 
+**After a restore** (Settings › Your data, with remote access ticked), remote
+access is off and the devices that came back are marked *From a backup*:
+they may include a device you removed since then, so they cannot connect
+until you turn remote access on. Unpair the ones you no longer use first.
+`shadowcode serve --remote` does not let them in; pair them again with the
+link it prints.
+
 ## Reaching it from your phone
 
 The safest set-ups, best first:
@@ -85,7 +92,8 @@ The same as the desktop window, with these exceptions:
   `/api/preview…` is refused and the tab says so.
 - **Remote access settings stay on this computer.** A remote device cannot
   see or change pairing, devices, the address or phone notifications. The app
-  log (Settings › About › Open logs folder) stays on this computer too.
+  log (Settings › About › Open logs folder) stays on this computer too: a
+  health report made on the device leaves its lines out.
 - **Spending limits work the same.** A task paused at a spending limit shows
   its Continue and Stop card on the device too.
 - **Your data stays on this computer.** Backups, restore, repair and reset
@@ -123,7 +131,9 @@ summary is included only if you turn on **Include task details**; keys in it
 are redacted. When remote access is running (or a public address is set),
 tapping the notification opens the conversation in the web interface.
 Offline mode stops phone notifications. At most 20 messages are sent in 10
-minutes.
+minutes. Settings that came back with a restore send nothing until you
+**Save** the server and topic again (or turn remote access on): the topic may
+be one a lost phone still follows.
 
 ## Security details
 

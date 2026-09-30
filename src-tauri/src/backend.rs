@@ -40,8 +40,13 @@ impl Backend {
         bail!("The active engine has not opened its local connection; wait for startup or close the other version")
     }
     pub async fn dispatch(&self, request: Request) -> Result<Value> {
+        // Settings › Your data also needs to know: quitting an attached
+        // window does not let a scheduled restore or reset run.
         let describe = request.method == "GET"
-            && matches!(request.path.as_str(), "/api/health" | "/api/version");
+            && matches!(
+                request.path.as_str(),
+                "/api/health" | "/api/version" | "/api/data"
+            );
         let mut result = match self {
             Self::Owned { service, .. } => service.dispatch(request).await?,
             Self::Attached(view) => self.dispatch_attached(view, request).await?,

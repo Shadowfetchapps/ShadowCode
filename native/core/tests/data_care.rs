@@ -4,7 +4,7 @@
 use serde_json::{json, Value};
 use shadowcode_core::{
     config::{self, Config},
-    data::{self, BackupOptions, Manifest},
+    data::{self, BackupOptions, Manifest, RestoreOptions},
     engine::Engine,
     paths::AppPaths,
     service::{Request, Service},
@@ -204,7 +204,8 @@ async fn incomplete_damaged_and_foreign_backups_are_refused_with_the_reason() {
             "{expect}: {:?}",
             inspection.problems
         );
-        let error = data::schedule_restore(&p.paths, folder, false).unwrap_err();
+        let error =
+            data::schedule_restore(&p.paths, folder, RestoreOptions::default()).unwrap_err();
         assert!(format!("{error:#}").contains(expect), "{error:#}");
         assert!(data::pending(&p.paths).unwrap().is_none());
     };
@@ -316,14 +317,14 @@ async fn a_scheduled_restore_finishes_at_the_next_start_after_backing_up_the_cur
     config::set_secret(&p.paths, "OPENAI_API_KEY", "second-value").unwrap();
 
     // Scheduling changes nothing yet, and can be cancelled.
-    let pending = data::schedule_restore(&p.paths, &folder, false).unwrap();
+    let pending = data::schedule_restore(&p.paths, &folder, RestoreOptions::default()).unwrap();
     assert_eq!(pending.kind, "restore");
     assert!(!pending.include_secrets);
     assert_eq!(titles(&p.paths), ["After", "Before"]);
     assert!(data::cancel_pending(&p.paths).unwrap());
     assert!(data::pending(&p.paths).unwrap().is_none());
     assert!(!p.paths.state.join("pending-restore").exists());
-    data::schedule_restore(&p.paths, &folder, false).unwrap();
+    data::schedule_restore(&p.paths, &folder, RestoreOptions::default()).unwrap();
     // The backup may go away before the restart; the staged copy is used.
     let moved = p.root.join("moved-backup");
     fs::rename(&folder, &moved).unwrap();
@@ -359,7 +360,15 @@ async fn a_scheduled_restore_finishes_at_the_next_start_after_backing_up_the_cur
     drop(engine);
 
     // Restoring API keys too, from the same backup.
-    data::schedule_restore(&p.paths, &moved, true).unwrap();
+    data::schedule_restore(
+        &p.paths,
+        &moved,
+        RestoreOptions {
+            include_secrets: true,
+            ..RestoreOptions::default()
+        },
+    )
+    .unwrap();
     let engine = Engine::open(p.paths.clone()).unwrap();
     assert_eq!(
         config::secret(&p.paths, "OPENAI_API_KEY")
@@ -389,7 +398,7 @@ async fn a_staged_restore_that_changed_is_refused_and_recorded() {
         let store = Store::open(&p.paths.database()).unwrap();
         store.create_session(&p.project, "mock", "Newer").unwrap();
     }
-    data::schedule_restore(&p.paths, &folder, false).unwrap();
+    data::schedule_restore(&p.paths, &folder, RestoreOptions::default()).unwrap();
     fs::write(
         p.paths.state.join("pending-restore/config/config.yaml"),
         "ui: {theme: light}\n",
@@ -429,7 +438,7 @@ async fn an_upgrade_copy_restores_and_is_upgraded_again() {
     assert_eq!(inspection.kind, "database");
     assert!(inspection.restorable, "{:?}", inspection.problems);
     assert_eq!(inspection.manifest.schema_version, 25);
-    data::schedule_restore(&p.paths, &old, false).unwrap();
+    data::schedule_restore(&p.paths, &old, RestoreOptions::default()).unwrap();
     let engine = Engine::open(p.paths.clone()).unwrap();
     assert!(
         titles(&p.paths).iter().any(|t| t == "Fixture conversation"),
@@ -864,20 +873,190 @@ fn the_command_line_backs_up_restores_resets_and_repairs() {
     assert!(asides.iter().any(|a| a.join("secrets.env").is_file()));
 }
 
-/// Tests that set the process-wide `SHADOWCODE_TEST_KEYRING` hold this.
-static TEST_KEYRING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Finish a scheduled restore or reset the way the next engine start does.
+fn finish(paths: &AppPaths) -> Value {
+    let _lock = paths.lock().unwrap();
+    data::apply_pending(paths).unwrap().unwrap()
+}
 
-/// Keys moved to the desktop keyring are in a backup with API keys, and a
-/// restore after a reset brings them back (in `secrets.env`).
-#[tokio::test(flavor = "multi_thread")]
-async fn keys_kept_in_the_keyring_are_backed_up_and_restored() {
-    use shadowcode_core::keyring;
-    let _lock = TEST_KEYRING.lock().await;
+/// A profile with one conversation in its database.
+fn profile_with_history() -> Profile {
     let p = profile();
-    drop(Store::open(&p.paths.database()).unwrap());
+    Store::open(&p.paths.database())
+        .unwrap()
+        .create_session(&p.project, "mock", "Kept")
+        .unwrap();
+    p
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_pairing_comes_back_only_when_asked_for_and_switched_off() {
+    use shadowcode_core::remote::settings::{self as remote, Device, Settings};
+    let p = profile_with_history();
+    let device = |name: &str, digest: &str| Device {
+        id: name.into(),
+        name: name.into(),
+        digest: digest.repeat(32),
+        created_at: 1.0,
+        last_seen: None,
+        restored: false,
+    };
+    let paired = Settings {
+        enabled: true,
+        allow_terminals: true,
+        devices: vec![device("Lost phone", "ab")],
+        ..Settings::default()
+    };
+    remote::save(&p.paths, &paired).unwrap();
+    let (folder, manifest) = data::create_backup(
+        &p.paths,
+        BackupOptions {
+            include_secrets: true,
+            ..manual()
+        },
+    )
+    .unwrap();
+    assert!(manifest
+        .files
+        .iter()
+        .any(|f| f.path == "config/remote.json"));
+    // The phone was lost and removed; a tablet was paired since.
+    let now = Settings {
+        enabled: true,
+        devices: vec![device("Tablet", "cd")],
+        ..Settings::default()
+    };
+    remote::save(&p.paths, &now).unwrap();
+
+    // Restoring the API keys leaves remote access as it is.
+    let pending = data::schedule_restore(
+        &p.paths,
+        &folder,
+        RestoreOptions {
+            include_secrets: true,
+            ..RestoreOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(pending.include_secrets && !pending.include_remote);
+    let last = finish(&p.paths);
+    assert_eq!(last["remote_restored"], false, "{last}");
+    assert_eq!(remote::load(&p.paths).unwrap(), now);
+    // The backup made first holds what the restore replaced, nothing more.
+    let previous = PathBuf::from(last["backup_of_previous_data"].as_str().unwrap());
+    assert!(previous.join("config/secrets.env").is_file());
+    assert!(!previous.join("config/remote.json").exists());
+
+    // Asked for on its own, it comes back switched off and its devices on
+    // hold: the lost phone is paired again, so the user checks the devices
+    // before turning it on.
+    let pending = data::schedule_restore(
+        &p.paths,
+        &folder,
+        RestoreOptions {
+            include_remote: true,
+            ..RestoreOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(pending.include_remote && !pending.include_secrets);
+    let last = finish(&p.paths);
+    assert_eq!(last["remote_restored"], true, "{last}");
+    let restored = remote::load(&p.paths).unwrap();
+    assert!(!restored.enabled, "remote access stays off until turned on");
+    assert_eq!(restored.devices.len(), 1);
+    assert_eq!(restored.devices[0].name, "Lost phone");
+    assert!(restored.devices[0].restored, "it cannot connect yet");
+    assert!(
+        !restored.ntfy.restored,
+        "no phone notifications were set up"
+    );
+    assert!(restored.allow_terminals);
+    #[cfg(unix)]
+    assert_eq!(mode(&remote::path(&p.paths)), 0o600);
+    assert_eq!(
+        config::secret(&p.paths, "OPENAI_API_KEY")
+            .unwrap()
+            .as_deref(),
+        Some("first-value")
+    );
+    // What it replaced is in the before-restore backup, and nothing about
+    // the API keys, which it left alone.
+    let previous = PathBuf::from(last["backup_of_previous_data"].as_str().unwrap());
+    let kept: Settings =
+        serde_json::from_slice(&fs::read(previous.join("config/remote.json")).unwrap()).unwrap();
+    assert_eq!(kept, now);
+    assert!(!previous.join("config/secrets.env").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_backup_into_a_chosen_folder_leaves_that_folder_as_it_is() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = profile_with_history();
+    // A folder other accounts may read.
+    let shared = p.root.join("shared");
+    fs::create_dir_all(&shared).unwrap();
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+    let chosen = |folder: &Path| {
+        data::create_backup(
+            &p.paths,
+            BackupOptions {
+                folder: Some(folder),
+                ..manual()
+            },
+        )
+        .unwrap()
+        .0
+    };
+    let folder = chosen(&shared);
+    assert_eq!(
+        mode(&shared),
+        0o755,
+        "the chosen folder keeps its permissions"
+    );
+    // Folders other accounts can change work too; the new folder is checked
+    // to be this account's own.
+    for shared_mode in [0o777, 0o1777, 0o775] {
+        fs::set_permissions(&shared, fs::Permissions::from_mode(shared_mode)).unwrap();
+        let folder = chosen(&shared);
+        assert_eq!(mode(&folder), 0o700);
+        assert!(data::inspect(&p.paths, &folder).unwrap().restorable);
+    }
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(mode(&folder), 0o700);
+    assert_eq!(mode(&folder.join("state")), 0o700);
+    assert!(data::inspect(&p.paths, &folder).unwrap().restorable);
+    // A folder reached through a symlink, such as a disk mounted elsewhere.
+    let disk = p.root.join("disk/backups");
+    fs::create_dir_all(&disk).unwrap();
+    let link = p.root.join("Backups");
+    std::os::unix::fs::symlink(&disk, &link).unwrap();
+    let folder = chosen(&link);
+    assert!(disk
+        .join(folder.file_name().unwrap())
+        .join("manifest.json")
+        .is_file());
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    // A missing folder is created.
+    let missing = p.root.join("new/place");
+    chosen(&missing);
+    assert_eq!(fs::read_dir(&missing).unwrap().count(), 1);
+}
+
+/// The stand-in keyring (a file; debug builds only) is set for the whole
+/// process: no other test in this file uses the keyring.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backup_with_api_keys_holds_the_keys_moved_to_the_keyring() {
+    use shadowcode_core::keyring;
+    let p = profile_with_history();
     std::env::set_var("SHADOWCODE_TEST_KEYRING", p.root.join("vault.json"));
-    let name = "SHADOWCODE_TEST_BACKUP_KEY";
-    config::set_secret(&p.paths, name, "kept-in-the-keyring").unwrap();
+    let name = "BACKUP_TEST_API_KEY";
+    let first = format!("{}-{}", "kept-in-keyring", "first");
+    config::set_secret(&p.paths, name, &first).unwrap();
     keyring::move_in(&p.paths, name).unwrap();
     assert_eq!(config::file_secret(&p.paths, name).unwrap(), None);
     let with_keys = BackupOptions {
@@ -886,78 +1065,283 @@ async fn keys_kept_in_the_keyring_are_backed_up_and_restored() {
     };
     let (folder, manifest) = data::create_backup(&p.paths, with_keys).unwrap();
     assert!(manifest.includes_secrets);
-    assert!(manifest.keys_left_out.is_empty(), "{manifest:?}");
-    let saved = fs::read_to_string(folder.join("config/secrets.env")).unwrap();
-    assert!(saved.contains("kept-in-the-keyring") && saved.contains("first-value"));
+    assert!(manifest.left_out.is_empty(), "{:?}", manifest.left_out);
+    let text = fs::read_to_string(folder.join("config/secrets.env")).unwrap();
+    assert!(text.contains(&first), "the keyring's key: {text}");
+    assert!(text.contains("first-value"), "the file's key: {text}");
+    #[cfg(unix)]
+    assert_eq!(mode(&folder.join("config/secrets.env")), 0o600);
     assert!(data::inspect(&p.paths, &folder).unwrap().restorable);
+    let keys = RestoreOptions {
+        include_secrets: true,
+        ..RestoreOptions::default()
+    };
 
-    // A reset moves the settings (and the keyring's list) aside.
+    // After a reset (which moves keyring.json aside) the key comes back.
     data::schedule_reset(&p.paths).unwrap();
-    let engine = Engine::open(p.paths.clone()).unwrap();
+    finish(&p.paths);
     assert_eq!(config::secret(&p.paths, name).unwrap(), None);
-    engine.shutdown().await.unwrap();
-    drop(engine);
-    data::schedule_restore(&p.paths, &folder, true).unwrap();
-    let engine = Engine::open(p.paths.clone()).unwrap();
+    data::schedule_restore(&p.paths, &folder, keys).unwrap();
+    finish(&p.paths);
     assert_eq!(
         config::secret(&p.paths, name).unwrap().as_deref(),
-        Some("kept-in-the-keyring")
+        Some(first.as_str())
     );
-    assert!(keyring::listed(&p.paths).is_empty());
-    engine.shutdown().await.unwrap();
 
-    // A keyring out of reach: the backup names the keys it could not hold.
+    // On the same computer, a restore brings back the backup's key, not the
+    // keyring's newer one.
     keyring::move_in(&p.paths, name).unwrap();
-    fs::write(p.root.join("vault.json.unreachable"), "").unwrap();
-    let (_, manifest) = data::create_backup(&p.paths, with_keys).unwrap();
-    assert_eq!(manifest.keys_left_out, [name]);
-    std::env::remove_var("SHADOWCODE_TEST_KEYRING");
+    let second = format!("{}-{}", "kept-in-keyring", "second");
+    config::set_secret(&p.paths, name, &second).unwrap();
+    data::schedule_restore(&p.paths, &folder, keys).unwrap();
+    let last = finish(&p.paths);
+    assert_eq!(
+        config::secret(&p.paths, name).unwrap().as_deref(),
+        Some(first.as_str())
+    );
+    assert!(!keyring::listed(&p.paths).contains(name));
+    // The keyring keeps its own copy, so the backup made before the restore
+    // copies secrets.env as it is and never writes the keyring's keys to a
+    // file nobody asked for.
+    assert_eq!(
+        keyring::get(&p.paths, name).unwrap().as_deref(),
+        Some(second.as_str())
+    );
+    let previous = PathBuf::from(last["backup_of_previous_data"].as_str().unwrap());
+    let before = fs::read_to_string(previous.join("config/secrets.env")).unwrap();
+    assert!(!before.contains(&second), "{before}");
+
+    // A key the keyring does not give is named, and a backup with no key
+    // does not claim to hold any.
+    let q = profile();
+    config::set_secret(&q.paths, "OPENAI_API_KEY", "").unwrap();
+    fs::write(
+        q.paths.config.join("keyring.json"),
+        r#"{"names":["GONE_API_KEY"]}"#,
+    )
+    .unwrap();
+    let (folder, manifest) = data::create_backup(&q.paths, with_keys).unwrap();
+    assert!(!manifest.includes_secrets);
+    assert!(!folder.join("config/secrets.env").exists());
+    assert!(
+        manifest.left_out.iter().any(|n| n.contains("GONE_API_KEY")),
+        "{:?}",
+        manifest.left_out
+    );
+    assert!(!data::list_backups(&data::backups_dir(&q.paths))[0].includes_secrets);
 }
 
-/// A restore that fails part way puts `secrets.env` back as it was. The
-/// backup made just before it also holds the keyring's keys in its
-/// `secrets.env`; they must not come back into the plain file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_agents_folder_never_blocks_a_backup_or_a_restore() {
+    let p = profile_with_history();
+    let agents = shadowcode_core::agents::user_dir(&p.paths);
+    // Agent definitions kept in a Git repository.
+    let objects = agents.join(".git/objects/ab");
+    fs::create_dir_all(&objects).unwrap();
+    for i in 0..4200 {
+        fs::write(objects.join(format!("{i:05}")), "x").unwrap();
+    }
+    fs::write(agents.join("helper.md"), "---\nname: helper\n---\nHelp.\n").unwrap();
+    fs::write(agents.join("model.bin"), vec![0u8; 4 * 1024 * 1024 + 1]).unwrap();
+    let (folder, manifest) = data::create_backup(&p.paths, manual()).unwrap();
+    let listed: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+    assert!(listed.contains(&"agents/helper.md"), "{listed:?}");
+    assert!(
+        !listed
+            .iter()
+            .any(|f| f.contains(".git") || f.ends_with("model.bin")),
+        "{listed:?}"
+    );
+    assert_eq!(manifest.left_out.len(), 1, "{:?}", manifest.left_out);
+    assert!(
+        manifest.left_out[0].contains("agents/model.bin")
+            && manifest.left_out[0].contains("larger than 4 MB"),
+        "{:?}",
+        manifest.left_out
+    );
+    // Past the file limit, the rest is counted and the backup still works.
+    let notes = agents.join("notes");
+    fs::create_dir_all(&notes).unwrap();
+    for i in 0..4200 {
+        fs::write(notes.join(format!("{i:05}.txt")), "x").unwrap();
+    }
+    let (_, manifest) = data::create_backup(&p.paths, manual()).unwrap();
+    assert_eq!(
+        manifest.files.len(),
+        4096 + 1,
+        "the database and 4096 files"
+    );
+    assert!(
+        manifest
+            .left_out
+            .iter()
+            .any(|n| n.contains("past the limit of 4096 files")),
+        "{:?}",
+        manifest.left_out
+    );
+    // The backup made before a restore works too.
+    data::schedule_restore(&p.paths, &folder, RestoreOptions::default()).unwrap();
+    let last = finish(&p.paths);
+    assert_eq!(last["ok"], true, "{last}");
+}
+
 #[cfg(unix)]
 #[test]
-fn a_failed_restore_keeps_keyring_keys_out_of_secrets_env() {
-    use shadowcode_core::keyring;
-    let _lock = TEST_KEYRING.blocking_lock();
+fn a_reset_keeps_the_lock_and_backups_when_the_xdg_folders_are_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    // XDG_CONFIG_HOME, XDG_DATA_HOME and XDG_STATE_HOME all name one folder.
+    let one = root.join("xdg/shadow-agent");
+    let paths = AppPaths {
+        config: one.clone(),
+        data: one.clone(),
+        state: one.clone(),
+        cache: root.join("cache/shadow-agent"),
+    };
+    paths.ensure().unwrap();
+    Config::patch(&paths, json!({"ui": {"theme": "dark"}})).unwrap();
+    {
+        let store = Store::open(&paths.database()).unwrap();
+        store.create_session(&root, "mock", "Old life").unwrap();
+    }
+    data::create_backup(&paths, manual()).unwrap();
+    fs::create_dir_all(one.join("managed-worktrees/task")).unwrap();
+    data::schedule_reset(&paths).unwrap();
+    let lock = paths.lock().unwrap();
+    let last = data::apply_pending(&paths).unwrap().unwrap();
+    assert_eq!(last["ok"], true, "{last}");
+    // The running engine's lock stays where it is and still holds, so no
+    // second engine can open the profile.
+    assert!(one.join("native.lock").is_file());
+    let second = paths.lock().err().expect("the profile is still locked");
+    assert!(format!("{second:#}").contains("already running"));
+    drop(lock);
+    // Backups and worktrees stay; settings and history moved aside once.
+    assert_eq!(data::list_backups(&data::backups_dir(&paths)).len(), 1);
+    assert!(one.join("managed-worktrees/task").is_dir());
+    assert!(!paths.database().exists());
+    assert!(!paths.config_file().exists());
+    let asides = data::reset_folders(&paths);
+    assert_eq!(asides.len(), 1, "{asides:?}");
+    assert_eq!(last["moved_to"].as_array().unwrap().len(), 1, "{last}");
+    assert!(asides[0].join("shadow-agent.db").is_file());
+    assert!(asides[0].join("config.yaml").is_file());
+
+    // The data folder inside the config folder: it is not moved with it.
+    let config = root.join("nested/shadow-agent");
+    let paths = AppPaths {
+        data: config.join("shadow-agent"),
+        state: root.join("state/shadow-agent"),
+        cache: root.join("cache/shadow-agent"),
+        config,
+    };
+    paths.ensure().unwrap();
+    Config::patch(&paths, json!({"ui": {"theme": "dark"}})).unwrap();
+    data::create_backup(&paths, manual()).unwrap();
+    data::schedule_reset(&paths).unwrap();
+    let last = finish(&paths);
+    assert_eq!(last["ok"], true, "{last}");
+    assert!(!paths.config_file().exists());
+    assert_eq!(data::list_backups(&data::backups_dir(&paths)).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_restart_advice_names_the_process_that_holds_the_profile() {
+    let p = profile();
+    let service = Service::open(p.paths.clone(), Some(p.project.clone())).unwrap();
+    // Unknown owner: every kind of ShadowCode process is named.
+    let overview = call(&service, "GET", "/api/data", Value::Null)
+        .await
+        .unwrap();
+    assert!(overview["engine"]["mode"].is_null(), "{overview}");
+    assert!(overview["engine"]["restart"]
+        .as_str()
+        .unwrap()
+        .contains("`shadowcode acp`"));
+    // An editor's `shadowcode acp` owns the engine: quitting a window
+    // attached to it would not let the reset run.
+    let server = shadowcode_core::control::Server::start_with_mode(service.clone(), "acp").unwrap();
+    let overview = call(&service, "GET", "/api/data", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(overview["engine"]["mode"], "acp");
+    assert_eq!(overview["engine"]["pid"], std::process::id());
+    let restart = overview["engine"]["restart"].as_str().unwrap();
+    assert!(
+        restart.contains("editor") && restart.contains("`shadowcode acp`"),
+        "{restart}"
+    );
+    let scheduled = call(
+        &service,
+        "POST",
+        "/api/data/reset",
+        json!({"confirm": "reset"}),
+    )
+    .await
+    .unwrap();
+    let message = scheduled["message"].as_str().unwrap();
+    assert!(
+        message.contains("next time ShadowCode starts") && message.contains("editor"),
+        "{message}"
+    );
+    assert!(data::cancel_pending(&p.paths).unwrap());
+    assert_eq!(
+        data::restart_hint(Some("desktop"), 1),
+        "Quit ShadowCode and open it again."
+    );
+    server.close();
+    server.wait_closed().await;
+    service.engine.shutdown().await.unwrap();
+}
+
+/// A restore that fails partway puts every replaced file back, and removes a
+/// file that did not exist before it (`secrets.env` or `remote.json`).
+#[test]
+fn a_failed_restore_removes_files_that_were_not_there_before() {
     let p = profile();
     drop(Store::open(&p.paths.database()).unwrap());
-    let remote = p.paths.config.join("remote.json");
-    fs::write(&remote, "{}").unwrap();
+    fs::write(p.paths.config.join("remote.json"), "{}").unwrap();
     let with_keys = BackupOptions {
         include_secrets: true,
         ..manual()
     };
     let (folder, manifest) = data::create_backup(&p.paths, with_keys).unwrap();
-    let order: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
-    let at = |path: &str| order.iter().position(|p| *p == path).unwrap();
-    assert!(
-        at("config/secrets.env") < at("config/remote.json"),
-        "{order:?}"
-    );
-
-    std::env::set_var("SHADOWCODE_TEST_KEYRING", p.root.join("vault.json"));
-    let name = "SHADOWCODE_TEST_ROLLBACK_KEY";
-    config::set_secret(&p.paths, name, "only-in-the-keyring").unwrap();
-    keyring::move_in(&p.paths, name).unwrap();
-    let secrets = p.paths.config.join("secrets.env");
-    let original = fs::read(&secrets).unwrap();
-    data::schedule_restore(&p.paths, &folder, true).unwrap();
-    // remote.json cannot be put in place: the restore stops after
-    // secrets.env was replaced.
-    fs::remove_file(&remote).unwrap();
-    fs::create_dir_all(remote.join("in-the-way")).unwrap();
+    // The first of the two to be restored did not exist before; the second
+    // cannot be put in place, so the restore stops after the first.
+    let (first, second) = manifest
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .filter(|path| ["config/secrets.env", "config/remote.json"].contains(path))
+        .fold((None, None), |(a, b), path| match a {
+            None => (Some(path), b),
+            Some(_) => (a, b.or(Some(path))),
+        });
+    let in_config = |path: Option<&str>| {
+        p.paths
+            .config
+            .join(path.unwrap().strip_prefix("config/").unwrap())
+    };
+    let (first, second) = (in_config(first), in_config(second));
+    fs::remove_file(&first).unwrap();
+    data::schedule_restore(
+        &p.paths,
+        &folder,
+        RestoreOptions {
+            include_secrets: true,
+            include_remote: true,
+        },
+    )
+    .unwrap();
+    fs::remove_file(&second).unwrap();
+    fs::create_dir_all(second.join("in-the-way")).unwrap();
     let lock = p.paths.lock().unwrap();
     let error = data::apply_pending(&p.paths).unwrap_err();
     drop(lock);
+    assert!(format!("{error:#}").contains("Could not put"), "{error:#}");
     assert!(
-        format!("{error:#}").contains("config/remote.json"),
-        "{error:#}"
+        !first.exists(),
+        "{} did not exist before the restore",
+        first.display()
     );
-    assert_eq!(fs::read(&secrets).unwrap(), original);
-    assert_eq!(config::file_secret(&p.paths, name).unwrap(), None);
-    assert!(keyring::listed(&p.paths).contains(name));
-    std::env::remove_var("SHADOWCODE_TEST_KEYRING");
 }

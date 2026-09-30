@@ -936,11 +936,14 @@ shows why the last one didn't work.
 ## Your data: back up, restore, repair, start over
 
 **Settings › Your data** backs up your conversations, tasks, goals,
-automations and settings to a private folder (API keys only if you tick the
-box), restores a backup after checking it, checks and repairs the database,
-and resets ShadowCode by moving everything aside, never deleting it. Restores
-and resets happen the next time ShadowCode starts. It also lists the copies
-made automatically before each upgrade. The same is on the command line:
+automations and settings to a private folder (API keys and remote-access
+pairing only if you tick the box), restores a backup after checking it (API
+keys, and remote access with its paired devices and phone notifications,
+each only if you tick it; remote access comes back switched off, and the
+restored devices and notifications wait until you turn it on), checks and
+repairs the database, and resets ShadowCode by moving everything aside, never
+deleting it. Restores and resets happen the next time ShadowCode starts. It
+also lists the copies made automatically before each upgrade. The same is on the command line:
 `shadowcode backup`, `shadowcode restore FOLDER`, `shadowcode doctor --repair`
 and `shadowcode reset`. See [Your data](DATA.md) for the details.
 

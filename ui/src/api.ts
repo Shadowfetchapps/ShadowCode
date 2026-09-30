@@ -1431,6 +1431,9 @@ export type RemoteStatus = {
     name: string;
     created_at: number;
     last_seen: number | null;
+    /** Came back with a restore: cannot connect until remote access is
+     * turned on. */
+    restored: boolean;
   }[];
   ntfy: {
     server: string;
@@ -1444,6 +1447,9 @@ export type RemoteStatus = {
     };
     token_saved: boolean;
     configured: boolean;
+    /** Came back with a restore: nothing is sent until the server and topic
+     * are saved again or remote access is turned on. */
+    restored: boolean;
     error: string | null;
   };
 };

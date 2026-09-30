@@ -125,7 +125,10 @@ impl Shared {
                 dropped.push(v.service);
             }
         }
-        let service = self.base.fork_selection(self.base.workspace()?, None)?;
+        let service = self
+            .base
+            .fork_selection(self.base.workspace()?, None)?
+            .for_remote_device();
         views.insert(
             key,
             View {

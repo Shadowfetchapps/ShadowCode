@@ -127,6 +127,12 @@ pub struct Service {
     /// Remote access and phone notifications (one per engine).
     #[cfg(unix)]
     remote: Arc<crate::remote::Manager>,
+    /// How the process that owns this engine runs (`control::Server`
+    /// modes: desktop, server, tui, acp, command); shared by every view.
+    engine_mode: Arc<std::sync::OnceLock<String>>,
+    /// This view answers a paired remote device: what stays on this
+    /// computer (the app log) is left out of its answers.
+    remote_device: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -176,6 +182,8 @@ impl Service {
             previews: Arc::default(),
             #[cfg(unix)]
             remote,
+            engine_mode: Arc::default(),
+            remote_device: false,
         })
     }
     /// A transport client shares the engine, but has its own navigation state.
@@ -211,7 +219,22 @@ impl Service {
             previews: self.previews.clone(),
             #[cfg(unix)]
             remote: self.remote.clone(),
+            engine_mode: self.engine_mode.clone(),
+            remote_device: false,
         })
+    }
+    /// Record how the owning process runs (set once, by the control server
+    /// that serves this engine).
+    pub(crate) fn set_engine_mode(&self, mode: &str) {
+        let _ = self.engine_mode.set(mode.to_owned());
+    }
+    pub(crate) fn engine_mode(&self) -> Option<&str> {
+        self.engine_mode.get().map(String::as_str)
+    }
+    /// This view answers a paired remote device.
+    pub(crate) fn for_remote_device(mut self) -> Self {
+        self.remote_device = true;
+        self
     }
     /// Remote access (web interface, pairing, phone notifications).
     #[cfg(unix)]

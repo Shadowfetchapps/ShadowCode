@@ -441,7 +441,27 @@ fn run() -> Result<()> {
         .setup(move |app| {
             let webview_data = paths.data.join("webview");
             let notification_paths = paths.clone();
-            let backend = tauri::async_runtime::block_on(Backend::open(paths, workspace))?;
+            let backend = match tauri::async_runtime::block_on(Backend::open(paths, workspace)) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    // Started from the app menu, nobody sees stderr (for
+                    // example a database a newer version wrote): say why in a
+                    // dialog, then quit with the same code as before. There
+                    // is no engine or window to shut down.
+                    let message = format!("{error:#}");
+                    eprintln!("ShadowCode: {message}");
+                    let handle = app.handle().clone();
+                    app.dialog()
+                        .message(message)
+                        .title("ShadowCode could not start")
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                        .show(move |_| {
+                            handle.cleanup_before_exit();
+                            std::process::exit(1);
+                        });
+                    return Ok(());
+                }
+            };
             let mut events = match &backend {
                 Backend::Owned { service, .. } => service.engine.subscribe(),
                 Backend::Attached(view) => view.subscribe(),

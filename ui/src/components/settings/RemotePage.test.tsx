@@ -43,6 +43,7 @@ function status(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
       events: { approval: true, finished: true, failed: true, limit: true },
       token_saved: false,
       configured: false,
+      restored: false,
       error: null,
     },
     ...overrides,
@@ -102,6 +103,7 @@ it("pairs a device with a QR code and unpairs devices", async () => {
           name: "Safari on iPhone or iPad",
           created_at: 1,
           last_seen: null,
+          restored: false,
         },
       ],
     }),
@@ -165,4 +167,58 @@ it("saves ntfy settings only when entered, and never shows the token", async () 
     ).toBe(""),
   );
   expect(randomTopic()).toMatch(/^shadowcode-[0-9a-z]{20}$/);
+});
+
+it("marks what came back with a restore until it is confirmed", async () => {
+  const restored = status({
+    devices: [
+      {
+        id: "d1",
+        name: "Lost phone",
+        created_at: 1,
+        last_seen: null,
+        restored: true,
+      },
+    ],
+    ntfy: {
+      ...status().ntfy,
+      server: "https://ntfy.example",
+      topic: "old-topic",
+      configured: true,
+      restored: true,
+    },
+  });
+  vi.spyOn(api, "remoteStatus").mockResolvedValue(restored);
+  const save = vi.spyOn(api, "saveNtfy").mockResolvedValue(
+    status({
+      ...restored,
+      ntfy: { ...restored.ntfy, restored: false },
+    }),
+  );
+  render(<RemotePage onToast={() => undefined} />);
+  expect(await screen.findByText(/^From a backup · Paired/)).toBeTruthy();
+  expect(
+    screen.getByText(/They can’t connect until you turn on remote access/),
+  ).toBeTruthy();
+  expect(
+    screen.getByText(/Nothing is sent until you check them and choose Save/),
+  ).toBeTruthy();
+  // Saving the unchanged server and topic confirms them.
+  const buttons = screen.getAllByRole<HTMLButtonElement>("button", {
+    name: "Save",
+  });
+  const saveButton = buttons[buttons.length - 1];
+  expect(saveButton.disabled).toBe(false);
+  fireEvent.click(saveButton);
+  await waitFor(() =>
+    expect(save).toHaveBeenCalledWith({
+      server: "https://ntfy.example",
+      topic: "old-topic",
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByText(/Nothing is sent until you check them/),
+    ).toBeNull(),
+  );
 });

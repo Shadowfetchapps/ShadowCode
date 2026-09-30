@@ -216,9 +216,15 @@ shadowcode reset --yes
 
 `restore` and `reset` finish right away when no ShadowCode runs on the
 profile; otherwise they are scheduled for the next start (cancel in Settings ›
-Your data). A restore first backs up what it replaces; `--include-secrets`
-also restores the backup's API keys. `reset` moves settings and history
-aside into `<folder>.reset-<time>` folders and deletes nothing.
+Your data), and the command says which process to stop (the app,
+`shadowcode serve`, the terminal app, or an editor's `shadowcode acp`). A
+restore first backs up what it replaces; `--include-secrets` also restores
+the backup's API keys, and `--include-remote` its remote access, paired
+devices and phone notification settings, switched off: the restored devices
+cannot connect (not even through `serve --remote`) and notifications are not
+sent until you turn remote access on in Settings › Remote access.
+`reset` moves settings and history aside into `<folder>.reset-<time>` folders
+and deletes nothing.
 
 Shell completions come from the same definitions as `--help`; the Debian
 package installs them, and for the AppImage:

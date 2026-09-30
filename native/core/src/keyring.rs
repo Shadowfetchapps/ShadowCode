@@ -248,6 +248,18 @@ pub fn move_in(paths: &AppPaths, name: &str) -> Result<()> {
     crate::config::remove_file_secret(paths, name)
 }
 
+/// Read these keys from `secrets.env` again instead of the keyring: a
+/// restore put them back there. The keyring's own copies are left alone.
+pub(crate) fn prefer_file(paths: &AppPaths, names: &[String]) -> Result<()> {
+    let mut listed = listed(paths);
+    let before = listed.len();
+    listed.retain(|name| !names.contains(name));
+    if listed.len() != before {
+        set_listed(paths, listed)?;
+    }
+    Ok(())
+}
+
 /// Move a key from the keyring back into `secrets.env`.
 pub fn move_out(paths: &AppPaths, name: &str) -> Result<()> {
     ensure!(

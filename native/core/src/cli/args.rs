@@ -83,8 +83,9 @@ pub enum Command {
     },
     /// Back up your conversations, jobs, goals and settings to a folder.
     Backup {
-        /// Also copy API keys (secrets.env) and remote-access pairing.
-        /// Anyone with the backup can then use those keys.
+        /// Also copy API keys (secrets.env and keys kept in the desktop
+        /// keyring) and remote-access pairing. Anyone with the backup can
+        /// then use those keys.
         #[arg(long)]
         include_secrets: bool,
         /// Folder to put the backup in (default: the profile's backups folder).
@@ -98,6 +99,13 @@ pub enum Command {
         /// Also restore API keys when the backup has them.
         #[arg(long)]
         include_secrets: bool,
+        /// Also restore remote access, paired devices and phone notification
+        /// settings when the backup has them. Devices you removed since then
+        /// come back too, so remote access comes back off, and the restored
+        /// devices cannot connect and notifications are not sent until you
+        /// turn it on in Settings › Remote access.
+        #[arg(long)]
+        include_remote: bool,
         /// Restore; without it only the check runs.
         #[arg(long)]
         yes: bool,

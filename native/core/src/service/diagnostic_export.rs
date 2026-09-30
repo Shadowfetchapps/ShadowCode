@@ -176,7 +176,11 @@ fn project(report: &Value, extra: &Value, captured_at: &str) -> Result<String> {
             "run": public_run(&job["run"]),
         })).collect::<Vec<_>>(),
         "log": {
-            "note": "The app log's last lines: events, errors and timings only, with secrets, paths and private model names removed.",
+            "note": if extra["log"].is_array() {
+                "The app log's last lines: events, errors and timings only, with secrets, paths and private model names removed."
+            } else {
+                "The app log is not included over remote access; it stays on the computer running ShadowCode."
+            },
             "lines": extra["log"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|line| scrub_paths(&crate::redaction::redact_text(&scrub_models(line)).text)).collect::<Vec<_>>(),
         },
     });

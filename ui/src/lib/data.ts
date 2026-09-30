@@ -11,13 +11,19 @@ export type BackupManifest = {
   app_version: string;
   schema_version: number;
   created_at: number;
+  /** The backup holds at least one API key. */
   includes_secrets: boolean;
   reason: "manual" | "before-restore" | "before-repair" | "upgrade-copy";
   files: BackupFile[];
   raw_copy: boolean;
-  /** Keys kept in the keyring that could not be read into the backup. */
-  keys_left_out?: string[];
+  /** What the backup could not include, in plain words. */
+  left_out: string[];
 };
+
+/** The backup holds remote access, paired devices and phone notification
+ * settings (`remote.json`). */
+export const hasRemotePairing = (manifest: BackupManifest) =>
+  manifest.files.some((f) => f.path === "config/remote.json");
 
 export type ListedBackup = {
   path: string;
@@ -43,6 +49,7 @@ export type PendingOperation = {
   requested_at: number;
   source: string | null;
   include_secrets: boolean;
+  include_remote: boolean;
 };
 
 export type RepairCheck = {
@@ -60,6 +67,7 @@ export type LastOperation = {
   source?: string | null;
   backup_of_previous_data?: string;
   secrets_restored?: boolean;
+  remote_restored?: boolean;
   moved_to?: string[];
   checks?: RepairCheck[];
   backup?: string;
@@ -82,6 +90,12 @@ export type DataOverview = {
   kept_on_reset: string[];
   pending: PendingOperation | null;
   last_operation: LastOperation | null;
+  /** The process holding the profile: a scheduled restore or reset runs
+   * when it stops. `mode` is desktop, server, tui, acp or command. */
+  engine?: { mode: string | null; pid: number; restart: string };
+  /** This window is attached to another process's engine (desktop only):
+   * quitting it does not let a scheduled restore or reset run. */
+  desktop_attached?: boolean;
 };
 
 export type BackupSummary = {
@@ -129,10 +143,11 @@ export const dataApi = {
     ),
   inspect: (path: string) =>
     request<Inspection>("/api/data/backups/inspect", "POST", { path }),
-  restore: (path: string, includeSecrets: boolean) =>
+  restore: (path: string, includeSecrets: boolean, includeRemote = false) =>
     request<Scheduled>("/api/data/restore", "POST", {
       path,
       include_secrets: includeSecrets,
+      include_remote: includeRemote,
     }),
   reset: () =>
     request<Scheduled>("/api/data/reset", "POST", { confirm: "reset" }),
