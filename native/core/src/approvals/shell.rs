@@ -255,7 +255,27 @@ impl Walker<'_> {
                 });
             }
             "comment" | "heredoc_body" | "heredoc_start" | "heredoc_end" => {}
-            "program" | "list" | "compound_statement" | "negated_command" => {
+            "list" => {
+                // `a && b && c` nests to the left, one level per step. The
+                // chain is followed in a loop, so a long one spends no depth
+                // and its first steps are read like the others.
+                let mut chain = Vec::new();
+                let mut node = node;
+                loop {
+                    let mut children = named_children(node);
+                    if children.first().is_some_and(|c| c.kind() == "list") {
+                        node = children.remove(0);
+                        chain.push(children);
+                    } else {
+                        chain.push(children);
+                        break;
+                    }
+                }
+                for child in chain.into_iter().rev().flatten() {
+                    self.statement(child, pipe, substituted);
+                }
+            }
+            "program" | "compound_statement" | "negated_command" => {
                 for child in named_children(node) {
                     self.statement(child, pipe, substituted);
                 }
@@ -902,6 +922,31 @@ mod tests {
         // Ordinary nesting is still read.
         let script = parse("( cd src && echo $(git rev-parse $(echo HEAD)) )");
         assert!(script.complete, "{:?}", script.problem);
+    }
+
+    #[test]
+    fn a_long_and_chain_is_read_from_its_first_step() {
+        // `&&` lists nest to the left in the tree, one level per step.
+        let chain = format!("rm -rf ~/x{}", " && true".repeat(150));
+        let script = parse(&chain);
+        assert!(script.complete, "{:?}", script.problem);
+        assert_eq!(script.commands.len(), 151);
+        assert_eq!(script.commands[0].base(), "rm");
+        let longer = format!("rm -rf ~/x{}", "&&true||false".repeat(4_000));
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let script = parse(&longer);
+                assert!(!script.complete);
+                assert_eq!(
+                    script.problem.as_deref(),
+                    Some("the command has too many steps to read ahead")
+                );
+                assert_eq!(script.commands[0].base(), "rm");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
