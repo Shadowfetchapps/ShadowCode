@@ -820,15 +820,24 @@ pub fn file_secret_names(paths: &AppPaths) -> Result<Vec<String>> {
 }
 
 /// Save a key where it lives: the keyring when it was moved there,
-/// otherwise `secrets.env`. An empty value removes it.
+/// otherwise `secrets.env`. An empty value removes it. Where no keyring can
+/// be reached (SSH, `shadowcode serve`), a key that lived there is saved in
+/// `secrets.env` instead and no longer listed as in the keyring.
 pub fn set_secret(paths: &AppPaths, name: &str, value: &str) -> Result<()> {
     ensure!(valid_secret_name(name), "Invalid secret name");
     if value.contains(['\n', '\r', '\0']) || value.len() > 16_384 {
         bail!("Invalid API key");
     }
     if crate::keyring::listed(paths).contains(name) {
-        crate::keyring::set(paths, name, value)?;
-        return remove_file_secret(paths, name);
+        match crate::keyring::set(paths, name, value) {
+            Ok(()) => return remove_file_secret(paths, name),
+            Err(error) if crate::keyring::availability().is_err() => {
+                tracing::warn!("keyring.unreachable name={name} saved_to=file error={error:#}");
+                write_file_secret(paths, name, value)?;
+                return crate::keyring::forget(paths, name);
+            }
+            Err(error) => return Err(error),
+        }
     }
     write_file_secret(paths, name, value)
 }
@@ -849,15 +858,24 @@ pub fn write_file_secret(paths: &AppPaths, name: &str, value: &str) -> Result<()
     } else {
         values.insert(name.into(), value.into());
     }
+    atomic_write(
+        &paths.secrets_file(),
+        render_secrets(&values)?.as_bytes(),
+        true,
+    )
+}
+
+/// `secrets.env` text holding `values`.
+pub(crate) fn render_secrets(values: &BTreeMap<String, String>) -> Result<String> {
     let mut out = String::new();
     for (name, value) in values {
-        out.push_str(&format!("{name}={}\n", serde_json::to_string(&value)?));
+        out.push_str(&format!("{name}={}\n", serde_json::to_string(value)?));
     }
     ensure!(
         out.len() <= MAX_CONFIG_BYTES,
         "Secret file would exceed 1 MB"
     );
-    atomic_write(&paths.secrets_file(), out.as_bytes(), true)
+    Ok(out)
 }
 
 /// True when the model route runs on this computer (managed llama.cpp, or an

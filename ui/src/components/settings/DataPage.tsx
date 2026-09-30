@@ -89,7 +89,13 @@ export function DataPage({ onToast }: { onToast: Toast }) {
       dataApi.createBackup(includeSecrets, folder),
     );
     if (made) {
-      onToast(`Backup saved to ${made.path}`, "ok");
+      const left = made.manifest.keys_left_out ?? [];
+      if (left.length)
+        onToast(
+          `Backup saved to ${made.path}, without ${left.join(", ")}: the keyring was locked or out of reach. Unlock it and back up again to include them.`,
+          "info",
+        );
+      else onToast(`Backup saved to ${made.path}`, "ok");
       await load();
     }
   }

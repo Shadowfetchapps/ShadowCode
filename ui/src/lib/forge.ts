@@ -70,11 +70,18 @@ export type PrStatus = {
   pr: PullRequest | null;
 };
 
-export type PrCreated = {
-  ok: boolean;
-  /** Refused in band: the commits to push may contain a secret. */
+/** A push refused in band: the commits may contain a secret, or could not
+ * all be checked. `scanned` is the commit checked; sending it back with
+ * `allow_secrets` pushes exactly that commit. */
+export type PushRefusal = {
   secrets?: SecretFinding[];
   secrets_truncated?: boolean;
+  secrets_unchecked?: string | null;
+  scanned?: string;
+};
+
+export type PrCreated = PushRefusal & {
+  ok: boolean;
   error?: string;
   url: string;
   number: number | null;
@@ -114,18 +121,19 @@ export const forgeApi = {
     }),
   suggest: (kind: "commit" | "pr", base = "", remote = "") =>
     request<Suggestion>("/api/git/suggest", "POST", { kind, base, remote }),
-  push: (remote = "", allowSecrets = false) =>
-    request<{
-      ok: boolean;
-      remote: string;
-      branch: string;
-      output: string;
-      secrets?: SecretFinding[];
-      secrets_truncated?: boolean;
-      error?: string;
-    }>("/api/git/push", "POST", {
+  /** With `scanned` (from a refusal), push that commit anyway. */
+  push: (remote = "", scanned?: string) =>
+    request<
+      PushRefusal & {
+        ok: boolean;
+        remote: string;
+        branch: string;
+        output: string;
+        error?: string;
+      }
+    >("/api/git/push", "POST", {
       remote,
-      ...(allowSecrets ? { allow_secrets: true } : {}),
+      ...(scanned !== undefined ? { allow_secrets: true, scanned } : {}),
     }),
   prStatus: (remote = "", base = "") =>
     request<PrStatus>(`/api/git/pr?remote=${q(remote)}&base=${q(base)}`),
@@ -136,6 +144,7 @@ export const forgeApi = {
     draft: boolean;
     remote?: string;
     allow_secrets?: boolean;
+    scanned?: string;
   }) => request<PrCreated>("/api/git/pr", "POST", body),
   checks: (number: number, remote = "") =>
     request<PrChecks>(

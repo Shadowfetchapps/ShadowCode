@@ -1033,6 +1033,11 @@ impl ToolExecutor {
                 // Staged secrets are never committed by the agent: the user
                 // can remove them, or commit from the Git tab after seeing them.
                 let scan = crate::secret_scan::staged(&self.workspace.path).await?;
+                if let (true, Some(reason)) = (scan.findings.is_empty(), scan.unchecked) {
+                    bail!(
+                        "Not committed: {reason} Commit fewer changes at a time, or ask the user to commit from the Git tab."
+                    );
+                }
                 if !scan.is_clean() {
                     let list = scan
                         .findings

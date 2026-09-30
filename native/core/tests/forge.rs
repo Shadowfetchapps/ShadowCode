@@ -471,7 +471,7 @@ async fn secrets_are_caught_before_commit_and_push_and_hooks_are_asked_once() {
     assert_eq!(commits(&f.project), before);
 
     // "Add to .gitignore" keeps the file local and out of the commit.
-    call(
+    let ignored = call(
         s,
         "POST",
         "/api/workspace/git/ignore",
@@ -479,6 +479,7 @@ async fn secrets_are_caught_before_commit_and_push_and_hooks_are_asked_once() {
     )
     .await
     .unwrap();
+    assert_eq!(ignored["tracked"], false, "{ignored}");
     assert!(fs::read_to_string(f.project.join(".gitignore"))
         .unwrap()
         .contains("/config.py"));
@@ -514,10 +515,58 @@ async fn secrets_are_caught_before_commit_and_push_and_hooks_are_asked_once() {
     assert_eq!(push["ok"], false, "{push}");
     assert_eq!(push["secrets"][0]["path"], ".env.local");
     assert!(push["secrets"][0]["commit"].as_str().is_some());
-    let pushed = call(s, "POST", "/api/git/push", json!({"allow_secrets":true}))
-        .await
-        .unwrap();
+    let scanned = push["scanned"].as_str().unwrap().to_owned();
+    // A commit made while the question is open is not sent with it.
+    fs::write(
+        f.project.join("later.py"),
+        format!("TOKEN = \"{}\"\n", fake_token()),
+    )
+    .unwrap();
+    git(&f.project, &["add", "later.py"]);
+    git(&f.project, &["commit", "-m", "Later"]);
+    let pushed = call(
+        s,
+        "POST",
+        "/api/git/push",
+        json!({"allow_secrets":true,"scanned":scanned}),
+    )
+    .await
+    .unwrap();
     assert_eq!(pushed["ok"], true, "{pushed}");
+    assert_eq!(git(&f.remote, &["rev-parse", "main"]), scanned);
+    assert_eq!(
+        git(
+            &f.project,
+            &["rev-parse", "--abbrev-ref", "main@{upstream}"]
+        ),
+        "origin/main"
+    );
+    let later = call(s, "POST", "/api/git/push", json!({})).await.unwrap();
+    assert_eq!(later["secrets"][0]["path"], "later.py", "{later}");
+    assert_eq!(later["secrets"].as_array().unwrap().len(), 1);
+
+    // "Add to .gitignore" on a file already in the repository keeps it
+    // there and only takes its change out of the commit.
+    fs::write(
+        f.project.join("README.md"),
+        format!("# Demo\n\nTOKEN = \"{}\"\n", fake_token()),
+    )
+    .unwrap();
+    git(&f.project, &["add", "README.md"]);
+    let kept = call(
+        s,
+        "POST",
+        "/api/workspace/git/ignore",
+        json!({"path":"README.md"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(kept["tracked"], true, "{kept}");
+    assert_eq!(git(&f.project, &["diff", "--cached", "--name-only"]), "");
+    assert_eq!(git(&f.project, &["ls-files", "README.md"]), "README.md");
+    assert!(!fs::read_to_string(f.project.join(".gitignore"))
+        .unwrap()
+        .contains("README.md"));
 
     // The project's own hooks: asked once, remembered, changeable.
     let hook = f.project.join(".git/hooks/pre-commit");
@@ -540,6 +589,7 @@ async fn secrets_are_caught_before_commit_and_push_and_hooks_are_asked_once() {
     .await
     .unwrap();
     assert_eq!(ask["needs_hooks_choice"], true, "{ask}");
+    assert_eq!(ask["hooks_changed"], false);
     assert_eq!(ask["hooks"][0]["name"], "pre-commit");
     assert_eq!(ask["hooks"][0]["preview"], "touch hook-ran");
     let skipped = call(
@@ -579,18 +629,57 @@ async fn secrets_are_caught_before_commit_and_push_and_hooks_are_asked_once() {
     assert_eq!(ran["ok"], true, "{ran}");
     assert_eq!(ran["hooks_ran"], true);
     assert!(f.project.join("hook-ran").exists());
-    // A failing hook stops the commit and says why.
+    // A commit that fails for Git's own reason does not blame the hooks.
+    let nothing = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"Nothing"}),
+    )
+    .await
+    .unwrap_err();
+    let nothing = format!("{nothing:#}");
+    assert!(nothing.contains("nothing added to commit"), "{nothing}");
+    assert!(nothing.starts_with("Git could not commit"), "{nothing}");
+    assert!(!nothing.contains("hook stopped"), "{nothing}");
+    // A changed hook asks again before it runs.
     fs::write(
         &hook,
         "#!/bin/sh\necho 'lint failed: 2 problems' >&2\nexit 1\n",
     )
     .unwrap();
     stage("# Demo\n\nFour\n");
-    let stopped = call(
+    let changed = call(
         s,
         "POST",
         "/api/workspace/git/commit",
         json!({"message":"Four"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(changed["needs_hooks_choice"], true, "{changed}");
+    assert_eq!(changed["hooks_changed"], true);
+    let settings = call(s, "GET", "/api/workspace/git/hooks", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(settings["run"], Value::Null, "{settings}");
+    assert_eq!(settings["changed"], true);
+    // "Run them" holds only for the hooks the question showed.
+    let stale = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"Four","hooks":"run","hooks_fingerprint":"an older one"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stale["needs_hooks_choice"], true, "{stale}");
+    // A failing hook stops the commit and says which one.
+    let stopped = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"Four","hooks":"run","hooks_fingerprint":changed["hooks_fingerprint"]}),
     )
     .await
     .unwrap_err();
@@ -598,5 +687,25 @@ async fn secrets_are_caught_before_commit_and_push_and_hooks_are_asked_once() {
         format!("{stopped:#}").contains("lint failed"),
         "{stopped:#}"
     );
-    assert!(format!("{stopped:#}").contains("hooks stopped the commit"));
+    assert!(
+        format!("{stopped:#}").contains("pre-commit hook stopped the commit"),
+        "{stopped:#}"
+    );
+    // What a hook runs is often set elsewhere: `npm test` is a
+    // package.json script, and editing it asks again too.
+    fs::write(
+        f.project.join("package.json"),
+        r#"{"scripts":{"test":"node -e 1"}}"#,
+    )
+    .unwrap();
+    let runner = call(
+        s,
+        "POST",
+        "/api/workspace/git/commit",
+        json!({"message":"Four"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(runner["needs_hooks_choice"], true, "{runner}");
+    assert_eq!(runner["hooks_changed"], true);
 }

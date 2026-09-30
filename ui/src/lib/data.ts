@@ -15,6 +15,8 @@ export type BackupManifest = {
   reason: "manual" | "before-restore" | "before-repair" | "upgrade-copy";
   files: BackupFile[];
   raw_copy: boolean;
+  /** Keys kept in the keyring that could not be read into the backup. */
+  keys_left_out?: string[];
 };
 
 export type ListedBackup = {

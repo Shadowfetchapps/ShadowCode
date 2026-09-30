@@ -3880,7 +3880,13 @@ export function installFakeBackend(options: FakeOptions = {}) {
     }
     if (path === "/api/workspace/git/hooks") {
       if (method === "POST") state.gitHooksRun = body.run;
-      return { workspace: "/work/demo", hooks: [], run: state.gitHooksRun };
+      return {
+        workspace: "/work/demo",
+        hooks: [],
+        run: state.gitHooksRun,
+        changed: false,
+        fingerprint: "",
+      };
     }
     if (path === "/api/approvals/always" && method === "GET") {
       return { workspace: "/work/demo", commands: state.alwaysAllowed };

@@ -243,3 +243,65 @@ it("waits for the agent before switching branches or committing", async () => {
   ).toBe(false);
   await act(async () => undefined);
 });
+
+it("pushes anyway only the commit that was checked", async () => {
+  const scanned = "0123456789abcdef0123456789abcdef01234567";
+  vi.mocked(forgeApi.push)
+    .mockResolvedValueOnce({
+      ok: false,
+      remote: "",
+      branch: "",
+      output: "",
+      secrets: [
+        {
+          path: ".env",
+          line: null,
+          kind: "an environment file",
+          preview: "the whole file",
+          commit: "0123456789ab",
+        },
+      ],
+      scanned,
+      error: "1 change looks like it contains a secret. Nothing was pushed.",
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      remote: "origin",
+      branch: "feature/login",
+      output: "",
+    });
+  const { toast } = mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Push" }));
+  expect(
+    await screen.findByText("These commits may contain a secret"),
+  ).toBeTruthy();
+  expect(screen.getByText(/Commits made since then stay/)).toBeTruthy();
+  expect(forgeApi.push).toHaveBeenLastCalledWith("", undefined);
+  fireEvent.click(screen.getByRole("button", { name: "Push anyway" }));
+  await waitFor(() =>
+    expect(forgeApi.push).toHaveBeenLastCalledWith("", scanned),
+  );
+  await waitFor(() =>
+    expect(toast).toHaveBeenCalledWith("Pushed feature/login to origin", "ok"),
+  );
+});
+
+it("a push that could not all be checked asks before it goes", async () => {
+  vi.mocked(forgeApi.push).mockResolvedValueOnce({
+    ok: false,
+    remote: "",
+    branch: "",
+    output: "",
+    secrets: [],
+    secrets_unchecked:
+      "More than 500 commits would be pushed; only the newest 500 were checked for secrets.",
+    scanned: "0123456789abcdef0123456789abcdef01234567",
+  });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Push" }));
+  expect(
+    await screen.findByText("These commits weren’t all checked"),
+  ).toBeTruthy();
+  expect(screen.getByText(/only the newest 500 were checked/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Push anyway" })).toBeTruthy();
+});

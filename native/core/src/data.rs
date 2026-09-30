@@ -7,7 +7,9 @@
 //! (`~/.config/shadowcode/agents`) and plugin install records, plus
 //! `manifest.json` with each file's size and SHA-256. API keys
 //! (`secrets.env`) and remote-access pairing (`remote.json`) are copied only
-//! when the user asks for them.
+//! when the user asks for them; keys kept in the desktop keyring are then
+//! written into the backup's `secrets.env`, and a restore puts them back in
+//! `secrets.env`.
 //!
 //! **Restore** and **reset** replace files the running engine has open, so
 //! they are scheduled: the request validates everything, stages the files in
@@ -44,6 +46,7 @@ const LAST: &str = "last-data-operation.json";
 /// State-folder copy of the files a scheduled restore will put in place.
 const STAGING: &str = "pending-restore";
 const DATABASE: &str = "state/shadow-agent.db";
+const SECRETS: &str = "config/secrets.env";
 /// Folders in the data directory a reset leaves where they are: the backups
 /// themselves, Git worktrees holding project changes (Git keeps pointing at
 /// them) and large downloads the user would otherwise fetch again.
@@ -88,6 +91,10 @@ pub struct Manifest {
     /// backed up before a restore), so its files were copied as they were.
     #[serde(default)]
     pub raw_copy: bool,
+    /// Keys kept in the keyring that could not be read into the backup (it
+    /// was locked or out of reach).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys_left_out: Vec<String>,
 }
 
 /// Where backups go unless the user picks another folder.
@@ -369,7 +376,12 @@ fn write_backup(paths: &AppPaths, folder: &Path, options: BackupOptions<'_>) -> 
             },
         );
     }
+    // With keys in the keyring, the backup's secrets.env is written below.
+    let keyring = options.include_secrets && !crate::keyring::listed(paths).is_empty();
     for (source, relative) in profile_files(paths, options.include_secrets)? {
+        if keyring && relative == SECRETS {
+            continue;
+        }
         let target = folder.join(&relative);
         private_directory(target.parent().context("backup folder")?)?;
         fs::copy(&source, &target)
@@ -382,6 +394,31 @@ fn write_backup(paths: &AppPaths, folder: &Path, options: BackupOptions<'_>) -> 
             sha256,
         });
     }
+    let mut keys_left_out = Vec::new();
+    if keyring {
+        // `secrets.env` with the keyring's keys written in, so a restore on
+        // another computer, or after a reset, brings every key back.
+        let mut values = crate::config::secrets(paths)?;
+        let (kept, missing) = crate::keyring::read_all(paths);
+        values.extend(kept);
+        keys_left_out = missing;
+        if !values.is_empty() {
+            let target = folder.join(SECRETS);
+            private_directory(target.parent().context("backup folder")?)?;
+            atomic_write(
+                &target,
+                crate::config::render_secrets(&values)?.as_bytes(),
+                true,
+            )?;
+            seal(&target)?;
+            let (bytes, sha256) = sha256_file(&target)?;
+            files.push(FileEntry {
+                path: SECRETS.into(),
+                bytes,
+                sha256,
+            });
+        }
+    }
     let manifest = Manifest {
         format: BACKUP_FORMAT.into(),
         format_version: BACKUP_FORMAT_VERSION,
@@ -392,6 +429,7 @@ fn write_backup(paths: &AppPaths, folder: &Path, options: BackupOptions<'_>) -> 
         reason: options.reason.into(),
         files,
         raw_copy,
+        keys_left_out,
     };
     for directory in ["state", "config", "agents"] {
         sync_dir(&folder.join(directory));
@@ -520,6 +558,7 @@ pub fn inspect(paths: &AppPaths, path: &Path) -> Result<Inspection> {
                     sha256,
                 }],
                 raw_copy: false,
+                keys_left_out: Vec::new(),
             },
         });
     }
@@ -825,6 +864,18 @@ fn apply_restore(paths: &AppPaths, pending: &Pending) -> Result<Value> {
             file.path
         );
     }
+    // secrets.env as it is, to put back if the restore fails: the backup
+    // below also holds the keyring's keys in it, which must not land in
+    // the file.
+    let secrets = resolve(paths, SECRETS)?;
+    let original_secrets = match fs::read(&secrets) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(anyhow::Error::from(error)
+                .context("Could not read secrets.env before restoring; nothing was restored"))
+        }
+    };
     // Keep what is about to be replaced.
     let (before, _) = create_backup(
         paths,
@@ -852,7 +903,7 @@ fn apply_restore(paths: &AppPaths, pending: &Pending) -> Result<Value> {
         prepared.push((temporary, target, file.path.clone()));
     }
     let database = paths.database();
-    let mut replaced = Vec::new();
+    let mut replaced: Vec<(PathBuf, PathBuf, String)> = Vec::new();
     for (temporary, target, relative) in &prepared {
         if relative == DATABASE {
             // The old write-ahead log belongs to the old database; applying it
@@ -863,6 +914,13 @@ fn apply_restore(paths: &AppPaths, pending: &Pending) -> Result<Value> {
         }
         if let Err(error) = fs::rename(temporary, target) {
             for (_, target, relative) in &replaced {
+                if relative == SECRETS {
+                    let _ = match &original_secrets {
+                        Some(bytes) => atomic_write(target, bytes, true),
+                        None => fs::remove_file(target).map_err(Into::into),
+                    };
+                    continue;
+                }
                 let _ = fs::copy(before.join(relative), target);
             }
             for (temporary, _, _) in &prepared {
@@ -875,6 +933,15 @@ fn apply_restore(paths: &AppPaths, pending: &Pending) -> Result<Value> {
         }
         sync_dir(target.parent().unwrap_or(Path::new("/")));
         replaced.push((temporary.clone(), target.clone(), relative.clone()));
+    }
+    // The restored keys are read from secrets.env again, not from the
+    // keyring, which may hold other values or none on this computer.
+    if manifest.files.iter().any(|f| f.path == SECRETS) {
+        for name in crate::config::secrets(paths).unwrap_or_default().keys() {
+            if let Err(error) = crate::keyring::forget(paths, name) {
+                tracing::warn!("restore.keyring_list name={name} error={error:#}");
+            }
+        }
     }
     Ok(json!({
         "kind": "restore",

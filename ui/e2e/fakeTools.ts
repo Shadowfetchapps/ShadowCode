@@ -387,6 +387,7 @@ export function installFakeTools(options: FakeToolsOptions = {}) {
               commit: "0123456789ab",
             },
           ],
+          scanned: "0123456789abcdef0123456789abcdef01234567",
           error:
             "1 change looks like it contains a secret. Nothing was pushed.",
         };

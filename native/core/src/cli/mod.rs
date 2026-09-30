@@ -1069,6 +1069,21 @@ async fn execute(backend: &Backend, workspace: &Path, options: &Options) -> Resu
                 {"label": "Size", "value": format!("{:.1} MB", bytes as f64 / 1_000_000.0)},
                 {"label": "API keys", "value": if value["manifest"]["includes_secrets"] == true { "included: keep this backup private" } else { "not included" }},
             ]);
+            let left_out: Vec<&str> = value["manifest"]["keys_left_out"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            if !left_out.is_empty() {
+                let note = format!(
+                    "{} (the keyring was locked or out of reach; unlock it and back up again)",
+                    left_out.join(", ")
+                );
+                if let Some(items) = value["items"].as_array_mut() {
+                    items.push(json!({"label": "Not included", "value": note}));
+                }
+            }
             value
         }
         Command::Restore { .. } | Command::Reset { .. } => {

@@ -26,7 +26,8 @@ move the key out of `secrets.env` into the keyring, and back. The key is
 written to the new place and read back before it is removed from the old
 one. A locked keyring makes the key unavailable until you unlock it;
 ShadowCode never unlocks it for you. Headless machines and SSH sessions keep
-using `secrets.env`.
+using `secrets.env`: saving or removing a key there that lives in the keyring
+puts the new key in `secrets.env` and stops using the keyring's copy.
 
 To test the keyring code against a real Secret Service without touching your
 own keyring, run the ignored test in a private session:
