@@ -85,6 +85,32 @@ it("lets a scheduled resume be cancelled and a ready one reviewed", () => {
   expect(onResumeNow).toHaveBeenCalledWith(ready);
 });
 
+it("words a waiting resume from the time it is shown", () => {
+  const at = new Date(2026, 8, 30, 3, 40).getTime() / 1000;
+  const resume: Extract<ChatItem, { kind: "resume" }> = {
+    kind: "resume",
+    resumeId: "r1",
+    state: "scheduled",
+    at,
+    label: "Codex",
+    target: "cli:codex",
+    // Worded when it was scheduled, the evening before.
+    text: "Will resume on Codex tomorrow at 3:40 AM, when its plan limit resets.",
+  };
+  const afterMidnight = new Date(2026, 8, 30, 1, 0).getTime() / 1000;
+  render(
+    <ResumeCard
+      item={resume}
+      onCancel={vi.fn()}
+      onResumeNow={vi.fn()}
+      now={afterMidnight}
+    />,
+  );
+  const card = screen.getByRole("status", { name: "Scheduled resume" });
+  expect(card.textContent).toMatch(/^Will resume on Codex at /);
+  expect(card.textContent).not.toContain("tomorrow");
+});
+
 it("lists what ran under Run details", () => {
   render(
     <RunDetails

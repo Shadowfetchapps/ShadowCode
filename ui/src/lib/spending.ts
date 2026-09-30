@@ -6,8 +6,9 @@ export function money(usd: number): string {
   return `$${Math.max(0, usd).toFixed(2)}`;
 }
 
-/** A clock time for "Resume at 3:40 PM": the time alone today, "tomorrow
- * at …" tomorrow, the weekday and time within a week, else the date. */
+/** When a resume runs, with its preposition: "at 3:40 PM" today, "tomorrow
+ * at …" tomorrow, the weekday and time within a week, else the date
+ * ("Resume on Codex tomorrow at 3:40 AM"). */
 export function clockTime(seconds: number, now = Date.now() / 1000): string {
   const at = new Date(seconds * 1000);
   const today = new Date(now * 1000);
@@ -18,11 +19,21 @@ export function clockTime(seconds: number, now = Date.now() / 1000): string {
   const day = (d: Date) =>
     new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const days = Math.round((day(at) - day(today)) / 86_400_000);
-  if (days <= 0) return time;
+  if (days <= 0) return `at ${time}`;
   if (days === 1) return `tomorrow at ${time}`;
   if (days < 7)
     return `${at.toLocaleDateString(undefined, { weekday: "long" })} at ${time}`;
   return `${at.toLocaleDateString(undefined, { month: "short", day: "numeric" })} at ${time}`;
+}
+
+/** A waiting resume's line, worded from `now` (so "tomorrow" becomes
+ * "at …" after midnight). */
+export function scheduledResumeText(
+  label: string,
+  at: number,
+  now = Date.now() / 1000,
+): string {
+  return `Will resume on ${label} ${clockTime(at, now)}, when its plan limit resets.`;
 }
 
 const DROPPED = new Set(["disconnected", "stalled", "connect_failed"]);

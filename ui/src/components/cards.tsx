@@ -1,6 +1,7 @@
 import { memo, useState } from "react";
 import type { CommandResult } from "../api";
 import type { SubagentRun } from "../lib/subagents";
+import type { TaskMode } from "../lib/effort";
 import { readableError } from "../lib/transport";
 import { Markdown } from "./Markdown";
 
@@ -65,6 +66,10 @@ export type ChatItem = (
       text: string;
       /** The continuation to send (needs_consent). */
       task?: string;
+      /** The limited task's mode and web access, which the continuation
+       * keeps. */
+      mode?: TaskMode;
+      web?: boolean;
     }
   /** What happened after a plan limit (limit.fallback). */
   | {

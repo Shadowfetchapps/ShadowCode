@@ -34,7 +34,7 @@ function ResumeButton({
       title={`Continue this conversation on ${item.from} when its plan resets. You can cancel it until then.`}
       onClick={() => onSchedule(item)}
     >
-      Resume on {item.from} at {clockTime(item.resetsAt, current)}
+      Resume on {item.from} {clockTime(item.resetsAt, current)}
     </button>
   );
 }

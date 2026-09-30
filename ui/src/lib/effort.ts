@@ -56,3 +56,6 @@ export const MODES: {
 ];
 export const purposeFor = (mode: TaskMode) =>
   MODES.find((m) => m.id === mode)?.purpose || "coder";
+/** The composer mode of an engine job's `mode` (`plan`, `review`, `code`). */
+export const modeOfJob = (mode: unknown): TaskMode =>
+  mode === "plan" ? "plan" : mode === "review" ? "ask" : "code";

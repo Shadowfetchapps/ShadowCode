@@ -30,7 +30,9 @@ import {
   parseRunRecord,
   retriedText,
   retryText,
+  scheduledResumeText,
 } from "./spending";
+import { modeOfJob } from "./effort";
 
 const ROUTE_PRODUCTS: Record<string, string> = {
   "cli:codex": "Codex",
@@ -1299,13 +1301,13 @@ function applySpendAndResume(
   const when = clockTime(at, event.ts || undefined);
   const text =
     state === "scheduled"
-      ? `Will resume on ${label} at ${when}, when its plan limit resets.`
+      ? scheduledResumeText(label, at, event.ts || undefined)
       : state === "cancelled"
         ? `The resume on ${label} was cancelled.`
         : state === "started"
           ? `Resumed on ${label} as scheduled.`
           : state === "missed"
-            ? `ShadowCode wasn't open at ${when}, so this conversation didn't resume on ${label}. Continue it yourself when you're ready.`
+            ? `ShadowCode wasn't open ${when}, so this conversation didn't resume on ${label}. Continue it yourself when you're ready.`
             : state === "needs_consent"
               ? `${label}'s limit has reset. Continuing there sends this conversation's newer turns to ${label}; review what is sent first.`
               : `The resume on ${label} didn't start: ${String(p.reason || "unknown error")}`;
@@ -1319,6 +1321,8 @@ function applySpendAndResume(
     target: String(p.target || ""),
     text,
     task: p.task ? String(p.task) : undefined,
+    mode: modeOfJob(p.mode),
+    web: p.web === true,
   };
   // One row per scheduled resume, updated as it runs or is cancelled; the
   // plan-limit card knows whether a resume is waiting.

@@ -1007,13 +1007,14 @@ serve`; one-shot CLI commands never run it).
   `execution_target` to `target`. It never switches to another model: when
   `target` cannot be resolved or started, nothing runs and the conversation
   says why.
-- Events on the limited task (`resume_id, at, target, label, job_id` in each):
+- Events on the limited task (`resume_id, at, target, label, mode, web,
+  job_id` in each; `mode` and `web` are the limited task's):
   `resume.scheduled {scheduler}`, `resume.cancelled`, `resume.started`
   (`job_id` is the new job), `resume.missed` (ShadowCode was not running and
   the time is more than 12 hours past), `resume.failed {reason, task}`, and
   `resume.needs_consent {reason, task}` (continuing would hand newer turns to
-  a cloud route; the window starts `task` on `target` through the usual
-  consent dialog).
+  a cloud route; the window starts `task` on `target`, in the same `mode`
+  and with the same `web`, through the usual consent dialog).
 
 ### Usage, cost, retries and compaction
 

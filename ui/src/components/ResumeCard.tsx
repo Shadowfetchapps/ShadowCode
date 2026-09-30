@@ -1,4 +1,5 @@
 import type { ChatItem } from "./cards";
+import { scheduledResumeText } from "../lib/spending";
 
 type ResumeItem = Extract<ChatItem, { kind: "resume" }>;
 
@@ -10,20 +11,27 @@ export function ResumeCard({
   disabled,
   onCancel,
   onResumeNow,
+  now,
 }: {
   item: ResumeItem;
   disabled?: boolean;
   onCancel: () => void;
   onResumeNow: (item: ResumeItem) => void;
+  now?: number;
 }) {
   const warning = item.state === "failed" || item.state === "missed";
+  // "tomorrow" is true only until midnight: a waiting resume is worded now.
+  const text =
+    item.state === "scheduled" && item.at
+      ? scheduledResumeText(item.label, item.at, now)
+      : item.text;
   return (
     <div
       className={`msg-note limit-note resume-note${warning ? " warning" : ""}`}
       role="status"
       aria-label="Scheduled resume"
     >
-      <span>{item.text}</span>
+      <span>{text}</span>
       {item.state === "scheduled" && (
         <button
           type="button"

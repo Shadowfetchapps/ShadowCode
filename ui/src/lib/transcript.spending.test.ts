@@ -246,4 +246,38 @@ describe("plan limits, resumes and Try on", () => {
       target: "cli:codex",
     });
   });
+
+  it("keeps the limited task's mode and web access on the resume card", () => {
+    const [ask] = of(
+      replay([
+        ...limited,
+        event(6, "resume.needs_consent", {
+          resume_id: "r1",
+          label: "Codex",
+          target: "cli:codex",
+          mode: "review",
+          web: true,
+          task: "Continue where Codex stopped.",
+        }),
+      ]).items,
+      "resume",
+    );
+    expect(ask).toMatchObject({ mode: "ask", web: true });
+    const [plan] = of(
+      replay([
+        ...limited,
+        event(6, "resume.scheduled", {
+          resume_id: "r1",
+          at: 1_790_010_000,
+          label: "Codex",
+          target: "cli:codex",
+          mode: "plan",
+          web: false,
+        }),
+      ]).items,
+      "resume",
+    );
+    expect(plan).toMatchObject({ mode: "plan", web: false });
+    expect(plan.text).not.toContain("at tomorrow");
+  });
 });

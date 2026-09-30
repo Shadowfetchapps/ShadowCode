@@ -6,6 +6,7 @@ import {
   parseRunRecord,
   retryText,
   runDetailRows,
+  scheduledResumeText,
 } from "./spending";
 
 describe("spending helpers", () => {
@@ -41,8 +42,17 @@ describe("spending helpers", () => {
     const now = new Date(2026, 8, 29, 22, 0).getTime() / 1000;
     const later = new Date(2026, 8, 29, 23, 30).getTime() / 1000;
     const tomorrow = new Date(2026, 8, 30, 9, 15).getTime() / 1000;
-    expect(clockTime(later, now)).not.toContain("tomorrow");
+    expect(clockTime(later, now)).toMatch(/^at /);
     expect(clockTime(tomorrow, now)).toMatch(/^tomorrow at /);
+    // The phrase carries its own "at": never "at tomorrow at …".
+    const line = scheduledResumeText("Codex", tomorrow, now);
+    expect(line).toMatch(/^Will resume on Codex tomorrow at .+, when/);
+    expect(line).not.toContain("at tomorrow");
+    // After midnight the same resume is today's.
+    const after = new Date(2026, 8, 30, 0, 30).getTime() / 1000;
+    expect(scheduledResumeText("Codex", tomorrow, after)).toMatch(
+      /^Will resume on Codex at /,
+    );
   });
 
   it("reads a run record and lists it for Run details", () => {
