@@ -1092,6 +1092,19 @@ fn project_switches_hold_in_the_projects_managed_worktrees() {
         assert!(!vendor.text.contains("Untrusted repository"));
         assert!(!vendor.text.contains("deploy"));
     }
+    // Switching from a worktree's conversation changes the project's switch.
+    set_enabled(&f.paths, Some(&child), "project:AGENTS.md", true).unwrap();
+    let guidance =
+        |dir: &Path| Book::load(&f.paths, Some(dir)).guidance(&Workspace::open(dir).unwrap());
+    assert!(guidance(&f.project).contains("Untrusted repository"));
+    set_enabled(&f.paths, Some(&task), "project:AGENTS.md", false).unwrap();
+    assert!(!guidance(&f.project).contains("Untrusted repository"));
+    assert!(!guidance(&child).contains("Untrusted repository"));
+    let state = State::load(&f.paths).unwrap();
+    assert_eq!(
+        state.projects.keys().collect::<Vec<_>>(),
+        [&f.project.to_string_lossy().into_owned()]
+    );
     // Another project keeps its own switches.
     let other = f._root.path().join("other");
     put(&other, "AGENTS.md", "Untrusted repository notes.\n");

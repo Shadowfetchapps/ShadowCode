@@ -243,6 +243,11 @@ async fn a_worktree_task_runs_beside_the_main_checkout_and_applies() {
     assert_eq!(record["workspace"], json!(project));
     assert_eq!(started["workspace"], json!(worktree));
     assert_ne!(started["session_id"], main["session_id"]);
+    // While its conversation is open, "Always allow" means the project's.
+    let always = call(&f.service, "GET", "/api/approvals/always", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(always["workspace"], json!(project));
     assert_eq!(
         fs::read_to_string(worktree.join("notes.txt")).unwrap(),
         "uncommitted\n"

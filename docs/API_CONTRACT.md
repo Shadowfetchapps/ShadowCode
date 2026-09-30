@@ -941,7 +941,8 @@ Routes:
   project). Stored in ShadowCode's database (`native_meta`
   `always_allow:<project>`), never in the repository; at most 100. A
   subagent, role or worktree task working in its own worktree uses (and
-  adds to) its project's commands.
+  adds to) its project's commands, and the default while a worktree task's
+  conversation is selected is its project.
 - `DELETE /api/approvals/always {workspace?, command}` → the same, without it.
 
 ### Feed

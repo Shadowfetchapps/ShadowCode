@@ -805,7 +805,8 @@ fn agent_files(dir: &Path) -> Vec<(String, String, String)> {
         .collect()
 }
 
-/// Switch one item on or off. Project items are saved for `project`.
+/// Switch one item on or off. Project items are saved for `project`; in a
+/// managed worktree, for the project it was made from.
 pub fn set_enabled(
     paths: &AppPaths,
     project: Option<&Path>,
@@ -828,21 +829,42 @@ pub(crate) fn set_enabled_with(
         id.len() <= 1024 && !id.chars().any(char::is_control),
         "Invalid rule item"
     );
+    // The folders whose switches hold here, the project itself last.
+    let folders: Vec<String> = project
+        .map(|p| {
+            let mut folders = vec![p.to_path_buf()];
+            folders.extend(crate::worktrees::sources_of(paths, p));
+            folders
+                .into_iter()
+                .map(|f| f.to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
     State::update(paths, |state| {
-        let set = if id.starts_with("project:") {
-            let project = project.context("Open a project to switch its files on or off")?;
-            state
-                .projects
-                .entry(project.to_string_lossy().into_owned())
-                .or_default()
+        if id.starts_with("project:") {
+            let project = folders
+                .last()
+                .context("Open a project to switch its files on or off")?;
+            if enabled {
+                for folder in &folders {
+                    if let Some(set) = state.projects.get_mut(folder) {
+                        set.remove(id);
+                    }
+                }
+            } else {
+                state
+                    .projects
+                    .entry(project.clone())
+                    .or_default()
+                    .insert(id.to_owned());
+            }
         } else {
             ensure!(id.starts_with("profile:"), "Unknown rule item {id}");
-            &mut state.disabled
-        };
-        if enabled {
-            set.remove(id);
-        } else {
-            set.insert(id.to_owned());
+            if enabled {
+                state.disabled.remove(id);
+            } else {
+                state.disabled.insert(id.to_owned());
+            }
         }
         state.projects.retain(|_, set| !set.is_empty());
         Ok(())
