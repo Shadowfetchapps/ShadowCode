@@ -51,9 +51,10 @@ Real work:
 - **Roles.** A model or subscription per step: plan, implement, review
   (**Settings › Roles**, **More › Roles**).
 - **Spending limits** for paid models (ask at $1 a task and $10 a day by
-  default), a price estimate before sending, *Provider busy, retrying (2 of
-  5)*, **Resume at** a plan's reset time, **Try on…** another model, and
-  **Run details** for every task.
+  default; the GitHub Action's `max-cost` input sets its limit), a price
+  estimate before sending, *Provider busy, retrying (2 of 5)*, **Resume at**
+  a plan's reset time, **Try on…** another model, and **Run details** for
+  every task.
 - **Stuck detection** pauses a task that fails the same way three times or
   edits a file back and forth (**Keep going**, **Give a hint**, **Try
   another model**, **Stop**). `/compact [what to keep]` and `/pin` keep what

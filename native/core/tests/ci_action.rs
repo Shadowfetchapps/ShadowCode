@@ -95,6 +95,45 @@ fn the_action_is_a_composite_with_safe_steps() {
     assert!(text(get(run, "run")).contains("run --json --approval \"$APPROVAL\""));
 }
 
+#[test]
+fn the_spending_limit_can_be_raised_and_is_explained() {
+    // A fresh profile limits each task on a paid model to $1, and the CLI's
+    // advice (--max-cost, --interactive) cannot be followed in a workflow.
+    let action = load("action.yml");
+    let input = get(get(&action, "inputs"), "max-cost");
+    assert_eq!(input["required"], false);
+    assert_eq!(text(get(input, "default")), "");
+    let steps = get(get(&action, "runs"), "steps").as_sequence().unwrap();
+    let step = |name: &str| {
+        steps
+            .iter()
+            .find(|s| text(get(s, "name")) == name)
+            .unwrap_or_else(|| panic!("{name}"))
+    };
+    let run = step("Run the task");
+    assert_eq!(
+        text(get(get(run, "env"), "MAX_COST")),
+        "${{ inputs.max-cost }}"
+    );
+    let script = text(get(run, "run"));
+    assert!(script.contains("args+=(--max-cost \"$MAX_COST\")"));
+    // The daily limit must not stop a larger task first.
+    assert!(script.contains("sc config spending.daily_usd \"$MAX_COST\""));
+    assert!(text(get(step("Check inputs"), "run")).contains("max-cost must be"));
+    let deliver = text(get(step("Deliver the result"), "run"));
+    assert!(deliver.contains("spending_limit)"));
+    assert!(deliver.contains("`max-cost`"));
+    assert!(text(get(step("Report the outcome"), "run")).contains("spending_limit"));
+    let exit_code = text(get(
+        get(get(&action, "outputs"), "exit-code"),
+        "description",
+    ));
+    assert!(exit_code.contains("spending limit"), "{exit_code}");
+    let readme = fs::read_to_string(root().join("README.md")).unwrap();
+    assert!(readme.contains("| `max-cost`"));
+    assert!(readme.contains("2 stopped for approval or at the spending\nlimit"));
+}
+
 fn triggers(workflow: &Value) -> Value {
     // YAML 1.1 readers turn `on` into `true`; accept both spellings.
     workflow

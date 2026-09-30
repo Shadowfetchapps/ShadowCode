@@ -45,6 +45,7 @@ command line runs directly.
 | `endpoint`          | empty                             | An OpenAI-compatible base URL, for providers other than OpenRouter.                                                |
 | `mode`              | `code`                            | `code` may edit files; `plan` and `ask` are read-only.                                                             |
 | `approval`          | `cancel`                          | When the task asks for approval (to run a command, for example): `cancel` stops it; `approve` grants its requests. |
+| `max-cost`          | empty ($1 per task)               | Most the task may spend on a paid API model, in US dollars (for example `2.50`). At the limit the task stops.      |
 | `output`            | `comment`                         | `pull-request`, `comment` or `none`.                                                                               |
 | `github-token`      | `github.token`                    | Used only for the comment or pull request, after ShadowCode finished.                                              |
 | `issue-number`      | the event's issue or pull request | Where to comment.                                                                                                  |
@@ -55,10 +56,10 @@ command line runs directly.
 
 ## Outputs
 
-`exit-code` (0 done, 1 failed, 2 stopped for approval), `status`
-(`completed`, `failed`, `needs_approval`, …), `changed` (`true` when files
-changed), `result-file` (the JSON result of `shadowcode run --json`) and
-`pull-request-url`.
+`exit-code` (0 done, 1 failed, 2 stopped for approval or at the spending
+limit), `status` (`completed`, `failed`, `needs_approval`, `spending_limit`,
+…), `changed` (`true` when files changed), `result-file` (the JSON result of
+`shadowcode run --json`) and `pull-request-url`.
 
 ## What it does, step by step
 
@@ -70,7 +71,10 @@ changed), `result-file` (the JSON result of `shadowcode run --json`) and
    checkout, sets permissions to "allow edits" (shell commands still ask),
    and runs `shadowcode run --json --approval <approval>`. Only this step
    receives the API key, and ShadowCode starts the agent's shell commands
-   with a minimal environment that does not include it.
+   with a minimal environment that does not include it. On a paid API model
+   the task stops once it has spent `max-cost` ($1 by default): the comment
+   says how much it spent, and files it changed are not turned into a pull
+   request. Set `max-cost` higher for bigger tasks.
 4. **Delivers the result** in a separate step with the token: for
    `pull-request`, when files changed and the task succeeded, commits to a
    new `shadowcode/run-<id>` branch, pushes it, opens a pull request and

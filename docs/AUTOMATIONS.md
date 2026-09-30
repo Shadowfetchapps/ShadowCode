@@ -131,3 +131,7 @@ permissions).
 `shadowcode run --approval approve` (used by the action's `approval:
 approve`) grants the task's own approval requests. It is meant for machines
 that are thrown away after the job, like GitHub-hosted runners.
+
+On a paid API model a task stops at the spending limit for one task ($1
+unless the action's `max-cost` input says otherwise) and exits with code 2;
+nobody is there to answer "Continue". The comment says how much it spent.
