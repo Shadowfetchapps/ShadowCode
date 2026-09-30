@@ -184,7 +184,11 @@ of a pipeline or `&&` list, `$(…)` substitutions, heredocs, `sudo` and
 `bash -c '…'`, and what `find -exec`, `xargs` and `fd -x` run. The riskiest
 step decides the tag. A command it can't read completely (a path or program
 that comes from a variable, for example) says so, and is never tagged
-*Read-only*. Deleting the project's
+*Read-only*. Neither is a command that sets a variable which changes what
+runs (`PATH`, `LD_PRELOAD`, `GIT_CONFIG_*`, a pager or an editor, before
+the command, with `env` or with `export`), or a reader given an option that
+starts another program or writes a file (`bat --pager`,
+`rg --hostname-bin`, `cloc --vcs`, `cloc --out`). Deleting the project's
 `.git` folder, or the whole project, is marked as something Rewind can't
 undo, because Rewind's checkpoints are kept there. Subscriptions' requests
 (Codex, Claude Code, Cursor, Grok, Antigravity) are explained the same way.
