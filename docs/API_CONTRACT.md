@@ -1953,8 +1953,9 @@ recorded once per conversation when a command runs without bubblewrap.
   [Run record](#run-record); model ids other than `api:openrouter:…` and
   `cli:…` are hidden because they can name local files or private hosts) and
   `log: {note, lines}`, the app log's last lines (at most 96 KiB; see
-  [App log](#app-log)) with secrets redacted again and every file path
-  replaced by `<path>`.
+  [App log](#app-log)) with secrets redacted again, every file path
+  replaced by `<path>`, and `model`, `model_id` and `target` values other
+  than those public ids or a subscription's name written as `"(hidden)"`.
 - `GET /api/diagnostic-exports/{id}` → the same snapshot, for 10 minutes; at
   most four are retained per engine. Unknown or expired ids fail ("Diagnostic
   snapshot expired; run Doctor again"); Doctor is not rerun. The desktop

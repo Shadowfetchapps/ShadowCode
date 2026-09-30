@@ -26,11 +26,43 @@ fn scrub_paths(line: &str) -> String {
     re.replace_all(line, "<path>").into_owned()
 }
 
+/// Public model ids (OpenRouter and vendor CLIs); other ids and names can
+/// name local files, private hosts or a custom model.
+fn public_model(id: &str) -> bool {
+    id.starts_with(crate::openrouter::ID_PREFIX) || id.starts_with("cli:")
+}
+
+/// A log line without private model names: its `model`, `model_id` and
+/// `target` fields keep only public ids ([`public_model`]) and a
+/// subscription's name (a vendor task's `model`). The log itself keeps them
+/// for the user; lines written by any version pass through here.
+fn scrub_models(line: &str) -> String {
+    static FIELD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = FIELD.get_or_init(|| {
+        regex::Regex::new(r#"\b(model|model_id|target)="((?:[^"\\]|\\.)*)""#)
+            .expect("model field regex")
+    });
+    let vendor = |name: &str| {
+        crate::cli_agent::Vendor::ALL
+            .iter()
+            .any(|v| name == v.label() || name == v.product_label())
+    };
+    re.replace_all(line, |caps: &regex::Captures| {
+        let (field, value) = (&caps[1], &caps[2]);
+        if public_model(value) || (field == "model" && vendor(value)) {
+            caps[0].to_owned()
+        } else {
+            format!("{field}=\"(hidden)\"")
+        }
+    })
+    .into_owned()
+}
+
 /// A run record as it may leave the computer: public model ids (OpenRouter
 /// and vendor CLIs) stay; other ids can name local files or private hosts.
 fn public_run(run: &Value) -> Value {
     let id = run["model_id"].as_str().unwrap_or("");
-    let public = id.starts_with(crate::openrouter::ID_PREFIX) || id.starts_with("cli:");
+    let public = public_model(id);
     let mut out = serde_json::Map::new();
     for key in [
         "provider",
@@ -144,8 +176,8 @@ fn project(report: &Value, extra: &Value, captured_at: &str) -> Result<String> {
             "run": public_run(&job["run"]),
         })).collect::<Vec<_>>(),
         "log": {
-            "note": "The app log's last lines: events, errors and timings only, with secrets and paths removed.",
-            "lines": extra["log"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|line| scrub_paths(&crate::redaction::redact_text(line).text)).collect::<Vec<_>>(),
+            "note": "The app log's last lines: events, errors and timings only, with secrets, paths and private model names removed.",
+            "lines": extra["log"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|line| scrub_paths(&crate::redaction::redact_text(&scrub_models(line)).text)).collect::<Vec<_>>(),
         },
     });
     let content = format!("{}\n", serde_json::to_string_pretty(&value)?);
@@ -250,7 +282,13 @@ mod tests {
             "log": [
                 "2026-09-29T10:00:00.000+02:00 INFO  event: tool.completed task=\"t\" tool=\"read_file\" success=true",
                 format!("2026-09-29T10:00:01.000+02:00 WARN  engine: could not read ~/work/app/.env with {secret}"),
-                "2026-09-29T10:00:02.000+02:00 ERROR engine: failed in /opt/project/src/main.rs"
+                "2026-09-29T10:00:02.000+02:00 ERROR engine: failed in /opt/project/src/main.rs",
+                "2026-09-29T10:00:03.000+02:00 INFO  event: agent.started task=\"t\" job_id=\"j\" mode=\"code\" model=\"acme-internal-coder\" native=true",
+                "2026-09-29T10:00:03.000+02:00 INFO  event: routing.selected task=\"t\" model_id=\"local:gguf:acme-7b\" provider=\"llamacpp\" route=\"local_llamacpp\"",
+                "2026-09-29T10:00:04.000+02:00 INFO  event: spend.unknown task=\"t\" model=\"acme-internal-coder\"",
+                "2026-09-29T10:00:05.000+02:00 INFO  event: routing.selected task=\"t\" model_id=\"api:openrouter:qwen/qwen3-coder\" provider=\"openrouter\"",
+                "2026-09-29T10:00:06.000+02:00 INFO  event: agent.started task=\"t\" job_id=\"j\" mode=\"code\" model=\"Codex (vendor agent)\" native=false vendor_agent=\"codex\"",
+                "2026-09-29T10:00:07.000+02:00 INFO  event: resume.scheduled task=\"t\" at=1790000000 target=\"cli:codex\""
             ]
         });
         let content = project(&json!({"checks":[]}), &extra, "2026-01-01T00:00:00Z").unwrap();
@@ -266,12 +304,31 @@ mod tests {
         assert_eq!(runs[1]["run"]["model"], Value::Null);
         assert_eq!(runs[2]["run"]["vendor_version"], "codex-cli 0.158.0");
         let lines = value["log"]["lines"].as_array().unwrap();
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 9);
         assert!(lines[0].as_str().unwrap().contains("tool=\"read_file\""));
-        for private in [secret, "secret-name", "/opt/project", "~/work", ".env"] {
+        for private in [
+            secret,
+            "secret-name",
+            "/opt/project",
+            "~/work",
+            ".env",
+            "acme-internal-coder",
+            "acme-7b",
+        ] {
             assert!(!content.contains(private), "{private}");
         }
         assert!(lines[2].as_str().unwrap().contains("failed in <path>"));
+        let line = |i: usize| lines[i].as_str().unwrap();
+        assert!(
+            line(3).contains(" model=\"(hidden)\" native=true"),
+            "{}",
+            line(3)
+        );
+        assert!(line(4).contains("model_id=\"(hidden)\" provider=\"llamacpp\""));
+        // Public ids and a subscription's product name stay.
+        assert!(line(6).contains("model_id=\"api:openrouter:qwen/qwen3-coder\""));
+        assert!(line(7).contains("model=\"Codex (vendor agent)\""));
+        assert!(line(8).contains("target=\"cli:codex\""));
     }
 
     #[test]
