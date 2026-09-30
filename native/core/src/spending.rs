@@ -432,8 +432,10 @@ impl Meter {
         Ok(Check::Clear)
     }
 
-    /// The card for a reached limit: the one already waiting, or a new one
-    /// (announced with `spend.limit_reached`).
+    /// The card for a reached limit: the one already waiting for this
+    /// limit, or a new one (announced with `spend.limit_reached`). A card
+    /// waiting for another limit, or for this one before a setting changed,
+    /// is lifted first.
     pub fn ask(
         &self,
         store: &Store,
@@ -443,7 +445,10 @@ impl Meter {
         now: f64,
     ) -> Result<Prompt> {
         if let Some(prompt) = self.pending() {
-            return Ok(prompt);
+            if prompt.kind == kind && prompt.limit == limit {
+                return Ok(prompt);
+            }
+            self.lift("limit_changed")?;
         }
         let (spent, estimated, step) = match kind {
             Kind::Task => {

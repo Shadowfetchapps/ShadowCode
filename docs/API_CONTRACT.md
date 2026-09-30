@@ -1122,7 +1122,8 @@ models on this computer and the offline preview are never limited.
     limit, is raised to `raise_to`: the limit plus one more step of the
     setting, past what is already spent) or `stop`. `reason` is set when
     no one answered but the limit stopped applying (a setting changed, or
-    the day's total reset).
+    the day's total reset); when the other limit, or a changed amount, is
+    what blocks now, a new `spend.limit_reached` card follows.
   - Event `spend.unknown {job_id, model, text}` once per task when a paid
     request has no known price; it is not counted as $0.
 - `POST /api/jobs/{id}/spending {prompt_id, action: "continue"|"stop"}`
