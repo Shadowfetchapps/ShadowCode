@@ -944,6 +944,9 @@ impl Service {
                 None => return Ok(None),
             },
         };
+        // A paid model's draft counts toward today's spending, and none is
+        // sent once today's limit is reached.
+        crate::spending::check_outside_task(&store, &cfg.spending, &model, crate::now())?;
         let facts = crate::redaction::redact_text(facts).text;
         let cancel = CancellationToken::new();
         let attempt = async {
@@ -964,6 +967,9 @@ impl Service {
                     |_| {},
                 )
                 .await?;
+            let mut usage = reply.usage;
+            crate::usage::price_turn(&mut usage, &prepared.config, &self.engine.paths().state);
+            crate::spending::record_outside_task(&store, &prepared.config, &usage)?;
             Ok::<_, anyhow::Error>((reply.text, name))
         };
         match tokio::time::timeout(MODEL_TIMEOUT, attempt).await {

@@ -639,6 +639,10 @@ conversation so far and the model's listed prices; a task that uses many
 tools can cost more. It is hidden for subscriptions, models on this computer,
 and models without listed prices.
 
+Commit and pull request drafts and **Explain this change** on a paid model
+count toward the daily total too. Once today's limit is reached they are not
+sent: a draft falls back to a plain summary of the changes.
+
 Change or turn off the limits in **Settings › Accounts › Spending limits**,
 which also shows what paid models have cost today. From the command line,
 `shadowcode run --max-cost 0.50 "…"` sets one task's limit.

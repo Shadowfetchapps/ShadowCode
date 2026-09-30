@@ -180,6 +180,56 @@ fn update_day<R>(store: &Store, now: f64, change: impl FnOnce(&mut Day) -> R) ->
     })
 }
 
+/// A turn's cost when it is known.
+fn cost_of(turn: &Usage) -> Option<f64> {
+    turn.cost_usd
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+}
+
+/// Add one priced request to today's total, or count it as a turn whose
+/// price is not known.
+fn add_to_day(store: &Store, now: f64, turn: &Usage) -> Result<()> {
+    match cost_of(turn) {
+        Some(cost) => update_day(store, now, |day| {
+            day.usd += cost;
+            day.estimated |= turn.cost_estimated;
+        }),
+        None => update_day(store, now, |day| day.unknown_turns += 1),
+    }
+}
+
+/// Before a paid request made outside any task (a commit message draft,
+/// "Explain this change"): refused once today's limit is reached, since
+/// there is no task to pause and ask in. Nothing to check for other models.
+pub fn check_outside_task(
+    store: &Store,
+    config: &SpendingConfig,
+    model: &ModelConfig,
+    now: f64,
+) -> Result<()> {
+    if !is_paid(model) {
+        return Ok(());
+    }
+    let day = today(store, now)?;
+    if let Some(limit) = daily_limit(config, &day) {
+        ensure!(
+            day.usd < limit,
+            "Today's spending limit for paid models ({}) is reached. Raise it in Settings › Accounts › Spending limits, or choose a subscription or a model on this computer.",
+            money(limit)
+        );
+    }
+    Ok(())
+}
+
+/// Count a priced request made outside any task toward today's total (a
+/// no-op for models that are not paid).
+pub fn record_outside_task(store: &Store, model: &ModelConfig, turn: &Usage) -> Result<()> {
+    if !is_paid(model) || (turn.turns == 0 && turn.total_tokens == 0) {
+        return Ok(());
+    }
+    add_to_day(store, crate::now(), turn)
+}
+
 /// The daily limit in force today: the setting, or what "Continue" raised
 /// it to.
 pub fn daily_limit(config: &SpendingConfig, day: &Day) -> Option<f64> {
@@ -336,20 +386,17 @@ impl Meter {
             return Ok(());
         }
         let now = crate::now();
-        match turn.cost_usd {
-            Some(cost) if cost.is_finite() && cost >= 0.0 => {
+        match cost_of(turn) {
+            Some(cost) => {
                 {
                     let mut state = self.state();
                     state.spent += cost;
                     state.estimated |= turn.cost_estimated;
                 }
-                update_day(store, now, |day| {
-                    day.usd += cost;
-                    day.estimated |= turn.cost_estimated;
-                })?;
+                add_to_day(store, now, turn)?;
             }
-            _ => {
-                update_day(store, now, |day| day.unknown_turns += 1)?;
+            None => {
+                add_to_day(store, now, turn)?;
                 let first = !std::mem::replace(&mut self.state().unknown_noted, true);
                 if first {
                     self.events.emit(

@@ -398,6 +398,62 @@ async fn suggestions_use_the_conversation_model_and_never_send_secret_files() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn paid_drafts_count_toward_today_and_stop_at_the_daily_limit() {
+    let server = support::server(|_, _| {
+        (
+            json!({"choices":[{"message":{"role":"assistant","content":"Add the login page"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":0.03}}),
+            Duration::ZERO,
+        )
+    })
+    .await;
+    let f = setup(&server.endpoint);
+    let s = &f.service;
+    // The conversation's model is billed per token.
+    Config::patch(
+        s.engine.paths(),
+        json!({
+            "model":{"provider":"openrouter","name":"acme/drafter","endpoint":server.endpoint,"api_key_env":"SHADOWCODE_TEST_UNUSED_API_KEY","context_limit":8192},
+            "spending":{"daily_usd":0.05},
+        }),
+    )
+    .unwrap();
+    fs::write(f.project.join("login.txt"), "sign in\n").unwrap();
+    call(
+        s,
+        "POST",
+        "/api/workspace/git/add",
+        json!({"paths": ["login.txt"]}),
+    )
+    .await
+    .unwrap();
+    let today = || {
+        shadowcode_core::spending::today(&s.engine.store(), shadowcode_core::now())
+            .unwrap()
+            .usd
+    };
+    for spent in [0.03, 0.06] {
+        let draft = call(s, "POST", "/api/git/suggest", json!({"kind": "commit"}))
+            .await
+            .unwrap();
+        assert_eq!(draft["source"], "model", "{draft}");
+        assert!((today() - spent).abs() < 1e-9, "{}", today());
+    }
+    // Today's limit is reached: a plain summary, and nothing is sent.
+    let draft = call(s, "POST", "/api/git/suggest", json!({"kind": "commit"}))
+        .await
+        .unwrap();
+    assert_eq!(draft["source"], "summary", "{draft}");
+    assert!(
+        draft["note"]
+            .as_str()
+            .unwrap()
+            .contains("Today's spending limit for paid models ($0.05) is reached"),
+        "{draft}"
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn push_without_a_remote_explains_itself() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("solo");

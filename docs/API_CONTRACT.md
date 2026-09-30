@@ -1126,6 +1126,9 @@ models on this computer and the offline preview are never limited.
     what blocks now, a new `spend.limit_reached` card follows.
   - Event `spend.unknown {job_id, model, text}` once per task when a paid
     request has no known price; it is not counted as $0.
+- Requests on a paid model outside any task (commit and pull request drafts,
+  **Explain this change**) count toward the day's total and are not sent
+  once today's limit is reached; there is no card to answer.
 - `POST /api/jobs/{id}/spending {prompt_id, action: "continue"|"stop"}`
   answers the waiting card of job `{id}` (the task's own job) → the
   `spend.limit_resolved` payload. `stop` cancels the task (and its
@@ -1358,7 +1361,8 @@ history. Vendor CLIs are always started without
   change (at most about 24 KB of diff) explained in plain words by the
   conversation's model, or the model loaded on this computer when the
   conversation uses a subscription. Only on request; secret and binary files
-  are refused.
+  are refused. On a paid model the request counts toward today's spending
+  and is refused (an error) once today's limit is reached.
 - `POST /api/review/tasks/{task_id}/undo {path, hunk?}` → the file's review
   after putting one hunk (by `id`) or the whole file back as it was before the
   task. Refused while a task runs in the project, outside the open project,
@@ -2503,7 +2507,9 @@ user-info; tool errors are redacted.
   (local GGUF, API, OpenRouter; not subscriptions; only loopback models
   offline), `local` the loaded local model, `summary` a deterministic text.
   Secret-looking paths are listed without contents; text is redacted before
-  it leaves; 60 s limit; failures fall back to `summary` with a `note`.
+  it leaves; 60 s limit; failures fall back to `summary` with a `note`. On a
+  paid model the draft counts toward today's spending; once today's limit is
+  reached none is sent and the `note` says so.
 - `POST /api/git/push` and `POST /api/git/pr` accept `allow_secrets`: without
   it, the commits the push would send (after the upstream, or on no branch
   of the remote) are checked for secrets first and findings answer in band as
