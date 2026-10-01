@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.1: A window that fits
+
+- **The window no longer grows each time it opens.** On Wayland desktops
+  such as KDE Plasma, every launch opened the window about 52 px wider and
+  99 px taller, until it no longer fit on the screen. The window draws its
+  own title bar there, and the saved size included that title bar and the
+  window's shadow, so restoring it added them again. ShadowCode still
+  remembers where the window was and whether it was maximized or full
+  screen, but no longer its size. A window that already grew opens at its
+  normal size again.
+- **The window fits small screens.** The window opened at 1380x920 even on a
+  1366x768 screen, so the composer and status bar sat under the panel. It
+  now opens at no more than 90% of the screen it opens on, less room for the
+  title bar (1229x643 on a 1366x768 screen), and still at 1380x920 on larger
+  screens. On a screen too small for the smallest window (520x640) it opens
+  maximized. A window that was maximized when you closed it opens maximized
+  again.
+
 ## 1.0.0: Easy to start, ready for real work
 
 For people starting out:

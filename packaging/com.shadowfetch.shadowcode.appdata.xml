@@ -29,6 +29,11 @@
     <binary>shadowcode</binary>
   </provides>
   <releases>
+    <release version="1.0.1" date="2026-10-01">
+      <description>
+        <p>The window no longer grows each time it opens on Wayland, and it fits small screens such as 1366x768, so the composer and status bar stay above the panel.</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-09-30">
       <description>
         <p>Easy to start and ready for real work: free models first, plain explanations when a task fails, approvals that explain themselves, secret checks before commits and pushes, one rulebook for every agent, second opinions, roles, spending limits and tools for large projects.</p>

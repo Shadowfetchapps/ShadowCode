@@ -1,13 +1,42 @@
-# ShadowCode 1.0.0
+# ShadowCode 1.0.1
 
-ShadowCode 1.0 is easy to start and ready for real work. New users get free
+ShadowCode 1.0.1 fixes the size of the window: it no longer grows each time
+it opens on Wayland, and it fits small screens. The 1.0.0 notes follow below.
+
+## Fixed
+
+- **The window keeps its size.** On Wayland desktops such as KDE Plasma, the
+  window opened a little bigger every time (about 50 pixels wider and 100
+  taller) until it no longer fit on the screen. ShadowCode now remembers
+  where the window was and whether it was maximized, but not its size. If
+  your window already grew, it opens at its normal size again.
+- **The window fits small screens.** On a 1366x768 screen the window used to
+  be taller than the screen, so the composer and the status bar were hidden
+  under the panel. The window now opens at a size that fits the screen, with
+  room for the title bar and the panel. Larger screens still get the full
+  size, a very small screen gets a maximized window, and a window you left
+  maximized opens maximized.
+
+## Download
+
+`ShadowCode_1.0.1_amd64.AppImage`, `ShadowCode_1.0.1_amd64.deb` and
+`ShadowCode_1.0.1_appimage-runtime-sources.tar.gz`, with `SHA256SUMS`,
+`RELEASE-MANIFEST.json`, `RELEASE-AUTH` and `RELEASE-AUTH.sig`. Install the
+AppImage with the authenticated installer described in the
+[README](../README.md#install); the signature is checked before anything
+runs.
+
+## Published 1.0.0
+
+[ShadowCode 1.0.0](https://github.com/Shadowfetchapps/ShadowCode/releases/tag/v1.0.0)
+made ShadowCode easy to start and ready for real work. New users get free
 models first, plain explanations when something fails and a glossary of the
 words the app uses. Everyone gets approvals that explain themselves, secret
 checks before anything leaves the computer, one rulebook for every agent,
 second opinions from another model, spending limits, and tools for big
-projects. The 0.34.2 notes follow below.
+projects.
 
-## Easy to start
+### Easy to start
 
 - **Free models first.** Until you connect a subscription, the model picker
   lists the free models on this computer first. Your code stays on your
@@ -24,7 +53,7 @@ projects. The 0.34.2 notes follow below.
   even for long shell commands and for Codex, Claude Code and the other
   subscriptions.
 
-## Safe by default
+### Safe by default
 
 - **No secrets by accident.** Commits, pushes and pull requests from
   ShadowCode are checked for keys, passwords and `.env` files first; you
@@ -40,7 +69,7 @@ projects. The 0.34.2 notes follow below.
 - **Always allow here** for the exact test and build commands you run all
   day, per project, and easy to take back.
 
-## Ready for real work
+### Ready for real work
 
 - **One rulebook for every agent.** Write your rules and skills once; they
   reach ShadowCode's own agent and every subscription CLI.
@@ -62,7 +91,7 @@ projects. The 0.34.2 notes follow below.
   from any branch, runs your setup commands, gets your `.env` and its own
   port.
 
-## Reliable
+### Reliable
 
 - **Your data is safe.** Back up, restore, repair or start over from
   Settings › Your data. Upgrades from every release since 0.28 are tested.
@@ -71,7 +100,7 @@ projects. The 0.34.2 notes follow below.
   turn fails; Rewind keeps files you saved during a subscription turn.
 - A stable, documented API for version 1.
 
-## Download
+### Download
 
 `ShadowCode_1.0.0_amd64.AppImage`, `ShadowCode_1.0.0_amd64.deb` and
 `ShadowCode_1.0.0_appimage-runtime-sources.tar.gz`, with `SHA256SUMS`,
