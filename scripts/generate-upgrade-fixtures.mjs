@@ -27,7 +27,7 @@ const fixtures = path.join(repo, 'native/core/tests/fixtures/upgrade');
 // 0.33.0, 0.34.0 and 0.34.1 were failed, unpublished release attempts.
 export const RELEASES = [
   'v0.28.0', 'v0.28.1', 'v0.29.0', 'v0.30.0', 'v0.30.1', 'v0.30.2', 'v0.31.0', 'v0.31.1',
-  'v0.32.0', 'v0.33.1', 'v0.34.2',
+  'v0.32.0', 'v0.33.1', 'v0.34.2', 'v1.0.0',
 ];
 
 // Generator snippets and the first release that has the feature.
