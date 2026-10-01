@@ -5,16 +5,20 @@ it opens on Wayland, and it fits small screens. The 1.0.0 notes follow below.
 
 ## Fixed
 
-- **The window keeps its size.** On Wayland desktops such as KDE Plasma, the
-  window opened a little bigger every time (about 50 pixels wider and 100
-  taller) until it no longer fit on the screen. ShadowCode now remembers
-  where the window was and whether it was maximized, but not its size. If
-  your window already grew, it opens at its normal size again.
+- **The window no longer grows each time it opens.** On Wayland desktops
+  such as KDE Plasma, the window opened a little bigger every time (about 50
+  pixels wider and 100 taller) until it no longer fit on the screen.
+  ShadowCode no longer remembers the window's size on any desktop, so it
+  opens at its default size, fitted to the screen. It still reopens
+  maximized or full screen if you left it that way, and on X11 at the same
+  place. If your window already grew, it opens at its normal size again.
 - **The window fits small screens.** On a 1366x768 screen the window used to
   be taller than the screen, so the composer and the status bar were hidden
   under the panel. The window now opens at a size that fits the screen, with
-  room for the title bar and the panel. Larger screens still get the full
-  size, a very small screen gets a maximized window, and a window you left
+  room for the title bar and the panel. With more than one screen it fits
+  the screen it reopens on (X11), or every screen (Wayland, where the
+  desktop chooses). Larger screens still get the full size, the window opens
+  maximized only when no screen is big enough for it, and a window you left
   maximized opens maximized.
 
 ## Download

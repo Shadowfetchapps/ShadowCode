@@ -197,7 +197,14 @@ Prove it with `node --test scripts/test-native-packaging-env.mjs`.
   HTTP/HTTPS links open through the OS; remote pages cannot replace the app view.
 - Default-profile launches focus the existing instance. Isolated profiles have
   separate webview storage and still enforce their own profile locks.
-- Window geometry is retained for the default profile. Desktop notifications
+- For the default profile the window reopens maximized or full screen if it
+  was, and on X11 at its last place (moved up or left until it fits that
+  screen's work area); a Wayland compositor chooses the place itself. Its
+  size is not remembered (`window_size.rs`): it opens at 1380x920, or at 90%
+  of a smaller screen with room for the title bar (the X11 window manager's
+  frame, or GTK's header bar inside the size on Wayland), on the screen it
+  reopens on (X11) or fitting every screen (Wayland). It opens maximized only
+  when no such screen holds the 520x640 minimum. Desktop notifications
   cover approvals waiting (and a warning 2 minutes before a vendor approval is
   denied), failed tasks, plan limits and finished tasks, each switchable in
   Settings › Appearance with an optional sound. They appear while the window

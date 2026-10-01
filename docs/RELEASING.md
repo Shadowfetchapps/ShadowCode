@@ -76,7 +76,19 @@ node scripts/check-secrets.mjs
 ```
 
 Build the desktop executable before running the Rust suite: the process tests
-launch `target/debug/shadowcode`. `check-secrets.mjs` also runs in the CI
+launch `target/debug/shadowcode`. The scripts need Node.js 22.12 or newer,
+like the UI: with an older `node` first on `PATH`, `test-native-cli.mjs`
+stops with `ERR_UNKNOWN_BUILTIN_MODULE` (`node:sqlite`). A change to the
+window also needs the window test on X11 and on a private Wayland
+compositor (see [NATIVE_DESKTOP.md](NATIVE_DESKTOP.md); Weston 13 and
+WebKitWebDriver can be unpacked copies):
+
+```sh
+node scripts/run-native-x11.mjs node scripts/test-native-desktop.mjs
+node scripts/run-native-wayland.mjs node scripts/test-native-desktop.mjs
+```
+
+`check-secrets.mjs` also runs in the CI
 "Checks" workflow, not in `release.yml`; run it before pushing the tag.
 Live turns against real accounts (`live_vendor_turn`) are described under
 [Tests](../README.md#tests) in the README.
