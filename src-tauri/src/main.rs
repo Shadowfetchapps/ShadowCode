@@ -470,13 +470,19 @@ fn run() -> Result<()> {
                 Backend::Attached(view) => view.subscribe(),
             };
             app.manage(backend);
-            let config = app
+            let mut config = app
                 .config()
                 .app
                 .windows
                 .first()
-                .context("Window configuration missing")?;
-            tauri::WebviewWindowBuilder::from_config(app, config)?
+                .context("Window configuration missing")?
+                .clone();
+            // A screen smaller than the configured window (1366x768) gets a
+            // window that fits it, title bar and panel included.
+            if let Some(screen) = window_size::opening_screen(app) {
+                window_size::fit_config(&mut config, screen);
+            }
+            tauri::WebviewWindowBuilder::from_config(app, &config)?
                 .data_directory(webview_data)
                 .on_navigation(move |url| {
                     // WebKitGTK asks for every frame, so this also admits the
