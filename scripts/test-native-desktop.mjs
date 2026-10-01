@@ -10,7 +10,9 @@
 // reconnecting through dropped/duplicated/stale events and a mid-stream reload
 // with a second conversation queued, every Settings page, the cloud consent dialog
 // (always cancelled: no vendor turn ever runs), Stop, light/dark/compact
-// layouts with axe checks, and process cleanup after quit.
+// layouts with axe checks, process cleanup after quit, and a relaunch: the
+// window opens at the same fitted size every time, whatever size it was
+// left at or a grown 1.0.0 window state says.
 //
 // Requirements: a display (xvfb-run), DBus, tauri-driver, WebKitWebDriver.
 //   node scripts/run-native-x11.mjs node scripts/test-native-desktop.mjs
@@ -156,6 +158,15 @@ if (displayBackend === "x11") {
   delete nativeEnv.DISPLAY; // No XWayland fallback can satisfy this run.
   displayEvidence.dmabufOverride = nativeEnv.WEBKIT_DISABLE_DMABUF_RENDERER || null;
 }
+// The window-state plugin's file as a 1.0.0 window that grew on Wayland left
+// it (1536x1170 after a few launches), placed low on the screen. The app
+// launches without --profile, so the plugin is active: it must not restore
+// that size, and on X11 the window comes back at that place, moved up and
+// left until it fits the screen.
+const windowStateFile = path.join(profile, "config/com.shadowfetch.shadowcode/.window-state.json");
+const GROWN = { width: 1536, height: 1170, x: 500, y: 500, prev_x: 500, prev_y: 500, maximized: false, visible: true, decorated: true, fullscreen: false };
+await mkdir(path.dirname(windowStateFile), { recursive: true });
+await writeFile(windowStateFile, JSON.stringify({ main: GROWN }));
 const launches = () => readFile(path.join(runtimeDir, "launches.jsonl"), "utf8").then((t) => t.trim().split("\n").filter(Boolean).map(JSON.parse), () => []);
 const modelRequests = () => readFile(path.join(runtimeDir, "requests.jsonl"), "utf8").then((t) => t.trim().split("\n").filter(Boolean).map(JSON.parse), () => []);
 
@@ -308,6 +319,41 @@ async function setWindow({ width, height }) {
   await delay(300);
   return true;
 }
+/** The window as the page sees it: its inner size, its place and its screen. */
+const windowGeometry = () => execute("return {inner:[innerWidth,innerHeight],position:[screenX,screenY],screen:{width:screen.width,height:screen.height,availWidth:screen.availWidth,availHeight:screen.availHeight}}");
+// The private runners have one screen: Xvfb, or the private Weston.
+const ONE_SCREEN = displayBackend === "x11" || process.env.XDG_CURRENT_DESKTOP === "ShadowCodePrivateWeston";
+/** The first size window_size::fit gives on one screen: 1380x920 at most,
+ * 90% of the screen and its work area, less a 48 px title bar on X11 (on
+ * Wayland the header bar is inside the size), never below 520x640. */
+function fittedSize(screen) {
+  const room = (full, work) => Math.min(full * 0.9, work > 0 ? work : Infinity);
+  const titleBar = displayBackend === "x11" ? 48 : 0;
+  return {
+    width: Math.max(520, Math.min(1380, Math.floor(room(screen.width, screen.availWidth)))),
+    height: Math.max(640, Math.min(920, Math.floor(room(screen.height, screen.availHeight) - titleBar))),
+  };
+}
+/** The window opened at its fitted size, not a remembered one. */
+async function expectFittedWindow(label) {
+  const opened = await until(`${label}: window shown`, async () => { const g = await windowGeometry(); return g.inner[0] > 0 && g.inner[1] > 0 && g; });
+  const fitted = fittedSize(opened.screen);
+  const [width, height] = opened.inner;
+  assert.ok(width < GROWN.width && height < GROWN.height, `${label}: the saved ${GROWN.width}x${GROWN.height} size is not restored (${width}x${height})`);
+  assert.ok(width <= fitted.width && height <= fitted.height, `${label}: ${width}x${height} fits the screen (${fitted.width}x${fitted.height})`);
+  if (ONE_SCREEN) {
+    assert.equal(width, fitted.width, `${label}: fitted width`);
+    // On Wayland the GTK header bar is part of the fitted height.
+    if (displayBackend === "x11") assert.equal(height, fitted.height, `${label}: fitted height`);
+    else assert.ok(fitted.height - height > 0 && fitted.height - height < 80, `${label}: fitted height ${fitted.height} with the header bar (content ${height})`);
+  }
+  if (displayBackend === "x11") {
+    // Back at the saved place, moved inside the screen (Xvfb has no frame).
+    const inside = [Math.max(0, Math.min(GROWN.x, opened.screen.availWidth - width)), Math.max(0, Math.min(GROWN.y, opened.screen.availHeight - height - 48))];
+    assert.deepEqual(opened.position, inside, `${label}: the saved place, inside the screen`);
+  }
+  return opened;
+}
 /** Brightness of the page background (0 black … 1 white), as rendered. */
 const pageLuminance = () => execute("const [r,g,b]=getComputedStyle(document.body).backgroundColor.match(/[\\d.]+/g).map(Number);return (0.2126*r+0.7152*g+0.0722*b)/255");
 /** The page really shows `theme` (its computed background), not just the
@@ -417,6 +463,9 @@ try {
   const created = await wd("POST", "/session", { capabilities: { alwaysMatch: { "tauri:options": { application: binary, args: binaryArgs } } } });
   session = created.sessionId;
   await wd("POST", `/session/${session}/timeouts`, { script: 60000, implicit: 0, pageLoad: 30000 });
+  const firstWindow = await expectFittedWindow("First launch");
+  displayEvidence.firstWindow = firstWindow;
+  note(`window opens at its fitted size ${firstWindow.inner.join("x")} on a ${firstWindow.screen.width}x${firstWindow.screen.height} screen, not the saved ${GROWN.width}x${GROWN.height}`);
   if (displayBackend === "wayland") {
     const screen = await execute("return {width:screen.availWidth,height:screen.availHeight,scale:devicePixelRatio}");
     assert.ok(screen.width > 0 && screen.height > 0, "Physical display dimensions available");
@@ -868,6 +917,7 @@ try {
   }
 
   // ------------------------------------------------------------ quit
+  const leftAt = (await windowGeometry()).inner;
   const children = await descendants(appPid);
   const serverPids = (await launches()).map((l) => l.pid);
   const described = await Promise.all(children.map(async (pid) => `${pid} ${await commandLine(pid)}`));
@@ -879,6 +929,30 @@ try {
   assert.equal(strays, "", "No llama-server test double remains");
   note(`quit: app and ${children.length} child processes (${serverPids.length} llama-server launches) exited`);
   await wd("DELETE", `/session/${session}`).catch(() => {}); session = undefined;
+
+  // ------------------------------------------------------------ relaunch
+  // The window was left at another size. The window-state plugin saved where
+  // it was and whether it was maximized, not its size (it keeps the one it
+  // read), and the second launch opens exactly as the first did.
+  const saved = JSON.parse(await readFile(windowStateFile, "utf8")).main;
+  assert.deepEqual([saved.width, saved.height], [GROWN.width, GROWN.height], "No window size saved");
+  assert.equal(saved.maximized, false);
+  if (displayBackend === "x11") assert.deepEqual([saved.x, saved.y], firstWindow.position, "The window's place saved");
+  const relaunched = await wd("POST", "/session", { capabilities: { alwaysMatch: { "tauri:options": { application: binary, args: binaryArgs } } } });
+  session = relaunched.sessionId;
+  await wd("POST", `/session/${session}/timeouts`, { script: 60000, implicit: 0, pageLoad: 30000 });
+  const secondWindow = await expectFittedWindow("Relaunch");
+  assert.deepEqual(secondWindow.inner, firstWindow.inner, `The relaunched window has the first launch's size (it was left at ${leftAt.join("x")})`);
+  if (displayBackend === "x11") assert.deepEqual(secondWindow.position, firstWindow.position, "The relaunched window is back at its place");
+  appPid = (await api("GET", "/api/version")).pid;
+  await until("Relaunched workspace ready", () => execute("const t=document.querySelector(arguments[0]);return !!t && !t.disabled && !document.querySelector('.wizard')", [composer]), 30000);
+  const relaunchChildren = await descendants(appPid);
+  await execute("setTimeout(()=>window.__TAURI_INTERNALS__.invoke('desktop_quit'),30);return true;");
+  await until("Relaunched app exited", () => dead(appPid), 30000);
+  for (const pid of relaunchChildren) await until(`Child ${pid} exited (${await commandLine(pid)})`, () => dead(pid), 15000);
+  assert.equal((await run("pgrep", ["-f", runtimeDir]).catch(() => ({ stdout: "" }))).stdout.trim(), "", "No llama-server test double remains");
+  await wd("DELETE", `/session/${session}`).catch(() => {}); session = undefined;
+  note(`relaunch: the window opens at ${secondWindow.inner.join("x")} again after it was left at ${leftAt.join("x")}; no size saved${displayBackend === "x11" ? ", same place" : ""}`);
 
   finalReport = { passed: displayEvidence.geometryFailures.length === 0, version: version.version, vendors: vendorSummary, checks, axe: axeFindings, screenshots: shots };
 } catch (error) {
