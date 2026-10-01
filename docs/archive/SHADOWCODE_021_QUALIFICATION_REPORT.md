@@ -8,7 +8,7 @@ packaging on this host. That is not a license to bump or merge.
 | Field | Value |
 | --- | --- |
 | Date | 2026-09-21 |
-| Repo | `/home/rtx5060ti/Documents/Codex/2026-09-19/new-chat/work/ShadowCode` |
+| Repo | `~/Documents/Codex/2026-09-19/new-chat/work/ShadowCode` |
 | GitHub | https://github.com/ShadowfetchLinux/ShadowCode.git |
 | Start branch | `feature/shadowcode-0.21-autonomy` |
 | Start SHA (verified) | `5d33133bf7d61375aafdb44d6b51ef01a0d5cbe0` |
@@ -531,7 +531,7 @@ Confirmed still `0.20.0`: workspace `Cargo.toml`,
 ## Commands a human can replay
 
 ```sh
-export PATH="/home/rtx5060ti/Documents/Codex/2026-09-19/new-chat/work/tools/rust-dev/extracted/usr/bin:$PATH"
+export PATH="~/Documents/Codex/2026-09-19/new-chat/work/tools/rust-dev/extracted/usr/bin:$PATH"
 cargo test --workspace --offline --lib --tests --bins
 npm --prefix ui test
 QUAL_SCALE=1 npm --prefix ui exec -- vitest run src/lib/transcript.scale.test.ts --testTimeout=120000

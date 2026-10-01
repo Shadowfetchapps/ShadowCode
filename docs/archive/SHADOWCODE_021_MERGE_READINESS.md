@@ -6,7 +6,7 @@ Package and crate version remain **0.20.0**.
 | Field | Value |
 | --- | --- |
 | Date | 2026-09-21 |
-| Repo | `/home/rtx5060ti/Documents/Codex/2026-09-19/new-chat/work/ShadowCode` |
+| Repo | `~/Documents/Codex/2026-09-19/new-chat/work/ShadowCode` |
 | GitHub | https://github.com/ShadowfetchLinux/ShadowCode.git |
 | BASE QUALIFICATION COMMIT | `c4efa493d78f68873eca9b3b4d86c63e6c96bd76` |
 | Qualification ancestry | includes `7970c45` and PATH sanitizer `c4efa49` |
