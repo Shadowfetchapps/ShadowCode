@@ -4538,7 +4538,9 @@ name = "shadowcode-desktop"
 version = "1.0.1"
 dependencies = [
  "anyhow",
+ "gdk",
  "notify-rust",
+ "serde",
  "serde_json",
  "shadowcode-core",
  "tauri",

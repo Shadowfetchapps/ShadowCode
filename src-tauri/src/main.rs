@@ -419,8 +419,8 @@ fn run() -> Result<()> {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init());
     if !isolated {
-        // Remembers where the window was and whether it was maximized, not its
-        // size (see `window_size::REMEMBERED`).
+        // Remembers whether the window was maximized or full screen and, on
+        // X11, where it was, but not its size (see `window_size::REMEMBERED`).
         builder = builder.plugin(window_size::state_plugin());
     }
     let preview_ports = PreviewPorts::default();
@@ -478,11 +478,14 @@ fn run() -> Result<()> {
                 .context("Window configuration missing")?
                 .clone();
             // A screen smaller than the configured window (1366x768) gets a
-            // window that fits it, title bar and panel included.
-            if let Some(screen) = window_size::opening_screen(app) {
-                window_size::fit_config(&mut config, screen);
+            // window that fits it, title bar and panel included: the screen
+            // the window-state plugin moves it back to on X11, every screen
+            // on Wayland.
+            let opening = window_size::opening_on(app, !isolated);
+            if let Some(opening) = &opening {
+                window_size::fit_config(&mut config, opening);
             }
-            tauri::WebviewWindowBuilder::from_config(app, &config)?
+            let window = tauri::WebviewWindowBuilder::from_config(app, &config)?
                 .data_directory(webview_data)
                 .on_navigation(move |url| {
                     // WebKitGTK asks for every frame, so this also admits the
@@ -497,6 +500,17 @@ fn run() -> Result<()> {
                             && url.port() == Some(5174))
                 })
                 .build()?;
+            // Building the window queued the plugin's move back to where it
+            // was (X11); this move follows it and keeps the fitted window
+            // inside that screen's work area.
+            let inside = opening
+                .filter(|_| !config.maximized)
+                .and_then(|opening| opening.inside_work_area((config.width, config.height)));
+            if let Some((x, y)) = inside {
+                if let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) {
+                    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+                }
+            }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {

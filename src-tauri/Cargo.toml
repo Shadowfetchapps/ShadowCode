@@ -18,6 +18,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 shadowcode-core = { path = "../native/core" }
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["signal"] }
 tauri = { version = "2", features = [] }
@@ -31,6 +32,9 @@ tauri-plugin-window-state = "2"
 # a click on desktop); the same crate the plugin already uses.
 [target.'cfg(target_os = "linux")'.dependencies]
 notify-rust = "4"
+# Whether GTK opened a Wayland or an X11 display (the window's first size);
+# the same crate tao already uses.
+gdk = "0.18"
 
 [features]
 default = ["custom-protocol"]
