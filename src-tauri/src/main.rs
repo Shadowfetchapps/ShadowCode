@@ -22,6 +22,7 @@ use tauri_plugin_opener::OpenerExt;
 mod backend;
 mod notices;
 mod web_ui;
+mod window_size;
 use backend::Backend;
 
 #[derive(Default)]
@@ -418,7 +419,9 @@ fn run() -> Result<()> {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init());
     if !isolated {
-        builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
+        // Remembers where the window was and whether it was maximized, not its
+        // size (see `window_size::REMEMBERED`).
+        builder = builder.plugin(window_size::state_plugin());
     }
     let preview_ports = PreviewPorts::default();
     let app = builder
