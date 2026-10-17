@@ -254,7 +254,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
-      actions: read
+      # actions: write starts the macOS and Flatpak workflows after publishing.
+      actions: write
     steps:
       - name: Checkout independently approved publication tooling and public trust
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -280,6 +281,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/publish-native-release.mjs "$RUNNER_TEMP/signed-download/x86_64" release/trust "$RUNNER_TEMP/signed-download/aarch64"
+      # A release this job publishes with GITHUB_TOKEN does not trigger other
+      # workflows' `release: published`; a dispatch does. They build from the
+      # tag and attach the macOS images and Flatpak bundles.
+      - name: Start the macOS and Flatpak builds for this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run release-macos.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f tag="$GITHUB_REF_NAME"
+          gh workflow run release-flatpak.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f tag="$GITHUB_REF_NAME"
   # Signed APT repository on GitHub Pages (gh-pages branch, path apt/). Only
   # the .deb that passed publisher authentication is indexed; the repository
   # signing key is a separate OpenPGP key held in the protected environment.

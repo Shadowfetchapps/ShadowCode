@@ -140,6 +140,10 @@ test('release workflow separates untrusted build from protected signing and writ
   assert.match(publication, /artifact-ids: \$\{\{ needs.sign.outputs.artifact-id \}\}/);
   assert.match(publication, /needs: \[configuration, build, sign\]/); assert.match(publication, /contents: write/);
   assert(!/SIGNING_KEY|secrets\./.test(publication));
+  // After publishing, the macOS images and Flatpak bundles are built from the tag.
+  assert.match(publication, /actions: write/);
+  assert.match(publication, /gh workflow run release-macos\.yml [^\n]*-f tag="\$GITHUB_REF_NAME"/);
+  assert.match(publication, /gh workflow run release-flatpak\.yml [^\n]*-f tag="\$GITHUB_REF_NAME"/);
   assert.equal([...workflow.matchAll(/secrets\.NATIVE_RELEASE_SIGNING_KEY_PEM/g)].length, 1);
   assert.match(apt, /needs: \[configuration, sign, publish\]/); assert.match(apt, /environment: \$\{\{ needs.configuration.outputs.environment \}\}/);
   assert.match(apt, /artifact-ids: \$\{\{ needs.sign.outputs.artifact-id \}\}/);

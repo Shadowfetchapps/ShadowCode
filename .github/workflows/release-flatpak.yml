@@ -5,6 +5,9 @@ name: Flatpak release
 # attached to the published GitHub release with
 # ShadowCode_<version>_flatpak.sha256. Pull requests already build the
 # Flatpak in ci.yml; this runs only for releases.
+# release.yml dispatches this after it publishes (its GITHUB_TOKEN-made
+# release does not trigger `release: published`); a release published by
+# hand still does.
 on:
   release:
     types: [published]

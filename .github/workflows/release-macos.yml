@@ -5,6 +5,9 @@ name: macOS release
 # The images are ad-hoc signed, not notarized: GitHub is the distribution
 # channel. On pull requests that touch macOS packaging this only builds and
 # smoke-tests the app (nothing is uploaded).
+# release.yml dispatches this after it publishes (its GITHUB_TOKEN-made
+# release does not trigger `release: published`); a release published by
+# hand still does.
 on:
   release:
     types: [published]
